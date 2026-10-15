@@ -68,16 +68,29 @@ impl MockLlm {
                             // 先读完整请求，再决定"下一条回复"：客户端可能先建连接再发请求、
                             // 甚至只建连接不发请求（重试/预连接）。按**连接**计数会让回复顺序错位，
                             // 表现为 macOS 上偶发断言失败（已经抓到过两次不同用例）。
-                            let Some(body) = read_request(stream.try_clone().unwrap()) else {
-                                return; // 没读到完整请求：不消耗任何回复
-                            };
-                            let _ = tx.send(body);
-                            let n = counter.fetch_add(1, Ordering::Relaxed);
-                            let reply = replies
-                                .get(n.min(replies.len().saturating_sub(1)))
-                                .cloned()
-                                .unwrap_or_default();
-                            let _ = respond(stream, status, &reply, chunked, wrap);
+                            // **一条连接可以承载多个请求**（HTTP/1.1 keep-alive）：
+                            // 客户端的连接池会复用 socket，而以前这里只答一个请求就丢连接，
+                            // macOS 上表现为"第二次请求拿到空响应/连接被关"，断言随机失败。
+                            // 循环读到对端关闭（read_request 返回 None）为止。
+                            while let Some(body) = read_request(stream.try_clone().unwrap()) {
+                                let _ = tx.send(body);
+                                let n = counter.fetch_add(1, Ordering::Relaxed);
+                                let reply = replies
+                                    .get(n.min(replies.len().saturating_sub(1)))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if respond(
+                                    stream.try_clone().unwrap(),
+                                    status,
+                                    &reply,
+                                    chunked,
+                                    wrap,
+                                )
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
