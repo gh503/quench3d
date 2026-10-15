@@ -61,7 +61,14 @@ fn hinted_candidates_are_compiled_in() {
     // 还把错误信息搅浑。（默认候选不适用这条：桌面端故意交 `Backends::all()`
     // 给 wgpu 自己挑，里面本就有该平台用不到的后端。）
     for hint in ["gl", "webgpu", "webgl2", "wgpu"] {
-        for b in GpuContext::candidates_from_hint(Some(hint)) {
+        let c = GpuContext::candidates_from_hint(Some(hint));
+        // 这台机器一个候选都编不出来时（macOS 就没有 GL），提示会被过滤空、
+        // 退回**默认候选**——而默认候选在桌面端故意是 `Backends::all()`，
+        // 交给 wgpu 自己挑，里面本就带该平台用不到的后端。那条豁免。
+        if c == GpuContext::backend_candidates() {
+            continue;
+        }
+        for b in c {
             assert!(
                 compiled().contains(b),
                 "候选 {b:?} 没编进这份构建（hint={hint}）"

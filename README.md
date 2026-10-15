@@ -139,6 +139,10 @@ python3 -m http.server 8000 --directory web
 # 打开 http://localhost:8000/
 ```
 
+> **线上已经部署好了**：<https://gh503.github.io/quench3d/> —— 每次 push 到 `main`
+> 由 `.github/workflows/pages.yml` 重新构建并发布（同一个 `tools/build_web.sh web_client`）。
+> 首次打开要下 ~11 MB 的 wasm；想本地跑就按上面三行来。
+
 页面里就是 **§1.1 那个编辑器**：工具栏、场景树、属性面板全在画布上由引擎自己画出来，
 页面只负责三件事——给一张画布、在 `start()` 之前探好后端、把用户选中的场景文件读成文本交给 wasm。
 （`physics_playground` 这个示例仍然可以构建成 Web 包：`tools/build_web.sh physics_playground`，
