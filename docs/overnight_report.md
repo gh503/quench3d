@@ -236,3 +236,21 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
    wasm32 全绿，`gh run rerun --failed` 后转绿）。看到它红请先复跑再判断 —— 详见 `CHANGELOG.md` 的「已知问题」。
 2. **Web 端仍需真机验证**：本会话所有浏览器验证跑在 headless Chrome + SwiftShader（`backend: "gl"`，
    即 WebGL2 回退），**真实设备的 WebGPU 路径没有验证过**（H4）。
+
+---
+
+## 10. 第 13–14 轮的增量
+
+| 轮 | 内容 | 证据 | 提交 / CI |
+|---|---|---|---|
+| 11 | `tools/gate.sh`：一条命令跑完整门禁（fmt → clippy 原生 → clippy wasm32 → 全部测试 → wasm 构建 → `check_web.mjs`），顺序固定、日志落盘、失败自动摘要；`--fast` 跳过 wasm 两项 | 直接跑：全绿 | `ed8ec30` CI ✅（首次 macOS 红，见下） |
+| 12 | 记录两条已知问题：macOS 偶发 flaky 测试、Web 端只有 SwiftShader 验证过 | `CHANGELOG.md` 「已知问题」+ 本文件 §9 | `4b0d88f` CI ✅ |
+| 13 | **修掉那个 flaky**：假 LLM 服务在非阻塞 `accept()` 遇到 `Interrupted`/`ConnectionAborted` 时直接 `break`，服务线程中途死掉；改为可重试 | 本地连续 5/5 通过；**真正的验证是 macOS CI 连续绿**（目前 1 次） | `cacb14c` CI ✅ |
+| 14 | **模型（glTF/OBJ 引用）变换面板**：位置/旋转/缩放写回导出底稿的 `models[i]` —— 补掉"导入模型的变换写不回场景文件" | `scene_roundtrip::model_transform_edits_are_exported`（真 OBJ；未改动不凭空多值；改后进文件；重载后值还在） | `d221f0e` + `3ae8c2a`(fmt 补救) CI ✅ Pages ✅ |
+
+**当前测试总数 356（0 失败）**；本会话累计 14 个提交。
+**一个流程教训（已修）**：`tools/gate.sh | tail` 会让管道吞掉退出码 —— 我第一次就这么推了一个 fmt 没过的提交，
+下一提交修好；看门禁请 `tools/gate.sh > log 2>&1; echo $?`，别接管道。
+
+**② 剩余的三组半**：① 模型引用接进场景树 + 视口实时拖动（需要"物体↔模型"映射）；② 场景层级/父子与格式 v2；
+③ 后处理 FXAA/SSAO；④ 物理碰撞过滤/传感器事件/CCD。
