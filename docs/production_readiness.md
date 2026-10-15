@@ -170,6 +170,64 @@
 | CI 矩阵 | 全部 | `test`（ubuntu / macOS / Windows）+ `wasm32-unknown-unknown` 四个 job，另有 Pages 工作流 | ✅ |
 | API 文档门禁 | 库类项目 | CI 无 `cargo doc` 步骤 | 🟠 |
 
+### 1.11 建模（网格创作）
+
+这一域是 quench3d 与"内容创作软件"之间**最硬的一道墙**：它消费别人做好的模型，自己不产出网格。
+
+| 能力 | 行业门槛（对标） | quench3d 现状（证据） | 验收标准 | 投入量级 | 能否替代 |
+|---|---|---|---|---|---|
+| 图元创作 | Blender / Maya | 6 种形状（球/盒/胶囊/圆柱/平面/凸包，`scene_doc.rs` 的 `ShapeKind`）+ 4 种预设网格 | 有 | **已达标** | 部分 |
+| 外部模型导入 | 全部 | glTF/GLB + OBJ（`assets.rs:261/465/500`） | 有 | **已达标** | 部分 |
+| 网格编辑（顶点/边/面） | Blender | **无**（`csg/extrude/subdivid/modifier/sculpt/bevel/uv_unwrap` 全仓 0 命中） | 半边长/移动顶点/挤出后能存盘并渲染 | **12–24 人月** | ❌ |
+| UV 展开与编辑 | Blender / RizomUV | 无（只有全局 `uv_scale`，`material.rs:55`） | 展开一个盒子并贴图无拉伸 | **6–12 人月** | ❌ |
+| 布尔 / 阵列 / 修改器栈 | Blender | 无 | 布尔求差后仍可编辑 | **6–12 人月** | ❌ |
+| 雕刻 / 重拓扑 | ZBrush / Blender | 无 | — | **24+ 人月** | ❌ |
+| 自动 LOD / 减面 | 引擎侧（Unity/Unreal） | 无（`renderer.rs:2072` 只有一句注释） | 同一模型 3 级 LOD 自动生成 | **2–4 人月** | ❌ |
+
+**结论**：quench3d **不能**替代任何建模工具。它的正确位置是"在 Blender 做完模型 → glTF 导入 → 摆场景/跑物理/出图"这条链里的**下游**。
+
+### 1.12 脚本与扩展（自动化接口）
+
+| 能力 | 行业门槛（对标） | quench3d 现状（证据） | 验收标准 | 投入量级 | 能否替代 |
+|---|---|---|---|---|---|
+| 脚本语言内嵌 | Unity C# / Godot GDScript / Blender Python | **无**（`rhai/lua/mlua/wasmtime/wasmer/plugin/scripting` 全仓 0 命中） | 能注册"每帧/每步回调"并读改场景 | **4–8 人月** | ❌ |
+| 命令行自动化 | 全部 | 11 个子命令（`main.rs` 手写解析，非 clap）：`schema/doctor/info/validate/render/movie/simulate/bench/example/ask/chat/mcp` | 有 | **已达标** | ✅ |
+| 能力自描述（给 agent） | MCP 生态 | `schema` 输出能力清单、`doctor` 环境自检、`mcp` stdio 服务（工具含 `dry_run`/`valid` 字段） | 有 | **已达标** | ✅ |
+| 库级 SDK | Unity/Unreal C++/C# | Rust crate 门面 `quench3d`（`Engine`/`World`/`Scene`），wasm 侧 `start()`/`on_scene_file()` | 有 | **已达标** | ✅ |
+| 自定义渲染 pass / 插件 | Unity SRP / Unreal RDG | **无**（`renderer.rs` 固定三步链，无 Pass trait / render graph） | 能插入一个自定义后处理并出图 | **2–4 人月** | ❌ |
+| 热重载（改脚本不重启） | Unity / Godot | 无 | 改脚本 1 秒内生效 | **1–2 人月** | ❌ |
+| 稳定错误码 | 生产集成 | 无（错误是中文文本，无 code） | 每个失败路径有稳定 code 且文档化 | **0.5–1 人月** | 🟠 |
+
+**结论**：**没有脚本层**是"给 agent 用"这条定位上的真实缺口 —— 目前 agent 只能通过 CLI/MCP 的**离散命令**驱动，不能写"每步都对接触力做判断"这种逻辑。这是下一批里性价比很高的一项（不需要图形学）。
+
+### 1.13 性能与规模化
+
+| 能力 | 行业门槛（对标） | quench3d 现状（证据） | 验收标准 | 投入量级 | 能否替代 |
+|---|---|---|---|---|---|
+| 物理并行 | PhysX / Jolt | 岛并行求解；**并行 vs 串行逐位一致**、线程数 2/3/4 不影响结果（`api_tests.rs:412/562`） | 有 | **已达标** | ✅ |
+| 渲染批处理 | 全部 | 按 (mesh, material) 合批 + 实例化（`renderer.rs:964-1042`） | 有 | **已达标** | ✅ |
+| 视锥剔除 | 全部 | 逐实例线性剔除（`renderer.rs:1215-1232`）；`occlusion_query_set: None` 是占位 | 有 | **部分** | 🟡 |
+| 空间加速 / GPU 剔除 | Unreal Nanite / Unity | 无（无 BVH/八叉树、无 GPU-driven） | 数千物体 60 fps | **6–12 人月** | ❌ |
+| 性能基准 | 全部 | `bench` 子命令（`crates/quench3d-cli/src/bench.rs`）；**无 criterion / tracy / 火焰图接入** | 每次 CI 产出可比数字并设阈值 | **0.5–1 人月** | 🟠 |
+| 帧预算可观测 | 全部 | 编辑器状态栏有 FPS + 绘制统计；引擎有 `RenderStats` | 有 | **已达标** | ✅ |
+| 大场景内存 | 全部 | 纹理只支持 `Rgba8Unorm(Srgb)`，无压缩纹理/KTX2（`texture.rs:284`） | 200 MB 贴图包能进显存 | **2–4 人月** | ❌ |
+
+**结论**：**"单机中小场景"的性能没问题，"生产规模"没有证据** —— 缺的是可比基准与空间加速结构，而不是"现在很慢"（没有做过对照测试，所以也不能反过来说它慢）。
+
+### 1.14 互操作（与外部工具交换）
+
+| 能力 | 行业门槛（对标） | quench3d 现状（证据） | 验收标准 | 投入量级 | 能否替代 |
+|---|---|---|---|---|---|
+| 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
+| 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
+| 模型**导出** | Blender / 引擎 | **无**（无 gltf/obj 写出代码，0 命中）→ 在编辑器里改完只能存回自有 JSON | `quench3d export model.glb` 能被 Blender 打开 | **1–2 人月** | ❌ |
+| 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
+| 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
+| 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
+| 版本升级路径 | 全部 | **无迁移器**（版本不符直接报错，`scene_doc.rs:1325`） | 旧文件能一键升到新版本并留备份 | **0.5–1 人月** | ❌ |
+
+**结论**：互操作是**单向**的 —— 能把外面的模型拿进来，拿不出去（除 PNG）。要在流水线里当"下游"是够的；要当"中间站"不够。
+
 ## 2. 六个使用场景的判定
 
 判定口径见 [production_readiness_criteria.md](production_readiness_criteria.md) §2–§6。
