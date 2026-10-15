@@ -641,7 +641,11 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 ui.horizontal(|ui| {
                     ui.label("缩放");
                     changed |= ui
-                        .add(egui::DragValue::new(scale).speed(0.01).range(0.001..=1000.0))
+                        .add(
+                            egui::DragValue::new(scale)
+                                .speed(0.01)
+                                .range(0.001..=1000.0),
+                        )
                         .changed();
                 });
             }
