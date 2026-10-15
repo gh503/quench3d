@@ -246,6 +246,9 @@ pub fn load_chair(bytes: &[u8]) -> Result<(), JsValue> {
 
 ## 想读代码从哪里开始
 
+**想先知道"它离生产还差什么"**：读 [docs/overnight_report.md](docs/overnight_report.md)（本轮做了什么、你怎么验收）
+与 [docs/production_readiness.md](docs/production_readiness.md)（逐域差距矩阵、六个场景判定、四类一票否决项）。
+
 先看 **[docs/getting_started.md](docs/getting_started.md)**（心智模型、三条开发路线、配方表、坑清单），
 再打开 **[crates/quench3d/examples/starter_game.rs](crates/quench3d/examples/starter_game.rs)**：
 一个能跑、能改、能进 CI 的完整骨架（`cargo run --release --example starter_game`）。
