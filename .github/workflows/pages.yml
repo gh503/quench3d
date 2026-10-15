@@ -1,0 +1,89 @@
+# 把 Web 客户端发布到 GitHub Pages：构建 wasm → 直接发布 web/ 目录。
+#
+# 为什么单独一个 workflow：CI 只做门禁（编译/测试/检查产物），不发版。
+# 这里复用同一套打包脚本（tools/build_web.sh），保证 Pages 上的东西
+# 和 CI 校验过的是同一条路。
+#
+# 一次性设置（仓库 Settings → Pages → Build and deployment → Source）：
+#   选 "GitHub Actions"。用 API 也行：
+#   gh api -X POST /repos/gh503/quench3d/pages -f build_type=workflow
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "web/**"
+      - "tools/build_web.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Pages 部署需要这三样权限：读代码、写 Pages、拿 id-token 换部署凭据。
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时刻只跑一个部署；新的推送取消排队中的旧部署，但不打断正在跑的。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: 构建 Web 产物
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 版本必须与 wasm-bindgen crate 一致（Cargo.lock 里锁的是 0.2.129），
+      # 否则胶水代码与 wasm 不匹配，页面加载即失败。
+      - name: 安装 wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+
+      - name: 打包（示例名决定 web/pkg 里是哪个入口）
+        run: tools/build_web.sh physics_playground
+
+      # 产物自检：wasm 能否实例化、页面 import 的符号是否存在、
+      # WebGL2 回退是否真的编进了产物、后端探测是否在 start() 之前。
+      - name: 校验产物
+        run: node tools/check_web.mjs
+
+      # Pages 只认这个目录：把要发布的东西拷进去（pkg/ 是构建产物，不在仓库里也没关系，
+      # 但本项目按 .gitignore 的约定是把 web/pkg 一起提交的，两条路都能用）。
+      - name: 组装发布目录
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          cp -r web/. _site/
+          # 别把构建戳/缓存之类的东西发上去（保留也无害，这里只是克制一点）。
+          ls -la _site | head
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: 发布到 Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

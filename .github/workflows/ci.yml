@@ -1,8 +1,6 @@
 # 前置假设：**quench3d/ 就是仓库根**（即本文件在仓库里的路径是 .github/workflows/ci.yml）。
-# GitHub Actions 只执行仓库根下的 workflows，所以这段 CI 要生效，前提是把 quench3d/
-# 作为独立仓库（或作为仓库根的子树）纳入版本控制。
-# 现状提醒：quench3d/ 目前还没有被任何 git 仓库跟踪（`git ls-files quench3d` 为空），
-# 因此这条流水线现在不会被触发——「CI 是绿的」在纳入 git 之前只是纸面结论。
+# 2026-10-16 起 quench3d 已是独立仓库 https://github.com/gh503/quench3d ，
+# 这条流水线在每次 push / PR 上真实运行（不再是纸面结论）。
 #
 # CI 机器上没有 GPU：这里不安装任何 GPU/软件光栅驱动，也不需要。
 # 物理与 CLI 冒烟都不依赖显卡；渲染路径会如实走「无 GPU」分支（退出码 3），
