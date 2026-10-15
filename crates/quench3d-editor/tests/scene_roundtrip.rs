@@ -157,3 +157,159 @@ fn scene_to_json_reports_unrepresentable_objects() {
         saved.skipped
     );
 }
+
+/// 编辑器只"懂"物体/地面/材质标量/相机 —— 但它**不能顺手把别的段丢掉**。
+///
+/// 这条测试钉的是一个真实存在过的静默数据损坏：`scene_to_json` 曾经从
+/// `SceneDoc::default()` 起头，于是「CLI 生成一份带光照/渲染设置/模型的场景
+/// → 编辑器改一改 → 存盘」之后，`lighting`、`simulate`、`render`、`models`、
+/// 材质的四个贴图槽会被**悄悄清零**，而文件看上去完全正常。
+///
+/// 判据（全部是"可复核的字符串/语义"）：
+/// 1. 编辑器不建模的段必须原样出现在导出结果里；
+/// 2. 贴图引用与 UV 参数不能丢（材质按同名物体继承）；
+/// 3. 存 → 读 → 再存 必须**字节相同**（存储是固定点）；
+/// 4. 引用了已删除物体的关节/动作要被清掉（否则文件自己读不回来）。
+#[test]
+fn export_preserves_sections_the_editor_does_not_model() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+
+    // 场景格式的校验器要求贴图**真实存在**（这是好事：错的路径早点报，别到渲染时才发现）。
+    // 所以这里先造一张 8×8 棋盘 PNG 当贴图。
+    let texture_path = std::env::temp_dir().join("quench3d-editor-test-texture.png");
+    let texture =
+        quench3d::render::ImageData::checker(8, 2, [255, 255, 255, 255], [40, 40, 40, 255]);
+    quench3d::write_png(&texture, &texture_path).expect("造测试贴图必须成功");
+    // JSON 里的反斜杠要转义（Windows 上路径带 `\`）。
+    let texture_json = texture_path.to_string_lossy().replace('\\', "\\\\");
+
+    // 手写一份"CLI 生成"的场景：带光照、仿真与渲染设置、探针、贴图材质、关节。
+    let source = r#"{
+      "format": "quench3d.scene",
+      "version": 1,
+      "name": "preserve",
+      "gravity": [0, -9.81, 0],
+      "ground": { "size": 24, "friction": 0.7 },
+      "lighting": { "preset": "studio", "sun_direction": [-0.4, -1, -0.35], "sun_intensity": 3.5, "ambient": 0.25, "exposure": 1.4, "shadows": true, "sky": true },
+      "simulate": { "steps": 240, "dt": 0.004 },
+      "render": { "output": "out.png", "width": 800, "height": 600, "msaa": 8 },
+      "probes": [ { "name": "probe-a", "position": [0, 1, 0], "radius": 2.5 } ],
+      "materials": {
+        "wood": { "color": [0.78, 0.48, 0.26], "roughness": 0.55, "uv_scale": 3.0, "base_color_texture": "__TEXTURE__", "normal_scale": 1.5, "double_sided": true }
+      },
+      "objects": [
+        { "name": "box", "shape": { "type": "box", "size": [0.8, 0.8, 0.8] },
+          "position": [0, 2.0, 0], "material": "wood", "body": "dynamic", "density": 400 },
+        { "name": "peg", "shape": { "type": "sphere", "radius": 0.25 },
+          "position": [0, 4.0, 0], "body": "static" }
+      ],
+      "joints": [ { "type": "hinge", "a": "box", "b": "peg", "axis": [0, 1, 0] } ]
+    }"#
+    .replace("__TEXTURE__", &texture_json);
+
+    let (count, _) =
+        scene_io::load_text_into_doc(&mut engine, &mut doc, &source).expect("载入必须成功");
+    assert!(count >= 2, "至少应当装出 box / peg（实际 {count}）");
+
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    for needle in [
+        "\"lighting\"",
+        "\"preset\": \"studio\"",
+        "\"sun_intensity\": 3.5",
+        "\"exposure\": 1.4",
+        "\"simulate\"",
+        "\"steps\": 240",
+        "\"render\"",
+        "\"msaa\": 8",
+        "\"probes\"",
+        "probe-a",
+        "\"joints\"",
+        "\"type\": \"hinge\"",
+    ] {
+        assert!(
+            saved.json.contains(needle),
+            "导出丢了「{needle}」——这正是那类静默损坏。导出内容：\n{}",
+            saved.json
+        );
+    }
+    // 贴图引用与 UV 参数：材质按同名物体继承，不许被"没有界面"当借口清掉。
+    assert!(
+        saved.json.contains("quench3d-editor-test-texture.png"),
+        "贴图引用被丢了：\n{}",
+        saved.json
+    );
+    assert!(saved.json.contains("\"uv_scale\": 3.0"), "UV 被丢了");
+    assert!(
+        saved.json.contains("\"normal_scale\": 1.5"),
+        "法线强度被丢了"
+    );
+    // 物体本身还在。
+    assert!(saved.json.contains("\"box\"") && saved.json.contains("\"peg\""));
+
+    // 存储必须是固定点：存 → 读 → 再存，字节相同。
+    let Some(mut engine2) = headless_engine() else {
+        return;
+    };
+    let mut doc2 = Doc::new();
+    scene_io::load_text_into_doc(&mut engine2, &mut doc2, &saved.json).expect("二次载入必须成功");
+    let saved2 = scene_io::scene_to_json(&engine2, &doc2).expect("二次导出必须成功");
+    assert_eq!(
+        saved.json, saved2.json,
+        "「存一次读一次再存一次」应当字节不变，否则每次保存都会漂移"
+    );
+}
+
+/// 编辑器删掉物体后，引用它的关节/动作不能让文件变成"自己都读不回来"。
+#[test]
+fn export_drops_joints_that_reference_deleted_objects() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = r#"{
+      "format": "quench3d.scene",
+      "version": 1,
+      "name": "dangling",
+      "objects": [
+        { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
+          "position": [0, 2, 0], "body": "dynamic" },
+        { "name": "peg", "shape": { "type": "sphere", "radius": 0.25 },
+          "position": [0, 4, 0], "body": "static" }
+      ],
+      "joints": [ { "type": "hinge", "a": "box", "b": "peg", "axis": [0, 1, 0] } ],
+      "actions": [ { "type": "impulse", "target": "box", "at_step": 10, "value": [0, 5, 0] } ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+
+    // 删掉 peg：引用它的铰链必须一起消失，否则存出来的文件读不回来。
+    let peg = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == "peg")
+        .expect("应当有 peg");
+    doc.selected = Some(peg);
+    doc.delete_selected(&mut engine);
+
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    assert!(
+        !saved.json.contains("\"type\": \"hinge\""),
+        "引用了已删除物体的关节必须被清掉：\n{}",
+        saved.json
+    );
+    assert!(
+        saved.skipped.iter().any(|s| s.contains("关节")),
+        "被清掉的关节要如实上报，实际：{:?}",
+        saved.skipped
+    );
+    // 二次装载必须还能读（这是"不能让文件坏掉"的最终判据）。
+    let Some(mut engine2) = headless_engine() else {
+        return;
+    };
+    let mut doc2 = Doc::new();
+    scene_io::load_text_into_doc(&mut engine2, &mut doc2, &saved.json)
+        .expect("清掉悬空引用之后，导出结果必须还能读回来");
+}

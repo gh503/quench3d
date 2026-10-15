@@ -24,6 +24,8 @@
 
 pub mod app;
 pub mod doc;
+pub mod gizmo;
+pub mod history;
 pub mod scene_io;
 pub mod ui;
 

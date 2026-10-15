@@ -35,10 +35,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rustfmt + clippy 供下面的门禁使用；wasm32 target 也一起装上（实际用它的
-      # `cargo check --target wasm32-unknown-unknown` 在单独的 `wasm` job 里跑）。
+      # 工具链**钉住版本**，不用 `@stable`：可复现构建的一部分
+      # （`@stable` 会在某天悄悄换成另一个编译器，"昨天还过、今天崩"最难查）。
+      # rustfmt + clippy 供下面的门禁使用；wasm32 target 也一起装上。
       - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
@@ -49,18 +50,20 @@ jobs:
       - name: 格式检查
         run: cargo fmt --all --check
 
+      # `--locked`：命令必须严格按 Cargo.lock 构建。少了它，CI 会在有人忘记
+      # 提交锁文件时悄悄解析出别的依赖版本，于是"本地过、CI 不过"。
       - name: Clippy（警告即失败）
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: 全部测试
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       # 命令行工具端到端冒烟：这是 agent 依赖的契约（退出码 + 单行 JSON）
       - name: CLI 冒烟测试
         shell: bash
         run: |
           set -euo pipefail
-          cargo build -p quench3d-cli
+          cargo build --locked -p quench3d-cli
           # GitHub 会给 RUNNER_OS，本地跑时缺省当 Linux
           BIN=target/debug/quench3d
           if [ "${RUNNER_OS:-Linux}" = "Windows" ]; then BIN=target/debug/quench3d.exe; fi
@@ -278,20 +281,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: 检查门面层能在 wasm32 上编译
-        run: cargo check -p quench3d --target wasm32-unknown-unknown --all-targets
+        run: cargo check --locked -p quench3d --target wasm32-unknown-unknown --all-targets
       - name: Clippy（wasm 目标）
-        run: cargo clippy -p quench3d --target wasm32-unknown-unknown --all-targets -- -D warnings
+        run: cargo clippy --locked -p quench3d --target wasm32-unknown-unknown --all-targets -- -D warnings
       # 编辑器是 Web 客户端本体：它的 wasm 路径必须一起守着
       # （egui 那条链上有过"桌面能编、wasm 编不过"的依赖，比如 arboard）。
       - name: 检查编辑器能在 wasm32 上编译
-        run: cargo check -p quench3d-editor --target wasm32-unknown-unknown --all-targets
+        run: cargo check --locked -p quench3d-editor --target wasm32-unknown-unknown --all-targets
       - name: Clippy（编辑器的 wasm 目标）
-        run: cargo clippy -p quench3d-editor --target wasm32-unknown-unknown --all-targets -- -D warnings
+        run: cargo clippy --locked -p quench3d-editor --target wasm32-unknown-unknown --all-targets -- -D warnings
 
       # 真正打包一次 Web 产物，并检查页面 import 的符号与 wasm 能否实例化。
       # 这一步能挡住「打包漏文件 / 页面 import 了不存在的函数 / wasm 损坏」。

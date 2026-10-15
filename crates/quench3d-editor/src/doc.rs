@@ -114,9 +114,26 @@ pub struct Doc {
     pub status: String,
     /// 是否显示帮助窗口。
     pub show_help: bool,
+    /// 撤销 / 重做历史（整场景快照，见 [`crate::history`]）。
+    pub history: crate::history::History,
+    /// 最近一次载入的场景文档（原样留着）。
+    ///
+    /// 编辑器只"懂"物体、地面、材质标量和相机；`lighting` / `simulate` / `render` /
+    /// `joints` / `probes` / `actions` 这些段它既不改也不该丢。导出时以这份文档为底稿，
+    /// 只覆盖编辑器真正管得着的部分 —— 否则「CLI 生成 → 编辑器改一改 → CLI 渲染」
+    /// 会把光照与渲染设置**静默清零**（这曾经是真事）。
+    pub(crate) base_doc: Option<quench3d_cli::scene_doc::SceneDoc>,
     baseline: Vec<Baseline>,
     /// 名字自增计数，保证不重名。
     spawn_counter: u32,
+}
+
+/// 把当前场景序列化成历史快照。失败（例如场景里有表达不了的物体）返回 `None`，
+/// 这时宁可不记历史，也不要记一份不完整的快照——撤销到残缺状态比不能撤销更糟。
+fn scene_json(engine: &Engine, doc: &Doc) -> Option<String> {
+    crate::scene_io::scene_to_json(engine, doc)
+        .ok()
+        .map(|saved| saved.json)
 }
 
 impl Default for Doc {
@@ -133,8 +150,99 @@ impl Doc {
             file_path: "scene.json".to_string(),
             status: "就绪".to_string(),
             show_help: false,
+            history: crate::history::History::default(),
+            base_doc: None,
             baseline: Vec::new(),
             spawn_counter: 0,
+        }
+    }
+
+    /// 编辑完成之后记一步历史（与栈顶相同则自动跳过）。
+    pub fn record_edit(&mut self, engine: &Engine) {
+        let json = scene_json(engine, self);
+        self.history.record_json(json);
+    }
+
+    /// 开始一段连续编辑（拖 gizmo / 拖数值框）：整段只算一步。
+    pub fn begin_history_transaction(&mut self) {
+        self.history.begin_transaction();
+    }
+
+    /// 结束连续编辑。
+    pub fn end_history_transaction(&mut self, engine: &Engine) {
+        let json = scene_json(engine, self);
+        self.history.end_transaction_json(json);
+    }
+
+    /// 撤销一步（含状态提示与选区收敛）。
+    pub fn undo(&mut self, engine: &mut Engine) {
+        match self.history.undo(engine) {
+            Some(Ok((count, snapshot))) => {
+                self.refresh_base_from(&snapshot);
+                self.clamp_selection(engine);
+                self.status = format!("已撤销 → {count} 个物体");
+            }
+            Some(Err(e)) => self.status = format!("撤销失败：{e}"),
+            None => self.status = "没有可撤销的步骤".to_string(),
+        }
+    }
+
+    /// 重做一步（含状态提示与选区收敛）。
+    pub fn redo(&mut self, engine: &mut Engine) {
+        match self.history.redo(engine) {
+            Some(Ok((count, snapshot))) => {
+                self.refresh_base_from(&snapshot);
+                self.clamp_selection(engine);
+                self.status = format!("已重做 → {count} 个物体");
+            }
+            Some(Err(e)) => self.status = format!("重做失败：{e}"),
+            None => self.status = "没有可重做的步骤".to_string(),
+        }
+    }
+
+    /// 撤销/重做之后，底稿文档也要跟着快照走 —— 否则"撤销回到带光照的场景、
+    /// 再存一次"会把光照丢掉。
+    fn refresh_base_from(&mut self, snapshot: &str) {
+        self.base_doc = quench3d_cli::scene_doc::SceneDoc::from_json(snapshot).ok();
+    }
+
+    /// 以当前场景为起点重开历史（打开文件 / 装载新场景后调用）。
+    pub fn reset_history(&mut self, engine: &Engine) {
+        let json = scene_json(engine, self);
+        self.history.reset_json(json);
+        self.status = "历史已重置".to_string();
+    }
+
+    /// 把视口对准选中的物体（`F` 键）。没选中时对准整个场景。
+    ///
+    /// 只改轨道相机的焦点与距离，不动 FOV、不动物体本身。
+    pub fn focus_selected(&mut self, engine: &mut Engine) {
+        let indices: Vec<usize> = match self.selected {
+            Some(index) if index < engine.scene.len() => vec![index],
+            _ => (0..engine.scene.len()).collect(),
+        };
+        if indices.is_empty() {
+            self.status = "场景是空的，没东西可聚焦".to_string();
+            return;
+        }
+        match engine.scene.bounds_of(&engine.renderer, &indices) {
+            Some(bounds) => {
+                engine.orbit.focus_on(&bounds);
+                self.status = match self.selected {
+                    Some(_) => "已聚焦选中物体".to_string(),
+                    None => "未选中：已聚焦整个场景".to_string(),
+                };
+            }
+            None => self.status = "选中的物体没有可算包围盒的网格".to_string(),
+        }
+    }
+
+    /// 选中的下标越界就取消选中（撤销/重做后物体数量会变）。
+    fn clamp_selection(&mut self, engine: &Engine) {
+        if let Some(index) = self.selected {
+            if index >= engine.scene.len() {
+                self.selected = None;
+            }
         }
     }
 

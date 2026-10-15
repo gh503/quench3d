@@ -23,11 +23,19 @@ pub struct SavedScene {
 
 /// 把引擎当前场景导出成 `quench3d.scene` JSON。
 pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
-    let mut out = SceneDoc {
-        format: FORMAT.to_string(),
-        version: VERSION,
-        ..Default::default()
-    };
+    // **以最近载入的那份文档为底稿**：编辑器只"懂"物体、地面、材质标量与相机，
+    // 而 `lighting` / `simulate` / `render` / `probes` / `models` 这些段它既不改也不该丢。
+    // 曾经这里是 `SceneDoc::default()` 起头 —— 后果是「CLI 生成（带光照与渲染设置）
+    // → 编辑器改一改 → 存盘」，光照、渲染设置、模型引用被**静默清零**。
+    let mut out = doc.base_doc.clone().unwrap_or_default();
+    out.format = FORMAT.to_string();
+    out.version = VERSION;
+    let inherited_models = out.models.len();
+    // 这三段由当前引擎状态重建，先清空（`models` 反过来要留着：模型实例被展开成
+    // 普通物体后，非预设网格那部分本来就导不出来，清了等于把它们整个丢掉）。
+    out.objects.clear();
+    out.materials.clear();
+    out.ground = None;
     out.name = Some(
         std::path::Path::new(&doc.file_path)
             .file_stem()
@@ -103,6 +111,15 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         }
 
         let material_name = format!("mat{index}");
+        // 同名物体在原文档里用过的材质：连贴图、UV、开关一起继承。
+        // 编辑器没有贴图界面 —— 但"没有界面"不等于"应该丢"。
+        let inherited = doc.base_doc.as_ref().and_then(|base| {
+            let source = base
+                .objects
+                .iter()
+                .find(|o| o.name.as_deref() == Some(name.as_str()))?;
+            base.materials.get(source.material.as_deref()?).cloned()
+        });
         let base = engine
             .renderer
             .material(object.material)
@@ -115,40 +132,44 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             base.w * object.color.w,
         );
         let source = engine.renderer.material(object.material);
-        out.materials.insert(
-            material_name.clone(),
-            MaterialDoc {
-                color: [
-                    quench3d::render::color::linear_to_srgb(linear.x.clamp(0.0, 1.0)),
-                    quench3d::render::color::linear_to_srgb(linear.y.clamp(0.0, 1.0)),
-                    quench3d::render::color::linear_to_srgb(linear.z.clamp(0.0, 1.0)),
-                ],
-                metallic: object
-                    .metallic
-                    .unwrap_or_else(|| source.map(|m| m.metallic).unwrap_or(0.0)),
-                roughness: object
-                    .roughness
-                    .unwrap_or_else(|| source.map(|m| m.roughness).unwrap_or(0.5)),
-                emissive: object.emissive_strength,
-                alpha: if linear.w < 1.0 {
-                    Some(linear.w.clamp(0.0, 1.0))
-                } else {
-                    None
-                },
-                // 贴图/开关类参数在编辑器里没有对应界面：一律留空（`None`）。
-                emissive_color: None,
-                uv_scale: None,
-                base_color_texture: None,
-                normal_texture: None,
-                metallic_roughness_texture: None,
-                emissive_texture: None,
-                normal_scale: None,
-                alpha_cutoff: None,
-                alpha_blend: None,
-                unlit: None,
-                double_sided: None,
-            },
-        );
+        let mut material = inherited.unwrap_or(MaterialDoc {
+            color: [0.0, 0.0, 0.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: 0.0,
+            alpha: None,
+            // 以下几项只有从原文档继承时才可能非空。
+            emissive_color: None,
+            uv_scale: None,
+            base_color_texture: None,
+            normal_texture: None,
+            metallic_roughness_texture: None,
+            emissive_texture: None,
+            normal_scale: None,
+            alpha_cutoff: None,
+            alpha_blend: None,
+            unlit: None,
+            double_sided: None,
+        });
+        // 编辑器改得动的只有这五个标量，其余（贴图、UV、开关）保持原样。
+        material.color = [
+            quench3d::render::color::linear_to_srgb(linear.x.clamp(0.0, 1.0)),
+            quench3d::render::color::linear_to_srgb(linear.y.clamp(0.0, 1.0)),
+            quench3d::render::color::linear_to_srgb(linear.z.clamp(0.0, 1.0)),
+        ];
+        material.metallic = object
+            .metallic
+            .unwrap_or_else(|| source.map(|m| m.metallic).unwrap_or(0.0));
+        material.roughness = object
+            .roughness
+            .unwrap_or_else(|| source.map(|m| m.roughness).unwrap_or(0.5));
+        material.emissive = object.emissive_strength;
+        material.alpha = if linear.w < 1.0 {
+            Some(linear.w.clamp(0.0, 1.0))
+        } else {
+            None
+        };
+        out.materials.insert(material_name.clone(), material);
 
         let (rotation_deg, position) = match body {
             Some(b) => (to_euler_xyz_deg(b.rotation()), b.position()),
@@ -195,6 +216,36 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         });
     }
 
+    // 关节与动作按**物体名**引用：编辑器删掉的物体不能留下悬空引用
+    // （那会让存出来的文件自己都读不回来）。
+    let names: std::collections::HashSet<String> =
+        out.objects.iter().filter_map(|o| o.name.clone()).collect();
+    let before = out.joints.len();
+    out.joints
+        .retain(|j| names.contains(&j.a) && names.contains(&j.b));
+    if before > out.joints.len() {
+        skipped.push(format!(
+            "{} 个关节（引用的物体已不存在）",
+            before - out.joints.len()
+        ));
+    }
+    let before = out.actions.len();
+    // `$ground` / `$model[i]` 这类内置目标不按物体名解析，保留。
+    out.actions
+        .retain(|a| a.target.starts_with('$') || names.contains(&a.target));
+    if before > out.actions.len() {
+        skipped.push(format!(
+            "{} 个动作（目标物体已不存在）",
+            before - out.actions.len()
+        ));
+    }
+    if inherited_models > 0 && !skipped.is_empty() {
+        skipped.push(format!(
+            "注意：原文档有 {inherited_models} 个 models 引用，已原样保留；\
+             上面被跳过的物体若来自模型，编辑器里的位置改动不会写回模型引用"
+        ));
+    }
+
     Ok(SavedScene {
         json: out.to_json_pretty(),
         skipped,
@@ -211,6 +262,37 @@ pub fn load_into_engine(engine: &mut Engine, text: &str) -> Result<(usize, Strin
         .validated()
         .map_err(|e| e.to_string())?;
     install_doc(engine, doc)
+}
+
+/// 把场景 JSON 装进引擎，**并把这份文档记成底稿**（编辑器导出时以它为底）。
+pub fn load_text_into_doc(
+    engine: &mut Engine,
+    doc: &mut Doc,
+    text: &str,
+) -> Result<(usize, String), String> {
+    let parsed = SceneDoc::from_json(text)
+        .map_err(|e| e.to_string())?
+        .validated()
+        .map_err(|e| e.to_string())?;
+    let result = install_doc(engine, parsed.clone())?;
+    doc.base_doc = Some(parsed);
+    Ok(result)
+}
+
+/// 从文件装载，并记成底稿（桌面端：贴图相对路径以文件所在目录为基准）。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_file_into_doc(
+    engine: &mut Engine,
+    doc: &mut Doc,
+    path: &std::path::Path,
+) -> Result<(usize, String), String> {
+    let parsed = SceneDoc::from_file(path)
+        .map_err(|e| e.to_string())?
+        .validated()
+        .map_err(|e| e.to_string())?;
+    let result = install_doc(engine, parsed.clone())?;
+    doc.base_doc = Some(parsed);
+    Ok(result)
 }
 
 /// 从文件装载（桌面端：贴图相对路径以文件所在目录为基准）。

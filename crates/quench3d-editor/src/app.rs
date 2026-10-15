@@ -10,6 +10,7 @@
 //! 中间插不进一层 UI。这里自己拿 `acquire_frame`，所以 UI 能浮在 3D 上面。
 
 use crate::doc::Doc;
+use crate::gizmo::{Gizmo, Mode as GizmoMode, Space as GizmoSpace};
 use crate::ui::{self, Viewport};
 use egui_wgpu::ScreenDescriptor;
 use quench3d::prelude::*;
@@ -105,6 +106,8 @@ struct Inner {
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     viewport: Viewport,
+    /// 视口里的变换手柄（模式 / 坐标系 / 正在拖拽的状态）。
+    gizmo: Gizmo,
     last_time: f64,
     first_frame_done: bool,
 }
@@ -131,7 +134,7 @@ impl Inner {
         // 启动即载入：只有桌面端有真实文件系统，Web 端靠页面上的「打开」按钮上传。
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = &config.startup_scene {
-            match crate::scene_io::load_file_into_engine(&mut engine, path) {
+            match crate::scene_io::load_file_into_doc(&mut engine, &mut doc, path) {
                 Ok((objects, _)) => {
                     doc.file_path = path.display().to_string();
                     doc.selected = if objects > 0 { Some(0) } else { None };
@@ -147,6 +150,7 @@ impl Inner {
         if config.demo_scene {
             doc.build_default_scene(&mut engine);
         }
+        doc.reset_history(&engine);
 
         let egui_ctx = egui::Context::default();
         install_fonts(&egui_ctx);
@@ -182,6 +186,7 @@ impl Inner {
             egui_state,
             egui_renderer,
             viewport: Viewport::default(),
+            gizmo: Gizmo::default(),
             last_time: quench3d::clock::now_seconds(),
             first_frame_done: false,
         }
@@ -202,7 +207,13 @@ impl Inner {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            let requests = ui::panels(ui, &mut self.engine, &mut self.doc, &mut self.viewport);
+            let requests = ui::panels(
+                ui,
+                &mut self.engine,
+                &mut self.doc,
+                &mut self.viewport,
+                &mut self.gizmo,
+            );
             if requests.screenshot {
                 self.screenshot();
             }
@@ -402,10 +413,11 @@ impl Inner {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let path = std::path::PathBuf::from(self.doc.file_path.clone());
-            match crate::scene_io::load_file_into_engine(&mut self.engine, &path) {
+            match crate::scene_io::load_file_into_doc(&mut self.engine, &mut self.doc, &path) {
                 Ok((objects, _)) => {
                     self.doc.selected = if objects > 0 { Some(0) } else { None };
                     self.doc.capture_baseline(&self.engine);
+                    self.doc.reset_history(&self.engine);
                     self.doc.status = format!("已载入 {}（{objects} 个物体）", path.display());
                 }
                 Err(e) => self.doc.status = format!("载入失败：{e}"),
@@ -421,11 +433,12 @@ impl Inner {
     /// 把浏览器上传的场景 JSON 装进引擎（Web 专用）。
     #[cfg(target_arch = "wasm32")]
     pub fn apply_scene_json(&mut self, text: &str) {
-        match crate::scene_io::load_into_engine(&mut self.engine, text) {
+        match crate::scene_io::load_text_into_doc(&mut self.engine, &mut self.doc, text) {
             Ok((objects, path)) => {
                 self.doc.selected = if objects > 0 { Some(0) } else { None };
                 self.doc.file_path = path;
                 self.doc.capture_baseline(&self.engine);
+                self.doc.reset_history(&self.engine);
                 self.doc.status = format!("已载入场景（{objects} 个物体）");
             }
             Err(e) => self.doc.status = format!("载入失败：{e}"),
@@ -556,6 +569,63 @@ impl EditorApp {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    // 编辑器快捷键先于引擎：Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y 是编辑器的，
+                    // F 聚焦选中。引擎拿到的仍然是它认识的那些键（不会重复处理）。
+                    if event.state == ElementState::Pressed {
+                        if engine.input.ctrl {
+                            match code {
+                                KeyCode::KeyZ => {
+                                    if engine.input.shift {
+                                        inner.doc.redo(engine);
+                                    } else {
+                                        inner.doc.undo(engine);
+                                    }
+                                    return;
+                                }
+                                KeyCode::KeyY => {
+                                    inner.doc.redo(engine);
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if code == KeyCode::KeyF {
+                            inner.doc.focus_selected(engine);
+                            return;
+                        }
+                        // 正在拖手柄时 Esc = 取消这次拖拽，不能让引擎把它当成"退出"。
+                        if code == KeyCode::Escape && inner.gizmo.is_dragging() {
+                            return;
+                        }
+                        // W/E/R 切手柄模式、L 切坐标系：只在轨道相机下生效。
+                        // 飞行相机要用 WASD/QE，那时这些键归相机；R 那时也归引擎的"聚焦场景"。
+                        if engine.camera_mode == CameraMode::Orbit && !engine.input.ctrl {
+                            match code {
+                                KeyCode::KeyW => {
+                                    inner.gizmo.mode = GizmoMode::Translate;
+                                    return;
+                                }
+                                KeyCode::KeyE => {
+                                    inner.gizmo.mode = GizmoMode::Rotate;
+                                    return;
+                                }
+                                KeyCode::KeyR => {
+                                    inner.gizmo.mode = GizmoMode::Scale;
+                                    return;
+                                }
+                                KeyCode::KeyL => {
+                                    inner.gizmo.space = match inner.gizmo.space {
+                                        GizmoSpace::World => GizmoSpace::Local,
+                                        GizmoSpace::Local => GizmoSpace::World,
+                                    };
+                                    let label = inner.gizmo.space.label();
+                                    inner.doc.status = format!("坐标系：{label}");
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     match event.state {
                         ElementState::Pressed => engine.input.on_key_down(code),
                         ElementState::Released => engine.input.on_key_up(code),
@@ -585,7 +655,10 @@ impl EditorApp {
                             engine.input.on_mouse_down(b);
                             // 在视口里按下左键 = 开始「转视角」；点一下（没拖动）
                             // 会被 egui 认成 click，那时光标没动，转视角也看不出。
-                            if b == MouseButton::Left && pointer_in_viewport {
+                            if b == MouseButton::Left
+                                && pointer_in_viewport
+                                && !inner.viewport.gizmo_active
+                            {
                                 inner.game.orbit_with_left = true;
                             }
                         }

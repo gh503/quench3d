@@ -4,6 +4,7 @@
 //! 需要平台能力（存盘、截图）的请求回传给 [`crate::app`]。
 
 use crate::doc::{BodyKind, Doc, Primitive};
+use crate::gizmo::{Gizmo, Mode as GizmoMode, Space as GizmoSpace};
 use egui::{RichText, Ui};
 use quench3d::prelude::*;
 
@@ -18,6 +19,8 @@ pub struct Viewport {
     pub click: Option<Vec2>,
     /// 左键是否正在视口里拖动（用来把左键拖动当转视角）。
     pub dragging: bool,
+    /// 这一帧指针被变换 gizmo 接管了（此时不要转视角、也不要拾取）。
+    pub gizmo_active: bool,
 }
 
 impl Default for Viewport {
@@ -27,6 +30,7 @@ impl Default for Viewport {
             hovered: false,
             click: None,
             dragging: false,
+            gizmo_active: false,
         }
     }
 }
@@ -50,21 +54,27 @@ pub struct Requests {
 }
 
 /// 画整个界面。
-pub fn panels(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, view: &mut Viewport) -> Requests {
+pub fn panels(
+    ui: &mut Ui,
+    engine: &mut Engine,
+    doc: &mut Doc,
+    view: &mut Viewport,
+    gizmo: &mut Gizmo,
+) -> Requests {
     let mut req = Requests::default();
     view.click = None;
-    top_bar(ui, engine, doc, &mut req);
-    status_bar(ui, engine, doc);
+    top_bar(ui, engine, doc, gizmo, &mut req);
+    status_bar(ui, engine, doc, gizmo);
     outliner(ui, engine, doc);
     inspector(ui, engine, doc, &mut req);
-    viewport(ui, engine, doc, view);
+    viewport(ui, engine, doc, view, gizmo);
     let ctx = ui.ctx().clone();
     help_window(&ctx, doc);
     req
 }
 
 /// 顶部工具栏。
-fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
+fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, req: &mut Requests) {
     egui::Panel::top("quench3d-toolbar").show(ui, |ui| {
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
@@ -95,6 +105,27 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) 
             {
                 doc.reset(engine);
                 engine.paused = true;
+                doc.record_edit(engine);
+            }
+
+            ui.separator();
+
+            // 撤销 / 重做：整场景快照，拖拽算一步（见 history.rs 的边界说明）。
+            let can_undo = doc.history.can_undo();
+            let can_redo = doc.history.can_redo();
+            if ui
+                .add_enabled(can_undo, egui::Button::new("↶ 撤销"))
+                .on_hover_text("Ctrl+Z")
+                .clicked()
+            {
+                doc.undo(engine);
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new("↷ 重做"))
+                .on_hover_text("Ctrl+Shift+Z / Ctrl+Y")
+                .clicked()
+            {
+                doc.redo(engine);
             }
 
             ui.separator();
@@ -104,11 +135,13 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) 
                 if ui.button(kind.label()).clicked() {
                     doc.spawn(engine, kind);
                     engine.paused = true;
+                    doc.record_edit(engine);
                 }
             }
             if ui.button("复制").clicked() {
                 doc.duplicate_selected(engine);
                 engine.paused = true;
+                doc.record_edit(engine);
             }
             let has_selection = doc.selected.is_some();
             if ui
@@ -116,11 +149,36 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) 
                 .clicked()
             {
                 doc.delete_selected(engine);
+                doc.record_edit(engine);
             }
             if ui.button("清空").clicked() {
                 doc.clear(engine);
                 engine.paused = true;
+                doc.record_edit(engine);
             }
+
+            ui.separator();
+
+            // 变换 gizmo：模式 + 坐标系（快捷键 W/E/R，L 切坐标系）。
+            ui.label("手柄：");
+            for mode in GizmoMode::ALL {
+                let active = gizmo.mode == mode;
+                if ui
+                    .selectable_label(active, mode.label())
+                    .on_hover_text(format!("{}（快捷键 {}）", mode.label(), mode.key_hint()))
+                    .clicked()
+                {
+                    gizmo.mode = mode;
+                }
+            }
+            egui::ComboBox::from_id_salt("gizmo-space")
+                .selected_text(gizmo.space.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut gizmo.space, GizmoSpace::World, "世界");
+                    ui.selectable_value(&mut gizmo.space, GizmoSpace::Local, "局部");
+                });
+            ui.checkbox(&mut gizmo.enabled, "显示")
+                .on_hover_text("关掉后视口里只剩拾取与转视角");
 
             ui.separator();
 
@@ -163,7 +221,7 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) 
 }
 
 /// 底部状态栏。
-fn status_bar(ui: &mut Ui, engine: &Engine, doc: &Doc) {
+fn status_bar(ui: &mut Ui, engine: &Engine, doc: &Doc, gizmo: &Gizmo) {
     egui::Panel::bottom("quench3d-status").show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{:.0} FPS", engine.fps));
@@ -188,6 +246,12 @@ fn status_bar(ui: &mut Ui, engine: &Engine, doc: &Doc) {
                 ui.separator();
                 ui.label(RichText::new("已暂停").strong());
             }
+            ui.separator();
+            ui.label(format!(
+                "手柄 {}·{}",
+                gizmo.mode.label(),
+                gizmo.space.label()
+            ));
             ui.separator();
             let selected = doc
                 .selected_object(engine)
@@ -456,6 +520,15 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
             }
             if changed {
                 doc.push_transform_to_physics(engine);
+                // 拖数值框/滑杆期间指针是按住状态：整段拖拽只算一步历史。
+                // （`begin_transaction` 是幂等的，重复调用不会清掉"改过"标志。）
+                if ui.input(|i| i.pointer.any_down()) {
+                    doc.begin_history_transaction();
+                }
+                doc.record_edit(engine);
+            }
+            if doc.history.in_transaction() && !ui.input(|i| i.pointer.any_down()) {
+                doc.end_history_transaction(engine);
             }
 
             ui.add_space(6.0);
@@ -467,25 +540,37 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                 }
                 if ui.button("复制").clicked() {
                     doc.duplicate_selected(engine);
+                    doc.record_edit(engine);
                 }
                 if ui.button("删除").clicked() {
                     doc.delete_selected(engine);
+                    doc.record_edit(engine);
                 }
             });
         });
 }
 
 /// 中央视口（3D 画面本身由引擎画，这里只放交互与叠加提示）。
-fn viewport(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, view: &mut Viewport) {
+fn viewport(
+    ui: &mut Ui,
+    engine: &mut Engine,
+    doc: &mut Doc,
+    view: &mut Viewport,
+    gizmo: &mut Gizmo,
+) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             let rect = ui.max_rect();
             view.rect = rect;
             let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            // gizmo **先**拿指针：命中它的手柄时不再当成转视角 / 点选。
+            // （它画在 3D 之上、不参与深度，所以被墙挡住的手柄也能抓。）
+            let gizmo_took = gizmo.interact(ui, engine, doc, rect);
+            view.gizmo_active = gizmo_took || gizmo.is_dragging();
             view.hovered = response.hovered() || response.dragged();
-            view.dragging = response.dragged();
-            if response.clicked() {
+            view.dragging = response.dragged() && !view.gizmo_active;
+            if response.clicked() && !view.gizmo_active {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let local = Vec2::new(pos.x - rect.left(), pos.y - rect.top());
                     view.click = Some(local);
@@ -537,8 +622,19 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.add_space(6.0);
             ui.label(RichText::new("编辑").strong());
             ui.label("左键点击：选中物体");
-            ui.label("场景树里的 ⌖：把相机对准这个物体");
+            ui.label("场景树里的 ⌖ / F：把相机对准这个物体");
             ui.label("属性面板：改名称 / 变换 / 颜色 / 材质 / 物理参数");
+            ui.add_space(6.0);
+            ui.label(RichText::new("变换手柄").strong());
+            ui.label("拖轴箭头 / 圆环 / 方块：移动 · 旋转 · 缩放");
+            ui.label("W / E / R：切换移动 / 旋转 / 缩放（轨道相机下）");
+            ui.label("L：世界 / 局部坐标系");
+            ui.label("Ctrl：吸附（0.25 / 15° / 0.1），Shift：精细（×0.1）");
+            ui.label("拖拽中按 Esc：取消这次拖拽");
+            ui.add_space(6.0);
+            ui.label(RichText::new("撤销").strong());
+            ui.label("Ctrl+Z 撤销 · Ctrl+Shift+Z / Ctrl+Y 重做");
+            ui.label("拖拽与滑杆整段算一步；撤销不动你的视角");
             ui.add_space(6.0);
             ui.label(RichText::new("仿真").strong());
             ui.label("P 或工具栏：播放 / 暂停");

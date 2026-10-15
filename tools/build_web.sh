@@ -63,7 +63,8 @@ EOF
 fi
 
 echo "==> 编译 wasm (example: $EXAMPLE)"
-cargo build --release --target wasm32-unknown-unknown --example "$EXAMPLE"
+# `--locked`：严格按 Cargo.lock 打包，避免"本地一个版本、CI 另一个版本"。
+cargo build --locked --release --target wasm32-unknown-unknown --example "$EXAMPLE"
 
 if [[ ! -f "$WASM" ]]; then
   echo "找不到产物: $WASM" >&2
