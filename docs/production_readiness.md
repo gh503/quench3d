@@ -388,3 +388,23 @@
    属于验证环境问题而非已定位的应用缺陷，但**没有排除应用侧原因**，因此按"未验证"记录。
    手柄的命中与吸附逻辑本身由 7 个不需要 GPU 的单元测试覆盖，原生（llvmpipe/Vulkan）下的渲染有逐像素证据。
 7. 本轮的取舍清单（**没做**的）逐条写在 §5.5；如果某条正好是你最关心的，那它现在**还没有**。
+
+---
+
+## 8. 下一批的实施笔记（已核对的 API 落点，省得下次再翻）
+
+**材质贴图界面**（数据层已在 `crates/quench3d-editor/src/doc.rs` 的 `TexturePaths` + `scene_io::apply_texture_overrides` 里就位，
+只差控件与"应用"动作）：
+
+| 需要什么 | 落点（本轮核过） |
+|---|---|
+| 读材质 | `Renderer::material(&self, MaterialId) -> Option<&MaterialDesc>`（`renderer.rs:1191`） |
+| 改材质 | **没有 `material_mut`** —— 实施时要么加一个 `materials_mut()` / `material_mut()`，要么走"重建材质"的路径（先确认 `materials` 的可见性） |
+| 贴图槽字段 | `MaterialDesc::{base_color_texture, normal_texture, metallic_roughness_texture, emissive_texture}: Option<TextureId>`（`material.rs:57-63`） |
+| 上传贴图 | `Renderer::add_texture(&mut self, ctx: &GpuContext, image: &ImageData, srgb: bool) -> TextureId`（`renderer.rs:1081`）—— 需要拿到引擎里的 `GpuContext`（实施时先确认 `Engine` 暴露的字段名） |
+| 从磁盘读图 | `ImageData::from_file(path)`（`texture.rs:103`）—— **原生专属**，wasm 侧要么禁用按钮、要么改成"上传字节"的入口 |
+| 校验口径 | 场景校验器要求被引用的贴图**文件存在**（`texture.rs` 校验路径），所以"应用"失败要给出可读原因，而不是静默保留旧贴图 |
+
+**其它两条已核过的落点**：glTF/OBJ 导入在 `assets.rs:261/465/500`（OBJ 不带材质）；
+模型**导出**目前 0 命中，是互操作里唯一的"只进不出"。格式迁移器要落在
+`scene_doc.rs:1325` 的版本检查处（现在是版本不符直接报错）。
