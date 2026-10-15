@@ -448,65 +448,111 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             changed |= ui.checkbox(&mut desc.unlit, "无光照").changed();
             changed |= ui.checkbox(&mut desc.double_sided, "双面").changed();
             // 贴图**路径**：改的是文档层记录（导出依据），按下"应用"才真的读盘上传。
+            // 四个槽共用同一套控件；sRGB 按槽位区分（基础色/自发光是颜色贴图，法线/MR 是数据贴图）。
             ui.separator();
-            let mut path = doc
-                .textures
-                .get(&object_name)
-                .and_then(|t| t.base_color.clone())
-                .unwrap_or_default();
-            ui.horizontal(|ui| {
-                ui.label("基础色贴图");
-                if ui.text_edit_singleline(&mut path).changed() {
-                    doc.textures
-                        .entry(object_name.clone())
-                        .or_default()
-                        .base_color = if path.trim().is_empty() {
-                        None
-                    } else {
-                        Some(path.clone())
-                    };
-                }
-            });
-            let ready = !path.trim().is_empty();
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                if ui
-                    .add_enabled(ready, egui::Button::new("应用贴图（从磁盘读取）"))
-                    .clicked()
-                {
-                    match quench3d::render::ImageData::from_file(&path) {
-                        Ok(image) => {
-                            let texture = engine.renderer.add_texture(&engine.gpu, &image, true);
-                            let ok = engine.renderer.set_material_texture(
-                                &engine.gpu,
-                                material_id,
-                                quench3d::render::MaterialTextureSlot::BaseColor,
-                                Some(texture),
-                            );
-                            doc.status = if ok {
-                                format!("已应用贴图：{path}")
-                            } else {
-                                format!("贴图应用失败（材质或贴图句柄无效）：{path}")
-                            };
-                            if ok {
-                                doc.record_edit(engine);
+            for (slot, label, srgb) in [
+                (
+                    quench3d::render::MaterialTextureSlot::BaseColor,
+                    "基础色贴图",
+                    true,
+                ),
+                (
+                    quench3d::render::MaterialTextureSlot::Normal,
+                    "法线贴图",
+                    false,
+                ),
+                (
+                    quench3d::render::MaterialTextureSlot::MetallicRoughness,
+                    "金属度-粗糙度贴图",
+                    false,
+                ),
+                (
+                    quench3d::render::MaterialTextureSlot::Emissive,
+                    "自发光贴图",
+                    true,
+                ),
+            ] {
+                let mut path = doc
+                    .textures
+                    .get(&object_name)
+                    .and_then(|t| match slot {
+                        quench3d::render::MaterialTextureSlot::BaseColor => t.base_color.clone(),
+                        quench3d::render::MaterialTextureSlot::Normal => t.normal.clone(),
+                        quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+                            t.metallic_roughness.clone()
+                        }
+                        quench3d::render::MaterialTextureSlot::Emissive => t.emissive.clone(),
+                    })
+                    .unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    if ui.text_edit_singleline(&mut path).changed() {
+                        let value = if path.trim().is_empty() {
+                            None
+                        } else {
+                            Some(path.clone())
+                        };
+                        let entry = doc.textures.entry(object_name.clone()).or_default();
+                        match slot {
+                            quench3d::render::MaterialTextureSlot::BaseColor => {
+                                entry.base_color = value
+                            }
+                            quench3d::render::MaterialTextureSlot::Normal => entry.normal = value,
+                            quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+                                entry.metallic_roughness = value
+                            }
+                            quench3d::render::MaterialTextureSlot::Emissive => {
+                                entry.emissive = value
                             }
                         }
-                        Err(error) => {
-                            // 场景校验器要求贴图文件存在；这里失败必须说清原因，不能静默留旧图。
-                            doc.status = format!("读图失败：{error}（{path}）");
+                    }
+                });
+                let ready = !path.trim().is_empty();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(format!("应用{label}（从磁盘读取）")),
+                        )
+                        .clicked()
+                    {
+                        match quench3d::render::ImageData::from_file(&path) {
+                            Ok(image) => {
+                                let texture =
+                                    engine.renderer.add_texture(&engine.gpu, &image, srgb);
+                                let ok = engine.renderer.set_material_texture(
+                                    &engine.gpu,
+                                    material_id,
+                                    slot,
+                                    Some(texture),
+                                );
+                                doc.status = if ok {
+                                    format!("已应用{label}：{path}")
+                                } else {
+                                    format!("{label}应用失败（材质或贴图句柄无效）：{path}")
+                                };
+                                if ok {
+                                    doc.record_edit(engine);
+                                }
+                            }
+                            Err(error) => {
+                                // 场景校验器要求贴图文件存在；失败必须说清原因，不能静默留旧图。
+                                doc.status = format!("读图失败：{error}（{path}）");
+                            }
                         }
                     }
                 }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                let _ = ready;
-                ui.label(
-                    RichText::new("Web 端没有本地文件系统：贴图路径请写在场景文件里")
-                        .small()
-                        .weak(),
-                );
+                #[cfg(target_arch = "wasm32")]
+                {
+                    // wasm 侧没有文件系统：按钮不出现，这两个变量只在原生分支用到。
+                    let _ = (ready, srgb);
+                    ui.label(
+                        RichText::new("Web 端没有本地文件系统：贴图路径请写在场景文件里")
+                            .small()
+                            .weak(),
+                    );
+                }
             }
         });
     if !changed || desc == before {
