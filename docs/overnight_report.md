@@ -109,7 +109,7 @@ cargo test -p quench3d-editor --test scene_roundtrip   # 4 个，其中两个是
 * 顺手更正了若干**文档与代码不一致**的地方（例如"没有点光源/没有实例化/没有 bloom"这类旧结论，
   经逐行核对后改为"有，且给出代码位置"）
 
-**测试规模：337 → 352（0 失败）**；门禁全绿：`cargo fmt --check`、
+**测试规模：337 → 354（0 失败）**；门禁全绿：`cargo fmt --check`、
 `cargo clippy --workspace --all-targets -- -D warnings`、
 `cargo clippy --workspace --target wasm32-unknown-unknown --all-targets -- -D warnings`、
 `cargo test --workspace`、`tools/build_web.sh web_client` + `node tools/check_web.mjs`（wasm 11,370,401 字节）。
@@ -198,3 +198,27 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 4. **H1/H5/H6 三份声明文档**（色彩管理、确定性边界、单位与 up-axis）——
    不需要写渲染代码，但它们是"能不能进生产"的一票否决项；
 5. glTF 导入进文档层（导入的模型可编辑、可写回）。
+
+
+---
+
+## 8. 第 2–6 轮的增量（补充上文的初始版本）
+
+第一版报告写于第 1 轮；之后又推进了 4 项并各自跑过门禁与 CI。**以本节为准**。
+
+| 轮 | 内容 | 证据 | 提交 / CI |
+|---|---|---|---|
+| 2 | 差距分析补齐 **14 个域**：新增「建模 / 脚本与扩展 / 性能 / 互操作」四张表（每域含：行业门槛、现状证据（源码命中）、验收标准、投入量级、能否替代） | `docs/production_readiness.md` §1.11–1.14；关键证据：`csg/extrude/uv_unwrap/modifier/sculpt/bevel` 全仓 0 命中、`rhai/lua/wasmtime/plugin` 全仓 0 命中、无模型导出代码 | `5f8a080` CI ✅ |
+| 3 | **材质贴图数据层**：`doc::TexturePaths` 按物体名记录 4 条贴图路径 + uv/normal/alpha/unlit/双面；导出时显式覆盖优先于"同名继承"；载入真的生效且**不串物体** | `cargo test -p quench3d-editor --test scene_roundtrip`（造真贴图 + 两个物体互不影响） | `d08bb02` CI ✅ Pages ✅ |
+| 4 | 把"贴图界面"所需的 API 落点核清并写进仓库（含**真实阻塞点**：没有 `material_mut`、贴图 handle 烘在绑定组里、需要 `GpuContext`），避免下次重翻代码 | `docs/production_readiness.md` §8 | `265bbcc` CI ✅ |
+| 5 | **材质缩放/开关面板**：UV 平铺 / 法线强度 / alpha 裁剪 / alpha 混合 / 无光照 / 双面，改的就是引擎材质（视口立刻变），并写进 `doc.textures` → 可撤销、可存盘 | `scene_roundtrip::update_material_changes_the_engine_material` | `230a5fa` CI ✅ Pages ✅ |
+
+**当前测试总数 354（0 失败）**；本会话共推送 6 个提交（`15f906e` → `230a5fa`），
+除最早一次因"钉工具链后未显式装 clippy"变红（已修复并复跑绿）外，其余 CI 全绿。
+
+**仍然没有做的**（按优先级，与 §4 的清单合并后最新的五项）：
+1. 界面里**换贴图文件**（贴图 handle 烘在材质绑定组里，换贴图要重建绑定组 —— 渲染器还没有这个 API；落点见 §8）；
+2. glTF/OBJ 导入进**场景树/文档层**（现在导入的模型在编辑器里不能改、位置写不回 `models`）；
+3. 场景**层级/父子**与场景格式 v2；
+4. 后处理 FXAA/SSAO；
+5. 物理碰撞过滤（层/掩码）、传感器事件、CCD。
