@@ -101,3 +101,15 @@ google-chrome --headless=new --no-sandbox --disable-dev-shm-usage \
 
 请带上：复现命令、期望与实际、平台与 GPU/后端（`RUST_LOG=info` 的第一行有适配器信息）、
 场景文件（能贴上就贴）、以及 `cargo test --workspace` 的结果。
+
+## 一条命令跑门禁
+
+```bash
+tools/gate.sh          # fmt + clippy(原生) + clippy(wasm32) + 全部测试 + wasm 构建 + check_web
+tools/gate.sh --fast   # 跳过 wasm 构建与 check_web（只改纯 Rust 时够用）
+```
+
+顺序有讲究：`check_web.mjs` **必须最后跑**（它检查的是刚构建出来的 wasm 产物）。
+脚本会把每个阶段的完整日志写到 `target/tmp/gate-*.log`，失败时自动打印末尾若干行。
+
+`gate.sh` 只做 CI 做的那几件事，不引入任何新依赖；`--fast` 少的那两项在 CI 里仍然会跑。

@@ -49,6 +49,12 @@
   每个槽一个路径输入 + 「应用…（从磁盘读取）」按钮（原生）；Web 端提示"路径写场景文件里"。
   上传时按槽位区分 sRGB（基础色与自发光是颜色贴图，法线/MR 是数据贴图）。
 
+### 工程卫生
+
+- 新增 `tools/gate.sh`：一条命令跑完整门禁（fmt → clippy 原生 → clippy wasm32 → 全部测试 →
+  wasm 构建 → `check_web.mjs`），顺序固定（`check_web` 必须在 wasm 构建之后），
+  日志写到 `target/tmp/gate-*.log`，失败自动打印末尾若干行；`--fast` 可跳过 wasm 两项。
+
 ### 变更
 
 - 场景导出会**清掉 `lighting.preset`**：编辑器现在自己负责太阳/环境光/曝光等字段，
