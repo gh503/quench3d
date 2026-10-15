@@ -447,11 +447,67 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             changed |= ui.checkbox(&mut desc.alpha_blend, "alpha 混合").changed();
             changed |= ui.checkbox(&mut desc.unlit, "无光照").changed();
             changed |= ui.checkbox(&mut desc.double_sided, "双面").changed();
-            ui.label(
-                RichText::new("贴图路径：写在场景文件里（按物体名显式指定即可，导出与载入都生效）")
-                    .small()
-                    .weak(),
-            );
+            // 贴图**路径**：改的是文档层记录（导出依据），按下"应用"才真的读盘上传。
+            ui.separator();
+            let mut path = doc
+                .textures
+                .get(&object_name)
+                .and_then(|t| t.base_color.clone())
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label("基础色贴图");
+                if ui.text_edit_singleline(&mut path).changed() {
+                    doc.textures
+                        .entry(object_name.clone())
+                        .or_default()
+                        .base_color = if path.trim().is_empty() {
+                        None
+                    } else {
+                        Some(path.clone())
+                    };
+                }
+            });
+            let ready = !path.trim().is_empty();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if ui
+                    .add_enabled(ready, egui::Button::new("应用贴图（从磁盘读取）"))
+                    .clicked()
+                {
+                    match quench3d::render::ImageData::from_file(&path) {
+                        Ok(image) => {
+                            let texture = engine.renderer.add_texture(&engine.gpu, &image, true);
+                            let ok = engine.renderer.set_material_texture(
+                                &engine.gpu,
+                                material_id,
+                                quench3d::render::MaterialTextureSlot::BaseColor,
+                                Some(texture),
+                            );
+                            doc.status = if ok {
+                                format!("已应用贴图：{path}")
+                            } else {
+                                format!("贴图应用失败（材质或贴图句柄无效）：{path}")
+                            };
+                            if ok {
+                                doc.record_edit(engine);
+                            }
+                        }
+                        Err(error) => {
+                            // 场景校验器要求贴图文件存在；这里失败必须说清原因，不能静默留旧图。
+                            doc.status = format!("读图失败：{error}（{path}）");
+                        }
+                    }
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = ready;
+                ui.label(
+                    RichText::new("Web 端没有本地文件系统：贴图路径请写在场景文件里")
+                        .small()
+                        .weak(),
+                );
+            }
         });
     if !changed || desc == before {
         // 没变也要把未结束的拖拽事务收尾，避免历史里留下半截事务。

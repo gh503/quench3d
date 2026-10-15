@@ -453,3 +453,90 @@ fn update_material_changes_the_engine_material() {
     assert!(after.unlit, "无光照没写进引擎");
     assert!(after.double_sided, "双面没写进引擎");
 }
+
+/// 运行时换贴图：贴图句柄烘在材质绑定组里，所以必须重建绑定组才真的换得掉。
+///
+/// 这是"界面里选一张贴图文件"所依赖的最后一块地基；顺带钉住"贴图 id 无效必须被拒绝"，
+/// 避免以后静默用错图或直接 panic。
+#[test]
+fn set_material_texture_swaps_and_rejects_bad_ids() {
+    use quench3d::render::MaterialTextureSlot;
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = r#"{
+      "format": "quench3d.scene", "version": 1, "name": "texapi",
+      "objects": [ { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
+                     "position": [0, 2, 0], "body": "dynamic" } ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+    let material_id = engine.scene.objects[0].material;
+    assert!(
+        engine
+            .renderer
+            .material(material_id)
+            .expect("应当有材质")
+            .base_color_texture
+            .is_none(),
+        "初始不该有基础色贴图"
+    );
+
+    let image = quench3d::render::ImageData::checker(4, 4, [255, 0, 0, 255], [0, 255, 0, 255]);
+    let texture = engine.renderer.add_texture(&engine.gpu, &image, true);
+    assert!(
+        engine.renderer.set_material_texture(
+            &engine.gpu,
+            material_id,
+            MaterialTextureSlot::BaseColor,
+            Some(texture)
+        ),
+        "换贴图应当成功"
+    );
+    assert_eq!(
+        engine
+            .renderer
+            .material(material_id)
+            .expect("应当有材质")
+            .base_color_texture,
+        Some(texture),
+        "贴图句柄没写进材质"
+    );
+
+    // 无效贴图 id：必须被拒绝，且不能改动原来的材质。
+    assert!(
+        !engine.renderer.set_material_texture(
+            &engine.gpu,
+            material_id,
+            MaterialTextureSlot::Normal,
+            Some(9999)
+        ),
+        "无效贴图 id 应当被拒绝"
+    );
+    assert!(
+        engine
+            .renderer
+            .material(material_id)
+            .expect("应当有材质")
+            .normal_texture
+            .is_none(),
+        "被拒绝的调用不该改动材质"
+    );
+
+    // `None` = 还原成内置默认贴图。
+    assert!(engine.renderer.set_material_texture(
+        &engine.gpu,
+        material_id,
+        MaterialTextureSlot::BaseColor,
+        None
+    ));
+    assert!(
+        engine
+            .renderer
+            .material(material_id)
+            .expect("应当有材质")
+            .base_color_texture
+            .is_none(),
+        "还原默认贴图失败"
+    );
+}

@@ -489,6 +489,19 @@ fn sampler_binding(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry
     }
 }
 
+/// 材质上的四个贴图槽（用于运行时换贴图）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialTextureSlot {
+    /// 基础色。
+    BaseColor,
+    /// 切线空间法线。
+    Normal,
+    /// 金属度-粗糙度。
+    MetallicRoughness,
+    /// 自发光。
+    Emissive,
+}
+
 impl Renderer {
     /// 创建渲染器（分配管线与默认资源）。
     pub fn new(ctx: &GpuContext, options: RendererOptions) -> Self {
@@ -1095,21 +1108,16 @@ impl Renderer {
         self.add_material_named(ctx, desc, "material")
     }
 
-    /// 创建材质并命名。
-    pub fn add_material_named(
-        &mut self,
+    /// 构造材质的绑定组（四张贴图 view + 两个采样器 + uniform 都烘在这里）。
+    ///
+    /// 单独抽出来是为了**换贴图**：贴图句柄是烘进绑定组的，换一张贴图必须重建它。
+    fn build_material_bind_group(
+        &self,
         ctx: &GpuContext,
-        desc: MaterialDesc,
-        name: &str,
-    ) -> MaterialId {
+        desc: &MaterialDesc,
+        uniform_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         let device = &ctx.device;
-        let uniform = desc.to_uniform();
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("quench3d-material-uniform"),
-            contents: bytemuck::bytes_of(&uniform),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         let view_for = |id: Option<TextureId>, fallback: &GpuTexture| -> wgpu::TextureView {
             match id.and_then(|i| self.textures.get(i as usize)) {
                 Some(t) => t.view.clone(),
@@ -1167,6 +1175,26 @@ impl Renderer {
             ],
         });
 
+        bind_group
+    }
+
+    /// 创建材质并命名。
+    pub fn add_material_named(
+        &mut self,
+        ctx: &GpuContext,
+        desc: MaterialDesc,
+        name: &str,
+    ) -> MaterialId {
+        let device = &ctx.device;
+        let uniform = desc.to_uniform();
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quench3d-material-uniform"),
+            contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bind_group = self.build_material_bind_group(ctx, &desc, &uniform_buffer);
+
         let id = self.materials.len() as MaterialId;
         self.materials.push(GpuMaterial {
             desc,
@@ -1185,6 +1213,40 @@ impl Renderer {
                 .write_buffer(&m.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
             m.desc = desc;
         }
+    }
+
+    /// 换掉材质上的某张贴图（`None` = 还原成内置的默认贴图）。
+    ///
+    /// 贴图 view 是烘在绑定组里的，所以这里会**重建绑定组**；
+    /// 材质不存在、或传入的贴图 id 无效时返回 `false`，调用方据此报错而不是静默失败。
+    pub fn set_material_texture(
+        &mut self,
+        ctx: &GpuContext,
+        id: MaterialId,
+        slot: MaterialTextureSlot,
+        texture: Option<TextureId>,
+    ) -> bool {
+        if texture.is_some_and(|t| self.textures.get(t as usize).is_none()) {
+            return false;
+        }
+        let Some(existing) = self.materials.get(id as usize) else {
+            return false;
+        };
+        let mut desc = existing.desc.clone();
+        match slot {
+            MaterialTextureSlot::BaseColor => desc.base_color_texture = texture,
+            MaterialTextureSlot::Normal => desc.normal_texture = texture,
+            MaterialTextureSlot::MetallicRoughness => desc.metallic_roughness_texture = texture,
+            MaterialTextureSlot::Emissive => desc.emissive_texture = texture,
+        }
+        let uniform_buffer = self.materials[id as usize].uniform_buffer.clone();
+        let bind_group = self.build_material_bind_group(ctx, &desc, &uniform_buffer);
+        let Some(m) = self.materials.get_mut(id as usize) else {
+            return false;
+        };
+        m.desc = desc;
+        m.bind_group = bind_group;
+        true
     }
 
     /// 读取材质描述。

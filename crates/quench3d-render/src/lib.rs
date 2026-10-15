@@ -61,8 +61,8 @@ pub use lines::{DebugLines, LineVertex};
 pub use material::{MaterialDesc, MaterialId, MeshId, TextureId};
 pub use mesh::{MeshData, Vertex};
 pub use renderer::{
-    BloomOptions, InstanceDesc, RenderStats, Renderer, RendererOptions, DEPTH_FORMAT, HDR_FORMAT,
-    SHADOW_FORMAT,
+    BloomOptions, InstanceDesc, MaterialTextureSlot, RenderStats, Renderer, RendererOptions,
+    DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,
 };
 pub use texture::{Filter, GpuTexture, ImageData, TextureOptions};
 
