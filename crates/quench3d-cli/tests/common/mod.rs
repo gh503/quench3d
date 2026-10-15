@@ -77,6 +77,19 @@ impl MockLlm {
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
                     }
+                    // 瞬时错误不能让假服务退出：非阻塞 accept() 在 macOS 上偶发
+                    // `Interrupted` / `ConnectionAborted`，以前这里直接 break，
+                    // 服务在测试中途死掉 → 后续请求失败 → 表现为"偶发红"。
+                    Err(ref e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::Interrupted
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                     Err(_) => break,
                 }
             }
