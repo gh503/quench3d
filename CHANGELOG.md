@@ -117,5 +117,8 @@
   （`run_turn(...).unwrap()`，同一提交的 ubuntu / windows / wasm32 三个 job 全绿，
   `gh run rerun --failed` 后转绿）。它用一个本地 mock HTTP 服务测 agent 的多工具回合，
   看起来是服务线程与客户端之间的竞态。
-  **这不是功能缺陷，但会污染 CI 信号** —— 修法方向：服务线程启动后再返回端口（用 channel
-  等 ready），或在测试里对首个请求加重试。修掉之前，看到它红请先 `gh run rerun --failed` 再判断。
+  **这不是功能缺陷，但会污染 CI 信号** —— **已修复**（根因不在这个用例本身）：假 LLM 服务一条连接只答一个请求就丢 socket，而 HTTP 客户端的
+  连接池会复用 socket —— 复用那一次拿到空响应/连接被关，于是**三个不同用例**在 macOS 上轮流偶发失败。
+  现在：连接线程循环 `read_request` 直到对端关闭（支持 keep-alive）、回复序号按**请求**递增、
+  `accept()` 的 `Interrupted`/`ConnectionAborted`/`ConnectionReset` 不再让服务退出。
+  验证：本地 `agent_tools` + `llm_mock` 连跑 3 次全过，macOS CI 全绿（`49cbf62`）。
