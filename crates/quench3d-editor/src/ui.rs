@@ -302,11 +302,103 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
 }
 
 /// 右侧属性面板。
+/// 场景级光照（太阳方向/强度、环境光、曝光、投影、天空与网格）。
+///
+/// 放在"选中物体"之前：光照不属于任何物体，没选中东西时也该能调。
+fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    egui::CollapsingHeader::new("光照")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut changed = false;
+            {
+                let light = &mut engine.scene.lighting;
+                let mut dir = light
+                    .sun
+                    .as_ref()
+                    .map(|s| [s.direction.x, s.direction.y, s.direction.z])
+                    .unwrap_or([-0.4, -1.0, -0.35]);
+                let mut intensity = light.sun.as_ref().map(|s| s.intensity).unwrap_or(3.0);
+                let mut shadows = light.sun.as_ref().map(|s| s.cast_shadows).unwrap_or(true);
+                ui.horizontal(|ui| {
+                    ui.label("太阳方向");
+                    for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut dir[i])
+                                    .speed(0.01)
+                                    .range(-1.0..=1.0)
+                                    .prefix(*axis),
+                            )
+                            .changed();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("太阳强度");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut intensity)
+                                .speed(0.05)
+                                .range(0.0..=30.0),
+                        )
+                        .changed();
+                });
+                changed |= ui.checkbox(&mut shadows, "投射阴影").changed();
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut light.ambient_intensity)
+                            .speed(0.01)
+                            .range(0.0..=2.0)
+                            .prefix("环境光 "),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut light.exposure)
+                            .speed(0.02)
+                            .range(0.05..=8.0)
+                            .prefix("曝光 "),
+                    )
+                    .changed();
+                changed |= ui.checkbox(&mut light.sky.enabled, "天空").changed();
+                changed |= ui.checkbox(&mut light.sky.show_grid, "参考网格").changed();
+                if changed {
+                    // 方向按原样写回（**不**在这里归一化：归一化不是逐位幂等的，
+                    // 会让"存一次读一次再存一次字节相同"这条性质失效）。
+                    let length_squared = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+                    let direction = if length_squared > 1e-8 {
+                        Vec3::new(dir[0], dir[1], dir[2]).normalize()
+                    } else {
+                        Vec3::new(0.0, -1.0, 0.0)
+                    };
+                    if let Some(sun) = light.sun.as_mut() {
+                        if length_squared > 1e-8 {
+                            // 用户动过方向才写：没动就保持原值，避免归一化引入的最后一位漂移。
+                            sun.direction = direction;
+                        }
+                        sun.intensity = intensity;
+                        sun.cast_shadows = shadows;
+                    }
+                }
+            }
+            if changed {
+                if ui.input(|i| i.pointer.any_down()) {
+                    doc.begin_history_transaction();
+                }
+                doc.record_edit(engine);
+            }
+            if doc.history.in_transaction() && !ui.input(|i| i.pointer.any_down()) {
+                doc.end_history_transaction(engine);
+            }
+        });
+}
+
 fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Requests) {
     egui::Panel::right("quench3d-inspector")
         .default_size(260.0)
         .show(ui, |ui| {
             ui.heading("属性");
+            ui.separator();
+            light_section(ui, engine, doc);
             ui.separator();
             let Some(index) = doc.selected else {
                 ui.label("在场景树或视口里点一个物体。");

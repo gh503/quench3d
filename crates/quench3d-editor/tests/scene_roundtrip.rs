@@ -217,7 +217,8 @@ fn export_preserves_sections_the_editor_does_not_model() {
     let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
     for needle in [
         "\"lighting\"",
-        "\"preset\": \"studio\"",
+        // 注意：`preset` 会被**故意**丢掉 —— 编辑器现在自己负责太阳/环境光/曝光这几个字段，
+        // 留着预设会在载入时把它们再覆盖一遍（"存了但不算数"）。
         "\"sun_intensity\": 3.5",
         "\"exposure\": 1.4",
         "\"simulate\"",
@@ -249,15 +250,32 @@ fn export_preserves_sections_the_editor_does_not_model() {
     // 物体本身还在。
     assert!(saved.json.contains("\"box\"") && saved.json.contains("\"peg\""));
 
+    // 光照**编辑**必须能存下去（这是"能改光照"这件事的行为证据，不只是"不丢"）。
+    engine.scene.lighting.exposure = 2.25;
+    if let Some(sun) = engine.scene.lighting.sun.as_mut() {
+        sun.intensity = 7.5;
+    }
+    let edited = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    assert!(
+        edited.json.contains("\"exposure\": 2.25"),
+        "改了曝光却没写进文件：\n{}",
+        edited.json
+    );
+    assert!(
+        edited.json.contains("\"sun_intensity\": 7.5"),
+        "改了太阳强度却没写进文件：\n{}",
+        edited.json
+    );
+
     // 存储必须是固定点：存 → 读 → 再存，字节相同。
     let Some(mut engine2) = headless_engine() else {
         return;
     };
     let mut doc2 = Doc::new();
-    scene_io::load_text_into_doc(&mut engine2, &mut doc2, &saved.json).expect("二次载入必须成功");
+    scene_io::load_text_into_doc(&mut engine2, &mut doc2, &edited.json).expect("二次载入必须成功");
     let saved2 = scene_io::scene_to_json(&engine2, &doc2).expect("二次导出必须成功");
     assert_eq!(
-        saved.json, saved2.json,
+        edited.json, saved2.json,
         "「存一次读一次再存一次」应当字节不变，否则每次保存都会漂移"
     );
 }

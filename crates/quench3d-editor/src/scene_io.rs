@@ -65,6 +65,23 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     // 相机位置只在"用 position/look_at 描述"时才写，否则让 yaw/pitch/distance 说话。
     out.camera.position = None;
 
+    // 光照：编辑器能改的字段从**引擎**写回（所以拖了太阳方向、改了曝光，存盘会生效），
+    // 编辑器不管的（点光、bloom…）沿用底稿。`preset` 必须清掉：预设会在载入时
+    // 再覆盖一遍显式字段，留着它等于"存了但不算数"。
+    let light = &engine.scene.lighting;
+    let mut lighting = std::mem::take(&mut out.lighting);
+    lighting.preset = None;
+    if let Some(sun) = &light.sun {
+        lighting.sun_direction = Some([sun.direction.x, sun.direction.y, sun.direction.z]);
+        lighting.sun_intensity = Some(sun.intensity);
+        lighting.shadows = Some(sun.cast_shadows);
+    }
+    lighting.ambient = Some(light.ambient_intensity);
+    lighting.exposure = Some(light.exposure);
+    lighting.sky = Some(light.sky.enabled);
+    lighting.grid = Some(light.sky.show_grid);
+    out.lighting = lighting;
+
     let mut skipped = Vec::new();
     for (index, object) in engine.scene.objects.iter().enumerate() {
         let name = if object.name.trim().is_empty() {
