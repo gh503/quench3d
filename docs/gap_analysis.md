@@ -47,9 +47,12 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 
 **仍然挡路的（不是"缺功能"，是"没接上"）**：
 
-* **P0 #2 项目仍未纳入 git**：`quench3d/` 在 `infra-dev` 里是未跟踪目录，也没有自己的 `.git`，
-  所以 `.github/workflows/ci.yml` 从来没有真正跑过——"CI 通过"目前仍是**纸面结论**。
-  需要人决定：独立建仓，还是作为 `infra-dev` 的子目录跟踪（workflow 假设 quench3d 是仓库根）。
+* ~~**P0 #2 项目仍未纳入 git**~~ ✅ **已解决（2026-10-16）**：`quench3d` 成了独立公开仓库
+  <https://github.com/gh503/quench3d>（main 分支），CI 矩阵（ubuntu / macOS / Windows / wasm32）
+  与 Pages 部署都真的跑过、结论可查（例如 CI run `38763387386`、Pages run `38763387263`）。
+  第一次真跑就抓到一个只在 CI 上出现的问题：CI 用 stable（1.99）做 `clippy -D warnings`，
+  而本机当时是 1.94 —— 1.99 新增的 `clippy::chunks_exact_to_as_chunks` / `drain_collect`
+  让四个 crate 直接红。**本机工具链已升到 1.99 与 CI 对齐**，这类"本地绿、CI 红"的漂移随之消失。
 * 剩余大件（都在 §4 P1/P2，不是本轮范围）：CCD、碰撞过滤、传感器/事件、父层级、
   复合形状、关节锚点/限位补全、CSG 无关的渲染大件（CSM/后处理/IBL/动画蒙皮）。
 
@@ -299,7 +302,8 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 
 | 层 | 缺什么（**本轮 grep 的命中数**） | 对标物 | 挡住了什么 |
 | --- | --- | --- | --- |
-| 内容层 | GPU 蒙皮/骨骼动画（`skin\|skinning\|joint_palette` = **0**，loader 不调 glTF `animations()` = **0**）、morph（0）、粒子（0）、贴花（0）、UI/文字（`font\|glyph\|sdf` = 0） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 导入任何角色 GLB **只能静止**；HUD/菜单/伤害数字要宿主自绘 |
+| 内容层 | GPU 蒙皮/骨骼动画（`skin\|skinning\|joint_palette` = **0**，loader 不调 glTF `animations()` = **0**）、morph（0）、粒子（0）、贴花（0） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 导入任何角色 GLB **只能静止**；HUD/菜单/伤害数字要宿主自绘 |
+| 手工界面 | ✅ **已有**（2026-10-16）：`quench3d-editor` 用 egui 做了工具栏/场景树/属性面板/视口拾取，桌面与 Web 共用（§2.5）。**引擎本体仍不带** UI/文字系统（`font\|glyph\|sdf` 在 `quench3d-render` 里仍是 0）——GUI 由宿主（编辑器就是这样一个宿主）自己选库 | Unity/Godot 的 UI 是引擎内建；Bevy 走 `bevy_ui` + 第三方编辑器 | 想在自己游戏里画 HUD，得自己接一个 UI 库（本仓库演示了怎么和 wgpu 渲染器共存） |
 | 表现层 | HDR 中间目标 + tonemap + bloom ✅、CSM（0）、聚光灯（0）、IBL/环境贴图（0）、SSAO/景深/TAA/FXAA（0）、透明物体距离排序、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属没反射；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
 | 玩法层（物理） | 碰撞过滤 layer/mask（0）、传感器/触发事件（0）、CCD（0）、复合形状（1 刚体 1 形状）、关节限位/马达补全、持久流形/特征 ID、物理材质与 combine（0）、快照回放、渲染插值（`interpolat` = 0）、地形高度场（0） | PhysX 5 / Jolt / Rapier / Box2D 的标配 | 队友互不碰撞、拾取/伤害区、子弹穿墙、载具悬挂、存档与回滚、高刷平滑 |
 | 工程/平台层 | 存档、音频（0）、输入抽象（手柄/触屏/重绑定 = 0，只有键鼠 + `movement_axes`）、脚本层（0）、渲染资源释放（渲染器 `remove_*` = **0**，资源表 append-only）、**Web 端 glTF/OBJ 加载（`assets.rs` 用 `Path::exists()`，wasm 下必 NotFound）**、发布工程 | Unity/Godot 的 Asset/Input/Audio/Save 子系统；Bevy 的 asset server | 项目做完变不成产品；Web 端连模型都加载不了 |
@@ -344,6 +348,26 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 3. 无 `CHANGELOG.md` / `CONTRIBUTING.md` / `rust-toolchain.toml` / `deny.toml` → 版本与依赖策略不透明。
 
 ---
+
+### 2.5 编辑器：第四个入口（2026-10-16 新增）
+
+对标物：Godot/Unity 的场景编辑器、Blender 的视口 + 大纲 + 属性面板、Bevy 生态里的
+`bevy_editor_*` 系（仍在早期）。差距最大的那一档一直是「**手工操作界面**」——
+CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本轮补上：
+
+* `quench3d-editor`：工具栏（播放/暂停/单步/重置/增删/复制/清空/显示开关/相机模式/文件）、
+  场景树、属性面板（变换 + 外观 + 物理参数）、状态栏；视口内左键环绕、右键平移、滚轮缩放、
+  单击拾取；桌面与 Web **同一套 egui 界面代码**（Web 端就是 `web/index.html`）。
+* 与 CLI 共用同一份 `quench3d.scene`：编辑器存的场景 `quench3d render/movie` 直接吃，
+  反过来也成立。往返有测试钉着（物体名、位置、地面高度、刚体数量），
+  且**这条测试当天就抓到一个真 bug**（默认地面用"压扁的立方体"时，视觉表面与物理半空间
+  差半个板厚，存读一轮地面下沉 0.5）。
+* 尺寸：`src/` 约 2.4k 行（另有 0.16k 行测试）。
+
+**仍然缺的（按差距大小排）**：拖拽式变换 gizmo、撤销/重做、原生文件对话框、
+多选与成组、导入模型进场景树（编辑器的 doc 层只认四种预设网格）、材质贴图选择
+（导出会把贴图字段留空）、层级/父变换、场景内嵌脚本或行为编辑。
+换言之：**"能手工摆一个图元场景"这一档已过关，"能手工编辑真实项目"这一档还差得远。**
 
 ## 3. `scene.json` 专项审计
 
@@ -597,8 +621,9 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 ### P2（长尾，按需）
 
 - **格式**：`units`/`up_axis` 自描述、凸包按 `points` 生成真实渲染网格（现在只做 AABB 盒体近似 + 告警）、多地面、形状补全（Cone/圆角盒/HeightField）。~~地面可配摩擦~~ ✅ 已做、~~`scale` 与碰撞体一致性诊断~~ ✅ 已做（告警）。
-- **引擎**：透明距离排序 + OIT、贴花、粒子/ billboard、LOD + 遮挡剔除、UI/文字、多视口、地形/水体、快照与回放、渲染插值、时间缩放与单步调试、音频、脚本层、输入映射与手柄/触屏、多体/articulation、TGS/SIMD 求解器、精确凸包质量属性。
-- **交付**：crate 元数据 + `cargo publish --dry-run`、CHANGELOG/semver 策略、cargo-deny 依赖审计、预编译发行（cargo-dist）、Web 产物 wasm-opt/Brotli/文件名哈希、移动端。
+- **引擎**：透明距离排序 + OIT、贴花、粒子/ billboard、LOD + 遮挡剔除、多视口、地形/水体、快照与回放、渲染插值、时间缩放与单步调试、音频、脚本层、输入映射与手柄/触屏、多体/articulation、TGS/SIMD 求解器、精确凸包质量属性。
+- **交付**：crate 元数据 + `cargo publish --dry-run`、CHANGELOG/semver 策略、cargo-deny 依赖审计、预编译发行（cargo-dist）、Web 产物 `wasm-opt`/Brotli/文件名哈希（编辑器包 11 MB，见 README §2）、移动端。
+- **编辑器**：拖拽 gizmo、撤销/重做、原生文件对话框、多选/成组、模型导入到场景树、贴图选择（当前导出丢贴图引用）、层级与父变换、场景内行为编辑 —— 详见 §2.5。
 
 ---
 

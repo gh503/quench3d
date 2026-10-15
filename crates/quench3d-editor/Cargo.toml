@@ -1,0 +1,48 @@
+[package]
+name = "quench3d-editor"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+license.workspace = true
+description = "Quench3D editor client: one egui interface for desktop and web (scene tree, inspector, gizmo, physics playback)"
+readme.workspace = true
+keywords = ["game-engine", "editor", "egui", "3d", "wasm"]
+categories = ["game-engines", "gui", "wasm"]
+# 先不发布：编辑器还在长，等界面稳定了再随其它 crate 一起发。
+publish = false
+
+[dependencies]
+quench3d.workspace = true
+# 场景文件格式（quench3d.scene）的唯一定义在 CLI 库的 `scene_doc`/`runner` 里，
+# 编辑器直接复用，不另写一套 —— 否则 CLI 生成、编辑器改、CLI 渲染这条链会断。
+quench3d-cli.workspace = true
+quench3d-math.workspace = true
+quench3d-physics.workspace = true
+quench3d-render.workspace = true
+log = "0.4"
+# 界面用 egui：同一套代码在桌面与浏览器里跑（egui-wgpu 0.37 依赖 wgpu ^30，
+# 与本仓库的 wgpu 30.0.1 一致；egui 的 default_fonts 必须开，否则一个字都画不出来）。
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = "0.37"
+# egui-winit 的默认特性里包含 clipboard（会拉 arboard，而 arboard 在 wasm32 上
+# 编不过）。所以关掉默认特性，桌面端单独把剪贴板/链接加回来，Web 端交给浏览器。
+egui-winit = { version = "0.37", default-features = false }
+winit = "0.30"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "1.0"
+env_logger = "0.11"
+egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+# 浏览器里要用的：读页面探好的后端结论（Reflect，走 js-sys）、
+# 场景 JSON 的上传/下载（File/FileReader/Blob/Url/HtmlElement…）。
+web-sys = { version = "0.3", features = [
+    "Document", "Window", "Element", "HtmlElement", "HtmlInputElement",
+    "HtmlAnchorElement", "HtmlCanvasElement", "File", "FileList", "Blob",
+    "Url", "Location", "Navigator", "console",
+] }

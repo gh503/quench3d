@@ -1486,7 +1486,9 @@ fn write_scene(dir: &std::path::Path, name: &str, value: serde_json::Value) -> s
 
 /// 接近纯白的像素数（用来量"箱子在屏幕上占多大"）。
 fn bright_pixels(rgba: &[u8]) -> usize {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200)
         .count()
 }

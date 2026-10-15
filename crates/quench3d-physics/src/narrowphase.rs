@@ -690,7 +690,7 @@ fn trimesh_vs_shape(
         .local_aabb()
         .transformed_conservative(&t_other.matrix());
     let mut points: SmallVec<ContactPoint, MAX_CANDIDATES> = SmallVec::new();
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         if ia >= vertices.len() || ib >= vertices.len() || ic >= vertices.len() {
             continue;

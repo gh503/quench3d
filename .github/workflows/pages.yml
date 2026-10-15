@@ -53,8 +53,10 @@ jobs:
       - name: 安装 wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
 
+      # Web 客户端 = 编辑器本体（和桌面端同一套 egui 界面代码）；
+      # 物理演示 physics_playground 仍可本地跑，但 Pages 上只发布这一个入口。
       - name: 打包（示例名决定 web/pkg 里是哪个入口）
-        run: tools/build_web.sh physics_playground
+        run: tools/build_web.sh web_client
 
       # 产物自检：wasm 能否实例化、页面 import 的符号是否存在、
       # WebGL2 回退是否真的编进了产物、后端探测是否在 start() 之前。

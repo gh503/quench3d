@@ -119,7 +119,7 @@ impl MeshData {
 
     /// 翻转所有三角形绕序（配合 `cull_mode` 可用于内表面）。
     pub fn flip_winding(&mut self) {
-        for tri in self.indices.chunks_exact_mut(3) {
+        for tri in self.indices.as_chunks_mut::<3>().0 {
             tri.swap(1, 2);
         }
     }
@@ -130,7 +130,7 @@ impl MeshData {
             v.normal = [0.0; 3];
         }
         let verts = self.vertices.clone();
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             let n = (verts[b].pos() - verts[a].pos())
                 .cross(verts[c].pos() - verts[a].pos())
@@ -144,7 +144,7 @@ impl MeshData {
     /// 按面积加权重算平滑法线。
     pub fn recompute_smooth_normals(&mut self) {
         let mut acc = vec![Vec3::ZERO; self.vertices.len()];
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             let p = [
                 self.vertices[a].pos(),
@@ -167,7 +167,7 @@ impl MeshData {
         let mut tan = vec![Vec3::ZERO; n];
         let mut bit = vec![Vec3::ZERO; n];
 
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             let v0 = self.vertices[i0];
             let v1 = self.vertices[i1];
@@ -582,7 +582,7 @@ mod tests {
             ("torus", MeshData::torus(1.0, 0.3, 20, 12)),
         ];
         for (name, m) in meshes {
-            for (t, tri) in m.indices.chunks_exact(3).enumerate() {
+            for (t, tri) in m.indices.as_chunks::<3>().0.iter().enumerate() {
                 let v = [
                     &m.vertices[tri[0] as usize],
                     &m.vertices[tri[1] as usize],

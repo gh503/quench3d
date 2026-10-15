@@ -36,6 +36,8 @@ quench3d/
 │   │                     基准：cargo run --release -p quench3d-physics --example bench
 │   ├── quench3d-render/   wgpu 前向 PBR 渲染器：阴影、天空、网格、实例化、调试线段、离屏截图
 │   ├── quench3d/          门面层：Engine / Game / App、场景与资源（glTF/OBJ）、输入、相机、Web 入口
+│   ├── quench3d-editor/   编辑器：egui 界面（工具栏 / 场景树 / 属性面板 / 状态栏）+ 引擎接线；
+│   │                     桌面端与 Web 端**同一套界面代码**（Web 端就是仓库的 web/index.html）
 │   └── quench3d-cli/      命令行工具 quench3d：渲染、纯物理仿真、模型检查、性能基准、大模型生成场景、MCP 服务器
 ├── tools/
 │   ├── build_web.sh      wasm 打包脚本（cargo build + wasm-bindgen）
@@ -48,10 +50,11 @@ quench3d/
 ├── docs/
 │   └── island_parallel_plan.md  island 并行求解设计稿（三步均已落地，见 §8.6 / §8.7）
 ├── .github/workflows/ci.yml  三平台 + wasm 的 CI 矩阵
-└── web/index.html        Web 版页面外壳（WebGPU 检测、加载进度、快捷键说明）
+└── web/index.html        Web 客户端页面外壳（后端探测、加载遮罩、场景文件上传/下载）
 ```
 
-约 3.6 万行 Rust（其中 CLI 约 1.0 万行）+ 0.5 千行 WGSL。
+约 3.7 万行 Rust（`src/`，其中 CLI 约 1.1 万、编辑器约 0.24 万）+ 0.65 千行 WGSL，
+另有约 0.8 万行示例与测试。
 引擎本体全部 `#![forbid(unsafe_code)]`（只有两个**基准/测试工具**为了统计堆分配用了
 `unsafe impl GlobalAlloc`，见第 8 节）。
 
@@ -61,7 +64,10 @@ quench3d/
 
 需要 Rust 1.90+（根 `Cargo.toml` 的 `rust-version`：由依赖图自己声明的 MSRV 推出，
 下面几个依赖是决定项——`wgpu` 1.87、`image` 1.88、`ordered-float` 1.90；
-实际使用 1.94 工具链验证）。
+实际使用 1.99 工具链验证 —— 本机与 CI 都用 stable）。
+**例外是编辑器**：`quench3d-editor` 单独声明 `rust-version = "1.95"`，因为 egui 0.37
+要求 1.95，而 0.37 是唯一同时满足「MSRV 可用」与「依赖 `wgpu 30`」的版本
+（0.35 还停在 `wgpu 29`，两个 wgpu 类型不兼容）。
 
 ```bash
 cd quench3d
@@ -78,10 +84,49 @@ cargo run --release --example model_viewer -- 你的模型.glb
 
 # 无窗口集成验证：物理 + 场景 + 渲染跑 240 步，输出前后两张 PNG
 cargo run --release --example headless
+
+# 编辑器（桌面应用；同一套界面在浏览器里就是 Web 客户端，见 §2）
+cargo run --release -p quench3d-editor
+cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个场景
 ```
 
 > 开发期建议直接用 `--release`：debug 下 CPU 侧物理与场景同步会成为瓶颈
 > （`Cargo.toml` 里已经把 `profile.dev` 设为 `opt-level = 1`、依赖设为 3）。
+
+### 1.1 编辑器：桌面应用 = Web 客户端
+
+`quench3d-editor` 是一个**手工操作界面**：不用写代码就能摆场景、调参数、跑物理、
+存成场景文件。它和 CLI / MCP / SDK 是同一套引擎能力的第四个入口，
+而且桌面与浏览器**跑的是同一套界面代码**（egui），不是两个实现。
+
+| 区域 | 内容 |
+| --- | --- |
+| 顶部工具栏 | 播放/暂停、单步、重置、添加图元（方块/球/圆柱/胶囊）、复制、删除、清空；网格/阴影/坐标轴开关；相机模式；打开/保存/截图/帮助 |
+| 左侧场景树 | 物体列表（点选）、`⌖` 聚焦到物体 |
+| 中央视口 | 3D 画面本身；**左键拖 = 环绕**、右键拖 = 平移、滚轮 = 缩放；单击拾取物体（射线 vs 网格 AABB） |
+| 右侧属性面板 | 名字、可见性、变换（位置/旋转/缩放数值框）、外观（颜色乘子、金属度/粗糙度覆盖、自发光）、物理（类型 动态/静态/视觉、质量/摩擦/弹性、停下、踢一脚） |
+| 底部状态栏 | 帧率、绘制统计、当前文件名与操作反馈 |
+
+* **相机**：环绕相机由编辑器接管（`Engine::auto_camera = false`），`Tab` 仍可切到自由飞行；
+  其余引擎内置快捷键照旧（`R` 对准场景、`F3`/`F4` 网格/阴影、`F5`/`F6` 调试、`P` 暂停、`Esc` 退出）；
+  在输入框里打字时这些快捷键自动让位（`egui_wants_keyboard_input`）。
+* **一帧是怎么拼出来的**：先跑界面（egui）→ 拿到这一帧的交互 → `Engine::tick` 推进物理与提交绘制 →
+  3D 画进交换链纹理 → egui 在同一张纹理上叠一层（`LoadOp::Load`）→ 呈现。
+  所以没有第二条渲染循环，也没有两份场景状态。
+* **场景文件与 CLI 完全共用**（`quench3d.scene`，见 §6）：
+  ```bash
+  quench3d scene --prompt "三层堆叠的箱子" -o 场景.json   # 或手写 / 由别处生成
+  cargo run --release -p quench3d-editor -- 场景.json      # 手工调整
+  quench3d movie 场景.json --out 演示.mp4 --ffmpeg         # 渲成视频
+  ```
+  * 桌面端「打开/保存」走**路径输入框 + 真实文件系统**（不引入原生对话框依赖）；
+  * Web 端走浏览器：页面提供文件选择与下载（`web/index.html` 里的
+    `__quench3d_pick_scene_file` 与 wasm 导出的 `on_scene_file`），wasm 侧只收字符串。
+* **中文界面**：egui 自带字体**一个中文字形都没有**（界面会变成一排豆腐块），
+  所以编辑器内嵌了一份中文子集字体（`crates/quench3d-editor/assets/ui-font.ttf`，563 KB，
+  源自 Droid Sans Fallback，Apache-2.0；字符集 = 界面文本 + GB2312 一级字 + 标点，共 3899 字），
+  挂在字体栈末尾作为兜底。启动时会打一行日志把它变成可观测事实：
+  `编辑器字体：中文子集可用 = true`。
 
 ## 2. 快速开始（Web 端）
 
@@ -89,10 +134,15 @@ cargo run --release --example headless
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.129   # 必须与 wasm-bindgen crate 版本一致
 
-tools/build_web.sh physics_playground              # 默认就是它
+tools/build_web.sh web_client                      # 默认就是它：编辑器（Web 客户端）
 python3 -m http.server 8000 --directory web
 # 打开 http://localhost:8000/
 ```
+
+页面里就是 **§1.1 那个编辑器**：工具栏、场景树、属性面板全在画布上由引擎自己画出来，
+页面只负责三件事——给一张画布、在 `start()` 之前探好后端、把用户选中的场景文件读成文本交给 wasm。
+（`physics_playground` 这个示例仍然可以构建成 Web 包：`tools/build_web.sh physics_playground`，
+但 `web/index.html` 现在服务的是编辑器。）
 
 > **时间 API 在 wasm 上要小心**：`std::time::Instant::now()` 在
 > `wasm32-unknown-unknown` 上是**直接 panic**（"time not implemented on this platform"），
@@ -116,9 +166,12 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **5.4 MB**（release、`lto=thin`、
-`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 134 KB）——
-这个包把 `wgpu` 的 WebGPU + WebGL2 两条后端都链进去了，体积主要在这儿。
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **11 MB**（release、`lto=thin`、
+`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
+构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
+（自检探针要用）、egui 与内嵌的中文子集字体。
+比物理示例包（5.4 MB）大了一倍，多出来的主要就是 egui 这一套 + 字体 + 模型解析。
+真要压体积：加一步 `wasm-opt -Oz`、把自检探针从发布包里去掉，或者只保留必需特性。
 浏览器里 `Esc` 退出、`Tab` 切换相机、`F3`~`F6` 是调试开关，和桌面端完全一致。
 
 #### 后端怎么选（WebGPU → WebGL2 回退）
@@ -374,7 +427,8 @@ quench3d::write_png(&image, "out.png")?;
 
 ## 5. 示例清单
 
-共 **9 个**示例（`quench3d` 6 个、`quench3d-render` 2 个、`quench3d-physics` 1 个）：
+共 **10 个**示例（`quench3d` 6 个、`quench3d-render` 2 个、`quench3d-physics` 1 个、
+`quench3d-editor` 1 个）；编辑器另有可执行程序 `quench3d-editor`：
 
 | 示例 | 演示内容 | 运行 |
 | --- | --- | --- |
@@ -387,6 +441,7 @@ quench3d::write_png(&image, "out.png")?;
 | `joints` | 5 种关节：铰链门（马达）、垂直滑块（轴向限位）、弹簧、焊接、球窝摆 | `cargo run -p quench3d --example joints` |
 | `model_viewer` | 模型加载：glTF/GLB/OBJ+MTL，轨道相机对准模型；`--collide` 把模型变成静态三角网格碰撞体（丢球验证） | `cargo run -p quench3d --example model_viewer` |
 | `bench` | 物理性能与分配基准（吞吐 / 分配次数 / 长跑稳定性，`--phases` 看阶段分解、`--layout` 换布局） | `cargo run --release -p quench3d-physics --example bench` |
+| `web_client` | Web 客户端入口（§1.1 的编辑器跑在浏览器里；另导出 CI 自检探针） | `tools/build_web.sh web_client` |
 
 ## 6. 命令行工具（面向 agent 与自动化）
 
@@ -754,14 +809,42 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 323 个测试：数学 33、物理 121、渲染 42、门面 26、CLI 101
+cargo test --workspace         # 337 个测试：物理 121、CLI 97、渲染 52、数学 32、门面 22、编辑器 2、doctest 11
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
+cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU 时自动跳过）
 ```
 
 `crates/quench3d/tests/readme_api.rs` 是**文档守卫**：它把 README 第 3 节的代码
 片段原样编译一遍，所以「文档里写的 API」与真实 API 不会漂移。
+
+### 7.1 编辑器的验证（桌面 + 浏览器）
+
+编辑器的两条测试
+
+* `scene_json_roundtrip_keeps_objects_and_ground`：默认场景 → 存成 `quench3d.scene` →
+  用 **CLI 的解析器与校验器**读回来 → 装回引擎，逐项对账（物体名不丢、位置漂移 < 0.01、
+  地面高度与物理半空间一致、刚体数量 = 物体数 + 1）。
+  这条测试第一次跑就抓到一个真 bug：默认场景的地面是「压扁的立方体」，
+  它的**视觉表面**在原点上方半个板厚，而物理半空间在原点平面上 —— 物体看起来半埋在地里，
+  存读一轮还会掉下去 0.5。已改成 `unit_plane`（与 CLI 的地面表示一致）。
+* `scene_to_json_reports_unrepresentable_objects`：塞一个场景格式表达不了的物体
+  （三角网碰撞体）进去，导出时必须**报告物体名**，而不是静默丢掉。
+
+两条都不依赖窗口；没有可用 GPU 时打印一行「跳过」并返回（CI 机器通常没有软件光栅驱动）。
+
+手工验过的两条实机路径（本机软件光栅 llvmpipe / SwiftShader）：
+
+| 路径 | 证据 |
+| --- | --- |
+| 桌面（X11 窗口 1280×800） | 日志 `编辑器字体：中文子集可用 = true`、`编辑器第一帧已渲染：1280x800`；窗口截屏分区统计：工具栏平均色 (46,48,52)、左面板 (29,29,30)、视口 (77,92,119)/985 种颜色、右面板 (33,34,34) |
+| Web（headless Chrome + SwiftShader，走 WebGL2） | 控制台 `后端选择：gl（navigator.gpu 存在但没有适配器）`、`渲染设备就绪：… / Gl（限制档位 downlevel_webgl2）`、`编辑器字体：中文子集可用 = true`、`编辑器第一帧已渲染：1280x800` |
+
+而且**桌面与浏览器的画面是同一张图**：两边各截一张 1280×800，
+16×16 平均亮度网格的平均差 **0.2/255**（最大差 13，出现在状态栏文字那一行），
+3D 视口区域的平均像素差 **0.0**。这比"两边都能启动"强得多——
+它说明两个入口用的是同一条渲染与界面路径，而不是看起来像的两套实现。
 
 物理测试覆盖：自由落体、静置接触、三层堆叠、恢复系数、高/低摩擦斜面、
 射线检测、铰链摆与马达、5 种关节、角度限位、确定性（逐位相等，含槽位复用）、
@@ -1169,6 +1252,19 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   LM Studio / vLLM，或云端）；`https://` 端点依赖系统 `curl`。模型输出质量取决于所选模型，
   本仓库的测试用假服务覆盖协议与校验，不评价模型本身。
   场景语法目前只覆盖图元 + 外部模型 + 关节，没有粒子/地形/程序化材质。
+* 编辑器：**没有拖拽式变换 gizmo**（变换用属性面板的数值框；视口拖拽留给相机，
+  因为软件光栅下 gizmo 的拾取/拖拽手感与验证成本都不划算）；没有撤销/重做；
+  没有原生文件对话框（桌面端用路径输入框，避免为此引入 `rfd` 这类依赖）；
+  打开/保存是**整场景替换**（不做增量合并）；
+  场景树默认场景只有图元，导入的模型（glTF/OBJ）在编辑器里目前只能作为静态物体存在
+  （编辑器的 doc 层只认四种预设网格；导入模型这条链目前由 CLI / `model_viewer` 覆盖）。
+* 编辑器的场景导出会**丢掉材质里的贴图引用**：`quench3d.scene` 有
+  `base_color_texture` 等字段，但编辑器界面还没有贴图选择，
+  所以导出时一律留空（导出后场景里只剩基础色/金属度/粗糙度/自发光）。
+  用带贴图的场景文件打开 → 显示正常，但它被再存一次之后贴图字段就没了。
+* Web 客户端：wasm 包 11 MB（见 §2），首次加载需要点时间；`web/pkg` 是按
+  **固定 example 名**（`web_client`）打包的，页面 `import` 的符号必须与之一致
+  （`tools/check_web.mjs` 会静态核对）。
 * MCP：只实现 stdio 传输与工具（无 resources / prompts / HTTP SSE）。
 * 渲染后处理：骨架已经在了（HDR 中间目标 + `post.wgsl` + bloom），
   但 SSAO / 景深 / TAA / FXAA 还没接；详见 [gap_analysis](docs/gap_analysis.md) P1 #25。

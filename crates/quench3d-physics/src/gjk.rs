@@ -752,7 +752,7 @@ pub(crate) fn distance_point_to_shape(shape: &Shape, t: &Transform, p: Vec3) -> 
         }
         Shape::TriMesh { vertices, indices } => {
             let mut best = f32::INFINITY;
-            for tri in indices.chunks_exact(3) {
+            for tri in indices.as_chunks::<3>().0 {
                 let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
                 if ia >= vertices.len() || ib >= vertices.len() || ic >= vertices.len() {
                     continue;

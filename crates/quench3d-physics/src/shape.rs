@@ -236,7 +236,7 @@ impl Shape {
             Shape::Plane { .. } => Aabb::new(Vec3::NEG_INFINITY, Vec3::INFINITY),
             Shape::TriMesh { vertices, indices } => {
                 let mut b = Aabb::EMPTY;
-                for tri in indices.chunks_exact(3) {
+                for tri in indices.as_chunks::<3>().0 {
                     for &i in tri {
                         if let Some(v) = vertices.get(i as usize) {
                             b.expand_point(*v);

@@ -10,13 +10,13 @@
 # 也会去 $CARGO_HOME/bin 找 wasm-bindgen，所以通常直接跑就行。
 #
 # 用法：
-#   tools/build_web.sh [example_name]      # 默认 physics_playground
+#   tools/build_web.sh [example_name]      # 默认 web_client（web/index.html 对应的入口）
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 REPO_ROOT="$(cd "$ROOT/.." && pwd)"
-EXAMPLE="${1:-physics_playground}"
+EXAMPLE="${1:-web_client}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 WASM="$TARGET_DIR/wasm32-unknown-unknown/release/examples/${EXAMPLE}.wasm"
 OUT="$ROOT/web/pkg"

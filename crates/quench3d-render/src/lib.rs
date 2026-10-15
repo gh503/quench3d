@@ -46,6 +46,10 @@ pub mod renderer;
 pub mod texture;
 
 pub use camera::{Camera, CameraInput, FlyCamera, Frustum, OrbitCamera, Projection};
+/// 重新导出 `wgpu`：上层（门面、编辑器、示例）需要它的类型（`TextureView`、
+/// `Device`、`SurfaceConfiguration`…）时一律走这里，避免各处各写一个版本号。
+pub use wgpu;
+
 pub use context::{FrameError, GpuContext, GpuInitError, GpuOptions, OffscreenTarget};
 pub use light::{DirectionalLight, FogParams, Lighting, PointLight, SkyParams, MAX_POINT_LIGHTS};
 pub use lines::{DebugLines, LineVertex};

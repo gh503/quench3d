@@ -3,18 +3,17 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Quench3D — Web 演示</title>
+<title>Quench3D 编辑器 — Web 客户端</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7dce5;
-               font: 14px/1.6 -apple-system, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+               font: 14px/1.6 -apple-system, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+               overflow: hidden; }
   #wrap { display: flex; flex-direction: column; height: 100%; }
-  header { padding: 10px 16px; background: #111722; border-bottom: 1px solid #1e2635;
-           display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-  header h1 { font-size: 16px; margin: 0; letter-spacing: .04em; }
-  header .hint { color: #7b879b; font-size: 12px; }
   #stage { position: relative; flex: 1; min-height: 0; }
+  /* 画布铺满整个工作区：界面（工具栏/场景树/属性面板）本身就是引擎用 egui 画上去的，
+     所以页面这边不抢任何像素，只负责"给一张画布 + 探后端 + 收文件"。 */
   canvas { display: block; width: 100%; height: 100%; background: #0b0e14;
            outline: none; touch-action: none; }
   #overlay { position: absolute; inset: 0; display: flex; align-items: center;
@@ -24,21 +23,13 @@
   .spinner { width: 34px; height: 34px; border: 3px solid #24304a; border-radius: 50%; }
   .spinner { border-color: #24304a; border-top-color: #6ea8fe; animation: spin 0.9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  #status { font-size: 13px; color: #93a1b8; text-align: center; max-width: 34em; }
+  #status { font-size: 13px; color: #93a1b8; text-align: center; max-width: 36em; }
   #status.error { color: #ff8a80; }
-  footer { padding: 8px 16px; background: #0f141d; border-top: 1px solid #1a2130;
-           color: #77839a; font-size: 12px; }
-  kbd { background: #1b2331; border: 1px solid #2a3446; border-bottom-width: 2px;
-        border-radius: 4px; padding: 0 5px; font-family: ui-monospace, monospace; font-size: 11px; }
+  #status code { background: #1b2331; padding: 0 4px; border-radius: 4px; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <header>
-    <h1>Quench3D</h1>
-    <span class="hint">纯 Rust 3D 引擎 · 自研物理 · WebGPU / WebGL2</span>
-  </header>
-
   <div id="stage">
     <canvas id="quench3d-canvas" tabindex="0"></canvas>
     <div id="overlay">
@@ -46,26 +37,11 @@
       <div id="status">正在初始化 WebGPU / WebGL2…</div>
     </div>
   </div>
-
-  <footer>
-    <kbd>中键</kbd>/<kbd>Alt+左键</kbd> 旋转 &nbsp;·&nbsp;
-    <kbd>右键</kbd> 自由视角 &nbsp;·&nbsp;
-    <kbd>W A S D</kbd> 移动 &nbsp;·&nbsp;
-    <kbd>Q</kbd>/<kbd>E</kbd> 升降 &nbsp;·&nbsp;
-    <kbd>滚轮</kbd> 缩放 &nbsp;·&nbsp;
-    <kbd>Shift</kbd> 加速 &nbsp;·&nbsp;
-    <kbd>Tab</kbd> 切换相机 &nbsp;·&nbsp;
-    <kbd>R</kbd> 对准场景 &nbsp;·&nbsp;
-    <kbd>F3</kbd> 网格 &nbsp;·&nbsp;
-    <kbd>F4</kbd> 阴影 &nbsp;·&nbsp;
-    <kbd>F5</kbd> 接触点 &nbsp;·&nbsp;
-    <kbd>P</kbd> 暂停
-  </footer>
 </div>
 
 <script type="module">
-// wasm-bindgen 生成的胶水代码（由 tools/build_web.sh 输出到 web/pkg/）
-import init, { start } from "./pkg/quench3d_web.js";
+// wasm-bindgen 生成的胶水代码（由 tools/build_web.sh web_client 输出到 web/pkg/）
+import init, { start, on_scene_file } from "./pkg/quench3d_web.js";
 
 const overlay = document.getElementById("overlay");
 const status = document.getElementById("status");
@@ -73,7 +49,7 @@ const status = document.getElementById("status");
 function fail(message) {
   overlay.classList.remove("hidden");
   status.classList.add("error");
-  status.textContent = message;
+  status.innerHTML = message;
 }
 
 // 选渲染后端：**先探再定**，不要交给 wgpu 自己"两个都试"。
@@ -102,6 +78,37 @@ async function pickBackend() {
   }
 }
 
+// 打开场景文件：Rust 侧（场景面板的「打开」按钮）调这里，
+// 读好文本再交回 on_scene_file(name, text) —— 文件读取在浏览器里做，
+// wasm 侧不收 File 对象，只收字符串。
+window.__quench3d_pick_scene_file = function (suggestedName) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = ".json,application/json";
+  input.style.display = "none";
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (!file) { input.remove(); return; }
+    file
+      .text()
+      .then((text) => {
+        on_scene_file(file.name, text);
+        console.info(`[Quench3D] 已读入场景文件 ${file.name}（${text.length} 字节）`);
+      })
+      .catch((err) => console.error("[Quench3D] 读取场景文件失败", err))
+      .finally(() => input.remove());
+  });
+  document.body.appendChild(input);
+  input.click();
+};
+
+// 画布上的右键/中键是相机操作（egui 侧也吃滚轮来滚面板），
+// 所以屏蔽浏览器右键菜单与页面级滚动/缩放。
+const canvas = document.getElementById("quench3d-canvas");
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("wheel", (e) => e.preventDefault(), { passive: false });
+canvas.addEventListener("auxclick", (e) => e.preventDefault());
+
 async function boot() {
   try {
     await init();
@@ -117,10 +124,15 @@ async function boot() {
   try {
     // 这里**故意不隐藏遮罩**：遮罩由引擎在「第一帧真的画出来」之后收掉
     // （Rust 侧 web_console::mark_ready）。启动失败时引擎会把原因写进 #status，
-    // 页面不会「假装启动成功」然后给你一块黑屏——之前就是这么坑的。
+    // 页面不会「假装启动成功」然后给你一块黑屏。
     start();
   } catch (err) {
-    fail("启动渲染器失败：" + err);
+    fail(
+      "启动编辑器失败：" + err +
+      "<br><br>如果是 <code>No available adapters</code>，试试 " +
+      '<a href="?backend=gl">?backend=gl</a>（强制 WebGL2）或 ' +
+      '<a href="?backend=webgpu">?backend=webgpu</a>。'
+    );
     console.error(err);
   }
 }

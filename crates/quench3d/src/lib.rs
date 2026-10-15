@@ -127,6 +127,9 @@ pub mod clock;
 pub mod input;
 pub mod scene;
 pub mod web_console;
+/// Web 端自检探针（仅 wasm 目标，供 CI 的 `tools/check_web.mjs` 调用）。
+#[cfg(target_arch = "wasm32")]
+pub mod web_probe;
 
 /// 数学库。
 pub use quench3d_math as math;

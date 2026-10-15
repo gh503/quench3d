@@ -255,7 +255,7 @@ fn ray_shape(
         Shape::TriMesh { vertices, indices } => {
             let ray = Ray::new(origin, dir);
             let mut best: Option<(f32, Vec3)> = None;
-            for tri in indices.chunks_exact(3) {
+            for tri in indices.as_chunks::<3>().0 {
                 let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
                 if ia >= vertices.len() || ib >= vertices.len() || ic >= vertices.len() {
                     continue;

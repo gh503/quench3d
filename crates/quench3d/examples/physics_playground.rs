@@ -392,53 +392,28 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
         .map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))
 }
 
-/// 给 `tools/check_web.mjs` 的时钟探针：读一次引擎时钟（秒）。
-///
-/// 存在的理由：`std::time::Instant::now()` 在 `wasm32-unknown-unknown` 上是
-/// **直接 panic**，而 `cargo check --target wasm32` 看不出来。这个探针让 CI
-/// 在 Node 里就能真的跑一遍时间路径，而不是等浏览器白屏。
+// 三个 Web 自检探针的实现住在 `quench3d::web_probe` 里（那里有详细说明），
+// 这里只做转发：检查脚本认的是 example 导出的这些名字。
+
+/// 时钟探针：读一次引擎时钟（秒）。
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn clock_probe() -> f64 {
-    quench3d::clock::now_seconds()
+    quench3d::web_probe::clock_probe()
 }
 
-/// 给 `tools/check_web.mjs` 的探针：Web 端**按路径**加载模型必须给出能照着做的报错。
-///
-/// wasm 上没有文件系统，`Path::exists()` 那条路只会得到"找不到 ... 已尝试: chair.glb, ..."
-/// 这种让人一头雾水的诊断。这里把"真正该用的 API"钉进产物里：探针在 Node 里跑一次，
-/// 断言错误文本里必须提到 `load_model_from_bytes`。
+/// 路径探针：Web 端按路径加载模型必须给出能照着做的报错。
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn model_path_probe() -> String {
-    match quench3d::assets::load_model("assets/chair.glb") {
-        Ok(m) => format!("unexpected-ok meshes={}", m.meshes.len()),
-        Err(e) => e.to_string(),
-    }
+    quench3d::web_probe::model_path_probe()
 }
 
-/// 探针：Web 端**从字节**加载模型必须真的能跑通（这里内联一个三角形 OBJ）。
-///
-/// 这是"Web 端能加载模型"的唯一硬证据——`cargo check --target wasm32` 只能证明它能编译。
+/// 字节探针：Web 端从字节加载模型必须真的能跑通。
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn model_bytes_probe() -> String {
-    const OBJ: &[u8] = b"v 0 0 0
-v 1 0 0
-v 0 1 0
-f 1 2 3
-";
-    match quench3d::assets::load_model_from_bytes("triangle.obj", OBJ) {
-        Ok(m) => {
-            let tris: usize = m
-                .meshes
-                .iter()
-                .map(|mesh| mesh.data.indices.len() / 3)
-                .sum();
-            format!("ok meshes={} triangles={tris}", m.meshes.len())
-        }
-        Err(e) => format!("err {e}"),
-    }
+    quench3d::web_probe::model_bytes_probe()
 }
 
 /// wasm 产物是 example，需要一个（Web 端不会调用它的）`main`。

@@ -404,14 +404,14 @@ fn gltf_image_to_rgba(img: &gltf::image::Data) -> Result<ImageData, AssetError> 
         }
         Format::R8G8 => {
             let mut out = Vec::with_capacity((w * h * 4) as usize);
-            for px in img.pixels.chunks_exact(2) {
+            for px in img.pixels.as_chunks::<2>().0 {
                 out.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
             }
             out
         }
         Format::R8G8B8 => {
             let mut out = Vec::with_capacity((w * h * 4) as usize);
-            for px in img.pixels.chunks_exact(3) {
+            for px in img.pixels.as_chunks::<3>().0 {
                 out.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
             out

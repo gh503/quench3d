@@ -143,7 +143,7 @@ struct ModelViewer {
 impl ModelViewer {
     fn load(&mut self, engine: &mut Engine) -> Result<(), Box<dyn std::error::Error>> {
         // 清掉上一次加载的物体（保留地面）
-        let old: Vec<usize> = self.objects.drain(..).collect();
+        let old = std::mem::take(&mut self.objects);
         for i in old.into_iter().rev() {
             if i < engine.scene.objects.len() {
                 engine.scene.objects.remove(i);
@@ -300,7 +300,7 @@ fn headless_check() -> Result<(), Box<dyn std::error::Error>> {
                         vertices.len(),
                         indices.len() / 3
                     );
-                    for t in indices.chunks_exact(3).take(14) {
+                    for t in indices.as_chunks::<3>().0.iter().take(14) {
                         let p: Vec<Vec3> = t.iter().map(|i| vertices[*i as usize]).collect();
                         println!(
                             "    ({:.2},{:.2},{:.2}) ({:.2},{:.2},{:.2}) ({:.2},{:.2},{:.2})",

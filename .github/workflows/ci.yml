@@ -281,6 +281,12 @@ jobs:
         run: cargo check -p quench3d --target wasm32-unknown-unknown --all-targets
       - name: Clippy（wasm 目标）
         run: cargo clippy -p quench3d --target wasm32-unknown-unknown --all-targets -- -D warnings
+      # 编辑器是 Web 客户端本体：它的 wasm 路径必须一起守着
+      # （egui 那条链上有过"桌面能编、wasm 编不过"的依赖，比如 arboard）。
+      - name: 检查编辑器能在 wasm32 上编译
+        run: cargo check -p quench3d-editor --target wasm32-unknown-unknown --all-targets
+      - name: Clippy（编辑器的 wasm 目标）
+        run: cargo clippy -p quench3d-editor --target wasm32-unknown-unknown --all-targets -- -D warnings
 
       # 真正打包一次 Web 产物，并检查页面 import 的符号与 wasm 能否实例化。
       # 这一步能挡住「打包漏文件 / 页面 import 了不存在的函数 / wasm 损坏」。
@@ -289,5 +295,6 @@ jobs:
 
       - name: 打包 Web 产物并检查
         run: |
-          tools/build_web.sh physics_playground
+          # 必须与 web/index.html 里的 import 对应：页面现在服务的是编辑器客户端。
+          tools/build_web.sh web_client
           node tools/check_web.mjs

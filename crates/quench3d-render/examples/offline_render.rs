@@ -262,8 +262,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let diff_percent = |other: &ImageData| -> f32 {
         let changed = baseline
             .rgba
-            .chunks_exact(4)
-            .zip(other.rgba.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(other.rgba.as_chunks::<4>().0)
             .filter(|(a, b)| (0..3).any(|i| (a[i] as i32 - b[i] as i32).abs() > 8))
             .count();
         changed as f32 / (baseline.width * baseline.height).max(1) as f32 * 100.0

@@ -137,6 +137,12 @@ pub struct Engine {
     pub paused: bool,
     /// 是否请求退出。
     pub should_exit: bool,
+    /// 是否由引擎自动把输入映射到相机（默认 `true`）。
+    ///
+    /// 编辑器这类应用要自己决定「这一下拖动是转相机还是拖物体」时，把它设成
+    /// `false`，然后每帧自己调 [`Engine::update_camera`]（或直接
+    /// `engine.orbit.update(&input)`）——两种相机都会按 `camera_mode` 走。
+    pub auto_camera: bool,
     /// 最近一帧渲染统计。
     pub stats: RenderStats,
     /// 固定步长累加器。
@@ -169,6 +175,7 @@ impl Engine {
             fps: 0.0,
             paused: false,
             should_exit: false,
+            auto_camera: true,
             stats: RenderStats::default(),
             accumulator: 0.0,
             window: None,
@@ -320,8 +327,8 @@ impl Engine {
         }
     }
 
-    /// 处理输入到相机的映射（引擎自动调用）。
-    fn update_camera(&mut self, dt: f32) {
+    /// 处理输入到相机的映射（引擎自动调用；自己写事件循环时也可直接调）。
+    pub fn update_camera(&mut self, dt: f32) {
         let orbit_drag = match self.camera_mode {
             CameraMode::Orbit => {
                 self.input.mouse_button_down(MouseButton::Middle)
@@ -336,8 +343,12 @@ impl Engine {
         }
     }
 
-    /// 内置快捷键与调试绘制。
-    fn handle_engine_keys(&mut self, event_loop: Option<&ActiveEventLoop>) {
+    /// 内置快捷键（Tab 相机模式、R 聚焦、F3/F4 网格阴影、F5/F6 调试、P 暂停、Esc 退出）。
+    ///
+    /// 自己写事件循环（编辑器）时直接调它就能白拿这套快捷键；
+    /// 传 `None` 表示"只改状态，不主动退出事件循环"（退出交给调用方看
+    /// [`Engine::should_exit`]）。
+    pub fn handle_engine_keys(&mut self, event_loop: Option<&ActiveEventLoop>) {
         if self.input.key_pressed(KeyCode::Tab) {
             self.camera_mode = match self.camera_mode {
                 CameraMode::Orbit => CameraMode::Fly,
@@ -409,10 +420,25 @@ impl Engine {
         }
     }
 
-    /// 执行一帧（渲染 + 逻辑）。
-    fn frame<G: Game>(&mut self, game: &mut G, dt: f32) {
+    /// 推进一帧：输入 → 相机 → `game.update` → 固定步长物理 → 物理回同步 →
+    /// 提交绘制指令（`begin_frame` + 场景 + 调试线 + `game.draw`）→ 推进时钟。
+    ///
+    /// **不碰交换链**。两种用法：
+    /// * "一帧到底"（`ForgeApp`、示例）：[`Engine::tick`] 之后调
+    ///   `renderer.draw_frame`；
+    /// * 自己掌控呈现（编辑器要在 3D 之上叠 UI、离屏录制）：
+    ///   [`Engine::tick`] 之后自己取帧 → [`Engine::render_to`] → 叠 UI → 呈现。
+    ///
+    /// 存在的理由：以前这套顺序只有 `ForgeApp::frame` 一条私有路径，
+    /// 想加个 UI 层就得把它抄一遍（抄漏一处就是"物理跑两遍""时间不推进"这类鬼 bug）。
+    pub fn tick<G: Game + ?Sized>(&mut self, game: &mut G, dt: f32) {
         self.input.begin_frame();
-        self.update_camera(dt);
+        // 着色器动画时间：与离屏录制路径同源（当前着色器没读这个字段，
+        // 但契约放在这里，免得窗口路径永远是 0）。
+        self.renderer.set_time(self.time);
+        if self.auto_camera {
+            self.update_camera(dt);
+        }
         game.update(self, dt);
 
         // 固定步长逻辑（物理）：最多追赶 8 步，避免长时间卡顿后"炸开"。
@@ -435,14 +461,41 @@ impl Engine {
             self.scene.sync_from_physics(world);
         }
 
-        let camera = self.camera();
-        let lighting: Lighting = self.scene.lighting.clone();
-
         self.renderer.begin_frame();
         self.scene.submit(&mut self.renderer);
         self.draw_debug();
         game.draw(self);
 
+        advance_clock(
+            &mut self.time,
+            &mut self.frame_count,
+            &mut self.last_dt,
+            &mut self.fps,
+            dt,
+            self.paused,
+        );
+    }
+
+    /// 把当前场景渲染到任意视图（**不呈现**）。`size` 是目标像素尺寸。
+    ///
+    /// 必须在 [`Engine::tick`] 之后调用（绘制指令是 tick 里提交的）。
+    pub fn render_to(
+        &mut self,
+        view: &quench3d_render::wgpu::TextureView,
+        size: (u32, u32),
+    ) -> RenderStats {
+        let camera = self.camera();
+        let lighting: Lighting = self.scene.lighting.clone();
+        self.renderer
+            .render(&self.gpu, view, size, &camera, &lighting)
+    }
+
+    /// 执行一帧（逻辑 + 渲染 + 呈现），窗口循环用。
+    fn frame<G: Game>(&mut self, game: &mut G, dt: f32) {
+        self.tick(game, dt);
+
+        let camera = self.camera();
+        let lighting: Lighting = self.scene.lighting.clone();
         match self.renderer.draw_frame(&mut self.gpu, &camera, &lighting) {
             Ok(stats) => self.stats = stats,
             Err(FrameError::Lost | FrameError::Outdated) => {
@@ -454,15 +507,6 @@ impl Engine {
             // 超时 / 被遮挡 / 验证错误：跳过这一帧即可
             Err(e) => log::debug!("本帧跳过: {e}"),
         }
-
-        advance_clock(
-            &mut self.time,
-            &mut self.frame_count,
-            &mut self.last_dt,
-            &mut self.fps,
-            dt,
-            self.paused,
-        );
     }
 }
 

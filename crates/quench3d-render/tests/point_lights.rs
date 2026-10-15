@@ -67,7 +67,7 @@ fn red_stats(image: &ImageData) -> (usize, u8, u8) {
     let mut red_dominant = 0;
     let mut max_red = 0u8;
     let mut max_lum = 0u8;
-    for px in image.rgba.chunks_exact(4) {
+    for px in image.rgba.as_chunks::<4>().0 {
         let (r, g, b) = (px[0], px[1], px[2]);
         if r > 60 && r > g.saturating_add(30) && r > b.saturating_add(30) {
             red_dominant += 1;
