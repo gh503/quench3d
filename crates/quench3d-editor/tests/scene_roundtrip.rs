@@ -414,3 +414,42 @@ fn explicit_material_textures_are_exported() {
     assert_eq!(ball_material.uv_scale, 1.0, "ball 不该被 box 的设置串到");
     assert!(!ball_material.double_sided, "ball 不该被 box 的设置串到");
 }
+
+/// 编辑器"材质（缩放与开关）"面板走的就是这条调用：`update_material` 改引擎里的材质描述。
+///
+/// 面板本身是 UI 代码，没法在无头测试里点；但把它真正依赖的那一步（写进引擎、
+/// 再读回来确实变了）钉住，面板里"视口立刻变"这句话才有依据。
+#[test]
+fn update_material_changes_the_engine_material() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = r#"{
+      "format": "quench3d.scene", "version": 1, "name": "mat",
+      "objects": [ { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
+                     "position": [0, 2, 0], "body": "dynamic" } ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+    let material_id = engine.scene.objects[0].material;
+    let mut desc = engine
+        .renderer
+        .material(material_id)
+        .cloned()
+        .expect("应当有材质");
+    assert_eq!(desc.uv_scale, 1.0, "初始 UV 平铺应当是 1");
+    desc.uv_scale = 3.5;
+    desc.unlit = true;
+    desc.double_sided = true;
+    engine
+        .renderer
+        .update_material(&engine.gpu, material_id, desc);
+    let after = engine
+        .renderer
+        .material(material_id)
+        .cloned()
+        .expect("应当有材质");
+    assert_eq!(after.uv_scale, 3.5, "UV 平铺没写进引擎");
+    assert!(after.unlit, "无光照没写进引擎");
+    assert!(after.double_sided, "双面没写进引擎");
+}

@@ -392,6 +392,93 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         });
 }
 
+/// 材质缩放与开关（选中物体）：**改的是引擎里的材质**，所以视口立刻变；
+/// 同时写进 `doc.textures`（按物体名），存盘与撤销才有依据。
+///
+/// 为什么单独一个函数、而且放在物体变换之前：属性面板里物体是被 `&mut` 借出去的，
+/// 在那一块里碰 `engine.renderer` 会和借用冲突；这里没有活跃的物体借用，可以自由改引擎。
+/// 贴图**路径**目前仍然只能写在场景文件里：换贴图要重建材质的绑定组，
+/// 渲染器还没有这样的 API（见 docs/production_readiness.md §8）。
+fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    let Some(index) = doc.selected else { return };
+    if index >= engine.scene.objects.len() {
+        return;
+    }
+    let material_id = engine.scene.objects[index].material;
+    let object_name = engine.scene.objects[index].name.clone();
+    let Some(before) = engine.renderer.material(material_id).cloned() else {
+        return;
+    };
+    let mut desc = before.clone();
+    let mut changed = false;
+    egui::CollapsingHeader::new("材质（缩放与开关）")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("UV 平铺");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut desc.uv_scale)
+                            .speed(0.05)
+                            .range(0.01..=64.0),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("法线强度");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut desc.normal_scale)
+                            .speed(0.02)
+                            .range(0.0..=4.0),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("alpha 裁剪");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut desc.alpha_cutoff)
+                            .speed(0.02)
+                            .range(0.0..=1.0),
+                    )
+                    .changed();
+            });
+            changed |= ui.checkbox(&mut desc.alpha_blend, "alpha 混合").changed();
+            changed |= ui.checkbox(&mut desc.unlit, "无光照").changed();
+            changed |= ui.checkbox(&mut desc.double_sided, "双面").changed();
+            ui.label(
+                RichText::new("贴图路径：写在场景文件里（按物体名显式指定即可，导出与载入都生效）")
+                    .small()
+                    .weak(),
+            );
+        });
+    if !changed || desc == before {
+        // 没变也要把未结束的拖拽事务收尾，避免历史里留下半截事务。
+        if doc.history.in_transaction() && !ui.input(|i| i.pointer.any_down()) {
+            doc.end_history_transaction(engine);
+        }
+        return;
+    }
+    engine
+        .renderer
+        .update_material(&engine.gpu, material_id, desc.clone());
+    let entry = doc.textures.entry(object_name).or_default();
+    entry.uv_scale = Some(desc.uv_scale);
+    entry.normal_scale = Some(desc.normal_scale);
+    entry.alpha_cutoff = Some(desc.alpha_cutoff);
+    entry.alpha_blend = Some(desc.alpha_blend);
+    entry.unlit = Some(desc.unlit);
+    entry.double_sided = Some(desc.double_sided);
+    if ui.input(|i| i.pointer.any_down()) {
+        doc.begin_history_transaction();
+    }
+    doc.record_edit(engine);
+    if doc.history.in_transaction() && !ui.input(|i| i.pointer.any_down()) {
+        doc.end_history_transaction(engine);
+    }
+}
+
 fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Requests) {
     egui::Panel::right("quench3d-inspector")
         .default_size(260.0)
@@ -415,6 +502,8 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                 return;
             }
 
+            material_section(ui, engine, doc);
+            ui.separator();
             let mut changed = false;
             let mut body_kind_change: Option<BodyKind> = None;
             {
