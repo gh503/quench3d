@@ -1,0 +1,43 @@
+[package]
+name = "quench3d"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Quench3D — a pure-Rust, easy-to-use 3D engine with built-in physics for desktop and web"
+readme.workspace = true
+keywords = ["game-engine", "3d", "graphics", "physics", "wgpu"]
+categories = ["game-engines", "rendering::engine", "graphics", "wasm"]
+
+[dependencies]
+quench3d-math.workspace = true
+quench3d-physics.workspace = true
+quench3d-render.workspace = true
+bytemuck = { version = "1.25", features = ["derive"] }
+log = "0.4"
+pollster = "1.0"
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+winit = "0.30"
+env_logger = "0.11"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+winit = "0.30"
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "Document", "Window", "Element", "Node", "DomTokenList", "Location",
+    "HtmlCanvasElement", "HtmlAnchorElement",
+    "Blob", "Url", "Performance", "console", "Navigator", "Gpu", "GpuAdapter",
+] }
+
+[lib]
+name = "quench3d"
+path = "src/lib.rs"
+
+[dev-dependencies]
+wasm-bindgen = "=0.2.129"

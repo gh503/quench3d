@@ -1,0 +1,28 @@
+# 构建产物：cargo 随时可重建，体积大且与机器/平台相关，不该进版本库。
+target/
+
+# 仿真视频的默认帧序列目录（quench3d movie --frames-dir frames）：逐帧 PNG 是派生产物。
+frames/
+
+# 录制出的视频文件：体积大，随时可用 movie 命令从场景 JSON 重新生成。
+*.mp4
+
+# 演示与校验用的动图：同上，属可重新生成的派生产物。
+*.gif
+
+# macOS 的目录元数据文件，与代码无关。
+.DS_Store
+
+# Vim 的交换文件，编辑器异常退出时留下的临时文件。
+*.swp
+*.swo
+
+# 各编辑器的备份文件（foo~ 之类）。
+*~
+
+# Python 字节码缓存：tools/ 下的脚本跑过就会生成。
+__pycache__/
+
+# —— 以下内容**不要**加进本文件 ——
+# web/pkg/      ：wasm 打包产物是要提交的（README 第 2 节，CI 会用 check_web.mjs 校验它）。
+# Cargo.lock    ：本项目含可执行文件（quench3d CLI），锁文件必须提交才能复现构建与 --locked。

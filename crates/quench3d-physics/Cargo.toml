@@ -1,0 +1,13 @@
+[package]
+name = "quench3d-physics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "From-scratch rigid-body physics for Quench3D: shapes, broadphase, narrowphase, sequential-impulse solver, joints, raycasts"
+readme.workspace = true
+keywords = ["physics", "rigid-body", "collision", "simulation", "game-engine"]
+categories = ["simulation", "game-development", "science"]
+
+[dependencies]
+quench3d-math.workspace = true

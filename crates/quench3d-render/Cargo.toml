@@ -1,0 +1,23 @@
+[package]
+name = "quench3d-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# 注意：阴影实现是**单张**平行光阴影贴图（`renderer.rs` 里只有一张 shadow texture，
+# 全仓搜 `cascade`/`csm` 零命中），这里是事实描述，不要写回 "cascaded shadow maps"。
+description = "wgpu renderer for Quench3D: PBR forward shading, a single directional shadow map, instancing, sky, debug lines"
+readme.workspace = true
+keywords = ["wgpu", "renderer", "pbr", "shadows", "webgpu"]
+categories = ["rendering", "graphics", "game-development", "wasm"]
+
+[dependencies]
+quench3d-math.workspace = true
+bytemuck = { version = "1.25", features = ["derive"] }
+log = "0.4"
+pollster = "1.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+wgpu = "30.0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30.0.1", features = ["webgl"] }

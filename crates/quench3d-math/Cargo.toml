@@ -1,0 +1,18 @@
+[package]
+name = "quench3d-math"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Self-contained linear algebra for Quench3D (zero required dependencies)"
+readme.workspace = true
+keywords = ["math", "linear-algebra", "matrix", "quaternion", "graphics"]
+categories = ["mathematics", "graphics", "game-development"]
+
+[dependencies]
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
+
+[features]
+default = []
+# 启用后 Vec2/Vec3/Vec4/Mat3/Mat4/Quat 可直接作为 GPU 缓冲数据使用。
+bytemuck = ["dep:bytemuck"]

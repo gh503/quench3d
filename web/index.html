@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quench3D — Web 演示</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7dce5;
+               font: 14px/1.6 -apple-system, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+  #wrap { display: flex; flex-direction: column; height: 100%; }
+  header { padding: 10px 16px; background: #111722; border-bottom: 1px solid #1e2635;
+           display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .04em; }
+  header .hint { color: #7b879b; font-size: 12px; }
+  #stage { position: relative; flex: 1; min-height: 0; }
+  canvas { display: block; width: 100%; height: 100%; background: #0b0e14;
+           outline: none; touch-action: none; }
+  #overlay { position: absolute; inset: 0; display: flex; align-items: center;
+             justify-content: center; flex-direction: column; gap: 10px; pointer-events: none;
+             background: radial-gradient(circle at 50% 40%, #16203a 0%, #0b0e14 70%); }
+  #overlay.hidden { display: none; }
+  .spinner { width: 34px; height: 34px; border: 3px solid #24304a; border-radius: 50%; }
+  .spinner { border-color: #24304a; border-top-color: #6ea8fe; animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #status { font-size: 13px; color: #93a1b8; text-align: center; max-width: 34em; }
+  #status.error { color: #ff8a80; }
+  footer { padding: 8px 16px; background: #0f141d; border-top: 1px solid #1a2130;
+           color: #77839a; font-size: 12px; }
+  kbd { background: #1b2331; border: 1px solid #2a3446; border-bottom-width: 2px;
+        border-radius: 4px; padding: 0 5px; font-family: ui-monospace, monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>Quench3D</h1>
+    <span class="hint">纯 Rust 3D 引擎 · 自研物理 · WebGPU / WebGL2</span>
+  </header>
+
+  <div id="stage">
+    <canvas id="quench3d-canvas" tabindex="0"></canvas>
+    <div id="overlay">
+      <div class="spinner"></div>
+      <div id="status">正在初始化 WebGPU / WebGL2…</div>
+    </div>
+  </div>
+
+  <footer>
+    <kbd>中键</kbd>/<kbd>Alt+左键</kbd> 旋转 &nbsp;·&nbsp;
+    <kbd>右键</kbd> 自由视角 &nbsp;·&nbsp;
+    <kbd>W A S D</kbd> 移动 &nbsp;·&nbsp;
+    <kbd>Q</kbd>/<kbd>E</kbd> 升降 &nbsp;·&nbsp;
+    <kbd>滚轮</kbd> 缩放 &nbsp;·&nbsp;
+    <kbd>Shift</kbd> 加速 &nbsp;·&nbsp;
+    <kbd>Tab</kbd> 切换相机 &nbsp;·&nbsp;
+    <kbd>R</kbd> 对准场景 &nbsp;·&nbsp;
+    <kbd>F3</kbd> 网格 &nbsp;·&nbsp;
+    <kbd>F4</kbd> 阴影 &nbsp;·&nbsp;
+    <kbd>F5</kbd> 接触点 &nbsp;·&nbsp;
+    <kbd>P</kbd> 暂停
+  </footer>
+</div>
+
+<script type="module">
+// wasm-bindgen 生成的胶水代码（由 tools/build_web.sh 输出到 web/pkg/）
+import init, { start } from "./pkg/quench3d_web.js";
+
+const overlay = document.getElementById("overlay");
+const status = document.getElementById("status");
+
+function fail(message) {
+  overlay.classList.remove("hidden");
+  status.classList.add("error");
+  status.textContent = message;
+}
+
+// 选渲染后端：**先探再定**，不要交给 wgpu 自己"两个都试"。
+//
+// 原因（踩过的坑）：wgpu 只要看到请求里有 BROWSER_WEBGPU、且 navigator.gpu 存在，
+// 就直接走 WebGPU 上下文，连 WebGL2 实例都不建 —— 而 navigator.gpu 存在
+// 不等于有适配器（Linux Chrome 没开 Vulkan、软件光栅环境都这样），于是报
+// "No available adapters"，说好的 WebGL2 回退永远轮不到。
+// 更麻烦的是：一旦对着这张画布要过 webgpu 上下文，再 getContext("webgl2")
+// 就返回 null（一张画布只能有一种上下文，且不可逆），回退彻底没戏。
+// 所以这里用 requestAdapter() 探一次（**不碰画布**），把结论交给 Rust。
+async function pickBackend() {
+  const forced = (new URLSearchParams(location.search).get("backend") || "").toLowerCase();
+  if (["gl", "gles", "webgl2", "webgpu", "wgpu", "all"].includes(forced)) {
+    return { mode: forced, why: "URL 指定 backend=" + forced };
+  }
+  if (!("gpu" in navigator) || !navigator.gpu) {
+    return { mode: "gl", why: "浏览器没有 WebGPU（navigator.gpu 不存在）" };
+  }
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (adapter) return { mode: "webgpu", why: "探测到 WebGPU 适配器" };
+    return { mode: "gl", why: "navigator.gpu 存在但没有适配器（比如没开 Vulkan）" };
+  } catch (err) {
+    return { mode: "gl", why: "WebGPU 探测失败：" + err };
+  }
+}
+
+async function boot() {
+  try {
+    await init();
+  } catch (err) {
+    fail("加载 WebAssembly 失败：" + err);
+    return;
+  }
+  const backend = await pickBackend();
+  globalThis.__quench3d_backend = backend.mode;
+  const label = backend.mode === "webgpu" ? "WebGPU 优先（WebGL2 兜底）" : "WebGL2";
+  status.textContent = `渲染后端：${label} —— ${backend.why}`;
+  console.info(`[Quench3D] 后端选择：${backend.mode}（${backend.why}）`);
+  try {
+    // 这里**故意不隐藏遮罩**：遮罩由引擎在「第一帧真的画出来」之后收掉
+    // （Rust 侧 web_console::mark_ready）。启动失败时引擎会把原因写进 #status，
+    // 页面不会「假装启动成功」然后给你一块黑屏——之前就是这么坑的。
+    start();
+  } catch (err) {
+    fail("启动渲染器失败：" + err);
+    console.error(err);
+  }
+}
+
+window.addEventListener("error", (e) => {
+  if (overlay.classList.contains("hidden")) fail("运行时错误：" + e.message);
+});
+
+boot();
+</script>
+</body>
+</html>

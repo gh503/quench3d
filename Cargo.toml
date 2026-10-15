@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# MSRV（最低支持的 Rust 版本）。依据是整张依赖图里各 crate 自己声明的 rust-version：
+# wgpu 30.0.1 / naga / wgpu-core 要求 1.87，image 0.25.10 要求 1.88，
+# wgpu-hal 拉进来的 ordered-float 5.5.0 要求 1.90 —— 取其中最大者。
+# 注意：本机只装了 1.94 工具链（`cargo --version` = 1.94.0），所以 1.90 是
+# 「依赖元数据推出的下界」，没有用 1.90 真的编译验证过；升级依赖时这个数字要跟着复核。
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+authors = ["Quench3D contributors"]
+description = "Quench3D — a pure-Rust 3D engine with built-in physics for desktop and web"
+readme = "README.md"
+keywords = ["game-engine", "3d", "graphics", "physics", "wgpu"]
+categories = ["game-engines", "rendering", "graphics", "wasm"]
+# 仓库公开地址（2026-10-16 建立独立仓库时填上；首次 `cargo publish` 前必须是真实 URL，
+# 不要留占位地址——crates.io 会把占位链接直接展示给用户）。
+repository = "https://github.com/gh503/quench3d"
+homepage = "https://github.com/gh503/quench3d"
+documentation = "https://docs.rs/quench3d"
+
+[workspace.dependencies]
+quench3d-math = { path = "crates/quench3d-math", version = "0.1.0" }
+quench3d-physics = { path = "crates/quench3d-physics", version = "0.1.0" }
+quench3d-render = { path = "crates/quench3d-render", version = "0.1.0" }
+quench3d = { path = "crates/quench3d", version = "0.1.0" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

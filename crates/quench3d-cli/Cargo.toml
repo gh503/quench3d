@@ -1,0 +1,26 @@
+[package]
+name = "quench3d-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Agent-friendly CLI for Quench3D: headless rendering, physics simulation, model inspection, LLM scene generation and an MCP tool server"
+readme.workspace = true
+keywords = ["cli", "3d", "physics", "mcp", "llm"]
+categories = ["command-line-utilities", "rendering", "game-development"]
+
+[[bin]]
+name = "quench3d"
+path = "src/main.rs"
+
+[lib]
+name = "quench3d_cli"
+path = "src/lib.rs"
+
+[dependencies]
+quench3d.workspace = true
+pollster = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gif = "0.13"
+png = "0.18"

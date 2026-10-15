@@ -1,0 +1,208 @@
+//! 测试用的假 OpenAI 服务：验证 HTTP 客户端与 `ask` 命令，不需要真的模型。
+//!
+//! 用 `std::net::TcpListener` 起一个只实现 `/v1/chat/completions` 的最小服务，
+//! 支持 Content-Length 与 chunked 两种响应，并把收到的请求体回传给测试。
+
+#![allow(dead_code)]
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// 假服务：记录收到的请求体，按给定内容回复。
+pub struct MockLlm {
+    /// 可以直接给 `--base-url` 的地址（含 `/v1`）。
+    pub base_url: String,
+    /// 收到的请求体（每条消息一个）。
+    pub requests: Receiver<String>,
+    stop: Arc<AtomicBool>,
+}
+
+impl MockLlm {
+    /// 启动假服务。`reply` 会被包成标准 OpenAI 响应里的 `choices[0].message.content`。
+    pub fn start(reply: &str) -> Self {
+        Self::start_with(reply.to_string(), 200, false)
+    }
+
+    /// 启动假服务并指定状态码与是否使用 chunked 传输（仍然包装成 OpenAI 响应）。
+    pub fn start_with(reply: String, status: u16, chunked: bool) -> Self {
+        Self::start_inner(vec![reply], status, chunked, true)
+    }
+
+    /// 启动假服务，把 `body` 原样当响应体返回（用于测试非标准协议或坏 JSON）。
+    pub fn start_raw(body: &str) -> Self {
+        Self::start_inner(vec![body.to_string()], 200, false, false)
+    }
+
+    /// 按顺序返回多条回复（第 n 个请求拿第 n 条，用完后一直重复最后一条）。
+    ///
+    /// `body` 为 `true` 时表示回复已经是完整的响应体（如带 tool_calls 的响应）。
+    pub fn start_sequence(replies: Vec<String>, raw: bool) -> Self {
+        Self::start_inner(replies, 200, false, !raw)
+    }
+
+    fn start_inner(replies: Vec<String>, status: u16, chunked: bool, wrap: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let (tx, rx) = channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let replies = Arc::new(replies);
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            while !stop_thread.load(Ordering::Relaxed)
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let n = counter.fetch_add(1, Ordering::Relaxed);
+                        let reply = replies
+                            .get(n.min(replies.len().saturating_sub(1)))
+                            .cloned()
+                            .unwrap_or_default();
+                        let tx = tx.clone();
+                        std::thread::spawn(move || {
+                            if let Some(body) = read_request(stream.try_clone().unwrap()) {
+                                let _ = tx.send(body);
+                            }
+                            let _ = respond(stream, status, &reply, chunked, wrap);
+                        });
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            requests: rx,
+            stop,
+        }
+    }
+
+    /// 等一条请求（超时返回 `None`）。
+    pub fn next_request(&self, timeout: Duration) -> Option<String> {
+        self.requests.recv_timeout(timeout).ok()
+    }
+
+    /// 收工。
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for MockLlm {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// 读一个完整的 HTTP 请求，返回请求体。
+fn read_request(stream: TcpStream) -> Option<String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    let mut reader = BufReader::new(stream.try_clone().ok()?);
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
+            content_length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body).ok()?;
+    Some(String::from_utf8_lossy(&body).to_string())
+}
+
+/// 回一个 OpenAI 风格的响应。
+fn respond(
+    mut stream: TcpStream,
+    status: u16,
+    content: &str,
+    chunked: bool,
+    wrap: bool,
+) -> std::io::Result<()> {
+    let json = if !wrap {
+        content.to_string()
+    } else {
+        serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "model": "mock-model",
+            "choices": [ { "index": 0, "message": { "role": "assistant", "content": content }, "finish_reason": "stop" } ],
+            "usage": { "prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33 }
+        })
+        .to_string()
+    };
+
+    let head = if chunked {
+        format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        )
+    } else {
+        format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            json.len()
+        )
+    };
+    stream.write_all(head.as_bytes())?;
+    if chunked {
+        // 故意拆成两块，逼客户端正确处理分块边界
+        let bytes = json.as_bytes();
+        let mid = bytes.len() / 2;
+        for part in [&bytes[..mid], &bytes[mid..]] {
+            write!(stream, "{:x}\r\n", part.len())?;
+            stream.write_all(part)?;
+            stream.write_all(b"\r\n")?;
+        }
+        stream.write_all(b"0\r\n\r\n")?;
+    } else {
+        stream.write_all(json.as_bytes())?;
+    }
+    stream.flush()
+}
+
+/// 一段能被解析成合法场景的模型输出（故意包在 Markdown 代码块里，模拟真实模型行为）。
+pub fn mock_scene_reply() -> String {
+    format!(
+        "好的，这是一个塔：\n```json\n{}\n```\n希望有帮助！",
+        r#"{
+  "format": "quench3d.scene",
+  "version": 1,
+  "name": "模型生成的塔",
+  "gravity": [0, -9.81, 0],
+  "ground": { "size": 20 },
+  "materials": { "wood": { "color": [0.8, 0.5, 0.25], "roughness": 0.6 } },
+  "objects": [
+    { "name": "底", "shape": { "type": "box", "size": [1.2, 0.4, 1.2] }, "position": [0, 0.2, 0], "material": "wood", "body": "dynamic" },
+    { "name": "中", "shape": { "type": "box", "size": [1.0, 0.4, 1.0] }, "position": [0, 0.6, 0], "material": "wood", "body": "dynamic" },
+    { "name": "顶", "shape": { "type": "box", "size": [0.8, 0.4, 0.8] }, "position": [0, 1.0, 0], "material": "wood", "body": "dynamic" }
+  ],
+  "camera": { "position": [5, 3, 6], "look_at": [0, 0.8, 0] },
+  "simulate": { "steps": 120 },
+  "render": { "output": "tower.png", "width": 640, "height": 400 }
+}"#
+    )
+}
+
+/// 一段结构不对的模型输出（字段名写错），用于验证校验诊断能回喂。
+pub fn mock_broken_reply() -> String {
+    r#"{"objects": [{"name": "a", "shape": {"type": "pyramid"}, "body": "dynamic"}]}"#.to_string()
+}

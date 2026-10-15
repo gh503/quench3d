@@ -1,0 +1,295 @@
+# 前置假设：**quench3d/ 就是仓库根**（即本文件在仓库里的路径是 .github/workflows/ci.yml）。
+# GitHub Actions 只执行仓库根下的 workflows，所以这段 CI 要生效，前提是把 quench3d/
+# 作为独立仓库（或作为仓库根的子树）纳入版本控制。
+# 现状提醒：quench3d/ 目前还没有被任何 git 仓库跟踪（`git ls-files quench3d` 为空），
+# 因此这条流水线现在不会被触发——「CI 是绿的」在纳入 git 之前只是纸面结论。
+#
+# CI 机器上没有 GPU：这里不安装任何 GPU/软件光栅驱动，也不需要。
+# 物理与 CLI 冒烟都不依赖显卡；渲染路径会如实走「无 GPU」分支（退出码 3），
+# 所以下面 CLI 冒烟里对 render 只接受退出码 0 或 3。
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  # 也允许在 Actions 页面手动跑整条流水线（排查偶发失败、验证分支）。
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # 三平台跑同一套门禁：格式、clippy、全部测试、CLI 冒烟
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustfmt + clippy 供下面的门禁使用；wasm32 target 也一起装上（实际用它的
+      # `cargo check --target wasm32-unknown-unknown` 在单独的 `wasm` job 里跑）。
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all --check
+
+      - name: Clippy（警告即失败）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 全部测试
+        run: cargo test --workspace
+
+      # 命令行工具端到端冒烟：这是 agent 依赖的契约（退出码 + 单行 JSON）
+      - name: CLI 冒烟测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p quench3d-cli
+          # GitHub 会给 RUNNER_OS，本地跑时缺省当 Linux
+          BIN=target/debug/quench3d
+          if [ "${RUNNER_OS:-Linux}" = "Windows" ]; then BIN=target/debug/quench3d.exe; fi
+          PY=$(command -v python3 || command -v python)
+
+          echo "--- doctor ---"
+          "$BIN" doctor --json
+
+          echo "--- 能力清单（截断） ---"
+          "$BIN" schema --json | head -c 200; echo
+
+          echo "--- 生成示例场景并校验 ---"
+          "$BIN" example --out scene.json
+          "$BIN" validate scene.json --json
+
+          echo "--- 纯物理仿真（不需要 GPU） ---"
+          "$BIN" simulate scene.json --steps 300 --json > sim.json
+          "$PY" - <<'PY'
+          import json
+          d = json.load(open("sim.json"))
+          assert d["ok"] is True, d
+          assert d["data"]["nan_bodies"] == 0, d
+          for st in d["data"]["states"]:
+              if st["kind"] == "dynamic":
+                  assert st["position"][1] > 0.0, st
+          print("仿真刚体数:", d["data"]["bodies"], "最大速度:", round(d["data"]["max_speed"], 4))
+          PY
+
+          echo "--- 轨迹采样（判断会不会倒 / 滑多远） ---"
+          "$BIN" simulate scene.json --trace-all --steps 200 --json > trace.json
+          "$PY" - <<'PY'
+          import json
+          d = json.load(open("trace.json"))
+          assert d["ok"] is True, d
+          trajs = d["data"]["trajectories"]
+          assert len(trajs) >= 1, d
+          t = trajs[0]
+          for key in ("fall", "rise", "travel", "path_length", "max_speed",
+                      "max_tilt_deg", "tipped_over", "last_motion_step", "samples"):
+              assert key in t, (key, t)
+          assert len(t["samples"]) >= 50, len(t["samples"])
+          assert t["samples"][0]["step"] == 0
+          print("轨迹数:", len(trajs), "| 首个:", t["name"], "下坠", round(t["fall"], 2),
+                "位移", round(t["travel"], 2), "采样", len(t["samples"]))
+          PY
+
+          echo "--- agent 幂等：--dry-run 不写盘 / --no-clobber 拒绝覆盖 ---"
+          "$BIN" render scene.json --dry-run --out ci_dry.png --json > dry.json
+          "$PY" - <<'PY'
+          import json, os
+          d = json.load(open("dry.json"))
+          assert d["ok"] is True, d
+          assert d["data"]["dry_run"] is True, d
+          assert d["data"]["would_write"] == ["ci_dry.png"], d
+          assert d["data"]["bytes"] == 0 and d["data"]["draw_calls"] == 0, d
+          assert not os.path.exists("ci_dry.png"), "dry-run 不许写盘"
+          print("--dry-run：物理跑了", d["data"]["simulate"]["steps"], "步，一个字节都没写")
+          PY
+          printf 'PREVIOUS' > ci_clobber.png
+          set +e
+          "$BIN" render scene.json --no-clobber --out ci_clobber.png --json > clobber.json
+          code=$?
+          set -e
+          if [ "$code" != "2" ]; then echo "期望退出码 2，实际 $code"; exit 1; fi
+          "$PY" - <<'PY'
+          import json
+          d = json.load(open("clobber.json"))
+          assert d["error"]["kind"] == "output_exists", d
+          assert d["error"]["path"] == "ci_clobber.png", d
+          assert open("ci_clobber.png").read() == "PREVIOUS", "拒绝覆盖就必须一个字都不动"
+          print("--no-clobber：退出码 2，kind =", d["error"]["kind"], "，旧文件未被改动")
+          PY
+          rm -f ci_dry.png clobber.json dry.json ci_clobber.png
+
+          echo "--- 定时动作 + 区域探针（不需要 GPU） ---"
+          printf '%s' '{"format":"quench3d.scene","version":1,"ground":{"size":20},"objects":[{"name":"球","shape":{"type":"sphere","radius":0.5},"position":[0,5,0],"body":"dynamic","mass":5.0},{"name":"台","shape":{"type":"box","size":[2,0.2,2]},"position":[0,0.1,0],"body":"static"}],"probes":[{"name":"落点","shape":"sphere","position":[0,0.6,0],"radius":1.0}],"actions":[],"simulate":{"steps":120,"dt":0.01666667}}' > action.json
+          "$BIN" simulate action.json --json > action_plain.json
+          "$PY" - <<'PY2'
+          import json
+          d = json.load(open("action_plain.json"))
+          assert d["ok"] is True, d
+          assert d["data"]["nan_bodies"] == 0, d
+          p = d["data"]["probes"][0]
+          assert p["name"] == "落点" and p["occupied"] is True, p
+          h = p["bodies"][0]
+          print("探针:", p["name"], "进入步", h["enter_step"], "区内最高速", round(h["max_speed"], 2))
+          PY2
+          # 把动作插进同一份场景：第 100 步给一次向上冲量，末态必须离地
+          "$PY" - <<'PY2'
+          import json
+          d = json.load(open("action.json"))
+          d["actions"] = [{"type": "impulse", "target": "球", "at_step": 100, "value": [0, 30, 0]}]
+          json.dump(d, open("action_impulse.json", "w"))
+          d2 = json.load(open("action.json"))
+          d2["actions"] = [{"type": "impulse", "target": "球", "at_time": 100 / 60.0, "value": [0, 30, 0]}]
+          json.dump(d2, open("action_time.json", "w"))
+          PY2
+          "$BIN" simulate action_impulse.json --json > action_impulse.out
+          "$BIN" simulate action_time.json --json > action_time.out
+          "$PY" - <<'PY'
+          import json
+          plain = json.load(open("action_plain.json"))["data"]
+          acted = json.load(open("action_impulse.json")) and json.load(open("action_impulse.out"))
+          assert acted["ok"] is True, acted
+          ball = [s for s in acted["data"]["states"] if s["name"] == "球"][0]
+          rest = [s for s in plain["states"] if s["name"] == "球"][0]
+          assert ball["position"][1] > 1.0 > rest["position"][1], (ball, rest)
+          # 探针只读：加不加动作都不改变"探针不碰物理"这条性质
+          pa = acted["data"]["probes"][0]
+          assert pa["bodies"][0]["exit_step"] is not None, pa
+          # at_time 与等价 at_step 必须逐位一致
+          a = json.load(open("action_impulse.out"))["data"]["states"]
+          b = json.load(open("action_time.out"))["data"]["states"]
+          assert a == b, "at_time 与 at_step 必须逐位一致"
+          print("动作后球 y =", round(ball["position"][1], 3), "（基线", round(rest["position"][1], 3), "）|",
+                "探针离开步", pa["bodies"][0]["exit_step"], "| at_time ≡ at_step")
+          PY
+
+          echo "--- 性能与资源基准（不需要 GPU） ---"
+          "$BIN" bench --bodies 100 --steps 30 --warmup 10 --no-render --json > bench.json
+          "$PY" - <<'PY'
+          import json
+          d = json.load(open("bench.json"))
+          assert d["ok"] is True, d
+          data = d["data"]
+          s = data["scales"][0]
+          assert s["bodies"] == 100 and s["steps"] == 30, s
+          assert s["ms_per_step"] > 0 and s["body_steps_per_sec"] > 0, s
+          assert data["startup_ms"] >= 0, data
+          assert data["notes"], data
+          print("每步", round(s["ms_per_step"], 4), "ms | 体·步/秒",
+                round(s["body_steps_per_sec"]), "| 峰值内存", data["peak_rss_mb"], "MB")
+          PY
+
+          echo "--- 非法输入：退出码必须是 2，且带 JSON 路径诊断 ---"
+          printf '{"objects":[{"name":"a","shape":{"type":"pyramid"},"body":"flying"}]}' > bad.json
+          set +e
+          "$BIN" validate bad.json --json > bad.out
+          code=$?
+          set -e
+          test "$code" = "2" || { echo "退出码应为 2，实际 $code"; cat bad.out; exit 1; }
+          "$PY" - <<'PY'
+          import json
+          d = json.load(open("bad.out"))
+          assert d["ok"] is False, d
+          diags = d["error"]["diagnostics"]
+          assert len(diags) >= 2, d
+          assert all(x["path"] for x in diags), d
+          print("诊断:", [(x["path"], x["message"][:40]) for x in diags])
+          PY
+
+          echo "--- 渲染（有 GPU 就出图，没有则按约定返回退出码 3） ---"
+          set +e
+          "$BIN" render scene.json --out out.png --json > render.json
+          code=$?
+          set -e
+          if [ "$code" != "0" ] && [ "$code" != "3" ]; then
+            echo "渲染失败但退出码不是 3：$code"
+            cat render.json
+            exit 1
+          fi
+          # 注意：python 的 heredoc 不能缩进，否则 bash 找不到结束标记
+          "$PY" - <<'PY'
+          import json
+          d = json.load(open("render.json"))
+          if d["ok"]:
+              assert d["data"]["bytes"] > 2000, d
+              print("已渲染:", d["data"]["output"], d["data"]["bytes"], "字节",
+                    "绘制调用", d["data"]["draw_calls"], "三角形", d["data"]["triangles"])
+              with open("out.png", "rb") as f:
+                  assert f.read(8) == b"\x89PNG\r\n\x1a\n", "输出不是 PNG"
+          else:
+              print("本机没有可用 GPU，渲染按约定返回退出码 3，error.kind =", d["error"]["kind"])
+          PY
+
+          echo "--- 仿真视频：内置 GIF/APNG 编码器（有 GPU 才真录，没有则退出码 3） ---"
+          set +e
+          "$BIN" movie scene.json --frames 4 --encoder gif --out demo.gif --json > movie_gif.json
+          code_gif=$?
+          "$BIN" movie scene.json --frames 4 --encoder apng --out demo_apng.png --json > movie_apng.json
+          code_apng=$?
+          set -e
+          for pair in "$code_gif movie_gif.json" "$code_apng movie_apng.json"; do
+            set -- $pair
+            if [ "$1" != "0" ] && [ "$1" != "3" ]; then
+              echo "录制失败但退出码不是 3：$1"
+              cat "$2"
+              exit 1
+            fi
+          done
+          "$PY" - <<'PY'
+          import json, pathlib
+
+          gif = json.load(open("movie_gif.json"))
+          apng = json.load(open("movie_apng.json"))
+          if not gif["ok"]:
+              assert gif["error"]["kind"] == "environment", gif
+              print("本机没有可用 GPU，录制按约定返回退出码 3")
+          else:
+              # 两个编码器必须拿到同一批像素（换封装不该换画面）
+              assert gif["data"]["digest"] == apng["data"]["digest"], (gif["data"]["digest"], apng["data"]["digest"])
+              blob = pathlib.Path("demo.gif").read_bytes()
+              assert blob[:6] == b"GIF89a" and blob[-1] == 0x3B, "不是合法 GIF"
+              assert gif["data"]["encoder"] == "gif" and gif["data"]["output"].endswith("demo.gif"), gif["data"]
+              png = pathlib.Path("demo_apng.png").read_bytes()
+              assert png[:8] == b"\x89PNG\r\n\x1a\n", "APNG 不是 PNG 容器"
+              assert b"acTL" in png, "APNG 缺 acTL 块"
+              assert apng["data"]["encoder"] == "apng", apng["data"]
+              print("已录 GIF", len(blob), "字节 / APNG", len(png), "字节，摘要", gif["data"]["digest"])
+          PY
+
+  # wasm 目标单独检查：引擎要能在浏览器里编译（CLI 是原生工具，不参与 wasm 构建）
+  wasm:
+    name: wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: 检查门面层能在 wasm32 上编译
+        run: cargo check -p quench3d --target wasm32-unknown-unknown --all-targets
+      - name: Clippy（wasm 目标）
+        run: cargo clippy -p quench3d --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # 真正打包一次 Web 产物，并检查页面 import 的符号与 wasm 能否实例化。
+      # 这一步能挡住「打包漏文件 / 页面 import 了不存在的函数 / wasm 损坏」。
+      - name: 安装 wasm-bindgen CLI（与 crate 版本锁一致）
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+
+      - name: 打包 Web 产物并检查
+        run: |
+          tools/build_web.sh physics_playground
+          node tools/check_web.mjs

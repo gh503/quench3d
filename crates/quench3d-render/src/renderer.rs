@@ -1,0 +1,2161 @@
+//! Quench3D 渲染器：前向 PBR + 平行光阴影 + 点光源 + 程序化天空 + 无限网格 + 调试线段。
+//!
+//! 使用方式是"立即模式"：每帧 `begin_frame()` → 多次 `draw()` → `render()`。
+//! 渲染器内部会做视锥剔除、按网格/材质合批、以及实例缓冲的按需扩容。
+
+use std::collections::HashMap;
+
+use bytemuck::{Pod, Zeroable};
+use quench3d_math::{Aabb, Mat4, Transform, Vec3, Vec4};
+use wgpu::util::DeviceExt;
+
+use crate::camera::{Camera, Frustum};
+use crate::context::{vertex_layout, FrameError, GpuContext};
+use crate::light::{Lighting, MAX_POINT_LIGHTS};
+use crate::lines::{DebugLines, LineVertex};
+use crate::material::{MaterialDesc, MaterialId, MeshId, TextureId};
+use crate::mesh::MeshData;
+use crate::texture::{default_texture, GpuTexture, ImageData};
+
+const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
+const PBR_WGSL: &str = include_str!("shaders/pbr.wgsl");
+const SHADOW_WGSL: &str = include_str!("shaders/shadow.wgsl");
+const SKY_WGSL: &str = include_str!("shaders/sky.wgsl");
+const GRID_WGSL: &str = include_str!("shaders/grid.wgsl");
+const LINE_WGSL: &str = include_str!("shaders/line.wgsl");
+const POST_WGSL: &str = include_str!("shaders/post.wgsl");
+const BLOOM_WGSL: &str = include_str!("shaders/bloom.wgsl");
+
+/// 把 `//@include common` 展开为公共 uniform 定义。
+fn expand(source: &str) -> String {
+    source.replace("//@include common", COMMON_WGSL)
+}
+
+/// 场景深度格式。
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+/// HDR 中间目标格式（线性、可混合、可过滤；WebGPU 核心里 `rgba16float` 三样都支持）。
+///
+/// 为什么不是 `rgba32float`：它在 WebGPU 核心里**不可混合**（要 `float32-blendable` 特性），
+/// 而半透明与网格线都要混合。f16 的精度对"tonemap 之前"的值完全够用
+/// （相对误差 ~1e-3，落在 8 位输出的 1 个色阶以内，见 `post_pass` 的像素测试）。
+pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// 阴影贴图格式（可比较采样）。
+pub const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// GPU 帧常量（必须与 `common.wgsl` 的 `Frame` 布局逐字节一致）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct FrameUniforms {
+    /// 视图投影矩阵。
+    pub view_proj: [[f32; 4]; 4],
+    /// 视图投影逆矩阵。
+    pub inv_view_proj: [[f32; 4]; 4],
+    /// xyz = 相机位置。
+    pub camera_pos: [f32; 4],
+    /// xyz = 指向光源方向，w = 平行光强度。
+    pub light_dir: [f32; 4],
+    /// rgb = 平行光颜色，w = 是否启用阴影。
+    pub light_color: [f32; 4],
+    /// rgb = 环境光颜色，w = 强度。
+    pub ambient: [f32; 4],
+    /// 阴影视图投影矩阵。
+    pub shadow_matrix: [[f32; 4]; 4],
+    /// 天顶色。
+    pub sky_zenith: [f32; 4],
+    /// 地平线色。
+    pub sky_horizon: [f32; 4],
+    /// 地面色。
+    pub sky_ground: [f32; 4],
+    /// rgb = 雾色，w = 雾密度。
+    pub fog: [f32; 4],
+    /// x = 时间，y = 阴影偏移，z = 阴影纹素，w = 阴影强度。
+    pub params: [f32; 4],
+    /// 点光源（结构体数组，与 WGSL 的 `array<PointLight, 8>` 同布局）。
+    pub point_lights: [PointLightUniform; MAX_POINT_LIGHTS],
+    /// x = 点光源数量，y = 绘制天空，z = 曝光，w = 网格高度。
+    pub params2: [f32; 4],
+}
+
+/// 单盏点光源的 uniform 数据。
+///
+/// **必须与 `shaders/common.wgsl` 的 `PointLight` 逐字段对应**：那边是
+/// `array<PointLight, 8>`，也就是**结构体数组（pos0, color0, pos1, color1 …）**。
+/// 曾经这里写成两个并列数组（8 个位置一段 + 8 个颜色一段），布局对不上，于是着色器
+/// 把"第二盏灯的位置"当成"第一盏灯的颜色和强度"在读——看起来有光，其实颜色和强度
+/// 全是错的，只有一盏灯时更是完全无效。布局回归测试见
+/// `frame_uniform_layout_matches_wgsl`。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct PointLightUniform {
+    /// xyz = 世界坐标，w = 影响半径。
+    pub pos_range: [f32; 4],
+    /// rgb = 颜色，w = 强度。
+    pub color_intensity: [f32; 4],
+}
+
+/// 每实例的顶点数据。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct InstanceRaw {
+    /// 模型矩阵。
+    pub model: [[f32; 4]; 4],
+    /// 颜色倍乘（线性 RGBA）。
+    pub color: [f32; 4],
+    /// x = 金属度，y = 粗糙度，z = 自发光强度，w = 是否覆盖材质参数。
+    pub params: [f32; 4],
+}
+
+/// 一次绘制请求（面向使用者的实例描述）。
+#[derive(Clone, Copy, Debug)]
+pub struct InstanceDesc {
+    /// 世界变换。
+    pub transform: Transform,
+    /// 颜色倍乘（线性空间）。
+    pub color: Vec4,
+    /// 覆盖材质的金属度（`None` 用材质自身的值）。
+    pub metallic: Option<f32>,
+    /// 覆盖材质的粗糙度。
+    pub roughness: Option<f32>,
+    /// 自发光强度倍乘。
+    pub emissive_strength: f32,
+}
+
+impl Default for InstanceDesc {
+    fn default() -> Self {
+        Self {
+            transform: Transform::IDENTITY,
+            color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+            metallic: None,
+            roughness: None,
+            emissive_strength: 1.0,
+        }
+    }
+}
+
+impl InstanceDesc {
+    /// 由变换构造。
+    pub fn new(transform: Transform) -> Self {
+        Self {
+            transform,
+            ..Default::default()
+        }
+    }
+
+    /// 位置 + 等比缩放。
+    pub fn from_position(position: Vec3, scale: f32) -> Self {
+        Self::new(Transform::new(
+            position,
+            quench3d_math::Quat::IDENTITY,
+            Vec3::splat(scale),
+        ))
+    }
+
+    /// 颜色。
+    pub fn with_color(mut self, color: Vec4) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// 覆盖金属度/粗糙度。
+    pub fn with_pbr(mut self, metallic: f32, roughness: f32) -> Self {
+        self.metallic = Some(metallic);
+        self.roughness = Some(roughness);
+        self
+    }
+
+    /// 自发光强度。
+    pub fn with_emissive(mut self, strength: f32) -> Self {
+        self.emissive_strength = strength;
+        self
+    }
+
+    fn to_raw(self) -> InstanceRaw {
+        let m = self.transform.matrix();
+        let override_material = self.metallic.is_some() || self.roughness.is_some();
+        InstanceRaw {
+            model: m.to_cols_arrays(),
+            color: self.color.to_array(),
+            params: [
+                self.metallic.unwrap_or(0.0),
+                self.roughness.unwrap_or(0.5),
+                self.emissive_strength,
+                if override_material { 1.0 } else { 0.0 },
+            ],
+        }
+    }
+}
+
+/// 一个批次的绘制范围。
+#[derive(Clone, Copy, Debug)]
+struct Batch {
+    mesh: MeshId,
+    material: MaterialId,
+    first: u32,
+    count: u32,
+    bounds: Aabb,
+}
+
+/// GPU 网格。
+struct GpuMesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    bounds: Aabb,
+    name: String,
+}
+
+/// GPU 材质。
+struct GpuMaterial {
+    desc: MaterialDesc,
+    bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
+    name: String,
+}
+
+/// 每帧渲染统计。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderStats {
+    /// 不透明绘制调用数。
+    pub draw_calls: u32,
+    /// 提交的实例数。
+    pub instances: u32,
+    /// 提交的三角形数。
+    pub triangles: u64,
+    /// 被视锥剔除的实例数。
+    pub culled: u32,
+    /// 阴影绘制调用数。
+    pub shadow_draw_calls: u32,
+    /// 阴影实例数。
+    pub shadow_instances: u32,
+    /// 调试线段数。
+    pub lines: u32,
+    /// 后处理趟数（正常是 1；bloom 打开时是 1 + 3）。
+    pub post_passes: u32,
+    /// 帧序号。
+    pub frame_index: u64,
+}
+
+/// 后处理参数（与 `post.wgsl` / `bloom.wgsl` 的 `PostParams` 逐字节一致）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct PostUniforms {
+    /// x = bloom 开关，y = 强度，z = 阈值，w = 预留。
+    pub params: [f32; 4],
+    /// xy = bloom 贴图 texel 大小（1/尺寸），zw = bloom 贴图尺寸。
+    pub bloom_texel: [f32; 4],
+    /// xy = 目标 texel 大小（1/尺寸），zw = 目标尺寸。
+    ///
+    /// 后处理 pass 的输出尺寸**不一定等于** bloom 贴图尺寸（bloom 是半分辨率），
+    /// 采样 bloom 时不能用 bloom 的 texel：那是 2× 缩放，只会读到一角。
+    pub target_texel: [f32; 4],
+}
+
+/// Bloom 配置。
+#[derive(Clone, Copy, Debug)]
+pub struct BloomOptions {
+    /// 是否启用。
+    pub enabled: bool,
+    /// 强度（合成时乘的系数）。
+    pub intensity: f32,
+    /// 亮度阈值（Rec.709 亮度，线性空间；超过才开始外溢）。
+    pub threshold: f32,
+}
+
+impl Default for BloomOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 0.6,
+            threshold: 1.0,
+        }
+    }
+}
+
+/// 渲染器创建选项。
+#[derive(Clone, Copy, Debug)]
+pub struct RendererOptions {
+    /// 阴影贴图分辨率。
+    pub shadow_map_size: u32,
+    /// 是否启用阴影。
+    pub shadows: bool,
+    /// 是否启用无限网格。
+    pub grid: bool,
+    /// 网格高度。
+    pub grid_height: f32,
+    /// 是否绘制天空。
+    pub sky: bool,
+    /// Bloom（缺省关闭；打开后画面与缺省不同，见 `docs/gap_analysis.md` P1 #25）。
+    pub bloom: BloomOptions,
+}
+
+impl Default for RendererOptions {
+    fn default() -> Self {
+        Self {
+            shadow_map_size: 2048,
+            shadows: true,
+            grid: true,
+            grid_height: 0.0,
+            sky: true,
+            bloom: BloomOptions::default(),
+        }
+    }
+}
+
+/// Quench3D 渲染器。
+pub struct Renderer {
+    // 管线与布局
+    frame_layout: wgpu::BindGroupLayout,
+    shadow_bind_layout: wgpu::BindGroupLayout,
+    material_layout: wgpu::BindGroupLayout,
+    opaque_pipeline: wgpu::RenderPipeline,
+    alpha_pipeline: wgpu::RenderPipeline,
+    /// 不剔除背面（材质的 `double_sided` 为真时使用）。
+    ///
+    /// 半透明不需要这条：`alpha_pipeline` 本来就是 `cull_mode: None`。
+    opaque_double_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
+    grid_pipeline: wgpu::RenderPipeline,
+    line_pipeline: wgpu::RenderPipeline,
+    /// 后处理：HDR → tonemap（+ bloom）→ 目标。
+    post_pipeline: wgpu::RenderPipeline,
+    /// Bloom：亮度提取 + 横向/纵向模糊。
+    bloom_bright_pipeline: wgpu::RenderPipeline,
+    bloom_blur_h_pipeline: wgpu::RenderPipeline,
+    bloom_blur_v_pipeline: wgpu::RenderPipeline,
+    post_layout: wgpu::BindGroupLayout,
+    bloom_layout: wgpu::BindGroupLayout,
+    post_uniform: wgpu::Buffer,
+    post_sampler: wgpu::Sampler,
+    /// 依赖尺寸，随 HDR 目标一起重建。
+    post_bind_group: Option<wgpu::BindGroup>,
+    bloom_bright_bind_group: Option<wgpu::BindGroup>,
+    bloom_blur_h_bind_group: Option<wgpu::BindGroup>,
+    bloom_blur_v_bind_group: Option<wgpu::BindGroup>,
+
+    // 帧资源
+    frame_uniform: wgpu::Buffer,
+    frame_bind_group: wgpu::BindGroup,
+    shadow_texture: wgpu::Texture,
+    shadow_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    shadow_bind_group: wgpu::BindGroup,
+
+    // 资源表
+    meshes: Vec<GpuMesh>,
+    materials: Vec<GpuMaterial>,
+    textures: Vec<GpuTexture>,
+    white_texture: GpuTexture,
+    flat_normal_texture: GpuTexture,
+    black_texture: GpuTexture,
+
+    // 每帧状态
+    staging: Vec<(InstanceRaw, Aabb)>,
+    visible: Vec<InstanceRaw>,
+    /// 每个批次在可见实例缓冲中的 `(起始, 数量)`。
+    visible_ranges: Vec<(u32, u32)>,
+    batches: Vec<Batch>,
+    batch_index: HashMap<u64, usize>,
+    /// 排序后的绘制顺序：`(是否透明, 材质, 网格, 批次下标)`。
+    /// 绘制顺序：`(alpha, double_sided, material, mesh, batch)`。
+    ///
+    /// 前两项是**管线选择**（不透明在前、半透明在后；双面与单面分开批），
+    /// 所以它们必须参与排序键，否则同一材质会被两套管线交叉绘制。
+    draw_order: Vec<(u8, u8, MaterialId, MeshId, usize)>,
+    instance_buffer: wgpu::Buffer,
+    instance_capacity: usize,
+
+    /// 调试线段收集器。
+    pub lines: DebugLines,
+    line_buffer: wgpu::Buffer,
+    line_capacity: usize,
+
+    // 目标尺寸相关
+    depth_view: Option<wgpu::TextureView>,
+    /// MSAA 颜色视图（HDR 格式）。
+    msaa_view: Option<wgpu::TextureView>,
+    /// HDR 中间目标（场景渲染到这里，再由后处理读）。
+    hdr_view: Option<wgpu::TextureView>,
+    /// Bloom ping-pong（半分辨率）。
+    bloom_a_view: Option<wgpu::TextureView>,
+    bloom_b_view: Option<wgpu::TextureView>,
+    bloom_size: (u32, u32),
+    target_size: (u32, u32),
+    pub sample_count: u32,
+
+    /// 渲染选项。
+    pub options: RendererOptions,
+    /// 一帧的时间（秒），供着色器动画使用。
+    pub time: f32,
+    frame_index: u64,
+    stats: RenderStats,
+}
+
+/// 创建管线时用到的参数集合。
+struct PipelineSpec<'a> {
+    label: &'a str,
+    layout: &'a wgpu::PipelineLayout,
+    module: &'a wgpu::ShaderModule,
+    vs_entry: &'a str,
+    fs_entry: Option<&'a str>,
+    buffers: Vec<Option<wgpu::VertexBufferLayout<'a>>>,
+    targets: Vec<Option<wgpu::ColorTargetState>>,
+    depth: Option<wgpu::DepthStencilState>,
+    sample_count: u32,
+    primitive: wgpu::PrimitiveState,
+}
+
+fn build_pipeline(device: &wgpu::Device, spec: PipelineSpec<'_>) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(spec.label),
+        layout: Some(spec.layout),
+        vertex: wgpu::VertexState {
+            module: spec.module,
+            entry_point: Some(spec.vs_entry),
+            compilation_options: Default::default(),
+            buffers: &spec.buffers,
+        },
+        primitive: spec.primitive,
+        depth_stencil: spec.depth,
+        multisample: wgpu::MultisampleState {
+            count: spec.sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: spec.fs_entry.map(|entry| wgpu::FragmentState {
+            module: spec.module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            targets: &spec.targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// 全屏一趟的管线（后处理与 bloom 都是这类：无顶点缓冲、无深度、无 MSAA）。
+fn build_fullscreen_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    entry: &str,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    build_pipeline(
+        device,
+        PipelineSpec {
+            label,
+            layout,
+            module,
+            vs_entry: "vs_main",
+            fs_entry: Some(entry),
+            buffers: vec![],
+            targets: vec![Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            depth: None,
+            sample_count: 1,
+            primitive: wgpu::PrimitiveState::default(),
+        },
+    )
+}
+
+fn texture_binding(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn sampler_binding(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(if filterable {
+            wgpu::SamplerBindingType::Filtering
+        } else {
+            wgpu::SamplerBindingType::NonFiltering
+        }),
+        count: None,
+    }
+}
+
+impl Renderer {
+    /// 创建渲染器（分配管线与默认资源）。
+    pub fn new(ctx: &GpuContext, options: RendererOptions) -> Self {
+        let device = &ctx.device;
+        let sample_count = ctx.msaa_samples;
+
+        // ---------- 布局 ----------
+        let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-frame-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let shadow_bind_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("quench3d-shadow-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        // 阴影用比较采样器（textureSampleCompare）
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                ],
+            });
+
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-material-layout"),
+            entries: &[
+                texture_binding(0),
+                sampler_binding(1, true),
+                texture_binding(2),
+                texture_binding(3),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                texture_binding(5),
+                sampler_binding(6, true),
+            ],
+        });
+
+        let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quench3d-pbr-layout"),
+            bind_group_layouts: &[
+                Some(&frame_layout),
+                Some(&shadow_bind_layout),
+                Some(&material_layout),
+            ],
+            immediate_size: 0,
+        });
+        let frame_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quench3d-frame-only-layout"),
+                bind_group_layouts: &[Some(&frame_layout)],
+                immediate_size: 0,
+            });
+
+        // ---------- 后处理布局 ----------
+        // 0 = HDR 颜色，1 = 采样器，2 = 后处理参数，3 = bloom 颜色
+        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-post-layout"),
+            entries: &[
+                texture_binding(0),
+                sampler_binding(1, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                texture_binding(3),
+            ],
+        });
+        let bloom_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-bloom-layout"),
+            entries: &[
+                texture_binding(0),
+                sampler_binding(1, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quench3d-post-pipeline-layout"),
+            bind_group_layouts: &[Some(&post_layout)],
+            immediate_size: 0,
+        });
+        let bloom_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quench3d-bloom-pipeline-layout"),
+                bind_group_layouts: &[Some(&bloom_layout)],
+                immediate_size: 0,
+            });
+
+        // ---------- 着色器 ----------
+        let pbr_module = ctx.create_shader("quench3d-pbr", &expand(PBR_WGSL));
+        let post_module = ctx.create_shader("quench3d-post", POST_WGSL);
+        let bloom_module = ctx.create_shader("quench3d-bloom", BLOOM_WGSL);
+        let shadow_module = ctx.create_shader("quench3d-shadow", &expand(SHADOW_WGSL));
+        let sky_module = ctx.create_shader("quench3d-sky", &expand(SKY_WGSL));
+        let grid_module = ctx.create_shader("quench3d-grid", &expand(GRID_WGSL));
+        let line_module = ctx.create_shader("quench3d-line", &expand(LINE_WGSL));
+
+        // ---------- 帧资源 ----------
+        let frame_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-frame-uniform"),
+            size: std::mem::size_of::<FrameUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-frame-bind-group"),
+            layout: &frame_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: frame_uniform.as_entire_binding(),
+            }],
+        });
+
+        let shadow_size = options.shadow_map_size.clamp(512, 4096);
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-shadow-map"),
+            size: wgpu::Extent3d {
+                width: shadow_size,
+                height: shadow_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("quench3d-shadow-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-shadow-bind-group"),
+            layout: &shadow_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+        });
+
+        // ---------- 管线 ----------
+        let mesh_buffer = Some(vertex_layout());
+        let instance_buffer_layout = Self::instance_layout();
+
+        let color_targets = |format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
+            vec![Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })]
+        };
+        let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+        let depth_state = |write: bool, compare: wgpu::CompareFunction, bias: i32| {
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(write),
+                depth_compare: Some(compare),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: bias,
+                    slope_scale: 0.0,
+                    clamp: 0.0,
+                },
+            })
+        };
+
+        let opaque_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-opaque",
+                layout: &pbr_pipeline_layout,
+                module: &pbr_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![mesh_buffer.clone(), Some(instance_buffer_layout.clone())],
+                targets: color_targets(HDR_FORMAT, None),
+                depth: depth_state(true, wgpu::CompareFunction::Less, 0),
+                sample_count,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let alpha_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-alpha",
+                layout: &pbr_pipeline_layout,
+                module: &pbr_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![mesh_buffer.clone(), Some(instance_buffer_layout.clone())],
+                targets: color_targets(HDR_FORMAT, alpha_blend),
+                depth: depth_state(false, wgpu::CompareFunction::Less, 0),
+                sample_count,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+            },
+        );
+
+        // 双面材质：不剔除背面（着色器按 front_facing 翻转法线，光照仍然正确）
+        let opaque_double_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-opaque-double-sided",
+                layout: &pbr_pipeline_layout,
+                module: &pbr_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![mesh_buffer.clone(), Some(instance_buffer_layout.clone())],
+                targets: color_targets(HDR_FORMAT, None),
+                depth: depth_state(true, wgpu::CompareFunction::Less, 0),
+                sample_count,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+            },
+        );
+
+        let shadow_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-shadow",
+                layout: &frame_pipeline_layout,
+                module: &shadow_module,
+                vs_entry: "vs_main",
+                fs_entry: None,
+                buffers: vec![mesh_buffer.clone(), Some(instance_buffer_layout.clone())],
+                targets: vec![],
+                depth: Some(wgpu::DepthStencilState {
+                    format: SHADOW_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    // 正面剔除 + 深度偏移：显著减少阴影痤疮
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                sample_count: 1,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(wgpu::Face::Front),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let sky_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-sky",
+                layout: &frame_pipeline_layout,
+                module: &sky_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![],
+                targets: color_targets(HDR_FORMAT, None),
+                depth: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                sample_count,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+            },
+        );
+
+        let grid_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-grid",
+                layout: &frame_pipeline_layout,
+                module: &grid_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![],
+                targets: color_targets(HDR_FORMAT, alpha_blend),
+                depth: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                sample_count,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+            },
+        );
+
+        let line_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-lines",
+                layout: &frame_pipeline_layout,
+                module: &line_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<LineVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+                })],
+                targets: color_targets(HDR_FORMAT, alpha_blend),
+                depth: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    // 线段拓扑不支持深度偏移，这里靠 LessEqual + 略微前移的顶点着色器偏移
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                sample_count,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+            },
+        );
+
+        // ---------- 后处理管线 ----------
+        // 后处理输出到**真正的目标**（`ctx.format`，通常是 sRGB）：着色器给线性值，
+        // sRGB 编码由目标格式的硬件转换完成——和改造前物体着色器直接写目标时的假设一致。
+        let post_pipeline = build_fullscreen_pipeline(
+            device,
+            "quench3d-post",
+            &post_pipeline_layout,
+            &post_module,
+            "fs_main",
+            ctx.format,
+        );
+        // bloom 三步都写 HDR 格式的半分辨率贴图，不需要深度与 MSAA。
+        let bloom_bright_pipeline = build_fullscreen_pipeline(
+            device,
+            "quench3d-bloom-bright",
+            &bloom_pipeline_layout,
+            &bloom_module,
+            "fs_bright",
+            HDR_FORMAT,
+        );
+        let bloom_blur_h_pipeline = build_fullscreen_pipeline(
+            device,
+            "quench3d-bloom-blur-h",
+            &bloom_pipeline_layout,
+            &bloom_module,
+            "fs_blur_h",
+            HDR_FORMAT,
+        );
+        let bloom_blur_v_pipeline = build_fullscreen_pipeline(
+            device,
+            "quench3d-bloom-blur-v",
+            &bloom_pipeline_layout,
+            &bloom_module,
+            "fs_blur_v",
+            HDR_FORMAT,
+        );
+
+        let post_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-post-uniform"),
+            size: std::mem::size_of::<PostUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let post_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("quench3d-post-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // ---------- 默认纹理 ----------
+        let white_texture = default_texture(device, &ctx.queue, &ImageData::white(), "white");
+        let flat_normal_texture =
+            default_texture(device, &ctx.queue, &ImageData::flat_normal(), "flat-normal");
+        let black_texture = default_texture(
+            device,
+            &ctx.queue,
+            &ImageData::solid([0, 0, 0, 255]),
+            "black",
+        );
+
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-instances"),
+            size: (std::mem::size_of::<InstanceRaw>() * 256) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let line_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-lines"),
+            size: (std::mem::size_of::<LineVertex>() * 1024) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            frame_layout,
+            shadow_bind_layout,
+            material_layout,
+            opaque_pipeline,
+            alpha_pipeline,
+            opaque_double_pipeline,
+            shadow_pipeline,
+            sky_pipeline,
+            grid_pipeline,
+            line_pipeline,
+            frame_uniform,
+            frame_bind_group,
+            shadow_texture,
+            shadow_view,
+            shadow_sampler,
+            shadow_bind_group,
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            textures: Vec::new(),
+            white_texture,
+            flat_normal_texture,
+            black_texture,
+            staging: Vec::new(),
+            visible: Vec::new(),
+            visible_ranges: Vec::new(),
+            batches: Vec::new(),
+            batch_index: HashMap::new(),
+            draw_order: Vec::new(),
+            instance_buffer,
+            instance_capacity: 256,
+            lines: DebugLines::new(),
+            line_buffer,
+            line_capacity: 1024,
+            post_pipeline,
+            bloom_bright_pipeline,
+            bloom_blur_h_pipeline,
+            bloom_blur_v_pipeline,
+            post_layout,
+            bloom_layout,
+            post_uniform,
+            post_sampler,
+            post_bind_group: None,
+            bloom_bright_bind_group: None,
+            bloom_blur_h_bind_group: None,
+            bloom_blur_v_bind_group: None,
+            depth_view: None,
+            msaa_view: None,
+            hdr_view: None,
+            bloom_a_view: None,
+            bloom_b_view: None,
+            bloom_size: (0, 0),
+            target_size: (0, 0),
+            sample_count,
+            options,
+            time: 0.0,
+            frame_index: 0,
+            stats: RenderStats::default(),
+        }
+    }
+
+    fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+            4 => Float32x4,
+            5 => Float32x4,
+            6 => Float32x4,
+            7 => Float32x4,
+            8 => Float32x4,
+            9 => Float32x4
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceRaw>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 资源上传
+    // -----------------------------------------------------------------
+
+    /// 上传网格，返回句柄。
+    pub fn add_mesh(&mut self, ctx: &GpuContext, mesh: &MeshData) -> MeshId {
+        self.add_mesh_named(ctx, mesh, "mesh")
+    }
+
+    /// 上传网格并命名（调试用）。
+    pub fn add_mesh_named(&mut self, ctx: &GpuContext, mesh: &MeshData, name: &str) -> MeshId {
+        let device = &ctx.device;
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quench3d-vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quench3d-indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let id = self.meshes.len() as MeshId;
+        self.meshes.push(GpuMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count: mesh.indices.len() as u32,
+            bounds: mesh.aabb(),
+            name: name.to_string(),
+        });
+        id
+    }
+
+    /// 上传纹理，返回句柄。
+    pub fn add_texture(&mut self, ctx: &GpuContext, image: &ImageData, srgb: bool) -> TextureId {
+        let options = if srgb {
+            crate::texture::TextureOptions::color()
+        } else {
+            crate::texture::TextureOptions::data()
+        };
+        let texture = GpuTexture::upload(&ctx.device, &ctx.queue, image, options);
+        let id = self.textures.len() as TextureId;
+        self.textures.push(texture);
+        id
+    }
+
+    /// 创建材质，返回句柄。
+    pub fn add_material(&mut self, ctx: &GpuContext, desc: MaterialDesc) -> MaterialId {
+        self.add_material_named(ctx, desc, "material")
+    }
+
+    /// 创建材质并命名。
+    pub fn add_material_named(
+        &mut self,
+        ctx: &GpuContext,
+        desc: MaterialDesc,
+        name: &str,
+    ) -> MaterialId {
+        let device = &ctx.device;
+        let uniform = desc.to_uniform();
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quench3d-material-uniform"),
+            contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let view_for = |id: Option<TextureId>, fallback: &GpuTexture| -> wgpu::TextureView {
+            match id.and_then(|i| self.textures.get(i as usize)) {
+                Some(t) => t.view.clone(),
+                None => fallback.view.clone(),
+            }
+        };
+        let base_view = view_for(desc.base_color_texture, &self.white_texture);
+        let normal_view = view_for(desc.normal_texture, &self.flat_normal_texture);
+        let mr_view = view_for(desc.metallic_roughness_texture, &self.white_texture);
+        let emissive_view = view_for(desc.emissive_texture, &self.black_texture);
+        // 采样器统一使用基础色纹理的采样器（贴图参数差异对最终效果影响很小）
+        let sampler = self
+            .textures
+            .get(desc.base_color_texture.unwrap_or(u32::MAX) as usize)
+            .map(|t| t.sampler.clone())
+            .unwrap_or_else(|| self.white_texture.sampler.clone());
+        let data_sampler = self
+            .textures
+            .get(desc.normal_texture.unwrap_or(u32::MAX) as usize)
+            .map(|t| t.sampler.clone())
+            .unwrap_or_else(|| self.flat_normal_texture.sampler.clone());
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-material-bind-group"),
+            layout: &self.material_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&base_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&normal_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&mr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&emissive_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&data_sampler),
+                },
+            ],
+        });
+
+        let id = self.materials.len() as MaterialId;
+        self.materials.push(GpuMaterial {
+            desc,
+            bind_group,
+            uniform_buffer,
+            name: name.to_string(),
+        });
+        id
+    }
+
+    /// 覆盖已有材质的 GPU 常量（用于运行时调整颜色/粗糙度）。
+    pub fn update_material(&mut self, ctx: &GpuContext, id: MaterialId, desc: MaterialDesc) {
+        if let Some(m) = self.materials.get_mut(id as usize) {
+            let uniform = desc.to_uniform();
+            ctx.queue
+                .write_buffer(&m.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+            m.desc = desc;
+        }
+    }
+
+    /// 读取材质描述。
+    pub fn material(&self, id: MaterialId) -> Option<&MaterialDesc> {
+        self.materials.get(id as usize).map(|m| &m.desc)
+    }
+
+    /// 材质名称（调试用）。
+    pub fn material_name(&self, id: MaterialId) -> Option<&str> {
+        self.materials.get(id as usize).map(|m| m.name.as_str())
+    }
+
+    /// 网格信息 `(名称, 索引数, 包围盒)`。
+    pub fn mesh_info(&self, id: MeshId) -> Option<(&str, u32, Aabb)> {
+        self.meshes
+            .get(id as usize)
+            .map(|m| (m.name.as_str(), m.index_count, m.bounds))
+    }
+
+    /// 已上传资源数量 `(网格, 材质, 纹理)`。
+    pub fn resource_counts(&self) -> (usize, usize, usize) {
+        (self.meshes.len(), self.materials.len(), self.textures.len())
+    }
+
+    // -----------------------------------------------------------------
+    // 每帧绘制
+    // -----------------------------------------------------------------
+
+    /// 开始一帧（清空待绘制列表）。
+    pub fn begin_frame(&mut self) {
+        self.staging.clear();
+        self.batches.clear();
+        self.batch_index.clear();
+        self.lines.clear();
+    }
+
+    /// 提交一次绘制。
+    pub fn draw(&mut self, mesh: MeshId, material: MaterialId, instance: InstanceDesc) {
+        let bounds = match self.meshes.get(mesh as usize) {
+            Some(m) => m.bounds.transformed(&instance.transform.matrix()),
+            None => return,
+        };
+        let key = ((mesh as u64) << 32) | material as u64;
+        let raw = instance.to_raw();
+        let index = match self.batch_index.get(&key) {
+            Some(i) => *i,
+            None => {
+                let i = self.batches.len();
+                self.batches.push(Batch {
+                    mesh,
+                    material,
+                    first: self.staging.len() as u32,
+                    count: 0,
+                    bounds: Aabb::EMPTY,
+                });
+                self.batch_index.insert(key, i);
+                i
+            }
+        };
+        let batch = &mut self.batches[index];
+        batch.count += 1;
+        batch.bounds = batch.bounds.union(&bounds);
+        self.staging.push((raw, bounds));
+    }
+
+    /// 批量提交同一网格/材质的多个实例。
+    pub fn draw_batch(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        instances: impl IntoIterator<Item = InstanceDesc>,
+    ) {
+        for i in instances {
+            self.draw(mesh, material, i);
+        }
+    }
+
+    fn ensure_instance_capacity(&mut self, device: &wgpu::Device, needed: usize) {
+        if needed <= self.instance_capacity {
+            return;
+        }
+        let cap = needed.next_power_of_two().max(256);
+        self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-instances"),
+            size: (std::mem::size_of::<InstanceRaw>() * cap) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.instance_capacity = cap;
+    }
+
+    fn ensure_line_capacity(&mut self, device: &wgpu::Device, needed: usize) {
+        if needed <= self.line_capacity {
+            return;
+        }
+        let cap = needed.next_power_of_two().max(1024);
+        self.line_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-lines"),
+            size: (std::mem::size_of::<LineVertex>() * cap) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.line_capacity = cap;
+    }
+
+    fn ensure_targets(&mut self, ctx: &GpuContext, size: (u32, u32)) {
+        if self.target_size == size && self.depth_view.is_some() {
+            return;
+        }
+        let device = &ctx.device;
+        let (w, h) = (size.0.max(1), size.1.max(1));
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-depth"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: self.sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.depth_view = Some(depth.create_view(&wgpu::TextureViewDescriptor::default()));
+
+        // HDR 中间目标：场景渲染到这里（线性、rgba16float），后处理再读它做 tonemap。
+        let hdr = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-hdr"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
+        self.hdr_view = Some(hdr_view.clone());
+
+        if self.sample_count > 1 {
+            let msaa = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("quench3d-msaa"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                // 注意是 HDR 格式：MSAA 颜色缓冲必须与主 pass 的颜色目标格式一致
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.msaa_view = Some(msaa.create_view(&wgpu::TextureViewDescriptor::default()));
+        } else {
+            self.msaa_view = None;
+        }
+
+        // Bloom ping-pong（半分辨率：外溢半径按屏幕比例算，半分辨率足够且省一半带宽）
+        let (bw, bh) = ((w.div_ceil(2)).max(1), (h.div_ceil(2)).max(1));
+        self.bloom_size = (bw, bh);
+        let make_bloom = |label: &str| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: bw,
+                        height: bh,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: HDR_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let bloom_a = make_bloom("quench3d-bloom-a");
+        let bloom_b = make_bloom("quench3d-bloom-b");
+        self.bloom_a_view = Some(bloom_a.clone());
+        self.bloom_b_view = Some(bloom_b.clone());
+
+        // 绑定组随尺寸重建
+        self.post_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-post-bind-group"),
+            layout: &self.post_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.post_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&bloom_a),
+                },
+            ],
+        }));
+        let bloom_bind = |label: &str, src: &wgpu::TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &self.bloom_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.post_uniform.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        self.bloom_bright_bind_group =
+            Some(bloom_bind("quench3d-bloom-bright-bind-group", &hdr_view));
+        self.bloom_blur_h_bind_group =
+            Some(bloom_bind("quench3d-bloom-blur-h-bind-group", &bloom_a));
+        self.bloom_blur_v_bind_group =
+            Some(bloom_bind("quench3d-bloom-blur-v-bind-group", &bloom_b));
+        self.target_size = (w, h);
+    }
+
+    /// 计算本帧的阴影视图投影矩阵。
+    fn shadow_matrix_for(&self, camera: &Camera, lighting: &Lighting) -> Mat4 {
+        match lighting.sun {
+            Some(s) if s.cast_shadows && self.options.shadows => {
+                let radius = s.shadow_radius.clamp(2.0, 4000.0);
+                let focus = camera.position + camera.forward() * (radius * 0.45);
+                s.shadow_matrix(focus, radius, radius * 2.0)
+            }
+            _ => Mat4::IDENTITY,
+        }
+    }
+
+    fn build_frame_uniforms(
+        &self,
+        camera: &Camera,
+        lighting: &Lighting,
+        shadow_matrix: Mat4,
+    ) -> FrameUniforms {
+        let view_proj = camera.view_projection();
+        let inv_view_proj = view_proj.inverse();
+        let sun = lighting.sun;
+
+        let mut point_lights = [PointLightUniform::zeroed(); MAX_POINT_LIGHTS];
+        let count = lighting.point_lights.len().min(MAX_POINT_LIGHTS);
+        for (i, l) in lighting.point_lights.iter().take(count).enumerate() {
+            point_lights[i] = PointLightUniform {
+                pos_range: [l.position.x, l.position.y, l.position.z, l.radius.max(0.01)],
+                color_intensity: [l.color.x, l.color.y, l.color.z, l.intensity],
+            };
+        }
+
+        let (light_dir, light_color) = match sun {
+            Some(s) => {
+                let d = s.to_light();
+                (
+                    [d.x, d.y, d.z, s.intensity],
+                    [
+                        s.color.x,
+                        s.color.y,
+                        s.color.z,
+                        if s.cast_shadows && self.options.shadows {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    ],
+                )
+            }
+            None => ([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
+        };
+
+        let shadow_map_size = self.shadow_texture.width() as f32;
+        FrameUniforms {
+            view_proj: view_proj.to_cols_arrays(),
+            inv_view_proj: inv_view_proj.to_cols_arrays(),
+            camera_pos: [camera.position.x, camera.position.y, camera.position.z, 1.0],
+            light_dir,
+            light_color,
+            ambient: [
+                lighting.ambient_color.x,
+                lighting.ambient_color.y,
+                lighting.ambient_color.z,
+                lighting.ambient_intensity,
+            ],
+            shadow_matrix: shadow_matrix.to_cols_arrays(),
+            sky_zenith: [
+                lighting.sky.zenith.x,
+                lighting.sky.zenith.y,
+                lighting.sky.zenith.z,
+                1.0,
+            ],
+            sky_horizon: [
+                lighting.sky.horizon.x,
+                lighting.sky.horizon.y,
+                lighting.sky.horizon.z,
+                1.0,
+            ],
+            sky_ground: [
+                lighting.sky.ground.x,
+                lighting.sky.ground.y,
+                lighting.sky.ground.z,
+                1.0,
+            ],
+            fog: [
+                lighting.fog.color.x,
+                lighting.fog.color.y,
+                lighting.fog.color.z,
+                lighting.fog.density,
+            ],
+            params: [
+                self.time,
+                // 深度偏移：约 1.5 个世界空间纹素，换算到归一化深度（与 shadow_matrix 的深度范围无关，恒为 0.75/size）
+                0.75 / shadow_map_size,
+                1.0 / shadow_map_size,
+                lighting.shadow_strength.clamp(0.0, 1.0),
+            ],
+            point_lights,
+            params2: [
+                count as f32,
+                if lighting.sky.enabled && self.options.sky {
+                    1.0
+                } else {
+                    0.0
+                },
+                lighting.exposure.max(0.001),
+                lighting.sky.grid_height,
+            ],
+        }
+    }
+
+    /// 渲染到指定视图。
+    pub fn render(
+        &mut self,
+        ctx: &GpuContext,
+        target: &wgpu::TextureView,
+        size: (u32, u32),
+        camera: &Camera,
+        lighting: &Lighting,
+    ) -> RenderStats {
+        self.frame_index += 1;
+        let mut stats = RenderStats {
+            frame_index: self.frame_index,
+            ..Default::default()
+        };
+        self.ensure_targets(ctx, size);
+        self.ensure_instance_capacity(&ctx.device, self.staging.len().max(1));
+        self.ensure_line_capacity(&ctx.device, self.lines.vertices.len().max(1));
+
+        let shadow_matrix = self.shadow_matrix_for(camera, lighting);
+        let uniforms = self.build_frame_uniforms(camera, lighting, shadow_matrix);
+        ctx.queue
+            .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniforms));
+
+        // 后处理参数（bloom 开关/强度/阈值 + bloom 贴图尺寸）
+        let bloom = self.options.bloom;
+        let bloom_on = bloom.enabled;
+        let post = PostUniforms {
+            params: [
+                if bloom_on { 1.0 } else { 0.0 },
+                bloom.intensity.max(0.0),
+                bloom.threshold.max(0.0),
+                0.0,
+            ],
+            bloom_texel: [
+                1.0 / self.bloom_size.0.max(1) as f32,
+                1.0 / self.bloom_size.1.max(1) as f32,
+                self.bloom_size.0.max(1) as f32,
+                self.bloom_size.1.max(1) as f32,
+            ],
+            target_texel: [
+                1.0 / self.target_size.0.max(1) as f32,
+                1.0 / self.target_size.1.max(1) as f32,
+                self.target_size.0.max(1) as f32,
+                self.target_size.1.max(1) as f32,
+            ],
+        };
+        ctx.queue
+            .write_buffer(&self.post_uniform, 0, bytemuck::bytes_of(&post));
+
+        // ---------- 可见性与剔除 ----------
+        let frustum = camera.frustum();
+        self.visible.clear();
+        self.visible_ranges.clear();
+        self.visible_ranges.resize(self.batches.len(), (0, 0));
+        self.draw_order.clear();
+        let want_shadow = uniforms.light_color[3] > 0.5;
+        let shadow_frustum = Frustum::from_view_projection(&shadow_matrix);
+
+        let mut write = 0u32;
+        let mut shadow_batches: Vec<(MeshId, u32, u32)> = Vec::new();
+        for (i, batch) in self.batches.iter().enumerate() {
+            let start = batch.first as usize;
+            let end = start + batch.count as usize;
+            let batch_first = write;
+            let mut batch_count = 0u32;
+            let mut shadow_any = false;
+            for (raw, bounds) in &self.staging[start..end] {
+                if !frustum.intersects_aabb(bounds) {
+                    stats.culled += 1;
+                    continue;
+                }
+                self.visible.push(*raw);
+                write += 1;
+                batch_count += 1;
+                if want_shadow && shadow_frustum.intersects_aabb(bounds) {
+                    shadow_any = true;
+                }
+            }
+            if batch_count == 0 {
+                continue;
+            }
+            self.visible_ranges[i] = (batch_first, batch_count);
+            let desc = self.materials.get(batch.material as usize).map(|m| &m.desc);
+            let alpha = desc.map(|d| d.needs_alpha_blend()).unwrap_or(false);
+            let double = desc.map(|d| d.double_sided).unwrap_or(false);
+            let unlit = desc.map(|d| d.unlit).unwrap_or(false);
+            self.draw_order.push((
+                u8::from(alpha),
+                u8::from(double),
+                batch.material,
+                batch.mesh,
+                i,
+            ));
+            if shadow_any && !alpha && !unlit {
+                shadow_batches.push((batch.mesh, batch_first, batch_count));
+                stats.shadow_instances += batch_count;
+            }
+        }
+        stats.instances = write;
+        self.draw_order.sort_unstable();
+
+        if !self.visible.is_empty() {
+            ctx.queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.visible),
+            );
+        }
+        if !self.lines.vertices.is_empty() {
+            ctx.queue.write_buffer(
+                &self.line_buffer,
+                0,
+                bytemuck::cast_slice(&self.lines.vertices),
+            );
+        }
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quench3d-encoder"),
+            });
+
+        // ---------- 阴影 pass ----------
+        if want_shadow && !shadow_batches.is_empty() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quench3d-shadow-pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            let mut current_mesh = u32::MAX;
+            for (mesh, first, count) in &shadow_batches {
+                if *mesh != current_mesh {
+                    let m = &self.meshes[*mesh as usize];
+                    pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                    pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    current_mesh = *mesh;
+                }
+                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                let m = &self.meshes[*mesh as usize];
+                pass.draw_indexed(0..m.index_count, 0, *first..(*first + *count));
+                stats.shadow_draw_calls += 1;
+            }
+            drop(pass);
+        }
+
+        // ---------- 主 pass（渲染到线性 HDR 中间目标） ----------
+        let hdr_view = self.hdr_view.clone().expect("HDR 目标缺失");
+        {
+            let (color_view, resolve_target) = match &self.msaa_view {
+                // MSAA 解析到 HDR 目标（不是最终目标：tonemap 还没做）
+                Some(msaa) => (msaa, Some(&hdr_view)),
+                None => (&hdr_view, None),
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quench3d-main-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    depth_slice: None,
+                    resolve_target,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.03,
+                            b: 0.05,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.depth_view.as_ref().expect("深度视图缺失"),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            // 天空
+            if self.options.sky && lighting.sky.enabled {
+                pass.set_pipeline(&self.sky_pipeline);
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // 不透明与透明物体（透明永远排在不透明之后）
+            for &(alpha_flag, double_flag, material, mesh, batch_index) in &self.draw_order {
+                let (first, count) = self.visible_ranges[batch_index];
+                if count == 0 {
+                    continue;
+                }
+                let (Some(gm), Some(gmat)) = (
+                    self.meshes.get(mesh as usize),
+                    self.materials.get(material as usize),
+                ) else {
+                    continue;
+                };
+                // 双面材质不能剔除背面；着色器已按 front_facing 翻转法线，
+                // 所以这里只需要换一条不剔除的管线。
+                let pipeline = if alpha_flag == 1 {
+                    &self.alpha_pipeline
+                } else if double_flag == 1 {
+                    &self.opaque_double_pipeline
+                } else {
+                    &self.opaque_pipeline
+                };
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                pass.set_bind_group(1, &self.shadow_bind_group, &[]);
+                pass.set_bind_group(2, &gmat.bind_group, &[]);
+                pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..gm.index_count, 0, first..(first + count));
+                stats.draw_calls += 1;
+                stats.triangles += (gm.index_count as u64 / 3) * count as u64;
+            }
+
+            // 无限网格
+            if self.options.grid && lighting.sky.show_grid {
+                pass.set_pipeline(&self.grid_pipeline);
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // 调试线段
+            if self.lines.enabled && !self.lines.vertices.is_empty() {
+                pass.set_pipeline(&self.line_pipeline);
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.line_buffer.slice(..));
+                pass.draw(0..self.lines.vertices.len() as u32, 0..1);
+                stats.lines = self.lines.line_count() as u32;
+            }
+        }
+
+        // ---------- Bloom（可选，三步都写半分辨率 HDR 贴图） ----------
+        if bloom_on {
+            let steps: [(
+                &str,
+                &wgpu::RenderPipeline,
+                &wgpu::BindGroup,
+                &wgpu::TextureView,
+            ); 3] = [
+                (
+                    "quench3d-bloom-bright-pass",
+                    &self.bloom_bright_pipeline,
+                    self.bloom_bright_bind_group
+                        .as_ref()
+                        .expect("bloom 绑定组缺失"),
+                    self.bloom_a_view.as_ref().expect("bloom 贴图缺失"),
+                ),
+                (
+                    "quench3d-bloom-blur-h-pass",
+                    &self.bloom_blur_h_pipeline,
+                    self.bloom_blur_h_bind_group
+                        .as_ref()
+                        .expect("bloom 绑定组缺失"),
+                    self.bloom_b_view.as_ref().expect("bloom 贴图缺失"),
+                ),
+                (
+                    "quench3d-bloom-blur-v-pass",
+                    &self.bloom_blur_v_pipeline,
+                    self.bloom_blur_v_bind_group
+                        .as_ref()
+                        .expect("bloom 绑定组缺失"),
+                    self.bloom_a_view.as_ref().expect("bloom 贴图缺失"),
+                ),
+            ];
+            for (label, pipeline, bind_group, dst) in steps {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: dst,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.draw(0..3, 0..1);
+                stats.post_passes += 1;
+            }
+        }
+
+        // ---------- 后处理 pass：tonemap（+ bloom 合成）→ 最终目标 ----------
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quench3d-post-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.post_pipeline);
+            pass.set_bind_group(
+                0,
+                self.post_bind_group.as_ref().expect("后处理绑定组缺失"),
+                &[],
+            );
+            pass.draw(0..3, 0..1);
+            stats.post_passes += 1;
+        }
+
+        ctx.queue.submit(Some(encoder.finish()));
+        self.stats = stats;
+        stats
+    }
+
+    /// 最近一帧的统计。
+    pub fn stats(&self) -> RenderStats {
+        self.stats
+    }
+
+    /// 获取交换链当前帧并渲染。
+    pub fn draw_frame(
+        &mut self,
+        ctx: &mut GpuContext,
+        camera: &Camera,
+        lighting: &Lighting,
+    ) -> Result<RenderStats, FrameError> {
+        let frame = ctx.acquire_frame()?;
+        if ctx.take_reconfigure_flag() {
+            // 上一帧报告配置次优：趁这一帧已经拿到纹理，重新配置供下一帧使用
+            ctx.reconfigure();
+        }
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let size = (frame.texture.width(), frame.texture.height());
+        let stats = self.render(ctx, &view, size, camera, lighting);
+        ctx.queue.present(frame);
+        Ok(stats)
+    }
+
+    /// 离屏渲染并回读为图像（无头截图 / 自动化测试）。
+    pub fn capture(
+        &mut self,
+        ctx: &mut GpuContext,
+        width: u32,
+        height: u32,
+        camera: &Camera,
+        lighting: &Lighting,
+    ) -> Result<ImageData, String> {
+        // 交换链格式若为 BGRA，直接复用会产生通道错位，这里统一用 RGBA 目标。
+        let target = ctx.create_offscreen(width, height);
+        let mut camera = *camera;
+        camera.set_aspect(width as f32 / height.max(1) as f32);
+        self.render(ctx, &target.view, (width, height), &camera, lighting);
+
+        let bytes_per_pixel = 4u32;
+        let unpadded = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+
+        let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quench3d-readback-encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("等待 GPU 失败: {e:?}"))?;
+        rx.recv()
+            .map_err(|e| format!("回读通道关闭: {e}"))?
+            .map_err(|e| format!("映射缓冲失败: {e:?}"))?;
+
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| format!("读取映射缓冲失败: {e:?}"))?;
+        let mut rgba = Vec::with_capacity((unpadded * height) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            rgba.extend_from_slice(&data[start..start + unpadded as usize]);
+        }
+        drop(data);
+        buffer.unmap();
+
+        // 若 GPU 格式为 BGRA，需要交换 R/B 通道。
+        if ctx.format == wgpu::TextureFormat::Bgra8UnormSrgb
+            || ctx.format == wgpu::TextureFormat::Bgra8Unorm
+        {
+            for px in rgba.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+        }
+
+        ImageData::from_rgba8(width, height, rgba).map_err(|e| e.to_string())
+    }
+
+    /// 回读阴影贴图的深度值（调试用）：返回 `(宽, 高, 深度)`，1.0 表示没有遮挡物。
+    pub fn read_shadow_map(&self, ctx: &GpuContext) -> Result<(u32, u32, Vec<f32>), String> {
+        let width = self.shadow_texture.width();
+        let height = self.shadow_texture.height();
+        let unpadded = width * 4;
+        let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-shadow-readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quench3d-shadow-readback"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.shadow_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        ctx.queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("等待 GPU 失败: {e:?}"))?;
+        rx.recv()
+            .map_err(|e| format!("回读通道关闭: {e}"))?
+            .map_err(|e| format!("映射缓冲失败: {e:?}"))?;
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| format!("读取映射缓冲失败: {e:?}"))?;
+        let mut depths = Vec::with_capacity((width * height) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            for i in 0..width as usize {
+                let b = &data[start + i * 4..start + i * 4 + 4];
+                depths.push(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            }
+        }
+        drop(data);
+        buffer.unmap();
+        Ok((width, height, depths))
+    }
+
+    /// 每帧时间（供着色器动画）。
+    pub fn set_time(&mut self, seconds: f32) {
+        self.time = seconds;
+    }
+
+    /// 视锥剔除测试（供上层做 LOD/可见性查询）。
+    pub fn is_visible(&self, camera: &Camera, bounds: &Aabb) -> bool {
+        camera.frustum().intersects_aabb(bounds)
+    }
+
+    /// 暴露给高级用途：帧绑定组。
+    pub fn frame_bind_group(&self) -> &wgpu::BindGroup {
+        &self.frame_bind_group
+    }
+
+    /// 暴露给高级用途：帧 uniform 布局。
+    pub fn frame_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.frame_layout
+    }
+
+    /// 暴露给高级用途：阴影贴图绑定组布局。
+    pub fn shadow_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.shadow_bind_layout
+    }
+
+    /// 暴露给高级用途：材质绑定组布局。
+    pub fn material_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.material_layout
+    }
+
+    /// 阴影贴图视图（可视化调试用）。
+    pub fn shadow_view(&self) -> &wgpu::TextureView {
+        &self.shadow_view
+    }
+
+    /// 阴影贴图纹理。
+    pub fn shadow_texture(&self) -> &wgpu::Texture {
+        &self.shadow_texture
+    }
+
+    /// 阴影采样器。
+    pub fn shadow_sampler(&self) -> &wgpu::Sampler {
+        &self.shadow_sampler
+    }
+
+    /// 默认白色纹理视图（自定义管线可复用）。
+    pub fn white_view(&self) -> &wgpu::TextureView {
+        &self.white_texture.view
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_raw_layout_is_tight() {
+        assert_eq!(std::mem::size_of::<InstanceRaw>(), 96);
+        assert_eq!(std::mem::size_of::<crate::mesh::Vertex>() % 4, 0);
+    }
+
+    #[test]
+    fn frame_uniform_layout_matches_wgsl() {
+        use std::mem::{offset_of, size_of};
+        // 偏移量按 `shaders/common.wgsl` 的 `Frame` 手算：mat4x4 = 64、vec4 = 16，
+        // 全部 16 字节对齐。点光是 `array<PointLight, 8>`，单盏 32 字节、交错排列。
+        assert_eq!(
+            size_of::<PointLightUniform>(),
+            32,
+            "PointLight 必须是两个 vec4"
+        );
+        assert_eq!(offset_of!(FrameUniforms, point_lights), 336);
+        assert_eq!(offset_of!(FrameUniforms, params2), 592);
+        assert_eq!(size_of::<FrameUniforms>(), 608);
+    }
+
+    #[test]
+    fn frame_uniforms_size_is_multiple_of_16() {
+        let size = std::mem::size_of::<FrameUniforms>();
+        assert_eq!(size % 16, 0, "uniform 结构大小必须是 16 的倍数: {size}");
+        assert_eq!(size, 608, "FrameUniforms 布局与 WGSL 不一致");
+    }
+
+    #[test]
+    fn instance_desc_packs_params() {
+        let d = InstanceDesc::default()
+            .with_pbr(1.0, 0.2)
+            .with_emissive(3.0);
+        let raw = d.to_raw();
+        assert_eq!(raw.params[0], 1.0);
+        assert_eq!(raw.params[1], 0.2);
+        assert_eq!(raw.params[2], 3.0);
+        assert_eq!(raw.params[3], 1.0, "应标记为覆盖材质");
+    }
+}
