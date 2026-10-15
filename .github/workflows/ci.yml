@@ -17,6 +17,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Windows 上 Python 的 `open()` 默认用 cp1252 读文件，而 CLI 的 JSON 信封里是中文
+  # （诊断、notes 都是中文）→ `json.load(open(...))` 直接 UnicodeDecodeError。
+  # UTF-8 模式让三平台的默认编码一致，冒烟脚本里就不用每处都写 encoding="utf-8"。
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 
 jobs:
   # 三平台跑同一套门禁：格式、clippy、全部测试、CLI 冒烟
