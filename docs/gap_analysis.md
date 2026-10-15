@@ -159,13 +159,17 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 
 **交付链（最刺眼的三条，都是 P0，且都不是代码问题）**：
 
-1. **项目没有被 git 跟踪**：`git ls-files quench3d` = 0 个文件，`git status` 显示 `?? quench3d/`
-   → 没有历史、没有 tag、没有 release；而且 `.github/workflows/ci.yml` 不在任何仓库根，
-   **这套 CI 从未也不会被触发**（"CI 是绿的"目前是纸面结论）。
+1. ~~**项目没有被 git 跟踪**~~ ✅ **已解决（2026-10-16）**：独立公开仓库
+   <https://github.com/gh503/quench3d>，三平台 + wasm 的 CI 矩阵**整条全绿**
+   （run `38778798444`：ubuntu / macOS / Windows / wasm32 四个 job 全 success）。
+   "CI 是绿的"从此是可查的事实，不再是纸面结论——而且它第一次真跑就抓出 4 个
+   只在 CI 上暴露的问题（无 GPU 的 doctest、3 核机器的线程数断言、
+   macOS 没有 GL 的候选断言、Windows 的 cp1252 读不了中文 JSON）。
 2. ~~**声明了双许可却没有 LICENSE 文件**~~ ✅ **已补**：仓库根 `LICENSE-MIT` / `LICENSE-APACHE` 全文，
    README §11 说明双许可与第三方依赖许可（gif/png 等均为 MIT/Apache-2.0）。
-3. **crate 元数据**：🟡 `readme`/`keywords`/`categories`/`description` 已补，**`repository` 仍缺**
-   （`Cargo.toml` 里留了发布前 TODO）→ crates.io 发布仍被卡。
+3. ~~**crate 元数据**~~ ✅ **已补齐**：`readme`/`keywords`/`categories`/`description`/`repository`
+   （`https://github.com/gh503/quench3d`）都在。**仍未做**：`cargo publish --dry-run`、
+   `cargo doc` 与 `--locked` 进 CI。
 
 **应用层缺失**：父子层级 ❌、存档/快照 ❌、事件总线 ❌、输入映射/手柄/触屏 ❌、音频 ❌、脚本层 ❌、
 资源异步与热重载 ❌、资源释放 ❌（只增不减，反复 `load_model` 必涨显存）、确定性回放（物理有、帧循环无）🟡。
@@ -342,10 +346,11 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 
 #### 最刺眼的三个非代码缺口
 
-1. `quench3d/` **未被 git 跟踪**（`git ls-files quench3d` = 0，`git status` 显示 `?? quench3d/`）
-   → `.github/workflows/ci.yml` 从未被触发，"CI 是绿的"仍是纸面结论；
-2. `Cargo.toml` 仍**缺 `repository`** → crates.io 发布被卡；
-3. 无 `CHANGELOG.md` / `CONTRIBUTING.md` / `rust-toolchain.toml` / `deny.toml` → 版本与依赖策略不透明。
+1. ~~`quench3d/` **未被 git 跟踪**~~ ✅ 独立公开仓库 + CI 整条全绿（见 §2.3）；
+2. ~~`Cargo.toml` **缺 `repository`**~~ ✅ 已补；
+3. ~~无 `CHANGELOG.md` / `CONTRIBUTING.md` / `rust-toolchain.toml` / `deny.toml`~~
+   🟡 **部分**：这四个文件仍没有；版本与依赖策略目前写在 README §10 与工作流里
+   （`Cargo.lock` 与 `web/pkg/` 是有意入库的）。
 
 ---
 
