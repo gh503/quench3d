@@ -226,3 +226,13 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 4. 物理碰撞过滤（层/掩码）、传感器事件、CCD。
 
 已闭环：编辑器撤销重做 ✅ / 变换 gizmo ✅ / 灯光面板 ✅ / 材质贴图编辑（数据层 + 缩放开关 + 四槽换贴图）✅。
+
+---
+
+## 9. 已知问题（必须知道的两条）
+
+1. **偶发测试**：`crates/quench3d-cli/tests/agent_tools.rs::agent_handles_multiple_tools_in_one_turn`
+   在 **macOS** 上偶发失败（本地 mock HTTP 服务与客户端之间的竞态；同提交的 ubuntu / windows /
+   wasm32 全绿，`gh run rerun --failed` 后转绿）。看到它红请先复跑再判断 —— 详见 `CHANGELOG.md` 的「已知问题」。
+2. **Web 端仍需真机验证**：本会话所有浏览器验证跑在 headless Chrome + SwiftShader（`backend: "gl"`，
+   即 WebGL2 回退），**真实设备的 WebGPU 路径没有验证过**（H4）。

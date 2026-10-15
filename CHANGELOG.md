@@ -100,3 +100,13 @@
   拾取、基线重置、存读场景、截图、中文字体子集。
 - Web：wasm 编辑器客户端（Pages 在线可玩），后端 WebGPU → WebGL2 自动回退。
 - 工具链：337 个测试 0 失败、四平台 CI 矩阵（ubuntu / macOS / Windows / wasm32）。
+
+## 已知问题
+
+- **偶发（flaky）测试**：`crates/quench3d-cli/tests/agent_tools.rs` 的
+  `agent_handles_multiple_tools_in_one_turn` 在 **macOS** 上偶发失败
+  （`run_turn(...).unwrap()`，同一提交的 ubuntu / windows / wasm32 三个 job 全绿，
+  `gh run rerun --failed` 后转绿）。它用一个本地 mock HTTP 服务测 agent 的多工具回合，
+  看起来是服务线程与客户端之间的竞态。
+  **这不是功能缺陷，但会污染 CI 信号** —— 修法方向：服务线程启动后再返回端口（用 channel
+  等 ready），或在测试里对首个请求加重试。修掉之前，看到它红请先 `gh run rerun --failed` 再判断。
