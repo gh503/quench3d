@@ -254,3 +254,30 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 
 **② 剩余的三组半**：① 模型引用接进场景树 + 视口实时拖动（需要"物体↔模型"映射）；② 场景层级/父子与格式 v2；
 ③ 后处理 FXAA/SSAO；④ 物理碰撞过滤/传感器事件/CCD。
+
+---
+
+## 11. CLI 三连（本轮实测过，用法与输出都是真的）
+
+命令行参数是**位置参数**，没有 `--scene`（`--help` 也不支持，用法靠错误提示给出）。实测：
+
+```bash
+# ① 生成示例场景（stdout，1503 字节）
+./target/debug/quench3d example demo > /tmp/demo.json
+
+# ② 校验
+./target/debug/quench3d validate /tmp/demo.json
+#   → 场景合法（0 条警告）
+
+# ③ 出一帧 PNG（注意：场景路径是位置参数）
+./target/debug/quench3d render /tmp/demo.json --out /tmp/demo.png
+#   → 相机位置  : [7.0, 4.5, 8.0]
+#      耗时      : 2372 ms
+#      物理      : 180 步，5 个刚体，最大速度 0.00 m/s，NaN 0
+#      /tmp/demo.png = 313,313 字节
+
+# ④ 出视频（帧序列 + 内置 GIF/APNG；不调用 ffmpeg）
+./target/debug/quench3d movie /tmp/demo.json --frames 120 --frames-dir frames
+```
+
+顺带一条**验收要点**：`render` 的输出里有"NaN 0"这一项 —— 用它比看画面更快发现物理炸掉。
