@@ -560,6 +560,15 @@ fn parallel_solver_with_joints_is_also_bit_exact() {
 /// 「换个核数（或换台机器）跑，结果不会变」。
 #[test]
 fn parallel_results_do_not_depend_on_thread_count() {
+    // 线程数会被机器核数夹住：`max_threads = 4` 在 3 核的机器上只能开 3 个线程
+    //（macOS CI runner 就是 3 核，这条断言因此在那边变红过一次）。
+    let hw = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if hw < 2 {
+        eprintln!("只有 {hw} 个逻辑核，跳过并行确定性测试");
+        return;
+    }
     let build = |threads: usize| {
         let mut w = PhysicsWorld::new();
         w.config.max_threads = threads;
@@ -594,8 +603,8 @@ fn parallel_results_do_not_depend_on_thread_count() {
         assert!(other.uses_parallel_solver());
         assert_eq!(
             other.solver_threads(),
-            threads,
-            "线程数应该被 max_threads 限制住"
+            threads.min(hw),
+            "线程数 = min(max_threads, 机器逻辑核数 = {hw})"
         );
         let got = snapshot_bits(&other);
         for (i, (a, b)) in want.iter().zip(got.iter()).enumerate() {

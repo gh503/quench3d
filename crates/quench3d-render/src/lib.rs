@@ -15,9 +15,14 @@
 //! use quench3d_render::prelude::*;
 //!
 //! # pollster::block_on(async {
-//! let mut ctx = GpuContext::headless(320, 200, GpuOptions { msaa_samples: 1, ..Default::default() })
-//!     .await
-//!     .unwrap();
+//! // 没有可用 GPU 适配器时直接跳过（CI 机器就常常没有软件光栅驱动）。
+//! // 文档示例不该在没显卡的机器上把 `cargo test` 弄红——这是本仓库对
+//! // 「要 GPU 的测试」一贯的处理方式（见各 tests/*.rs 里的 headless_engine）。
+//! let Ok(mut ctx) =
+//!     GpuContext::headless(320, 200, GpuOptions { msaa_samples: 1, ..Default::default() }).await
+//! else {
+//!     return;
+//! };
 //! let mut renderer = Renderer::new(&ctx, RendererOptions::default());
 //! let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
 //! let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.9, 0.3, 0.2, 1.0).pbr(0.1, 0.4));
