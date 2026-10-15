@@ -331,3 +331,86 @@ fn export_drops_joints_that_reference_deleted_objects() {
     scene_io::load_text_into_doc(&mut engine2, &mut doc2, &saved.json)
         .expect("清掉悬空引用之后，导出结果必须还能读回来");
 }
+
+/// 编辑器里显式设置的材质贴图/开关，必须能写进场景文件（并遵守"同名物体"的键）。
+///
+/// 这是"材质贴图编辑"这条链**数据侧**的钉子：界面还没有，但底下的存储、导出、
+/// 以及与"继承原文档"的优先级关系必须先是确定的 —— 否则界面一接上就会出错。
+#[test]
+fn explicit_material_textures_are_exported() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = r#"{
+      "format": "quench3d.scene",
+      "version": 1,
+      "name": "tex",
+      "objects": [
+        { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
+          "position": [0, 2, 0], "body": "dynamic" },
+        { "name": "ball", "shape": { "type": "sphere", "radius": 0.5 },
+          "position": [2, 2, 0], "body": "dynamic" }
+      ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+
+    // 造一张真贴图：校验器要求被引用的贴图**确实存在**（这正是它该做的事）。
+    let texture_path = std::env::temp_dir().join("quench3d-tex-explicit.png");
+    let texture =
+        quench3d::render::ImageData::checker(8, 2, [255, 255, 255, 255], [40, 40, 40, 255]);
+    quench3d::write_png(&texture, &texture_path).expect("造测试贴图必须成功");
+    let texture_json = texture_path.to_string_lossy().replace('\\', "\\\\");
+
+    // box 显式指定：基础色贴图 + UV + 双面 + 无光照；ball 什么都不设。
+    let paths = quench3d_editor::doc::TexturePaths {
+        base_color: Some(texture_path.display().to_string()),
+        uv_scale: Some(2.5),
+        double_sided: Some(true),
+        unlit: Some(false),
+        ..Default::default()
+    };
+    doc.textures.insert("box".to_string(), paths);
+
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    for needle in [
+        format!("\"base_color_texture\": \"{texture_json}\"",),
+        "\"uv_scale\": 2.5".to_string(),
+        "\"double_sided\": true".to_string(),
+    ] {
+        assert!(
+            saved.json.contains(&needle),
+            "显式设置的材质项没写进文件：「{needle}」\n{}",
+            saved.json
+        );
+    }
+
+    // 再读一次：显式设置必须真的生效（按物体名匹配，而不是靠索引）。
+    let mut engine2 = headless_engine().expect("需要 GPU 才能复核材质");
+    let mut doc2 = Doc::new();
+    scene_io::load_text_into_doc(&mut engine2, &mut doc2, &saved.json).expect("二次载入必须成功");
+    let box_index = engine2
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == "box")
+        .expect("应当有 box");
+    let ball_index = engine2
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == "ball")
+        .expect("应当有 ball");
+    let box_material = engine2
+        .renderer
+        .material(engine2.scene.objects[box_index].material)
+        .expect("box 应当有材质");
+    assert_eq!(box_material.uv_scale, 2.5, "UV 平铺没有生效");
+    assert!(box_material.double_sided, "双面没有生效");
+    let ball_material = engine2
+        .renderer
+        .material(engine2.scene.objects[ball_index].material)
+        .expect("ball 应当有材质");
+    assert_eq!(ball_material.uv_scale, 1.0, "ball 不该被 box 的设置串到");
+    assert!(!ball_material.double_sided, "ball 不该被 box 的设置串到");
+}

@@ -5,7 +5,7 @@
 //! 这里只做两件事：把引擎里现在的场景**导出**成 `SceneDoc`，
 //! 以及把 `SceneDoc` **装回**引擎（都借 CLI 的库代码，不重写一遍物理/材质装配）。
 
-use crate::doc::Doc;
+use crate::doc::{Doc, TexturePaths};
 use quench3d::prelude::*;
 use quench3d_cli::runner;
 use quench3d_cli::scene_doc::{
@@ -186,6 +186,10 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         } else {
             None
         };
+        // 用户在编辑器里显式指定过的贴图/开关优先（按物体名匹配；没有就用继承来的）。
+        if let Some(explicit) = doc.textures.get(&name) {
+            apply_texture_overrides(&mut material, explicit);
+        }
         out.materials.insert(material_name.clone(), material);
 
         let (rotation_deg, position) = match body {
@@ -267,6 +271,40 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         json: out.to_json_pretty(),
         skipped,
     })
+}
+
+/// 把编辑器里显式设置的贴图/开关盖到材质上（只覆盖非 `None` 的项）。
+fn apply_texture_overrides(material: &mut MaterialDoc, explicit: &TexturePaths) {
+    if explicit.base_color.is_some() {
+        material.base_color_texture = explicit.base_color.clone();
+    }
+    if explicit.normal.is_some() {
+        material.normal_texture = explicit.normal.clone();
+    }
+    if explicit.metallic_roughness.is_some() {
+        material.metallic_roughness_texture = explicit.metallic_roughness.clone();
+    }
+    if explicit.emissive.is_some() {
+        material.emissive_texture = explicit.emissive.clone();
+    }
+    if explicit.uv_scale.is_some() {
+        material.uv_scale = explicit.uv_scale;
+    }
+    if explicit.normal_scale.is_some() {
+        material.normal_scale = explicit.normal_scale;
+    }
+    if explicit.alpha_cutoff.is_some() {
+        material.alpha_cutoff = explicit.alpha_cutoff;
+    }
+    if explicit.alpha_blend.is_some() {
+        material.alpha_blend = explicit.alpha_blend;
+    }
+    if explicit.unlit.is_some() {
+        material.unlit = explicit.unlit;
+    }
+    if explicit.double_sided.is_some() {
+        material.double_sided = explicit.double_sided;
+    }
 }
 
 /// 把场景 JSON 装进引擎。

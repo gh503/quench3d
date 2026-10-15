@@ -105,6 +105,35 @@ struct Baseline {
 }
 
 /// 编辑器文档状态。
+/// 编辑器里**显式指定**的材质贴图与开关（按物体名存）。
+///
+/// 为什么按名字而不是索引：物体增删会挪索引，名字是场景格式里本来就有的稳定键；
+/// 导出时也是"同名物体继承原文档材质"的口径，两者一致。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TexturePaths {
+    /// 基础色贴图路径（相对场景文件或绝对路径）。
+    pub base_color: Option<String>,
+    /// 切线空间法线贴图路径。
+    pub normal: Option<String>,
+    /// 金属度-粗糙度贴图路径。
+    pub metallic_roughness: Option<String>,
+    /// 自发光贴图路径。
+    pub emissive: Option<String>,
+    /// UV 平铺次数。
+    pub uv_scale: Option<f32>,
+    /// 法线强度。
+    pub normal_scale: Option<f32>,
+    /// alpha 裁剪阈值。
+    pub alpha_cutoff: Option<f32>,
+    /// 走混合管线。
+    pub alpha_blend: Option<bool>,
+    /// 无光照着色。
+    pub unlit: Option<bool>,
+    /// 双面渲染。
+    pub double_sided: Option<bool>,
+}
+
+/// 编辑器文档层：场景内容的可撤销副本 + 界面状态（选中、状态栏、帮助开关）。
 pub struct Doc {
     /// 当前选中的场景对象下标（`None` = 没选）。
     pub selected: Option<usize>,
@@ -116,6 +145,8 @@ pub struct Doc {
     pub show_help: bool,
     /// 撤销 / 重做历史（整场景快照，见 [`crate::history`]）。
     pub history: crate::history::History,
+    /// 用户显式设置的材质贴图/开关（空 = 沿用原文档的继承规则）。
+    pub textures: std::collections::HashMap<String, TexturePaths>,
     /// 最近一次载入的场景文档（原样留着）。
     ///
     /// 编辑器只"懂"物体、地面、材质标量和相机；`lighting` / `simulate` / `render` /
@@ -151,6 +182,7 @@ impl Doc {
             status: "就绪".to_string(),
             show_help: false,
             history: crate::history::History::default(),
+            textures: std::collections::HashMap::new(),
             base_doc: None,
             baseline: Vec::new(),
             spawn_counter: 0,
