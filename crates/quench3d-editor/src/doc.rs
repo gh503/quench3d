@@ -174,6 +174,17 @@ impl Default for Doc {
 }
 
 impl Doc {
+    /// 载入时保留的原文档。导出以它为底稿，编辑器**不建模**的段（`models` / `probes` /
+    /// 点光源等）也靠它原样带出去。
+    pub fn base_doc(&self) -> Option<&quench3d_cli::scene_doc::SceneDoc> {
+        self.base_doc.as_ref()
+    }
+
+    /// 可变访问底稿（编辑器"模型"面板用它把模型变换写回 `models`）。
+    pub fn base_doc_mut(&mut self) -> Option<&mut quench3d_cli::scene_doc::SceneDoc> {
+        self.base_doc.as_mut()
+    }
+
     /// 空文档。
     pub fn new() -> Self {
         Self {

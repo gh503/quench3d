@@ -581,6 +581,101 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     }
 }
 
+/// 模型（glTF/OBJ 引用）的变换面板。
+///
+/// 为什么改的是**底稿**（`doc.base_doc.models`）而不是引擎：导入的模型在引擎里会被展开成
+/// 若干物体，编辑器拿不到"哪个物体属于哪个模型"的映射；而导出的 `models` 段本来就是从底稿
+/// 原样带出来的。所以这里改底稿 = 存盘生效（重开后模型在新位置），并因为场景快照包含导出
+/// JSON，撤销/重做也能覆盖到它。
+///
+/// 诚实边界：改完**当场不会动**（引擎里的实例没被移动），状态栏会写明"重开后生效"。
+fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    let Some(base) = doc.base_doc.as_ref() else {
+        return;
+    };
+    if base.models.is_empty() {
+        return;
+    }
+    let mut rows: Vec<(String, [f32; 3], [f32; 3], f32)> = base
+        .models
+        .iter()
+        .map(|m| {
+            (
+                m.path.display().to_string(),
+                m.position.unwrap_or([0.0, 0.0, 0.0]),
+                m.rotation_deg.unwrap_or([0.0, 0.0, 0.0]),
+                m.scale.unwrap_or(1.0),
+            )
+        })
+        .collect();
+    let mut changed = false;
+    egui::CollapsingHeader::new(format!("模型（{} 个引用）", rows.len()))
+        .default_open(false)
+        .show(ui, |ui| {
+            for (path, position, rotation, scale) in rows.iter_mut() {
+                ui.label(RichText::new(path.as_str()).small().weak());
+                ui.horizontal(|ui| {
+                    ui.label("位置");
+                    for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut position[i])
+                                    .speed(0.02)
+                                    .prefix(*axis),
+                            )
+                            .changed();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("旋转°");
+                    for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut rotation[i])
+                                    .speed(0.5)
+                                    .prefix(*axis),
+                            )
+                            .changed();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("缩放");
+                    changed |= ui
+                        .add(egui::DragValue::new(scale).speed(0.01).range(0.001..=1000.0))
+                        .changed();
+                });
+            }
+        });
+    if !changed {
+        return;
+    }
+    let mut dirty = false;
+    if let Some(base) = doc.base_doc.as_mut() {
+        for (m, (_, position, rotation, scale)) in base.models.iter_mut().zip(rows.iter()) {
+            let same_position = m.position.unwrap_or([0.0, 0.0, 0.0]) == *position;
+            let same_rotation = m.rotation_deg.unwrap_or([0.0, 0.0, 0.0]) == *rotation;
+            let same_scale = m.scale.unwrap_or(1.0) == *scale;
+            if same_position && same_rotation && same_scale {
+                continue;
+            }
+            m.position = Some(*position);
+            m.rotation_deg = Some(*rotation);
+            m.scale = Some(*scale);
+            dirty = true;
+        }
+    }
+    if dirty {
+        doc.status = "模型变换已写入场景文件（重新打开后模型会到新位置）".to_string();
+        if ui.input(|i| i.pointer.any_down()) {
+            doc.begin_history_transaction();
+        }
+        doc.record_edit(engine);
+        if doc.history.in_transaction() && !ui.input(|i| i.pointer.any_down()) {
+            doc.end_history_transaction(engine);
+        }
+    }
+}
+
 fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Requests) {
     egui::Panel::right("quench3d-inspector")
         .default_size(260.0)
@@ -588,6 +683,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
             ui.heading("属性");
             ui.separator();
             light_section(ui, engine, doc);
+            models_section(ui, engine, doc);
             ui.separator();
             let Some(index) = doc.selected else {
                 ui.label("在场景树或视口里点一个物体。");

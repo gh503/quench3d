@@ -540,3 +540,54 @@ fn set_material_texture_swaps_and_rejects_bad_ids() {
         "还原默认贴图失败"
     );
 }
+
+/// 导入模型的**变换**要能写回场景文件（编辑器的"模型"面板改的就是这一处）。
+///
+/// 编辑器拿不到"哪个物体属于哪个模型"的映射，所以面板改的是底稿里的 `models[i]`；
+/// 导出时 `models` 段本来就是从底稿带出来的，于是"改位置 → 存盘 → 重开生效"这条链成立。
+#[test]
+fn model_transform_edits_are_exported() {
+    let obj_path = std::env::temp_dir().join("quench3d-model-panel.obj");
+    std::fs::write(&obj_path, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").expect("写测试 OBJ 必须成功");
+    let obj_json = obj_path.to_string_lossy().replace('\\', "\\\\");
+    let source = format!(
+        r#"{{
+          "format": "quench3d.scene", "version": 1, "name": "model-panel",
+          "models": [
+            {{ "path": "{obj_json}", "position": [0.0, 0.0, 0.0], "scale": 1.0, "collide": false }}
+          ],
+          "objects": []
+        }}"#
+    );
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &source).expect("载入必须成功");
+
+    // 没动过：导出里必须是原来的值（不能凭空改数据）。
+    let before = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    assert!(before.json.contains("quench3d-model-panel.obj"), "{}", before.json);
+    assert!(!before.json.contains("3.0"), "不应出现未设置的值：{}", before.json);
+
+    // 编辑器"模型"面板做的事：直接改底稿里的模型变换。
+    let base = doc.base_doc_mut().expect("应当有底稿");
+    base.models[0].position = Some([3.0, 1.5, -2.0]);
+    base.models[0].scale = Some(2.5);
+    let after = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    for needle in ["3.0", "1.5", "-2.0", "2.5"] {
+        assert!(
+            after.json.contains(needle),
+            "模型变换「{needle}」没写进场景文件：\n{}",
+            after.json
+        );
+    }
+
+    // 存了再读回来：值必须还在（否则"重开生效"是假的）。
+    let mut engine2 = headless_engine().expect("需要 GPU 才能复核");
+    let mut doc2 = Doc::new();
+    scene_io::load_text_into_doc(&mut engine2, &mut doc2, &after.json).expect("二次载入必须成功");
+    let base2 = doc2.base_doc().expect("应当有底稿");
+    assert_eq!(base2.models[0].position, Some([3.0, 1.5, -2.0]), "位置没读回来");
+    assert_eq!(base2.models[0].scale, Some(2.5), "缩放没读回来");
+}
