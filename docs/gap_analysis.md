@@ -39,7 +39,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 | P0 #8 后半：单帧 `render` 的 golden 回归 | ⬜ 仍未做 | `render` 只断言"是合法 PNG"，没有像素基线 |
 | P0 #9 运动学推不动睡眠刚体（真 bug） | ✅ 已修 + 回归用例 | 根因：宽相把"运动学体"当成不可动（`world.rs` 的 `movable` 注释里写了这段历史），候选对根本不会生成，唤醒逻辑走不到。用例 `moving_kinematic_body_wakes_and_pushes_a_sleeping_body`（**回退修复即变红**）与反向约束 `kinematic_body_at_rest_does_not_wake_sleepers` |
 | P0 #9 后半：`wake_up_all` / 公开 `sleep()` | ⬜ 仍未做 | `world.rs` 里仍无这两个 API |
-| P1 #30 文档数字与门禁对齐 | 🟡 大部分已做 | 测试数 285→**298**（口径 :610/:637）、行数 3 万→**3.6 万**、重复的 `## 3.` 标题已消、示例数已对、MSRV 由 1.82 改为 **1.90**（依据：wgpu 30.0.1→1.87、image 0.25.10→1.88、ordered-float 5.5.0→1.90，**未在 1.90 上实编译验证**，本机只有 1.94）。`cargo doc` / `--locked` 仍未进 CI |
+| P1 #30 文档数字与门禁对齐 | 🟡 大部分已做 | 测试数 285→**337**（物理 121、CLI 97、渲染 52、数学 32、门面 22、编辑器 2、doctest 11）、行数 3 万→**3.7 万（src）**、重复的 `## 3.` 标题已消、示例数已对（10 个）、MSRV 由 1.82 改为 **1.90**（编辑器单独 1.95，因为 egui 0.37 要求它）；本机与 CI 工具链**都升到了 1.99 并真跑过**——CI 第一次跑到"全部测试"这一步就抓出 4 个只在 CI 上暴露的问题（无 GPU 的 doctest、3 核机器的线程数断言、macOS 没有 GL 的候选断言、Windows 的 cp1252 读不了中文 JSON），全部已修。`cargo doc` / `--locked` 仍未进 CI |
 | P2 "地面可配摩擦" | ✅ 已做 | `ground.friction` / `ground.restitution`，取值校验 + 测试 |
 | P2 "`scale` 与碰撞体一致性诊断" | ✅ 已做 | `objects[i].scale` 现在会告警"只影响渲染" |
 | 仿真视频的内置编码器（`docs/simulation_video.md` 第 4 项） | ✅ 已做 | `--encoder gif\|apng`：纯 Rust、流式写入、换编码器不改像素 `digest`；GIF 的 10 ms 延迟粒度会在 `data.notes` 里算给用户看 |
