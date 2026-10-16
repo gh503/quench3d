@@ -184,6 +184,10 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
 
             ui.checkbox(&mut engine.renderer.options.grid, "网格");
             ui.checkbox(&mut engine.renderer.options.shadows, "阴影");
+            ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）")
+                .on_hover_text(
+                    "后处理抗锯齿：在 tonemap 之后的画面上找边缘做定向模糊。\n                     关掉时画面与不开这个功能完全一致；MSAA 与它互不替代，可以同时开。",
+                );
             ui.checkbox(&mut engine.debug.axes, "坐标轴");
 
             let mode_label = match engine.camera_mode {

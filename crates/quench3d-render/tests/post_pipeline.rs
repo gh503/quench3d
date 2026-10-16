@@ -11,7 +11,7 @@
 //! 没有可用 GPU 时直接跳过（CI 机器通常没有软件光栅驱动）。
 
 use quench3d_render::prelude::*;
-use quench3d_render::{BloomOptions, RendererOptions};
+use quench3d_render::{BloomOptions, FxaaOptions, RendererOptions};
 
 const W: u32 = 64;
 const H: u32 = 64;
@@ -385,4 +385,187 @@ fn bloom_makes_bright_areas_bleed() {
         near(bg_on, bg_off, 3),
         "背景被整体抬亮了：x=2 处 旧={bg_off:?} 新={bg_on:?}"
     );
+}
+
+/// 画一个转过的立方体并读回像素（`fxaa` 决定开不开后处理抗锯齿）。
+///
+/// 用**转过角度**的立方体：轮廓上有浅斜边，FXAA 的定向模糊才有东西可做。
+/// 正对镜头的立方体是纯水平/垂直边——那是理想边缘，FXAA 原版也（正确地）不动它。
+fn fxaa_image(fxaa: FxaaOptions) -> Option<ImageData> {
+    let ctx = match pollster::block_on(GpuContext::headless(
+        W,
+        H,
+        GpuOptions {
+            msaa_samples: 1,
+            ..Default::default()
+        },
+    )) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("跳过：没有可用的 GPU（{e}）");
+            return None;
+        }
+    };
+    let mut ctx = ctx;
+    let mut renderer = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: false,
+            shadows: false,
+            sky: false,
+            fxaa,
+            ..Default::default()
+        },
+    );
+    // 无光照材质：物体内部必须是**同一个值**，这样"平坦区域没被动过"才可断言。
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.9, 0.2, 0.15, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    // 半边长 20，相机 z=60（半屏世界高度 tan30°·60 ≈ 34.6）→ 屏上约占 58%，
+    // 四周留出十几像素背景；容器角 30°/20° 让轮廓出现浅斜边。
+    let rotation = Quat::from_rotation_y(0.5) * Quat::from_rotation_x(0.35);
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::new(Transform::from_trs(
+            vec3(0.0, 0.0, 0.0),
+            rotation,
+            vec3(40.0, 40.0, 40.0),
+        )),
+    );
+
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+
+    Some(
+        renderer
+            .capture(
+                &mut ctx,
+                W,
+                H,
+                &camera,
+                &Lighting {
+                    exposure: 1.0,
+                    ..Default::default()
+                },
+            )
+            .expect("离屏渲染"),
+    )
+}
+
+/// 既不像 `a` 也不像 `b` 的像素（即"被抗锯齿混出来的"中间值）。
+fn mixed_pixels(image: &ImageData, a: [i32; 3], b: [i32; 3]) -> usize {
+    let mut n = 0;
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let p = pixel(image, x, y);
+            if !near(p, a, 2) && !near(p, b, 2) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// FXAA 的像素级验证：**硬边被平滑，平坦区域逐位不变**。
+///
+/// 后半句比前半句重要：抗锯齿最常见的失败是"整幅画糊了一层"。
+/// `msaa_samples: 1` + 无光照材质让这个断言可以做得非常硬：
+///   * 关闭时轮廓是硬的（中间值必须为 0）；
+///   * 打开后同一处必须出现中间值（否则 FXAA 什么都没干）；
+///   * 立方体内部与四角背景必须**逐位不变**（FXAA 的提前退出与 ±8 texel 步长上限）。
+#[test]
+fn fxaa_smooths_edges_and_leaves_flat_areas_alone() {
+    let off_opts = FxaaOptions {
+        enabled: false,
+        ..Default::default()
+    };
+    let Some(i_off) = fxaa_image(off_opts) else {
+        return;
+    };
+    let Some(i_on) = fxaa_image(FxaaOptions {
+        enabled: true,
+        ..Default::default()
+    }) else {
+        return;
+    };
+
+    let cube = pixel(&i_off, W / 2, H / 2);
+    let background = pixel(&i_off, 1, 1);
+    // 自检：两种颜色必须差得足够远，否则"混合像素"根本区分不出来
+    assert!(
+        !near(cube, background, 24),
+        "测试自身失效：物体 {cube:?} 与背景 {background:?} 太接近"
+    );
+    // 物体颜色等于手算值（无光照 = 材质色过一遍 ACES）
+    let expected = srgb8(aces(lin([0.9, 0.2, 0.15])));
+    assert!(
+        near(cube, expected, 1),
+        "物体颜色与手算不符：{cube:?} vs {expected:?}"
+    );
+
+    let mixed_off = mixed_pixels(&i_off, cube, background);
+    let mixed_on = mixed_pixels(&i_on, cube, background);
+    assert_eq!(
+        mixed_off, 0,
+        "关掉 FXAA 时不该有中间值（msaa=1、无光照），实际 {mixed_off} 个"
+    );
+    assert!(
+        mixed_on >= 8,
+        "开着 FXAA 却几乎没有平滑（中间值 {mixed_on} 个）：轮廓 {cube:?} / 背景 {background:?}"
+    );
+
+    // 平坦区域：物体内部 ±6 像素必须逐位不变（离轮廓至少 12 像素，超出 ±8 texel 步长）
+    for y in (H / 2 - 6)..=(H / 2 + 6) {
+        for x in (W / 2 - 6)..=(W / 2 + 6) {
+            let p = pixel(&i_on, x, y);
+            assert!(
+                near(p, expected, 1),
+                "物体内部被改了：({x},{y}) = {p:?}，手算 {expected:?}"
+            );
+        }
+    }
+    // 四角背景同理（立方体只占中间约 58%）
+    for (x, y) in [(1, 1), (W - 2, 1), (1, H - 2), (W - 2, H - 2), (2, H / 2)] {
+        let p = pixel(&i_on, x, y);
+        assert!(
+            near(p, background, 2),
+            "背景被改了：({x},{y}) = {p:?}，关闭时 {background:?}"
+        );
+    }
+}
+
+/// FXAA 的阈值必须是**真的在用**：把相对阈值调到不可能触发（比任何对比度都大），
+/// 画面就该退化成关闭时的样子。这条防的是"阈值读了但没进判断"这类接线错误。
+#[test]
+fn fxaa_threshold_actually_gates_the_filter() {
+    let Some(i_off) = fxaa_image(FxaaOptions {
+        enabled: false,
+        ..Default::default()
+    }) else {
+        return;
+    };
+    let Some(i_huge) = fxaa_image(FxaaOptions {
+        enabled: true,
+        edge_threshold: 100.0,
+        edge_threshold_min: 100.0,
+    }) else {
+        return;
+    };
+    let cube = pixel(&i_off, W / 2, H / 2);
+    let background = pixel(&i_off, 1, 1);
+    assert_eq!(
+        mixed_pixels(&i_huge, cube, background),
+        0,
+        "阈值大到不该触发时仍然平滑了边缘：说明阈值没有参与判断"
+    );
+    for y in 0..H {
+        for x in 0..W {
+            let (a, b) = (pixel(&i_off, x, y), pixel(&i_huge, x, y));
+            assert!(
+                near(a, b, 1),
+                "({x},{y}) 与关闭 FXAA 不一致：{b:?} vs {a:?}（阈值应当让它原样返回）"
+            );
+        }
+    }
 }

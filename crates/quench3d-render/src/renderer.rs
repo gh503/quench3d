@@ -25,6 +25,7 @@ const GRID_WGSL: &str = include_str!("shaders/grid.wgsl");
 const LINE_WGSL: &str = include_str!("shaders/line.wgsl");
 const POST_WGSL: &str = include_str!("shaders/post.wgsl");
 const BLOOM_WGSL: &str = include_str!("shaders/bloom.wgsl");
+const FXAA_WGSL: &str = include_str!("shaders/fxaa.wgsl");
 
 /// 把 `//@include common` 展开为公共 uniform 定义。
 fn expand(source: &str) -> String {
@@ -248,6 +249,8 @@ pub struct PostUniforms {
     /// 后处理 pass 的输出尺寸**不一定等于** bloom 贴图尺寸（bloom 是半分辨率），
     /// 采样 bloom 时不能用 bloom 的 texel：那是 2× 缩放，只会读到一角。
     pub target_texel: [f32; 4],
+    /// x = FXAA 开关（0/1），y = 相对边缘阈值，z = 绝对边缘阈值下限，w = 预留。
+    pub fxaa: [f32; 4],
 }
 
 /// Bloom 配置。
@@ -271,6 +274,32 @@ impl Default for BloomOptions {
     }
 }
 
+/// FXAA（后处理抗锯齿）配置。
+///
+/// 与 MSAA 的关系：MSAA 在**几何边缘**上以更高采样率着色（贵、且对材质内部的高频无效），
+/// FXAA 在**已经 tonemap 过的画面**上找感知边缘做定向模糊（便宜、能顺带压掉着色噪声，
+/// 但会把细节一起糊一点）。两者可以叠加：MSAA 管几何、FXAA 管剩下的。
+#[derive(Clone, Copy, Debug)]
+pub struct FxaaOptions {
+    /// 是否启用（缺省关闭：多一趟全屏 pass + 一张 LDR 中间目标）。
+    pub enabled: bool,
+    /// 相对边缘阈值（跟随亮度）：对比度低于它就不当成边缘。越小越敏感（也越糊）。
+    pub edge_threshold: f32,
+    /// 绝对边缘阈值下限：压掉平坦区域里的单像素噪点。
+    pub edge_threshold_min: f32,
+}
+
+impl Default for FxaaOptions {
+    /// 缺省值取 FXAA 原版（NVIDIA 3.11）的"质量档"预设。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            edge_threshold: 0.166,
+            edge_threshold_min: 0.0833,
+        }
+    }
+}
+
 /// 渲染器创建选项。
 #[derive(Clone, Copy, Debug)]
 pub struct RendererOptions {
@@ -286,6 +315,8 @@ pub struct RendererOptions {
     pub sky: bool,
     /// Bloom（缺省关闭；打开后画面与缺省不同，见 `docs/gap_analysis.md` P1 #25）。
     pub bloom: BloomOptions,
+    /// FXAA（缺省关闭）。
+    pub fxaa: FxaaOptions,
 }
 
 impl Default for RendererOptions {
@@ -297,6 +328,7 @@ impl Default for RendererOptions {
             grid_height: 0.0,
             sky: true,
             bloom: BloomOptions::default(),
+            fxaa: FxaaOptions::default(),
         }
     }
 }
@@ -319,12 +351,18 @@ pub struct Renderer {
     line_pipeline: wgpu::RenderPipeline,
     /// 后处理：HDR → tonemap（+ bloom）→ 目标。
     post_pipeline: wgpu::RenderPipeline,
+    /// 后处理写 **LDR 中间目标**时用的同一条管线（颜色目标格式不同，管线不能复用）。
+    post_ldr_pipeline: wgpu::RenderPipeline,
     /// Bloom：亮度提取 + 横向/纵向模糊。
     bloom_bright_pipeline: wgpu::RenderPipeline,
     bloom_blur_h_pipeline: wgpu::RenderPipeline,
     bloom_blur_v_pipeline: wgpu::RenderPipeline,
+    /// FXAA：tonemap 之后的画面 → 抗锯齿 → 目标（见 `fxaa.wgsl`）。
+    fxaa_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
     bloom_layout: wgpu::BindGroupLayout,
+    /// FXAA 的绑定组布局（比后处理少一张 bloom 贴图）。
+    fxaa_layout: wgpu::BindGroupLayout,
     post_uniform: wgpu::Buffer,
     post_sampler: wgpu::Sampler,
     /// 依赖尺寸，随 HDR 目标一起重建。
@@ -332,6 +370,7 @@ pub struct Renderer {
     bloom_bright_bind_group: Option<wgpu::BindGroup>,
     bloom_blur_h_bind_group: Option<wgpu::BindGroup>,
     bloom_blur_v_bind_group: Option<wgpu::BindGroup>,
+    fxaa_bind_group: Option<wgpu::BindGroup>,
 
     // 帧资源
     frame_uniform: wgpu::Buffer,
@@ -376,6 +415,10 @@ pub struct Renderer {
     msaa_view: Option<wgpu::TextureView>,
     /// HDR 中间目标（场景渲染到这里，再由后处理读）。
     hdr_view: Option<wgpu::TextureView>,
+    /// FXAA 的输入：tonemap 之后的画面（线性显示值，格式与 HDR 目标相同）。
+    ///
+    /// 只在开了 FXAA 时才会被写/读；关着的时候它只是占内存，不影响任何像素。
+    ldr_view: Option<wgpu::TextureView>,
     /// Bloom ping-pong（半分辨率）。
     bloom_a_view: Option<wgpu::TextureView>,
     bloom_b_view: Option<wgpu::TextureView>,
@@ -633,11 +676,36 @@ impl Renderer {
                 bind_group_layouts: &[Some(&bloom_layout)],
                 immediate_size: 0,
             });
+        // FXAA 读的是后处理 pass 的输出（LDR 中间目标），不需要 bloom 贴图；
+        // uniform 复用后处理那一份（texel 尺寸与阈值都在里面）。
+        let fxaa_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-fxaa-layout"),
+            entries: &[
+                texture_binding(0),
+                sampler_binding(1, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let fxaa_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quench3d-fxaa-pipeline-layout"),
+            bind_group_layouts: &[Some(&fxaa_layout)],
+            immediate_size: 0,
+        });
 
         // ---------- 着色器 ----------
         let pbr_module = ctx.create_shader("quench3d-pbr", &expand(PBR_WGSL));
         let post_module = ctx.create_shader("quench3d-post", POST_WGSL);
         let bloom_module = ctx.create_shader("quench3d-bloom", BLOOM_WGSL);
+        let fxaa_module = ctx.create_shader("quench3d-fxaa", FXAA_WGSL);
         let shadow_module = ctx.create_shader("quench3d-shadow", &expand(SHADOW_WGSL));
         let sky_module = ctx.create_shader("quench3d-sky", &expand(SKY_WGSL));
         let grid_module = ctx.create_shader("quench3d-grid", &expand(GRID_WGSL));
@@ -914,6 +982,16 @@ impl Renderer {
             "fs_main",
             ctx.format,
         );
+        // 开了 FXAA 时后处理写 LDR 中间目标（`rgba16float`）而不是最终目标：
+        // **颜色附件格式不同 = 必须是一条独立管线**（wgpu 会在绘制时报格式不兼容）。
+        let post_ldr_pipeline = build_fullscreen_pipeline(
+            device,
+            "quench3d-post-to-ldr",
+            &post_pipeline_layout,
+            &post_module,
+            "fs_main",
+            HDR_FORMAT,
+        );
         // bloom 三步都写 HDR 格式的半分辨率贴图，不需要深度与 MSAA。
         let bloom_bright_pipeline = build_fullscreen_pipeline(
             device,
@@ -938,6 +1016,16 @@ impl Renderer {
             &bloom_module,
             "fs_blur_v",
             HDR_FORMAT,
+        );
+        // FXAA 输出到**真正的目标**（`ctx.format`，sRGB）：着色器给的是线性值，
+        // 编码由目标格式的硬件转换完成（和 post 那一趟一样）。
+        let fxaa_pipeline = build_fullscreen_pipeline(
+            device,
+            "quench3d-fxaa",
+            &fxaa_pipeline_layout,
+            &fxaa_module,
+            "fs_main",
+            ctx.format,
         );
 
         let post_uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1015,20 +1103,25 @@ impl Renderer {
             line_buffer,
             line_capacity: 1024,
             post_pipeline,
+            post_ldr_pipeline,
             bloom_bright_pipeline,
             bloom_blur_h_pipeline,
             bloom_blur_v_pipeline,
+            fxaa_pipeline,
             post_layout,
             bloom_layout,
+            fxaa_layout,
             post_uniform,
             post_sampler,
             post_bind_group: None,
             bloom_bright_bind_group: None,
             bloom_blur_h_bind_group: None,
             bloom_blur_v_bind_group: None,
+            fxaa_bind_group: None,
             depth_view: None,
             msaa_view: None,
             hdr_view: None,
+            ldr_view: None,
             bloom_a_view: None,
             bloom_b_view: None,
             bloom_size: (0, 0),
@@ -1392,6 +1485,26 @@ impl Renderer {
         let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
         self.hdr_view = Some(hdr_view.clone());
 
+        // LDR 中间目标：FXAA 的输入（tonemap 之后的画面）。格式与 HDR 目标相同
+        // （`rgba16float`）：着色器给线性显示值，最后写 sRGB 目标时由硬件编码一次；
+        // 若改用 8 位 sRGB 贴图，"先编码再解码"会在混合处多一次量化。
+        let ldr = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-ldr"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let ldr_view = ldr.create_view(&wgpu::TextureViewDescriptor::default());
+        self.ldr_view = Some(ldr_view.clone());
+
         if self.sample_count > 1 {
             let msaa = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("quench3d-msaa"),
@@ -1489,6 +1602,24 @@ impl Renderer {
             Some(bloom_bind("quench3d-bloom-blur-h-bind-group", &bloom_a));
         self.bloom_blur_v_bind_group =
             Some(bloom_bind("quench3d-bloom-blur-v-bind-group", &bloom_b));
+        self.fxaa_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-fxaa-bind-group"),
+            layout: &self.fxaa_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&ldr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.post_uniform.as_entire_binding(),
+                },
+            ],
+        }));
         self.target_size = (w, h);
     }
 
@@ -1625,9 +1756,11 @@ impl Renderer {
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniforms));
 
-        // 后处理参数（bloom 开关/强度/阈值 + bloom 贴图尺寸）
+        // 后处理参数（bloom 开关/强度/阈值 + bloom 贴图尺寸 + FXAA 阈值）
         let bloom = self.options.bloom;
         let bloom_on = bloom.enabled;
+        let fxaa = self.options.fxaa;
+        let fxaa_on = fxaa.enabled;
         let post = PostUniforms {
             params: [
                 if bloom_on { 1.0 } else { 0.0 },
@@ -1646,6 +1779,12 @@ impl Renderer {
                 1.0 / self.target_size.1.max(1) as f32,
                 self.target_size.0.max(1) as f32,
                 self.target_size.1.max(1) as f32,
+            ],
+            fxaa: [
+                if fxaa_on { 1.0 } else { 0.0 },
+                fxaa.edge_threshold.max(0.0),
+                fxaa.edge_threshold_min.max(0.0),
+                0.0,
             ],
         };
         ctx.queue
@@ -1911,9 +2050,48 @@ impl Renderer {
         }
 
         // ---------- 后处理 pass：tonemap（+ bloom 合成）→ 最终目标 ----------
+        // 开了 FXAA 时先写 LDR 中间目标，再由下面那一趟做抗锯齿；否则直接写目标
+        // （**关掉 FXAA 的像素与加这个功能之前逐位相同**：那一趟根本不跑）。
+        let post_target = if fxaa_on {
+            self.ldr_view.clone().expect("LDR 中间目标缺失")
+        } else {
+            target.clone()
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("quench3d-post-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &post_target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(if fxaa_on {
+                &self.post_ldr_pipeline
+            } else {
+                &self.post_pipeline
+            });
+            pass.set_bind_group(
+                0,
+                self.post_bind_group.as_ref().expect("后处理绑定组缺失"),
+                &[],
+            );
+            pass.draw(0..3, 0..1);
+            stats.post_passes += 1;
+        }
+
+        // ---------- FXAA：LDR 中间目标 → 目标（可选） ----------
+        if fxaa_on {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quench3d-fxaa-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     depth_slice: None,
@@ -1928,10 +2106,10 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.post_pipeline);
+            pass.set_pipeline(&self.fxaa_pipeline);
             pass.set_bind_group(
                 0,
-                self.post_bind_group.as_ref().expect("后处理绑定组缺失"),
+                self.fxaa_bind_group.as_ref().expect("FXAA 绑定组缺失"),
                 &[],
             );
             pass.draw(0..3, 0..1);

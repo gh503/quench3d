@@ -398,7 +398,8 @@ pub fn scene_grammar() -> Value {
             "grid": "是否绘制无限网格，缺省 true",
             "shadows": "是否投射阴影，缺省 true",
             "point_lights": "点光源数组：{ position:[x,y,z], color:[r,g,b]（**线性**、非 sRGB）, intensity（缺省 12）, radius（影响半径，缺省 18）}；最多 8 盏生效。**不写这个字段 = 保留预设自带的补光**，写 [] 才是显式清空",
-            "bloom": "泛光：{ enabled（缺省 true）, intensity（缺省 0.6）, threshold（缺省 1.0，线性 Rec.709 亮度）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。光照/自发光先落到线性 HDR 中间目标，超阈值的部分做半分辨率高斯模糊，再在 tonemap **之前**加回去——所以亮区外溢不会过曝成白块。想让太阳/自发光有「发光感」就写 { threshold: 1.0, intensity: 0.6 }"
+            "bloom": "泛光：{ enabled（缺省 true）, intensity（缺省 0.6）, threshold（缺省 1.0，线性 Rec.709 亮度）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。光照/自发光先落到线性 HDR 中间目标，超阈值的部分做半分辨率高斯模糊，再在 tonemap **之前**加回去——所以亮区外溢不会过曝成白块。想让太阳/自发光有「发光感」就写 { threshold: 1.0, intensity: 0.6 }",
+            "fxaa": "后处理抗锯齿：{ enabled（缺省 true）, edge_threshold（缺省 0.166，越小越敏感）, edge_threshold_min（缺省 0.0833）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。它在 tonemap **之后**的画面（不是线性 HDR）上找感知边缘，沿边缘方向做一次定向模糊；平坦区域逐位不变。与 render.msaa 不冲突：MSAA 管几何边缘，FXAA 管着色噪声与剩下的锯齿，代价是细节略微变软。斜边多的场景写 {} 就够了"
         },
         "simulate": { "steps": "步数，缺省 0", "dt": "单步秒数，缺省 1/60" },
         "render": {
@@ -462,9 +463,11 @@ pub fn system_prompt() -> String {
   （给了 orthographic_height 就是正交投影，没有近大远小）
 - lighting: { preset: "studio"|"day"|"night", sun_direction: [x,y,z], sun_intensity, ambient, exposure, sky: true, grid: true, shadows: true,
              point_lights: [ { position: [x,y,z], color: [r,g,b]（线性）, intensity: 12, radius: 18 } ],
-             bloom: { enabled: true, intensity: 0.6, threshold: 1.0 } }
-  （point_lights 最多 8 盏；不写就保留预设自带补光。bloom 不写 = 关闭；
-    threshold 是线性亮度，太阳圆盘/自发光可以远大于 1，所以 1.0 通常只让它们外溢）
+             bloom: { enabled: true, intensity: 0.6, threshold: 1.0 },
+             fxaa: { enabled: true, edge_threshold: 0.166 } }
+  （point_lights 最多 8 盏；不写就保留预设自带补光。bloom / fxaa 不写 = 关闭；
+    threshold 是线性亮度，太阳圆盘/自发光可以远大于 1，所以 1.0 通常只让它们外溢；
+    fxaa 是 tonemap 之后的后处理抗锯齿，和 render.msaa 可以同时开）
 - simulate: { steps: 180, dt: 0.0166667 }
 - render: { output: "scene.png", width: 960, height: 600, msaa: 4 }
 

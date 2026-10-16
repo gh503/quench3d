@@ -15,8 +15,10 @@ struct PostParams {
     params: vec4<f32>,
     // xy = bloom 贴图的 texel 大小，zw = bloom 贴图尺寸
     bloom_texel: vec4<f32>,
-    // 后处理 pass 用；这里不读（保持与 post.wgsl 逐字节一致的布局）
+    // 后处理 / FXAA 用；这里不读（保持与 post.wgsl 逐字节一致的布局）
     target_texel: vec4<f32>,
+    // FXAA 阈值；这里不读（同上，三个着色器共用一个 uniform 缓冲）
+    fxaa: vec4<f32>,
 };
 
 struct BloomOut {

@@ -1676,6 +1676,19 @@ fn bloom_options(doc: &SceneDoc) -> quench3d::render::BloomOptions {
     }
 }
 
+/// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。
+fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
+    let Some(f) = &doc.lighting.fxaa else {
+        return quench3d::render::FxaaOptions::default();
+    };
+    let defaults = quench3d::render::FxaaOptions::default();
+    quench3d::render::FxaaOptions {
+        enabled: f.enabled.unwrap_or(true),
+        edge_threshold: f.edge_threshold.unwrap_or(defaults.edge_threshold),
+        edge_threshold_min: f.edge_threshold_min.unwrap_or(defaults.edge_threshold_min),
+    }
+}
+
 fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
     let l = &doc.lighting;
     // 未知预设由 `SceneDoc::validate` 拦下（`load_scene` 会拒绝带 error 的场景），
@@ -1853,6 +1866,7 @@ pub fn run_render(
         msaa_samples: doc.render.msaa,
         renderer: quench3d::render::RendererOptions {
             bloom: bloom_options(doc),
+            fxaa: fxaa_options(doc),
             ..Default::default()
         },
         ..Default::default()
@@ -2261,6 +2275,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         msaa_samples: doc.render.msaa,
         renderer: quench3d::render::RendererOptions {
             bloom: bloom_options(doc),
+            fxaa: fxaa_options(doc),
             ..Default::default()
         },
         ..Default::default()

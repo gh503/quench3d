@@ -21,7 +21,7 @@
 | 给 agent 的自动化入口（scene.json + MCP + CLI） | **能**（最接近） | schema/validate/doctor/ask/chat/mcp 齐全，格式可机读 |
 | 替代 Blender（建模/UV/雕刻/材质节点） | **不能** | 没有编辑模式、没有 UV/雕刻、材质只有标量 + 4 贴图槽 |
 | 替代 Unity/Unreal（游戏运行时） | **不能** | 动画、音频、UI、输入映射、存档**四件全无** |
-| 替代 three.js editor（Web 内容/后处理生态） | **不能** | 后处理链固定三步、无 SSAO/DOF/TAA、无 IBL、wasm 11 MB |
+| 替代 three.js editor（Web 内容/后处理生态） | **不能** | 后处理链固定（bloom + FXAA）、无 SSAO/DOF/TAA、无 IBL、wasm 11 MB |
 | 替代 Houdini（程序化） | **不能** | 无节点图/程序化建模 |
 
 **一句话**：它是"确定性刚体仿真内核 + agent 友好流水线"的**垂直切片**，不是一个通用 3D 内容创作软件。
@@ -222,7 +222,7 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 **仍然没有做的**（按优先级，与 §4 的清单合并后最新的四项）：
 1. glTF/OBJ 导入进**场景树/文档层**（现在导入的模型在编辑器里位置改动写不回 `models`）；
 2. 场景**层级/父子**与场景格式 v2；
-3. 后处理 FXAA/SSAO；
+3. 后处理 SSAO（FXAA 已在第 17 轮做完，见 §14）；
 4. 物理碰撞过滤（层/掩码）、传感器事件、CCD。
 
 已闭环：编辑器撤销重做 ✅ / 变换 gizmo ✅ / 灯光面板 ✅ / 材质贴图编辑（数据层 + 缩放开关 + 四槽换贴图）✅。
@@ -360,3 +360,41 @@ macOS CI 连续 3 次绿（含一次全平台 dispatch 跑）。
 这两份不在任何 crate 的测试路径里。补救不是"下次记得改"，而是加了一条测试
 （`cargo test -p quench3d-cli --test scene_fixtures`）：把这类外部夹具列进名单，
 断言它们的版本号等于 `scene_doc::VERSION` —— 故意改回 v1 会立刻变红（已实测）。
+
+---
+
+## 14. 第 17 轮：后处理 FXAA（剩余项 ③ 的一半）
+
+**做了什么**：`lighting.fxaa`（不写 = 关闭，写 `{}` = 打开）→ CLI、`validate`、编辑器视口面板
+都能开。算法是 FXAA 3.11 的 console 档（4 个对角取样估边缘方向 → 沿方向两次混合 →
+亮度越界回退），实现落在 `crates/quench3d-render/src/shaders/fxaa.wgsl`。
+
+| # | 决定 | 理由 / 落点 |
+| --- | --- | --- |
+| 1 | 放在 tonemap **之后**，而不是在线性 HDR 上做 | FXAA 的阈值是 0~1 的**感知**亮度；线性 HDR 里太阳是 8~20，任何阈值都失效 |
+| 2 | 中间目标用 `rgba16float`，不用 8 位 sRGB 贴图 | 8 位 sRGB 要"先编码再解码"才能混合，混合处会多一次量化；f16 线性存显示值，写 sRGB 目标时由硬件编码一次 |
+| 3 | **边缘判断在 sRGB 空间、混合在线性空间** | 边缘是感知现象（判断要在 sRGB），混合是光强运算（要在线性）；与 FXAA 原版"整条都在 gamma 空间"有细微差别，已写在 `fxaa.wgsl` 顶部 |
+| 4 | 关闭时**不建** LDR 目标、**不跑**那一趟 | 保证"不写 = 像素与加这个功能之前逐位相同"这条项目惯例 |
+| 5 | 多了一条 `post_ldr_pipeline`（同着色器、不同颜色目标格式） | wgpu 的管线与附件格式绑定：写 LDR 中间目标与写 sRGB 目标必须是两条管线（第一次跑测试就撞上了这个校验） |
+| 6 | 编辑器的开关放在视口面板（网格/阴影旁边） | `renderer.options.fxaa.enabled` 本来就在 `Engine` 上，3 行代码；与 `render.msaa` 分开，互不替代 |
+
+**验证（这一轮的重点）**：
+
+* `cargo test -p quench3d-render --test post_pipeline` —— 新增 2 个**像素级**用例
+  （本机有 GPU，真跑；无 GPU 的 CI 会打印"跳过"）：
+  ① `fxaa_smooths_edges_and_leaves_flat_areas_alone`：msaa=1 + 无光照材质下，
+  **关掉时中间值必须为 0**（硬边），打开后**必须 ≥ 8 个中间值**，同时
+  物体内部 ±6 像素与四角背景**逐位不变**——抗锯齿最常见的失败是"整幅画糊了一层"，
+  这条断言就是钉这个的；
+  ② `fxaa_threshold_actually_gates_the_filter`：阈值调到 100（不可能触发）后，
+  整幅图必须与关闭时逐位一致——防"阈值读了但没进判断"。
+* `cargo test -p quench3d-cli --lib fxaa`：格式层 6 条断言（不写就不出现在序列化结果里、
+  空对象 = 打开、负阈值 error、>1 warning、显式 `enabled:false` 不再警告、字段拼错报未知字段）。
+* **端到端 + 逐像素比对**：同一个 480×320 场景开/关各渲一张
+  （`target/fxaa-demo/{on,off}.png`，命令见 CHANGELOG），
+  比对结果：**3.03% 的像素被改动，其中只有 3 个**离边缘 2 像素以外（3×3 邻域梯度 < 12），
+  改动幅度中位数 4/255、最大 118（出现在最硬的轮廓上）。
+  也就是说它确实"只动边缘"，不是全局模糊。
+
+**没有做（别误以为有）**：FXAA 高质量档的子像素锯齿消除与 3×3 全邻域方向估计；
+TAA；SSAO（③ 的另一半，下一轮）；编辑器的 MSAA 切换（MSAA 仍然只能在场景文件里改）。

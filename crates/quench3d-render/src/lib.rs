@@ -61,8 +61,8 @@ pub use lines::{DebugLines, LineVertex};
 pub use material::{MaterialDesc, MaterialId, MeshId, TextureId};
 pub use mesh::{MeshData, Vertex};
 pub use renderer::{
-    BloomOptions, InstanceDesc, MaterialTextureSlot, RenderStats, Renderer, RendererOptions,
-    DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,
+    BloomOptions, FxaaOptions, InstanceDesc, MaterialTextureSlot, RenderStats, Renderer,
+    RendererOptions, DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,
 };
 pub use texture::{Filter, GpuTexture, ImageData, TextureOptions};
 
@@ -75,7 +75,9 @@ pub mod prelude {
     pub use crate::lines::DebugLines;
     pub use crate::material::MaterialDesc;
     pub use crate::mesh::MeshData;
-    pub use crate::renderer::{BloomOptions, InstanceDesc, RenderStats, Renderer, RendererOptions};
+    pub use crate::renderer::{
+        BloomOptions, FxaaOptions, InstanceDesc, RenderStats, Renderer, RendererOptions,
+    };
     pub use crate::texture::ImageData;
     pub use quench3d_math::{
         approx_eq, deg, lerp, rad, vec2, vec3, vec4, Aabb, Deg, Mat3, Mat4, Plane, Quat, Rad, Ray,

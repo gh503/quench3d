@@ -39,7 +39,7 @@
 | 色调映射可选性 | 全部 | 算子**不可选不可关**，只有一条 ACES 路径（→ H1） | 🟠 |
 | 阴影 | 全部 | 1 张方向光阴影贴图（`renderer.rs:339`，Depth32Float），3×3 PCF（`pbr.wgsl:105`），分辨率 512–4096（缺省 2048）；**无 CSM** | 🟡 |
 | 阴影可调参数 | Blender / Unity | bias 是编译期常量（`renderer.rs:795`），**没有公开字段**；只有 `DirectionalLight.cast_shadows` + 全局开关 | 🟠 |
-| 后处理链 | 全部 | 固定三步（阴影 → PBR → post/bloom）；**无 FXAA/TAA、无 SSAO、无 DOF、无自定义 pass / render graph** | ❌ |
+| 后处理链 | 全部 | 固定四步（阴影 → PBR → bloom → post，FXAA 打开时多一趟）；**无 TAA、无 SSAO、无 DOF、无自定义 pass / render graph** | ❌ |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4 | ✅ |
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent（`mesh.rs:14`）；**无顶点色、无骨骼蒙皮、无 morph** | 🟡 |
 | 实例化 | 全部 | 有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |

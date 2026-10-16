@@ -806,6 +806,31 @@ pub struct LightingDoc {
     /// 高斯模糊，再在 tonemap **之前**加回去——所以亮区外溢不会过曝成白块。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bloom: Option<BloomDoc>,
+    /// FXAA（后处理抗锯齿）。
+    ///
+    /// **不写 = 关闭**（像素与加这个功能之前逐位相同）；写了这一节就是打开。
+    /// 它工作在 tonemap **之后**的画面上：找感知边缘、沿着边缘方向做一次定向模糊。
+    /// 跟 MSAA 不冲突也不重复：MSAA 在几何边缘上以更高采样率着色，FXAA 负责剩下的
+    /// （着色噪声、材质内部的高频），代价是细节会略微变软。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fxaa: Option<FxaaDoc>,
+}
+
+/// FXAA（后处理抗锯齿）配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FxaaDoc {
+    /// 是否启用，缺省 true（写了这一节就是想开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 相对边缘阈值，缺省 0.166（FXAA 原版质量档）：对比度低于它就不当成边缘。
+    ///
+    /// 越小越敏感（能压掉更细的锯齿，也更容易把细节糊掉）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_threshold: Option<f32>,
+    /// 绝对边缘阈值下限，缺省 0.0833：压掉平坦区域里的单像素噪点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_threshold_min: Option<f32>,
 }
 
 /// Bloom（泛光）配置。
@@ -2245,6 +2270,27 @@ impl SceneDoc {
             }
         }
 
+        // FXAA：阈值必须落在 (0, 1) 这个量级，否则要么永远不触发要么糊成一片
+        if let Some(f) = &self.lighting.fxaa {
+            let enabled = f.enabled.unwrap_or(true);
+            for (key, value) in [
+                ("lighting.fxaa.edge_threshold", f.edge_threshold),
+                ("lighting.fxaa.edge_threshold_min", f.edge_threshold_min),
+            ] {
+                let Some(v) = value else { continue };
+                if !v.is_finite() || v < 0.0 {
+                    out.push(Diagnostic::error(key, "FXAA 阈值必须是非负数"));
+                } else if v > 1.0 && enabled {
+                    out.push(
+                        Diagnostic::warn(key, format!("阈值 {v} 大于 1，几乎不会判定出边缘"))
+                            .with_hint(
+                                "亮度差是 0~1 的量：常用 edge_threshold 0.166、edge_threshold_min 0.0833",
+                            ),
+                    );
+                }
+            }
+        }
+
         // 光照预设：以前写错名字会静默退回 studio，现在直接报错
         if let Some(preset) = self.lighting.preset.as_deref() {
             if !matches!(preset, "studio" | "day" | "night" | "none") {
@@ -2672,6 +2718,52 @@ mod tests {
         assert!(
             SceneDoc::from_json(r#"{"objects":[],"lighting":{"bloom":{"knee":1.0}}}"#).is_err()
         );
+    }
+
+    #[test]
+    fn fxaa_defaults_and_validation() {
+        // 缺省 = 关闭：不写这一节时序列化结果里不该冒出新字段（对已有场景零影响）
+        let doc = SceneDoc::from_json(r#"{"objects":[]}"#).unwrap();
+        assert!(doc.lighting.fxaa.is_none());
+        let text = serde_json::to_string(&doc).unwrap();
+        assert!(!text.contains("fxaa"), "不写就不该出现在输出里：{text}");
+
+        // 写了这一节（哪怕是空对象）：解析出来，且阈值留给渲染器缺省
+        let doc = SceneDoc::from_json(r#"{"objects":[],"lighting":{"fxaa":{}}}"#).unwrap();
+        let f = doc.lighting.fxaa.expect("fxaa 节应当被解析出来");
+        assert_eq!(f.enabled, None);
+        assert_eq!(f.edge_threshold, None);
+        assert_eq!(f.edge_threshold_min, None);
+        assert!(!SceneDoc::has_errors(&doc.validate()));
+
+        // 负阈值是错误；大于 1 的阈值是警告——都指向具体字段
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[],"lighting":{"fxaa":{"edge_threshold":-0.1,"edge_threshold_min":2.0}}}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "lighting.fxaa.edge_threshold" && d.severity == Severity::Error));
+        assert!(diags.iter().any(
+            |d| d.path == "lighting.fxaa.edge_threshold_min" && d.severity == Severity::Warning
+        ));
+
+        // 显式关掉就不该再警告"阈值没意义"
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[],"lighting":{"fxaa":{"enabled":false,"edge_threshold":5.0}}}"#,
+        )
+        .unwrap();
+        assert!(!SceneDoc::has_errors(&doc.validate()));
+        assert!(
+            !doc.validate()
+                .iter()
+                .any(|d| d.path.starts_with("lighting.fxaa")),
+            "关掉的 fxaa 不该再有诊断"
+        );
+
+        // 字段名拼错要报未知字段，而不是静默忽略
+        assert!(SceneDoc::from_json(r#"{"objects":[],"lighting":{"fxaa":{"knee":1.0}}}"#).is_err());
     }
 
     #[test]

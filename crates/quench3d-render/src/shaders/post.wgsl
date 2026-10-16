@@ -21,6 +21,9 @@ struct PostParams {
     // xy = 输出目标 texel 大小，zw = 输出目标尺寸
     // （bloom 是半分辨率，采样它必须用**目标**的 texel，否则是 2× 缩放，只读到一角）
     target_texel: vec4<f32>,
+    // x = FXAA 开关（0/1），y = 相对边缘阈值，z = 绝对边缘阈值下限，w = 预留
+    // （这一趟不读，留给 `fxaa.wgsl`；三个后处理着色器共用同一个 uniform 缓冲）
+    fxaa: vec4<f32>,
 };
 
 /// Narkowicz 2015 的 ACES 近似（全项目唯一一份）。
