@@ -32,14 +32,20 @@
     重算整表的命令）；README §6.4 补了分支表。
   - 测试（全部无显卡）：`error_code_table_is_self_consistent`、
     `error_codes_doc_matches_the_table`（与文档逐格对账）、
-    `diagnostic_codes_are_stable_and_specific`（15 种典型问题各给哪个码、落在哪个 path）、
-    `serde_errors_classify_into_stable_codes`、`diagnostics_without_a_code_deserialize_to_invalid`、
-    `schema_error_codes_match_the_table`、`system_prompt_mentions_diagnostic_codes`，
-    以及 e2e `diagnostics_carry_stable_machine_readable_codes`（真跑二进制，含"每条诊断都有码"
-    与"文本输出也带码"）。
+    `diagnostic_codes_are_stable_and_specific`（码表里 16 个非兜底码**各有真实触发场景**，
+    钉死 `code` + `path`，并在末尾反向断言"覆盖集 == 码表 − `invalid`"）、
+    `every_code_in_the_table_is_emitted_by_the_source`（码表里每个码在源码主体里至少有一个
+    发出点，专门挡"加了码但没接线的死码"）、`serde_errors_classify_into_stable_codes`、
+    `diagnostics_without_a_code_deserialize_to_invalid`、`schema_error_codes_match_the_table`、
+    `system_prompt_mentions_diagnostic_codes`，以及 e2e
+    `diagnostics_carry_stable_machine_readable_codes`（真跑二进制，含"每条诊断都有码"
+    与"文本输出也带码"）。代码 ↔ `docs/error_codes.md` 的一一对应有两条可复核判据
+    （`schema --json` 的码集 vs 文档表第一列，见 `docs/error_codes.md`）。
   - **变异验证**（故意改坏 → 测试必须红 → 改回来 → 绿）：改名 `asset_not_found` → 3 条独立
     守卫变红；误改 `models[0].path` 的码 → 稳定性测试变红（文档对账正确地保持绿）；
-    手改文档一格 → 对账测试变红；停掉 unknown-field 分类分支 → 分类测试变红。
+    手改文档一格 → 对账测试变红；停掉 unknown-field 分类分支 → 分类测试变红；
+    摘掉 `ReservedName` 的唯一发出点 → 死码守卫变红；删掉 `suspicious_value` 的触发场景 →
+    稳定性测试变红并报"缺场景的码 = [suspicious_value]"。
   - **没做**：顶层 `error.kind`（`scene`/`invalid`/…）与运行期 `RunError` 仍是粗粒度 ——
     `ErrorInfo` 定义在 `crates/quench3d-cli/src/report.rs`，不在该轮允许改动的文件围栏内。
 - **聚光灯阴影（spot shadow）：一盏聚光灯可以投影**。以前只有太阳（平行光）会投影，

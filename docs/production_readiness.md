@@ -487,11 +487,18 @@ README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模
 |---|---|
 | `error_code_table_is_self_consistent` | 码名唯一、snake_case、无 `|`（会破坏文档表格）、serde 名字与表一致、缺省是兜底码 |
 | `error_codes_doc_matches_the_table` | `docs/error_codes.md` 的码/含义/动作与 `ErrorCode::TABLE` **逐格**对账 |
-| `diagnostic_codes_are_stable_and_specific` | **稳定契约**：15 种典型问题各给哪个码、落在哪个 `path`，并断言这段场景不出现兜底码 |
+| `diagnostic_codes_are_stable_and_specific` | **稳定契约**：16 个非兜底码**各有真实触发场景**，钉住 `code` + `path`；末尾反向断言"覆盖集 == 码表 − `invalid`"，所以"加了码却没有场景会发出它"本地就红 |
+| `every_code_in_the_table_is_emitted_by_the_source` | **死码守卫**：码表里每个码在 `mod tests` 之前的源码里至少有一个发出点（用 `include_str!` 读自己） |
 | `serde_errors_classify_into_stable_codes` | 结构检查唯一出口的分类规则 |
 | `diagnostics_without_a_code_deserialize_to_invalid` | 老 JSON 的向后兼容 |
 | `schema_error_codes_match_the_table` / `system_prompt_mentions_diagnostic_codes` | schema 与系统提示没漏码 |
 | `diagnostics_carry_stable_machine_readable_codes`（e2e） | 真跑二进制：每条诊断都有 `code`、具体问题给具体码、码表能从 `schema --json` 查到、**文本输出里也带码** |
+
+**代码 ↔ 文档的一一对应怎么复核**（两条命令，17 行对 17 行，`diff` 为空）：
+`schema --json` 的 `data.error_codes[].code` 排序 vs `docs/error_codes.md` 生成表第一列排序
+（完整命令在 `docs/error_codes.md` 的"覆盖情况"）。注意两个**看着自然但数错**的 grep：
+`code: "..."` 在源码里出现 **0** 次（码写在宏声明的 `Variant => "wire",` 里，每码只有这一处），
+而文档里反引号包裹的小写标识符有 **53** 个（只有表格行第一列才是码）。
 
 **变异验证（故意改坏 → 测试必须红 → 改回来 → 绿）**：
 
@@ -500,6 +507,8 @@ README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模
 | 把 `asset_not_found` 改名成 `asset_missing` | `error_codes_doc_matches_the_table`、`diagnostic_codes_are_stable_and_specific`、e2e `diagnostics_carry_stable_machine_readable_codes`（3 条独立守卫） |
 | 把 `models[0].path` 的码误改成 `OutOfRange` | `diagnostic_codes_are_stable_and_specific`（文档对账**正确**地保持绿：表没变） |
 | 手改 `docs/error_codes.md` 的一格文案 | `error_codes_doc_matches_the_table` |
+| 摘掉 `ReservedName` 的唯一发出点（人为造一个死码） | `every_code_in_the_table_is_emitted_by_the_source` |
+| 从稳定契约里删掉 `suspicious_value` 的触发场景 | `diagnostic_codes_are_stable_and_specific`（报"缺场景的码 = [suspicious_value]"），而死码守卫正确地保持绿 |
 | 停掉 `classify_serde_code` 的 unknown-field 分支 | `serde_errors_classify_into_stable_codes` |
 
 **没做（诚实边界）**：

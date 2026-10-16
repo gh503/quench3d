@@ -6881,8 +6881,12 @@ mod tests {
     }
 
     /// 断言某段场景在某个路径上给出某个码，且不出现兜底码。
+    /// 断言"这段 JSON 在 `path` 上给出 `code`"，并返回该码以便测试收集覆盖集。
+    ///
+    /// 返回值不是装饰：下面用它拼出"这份契约覆盖了哪些码"，从而能反过来断言
+    /// **码表里除兜底码外的每一个码都在这份契约里有真实触发场景**（见测试末尾）。
     #[track_caller]
-    fn assert_code(json_text: &str, code: &str, path: &str) {
+    fn assert_code(json_text: &str, code: &'static str, path: &str) -> &'static str {
         let got = codes_of(json_text);
         assert!(
             got.iter().any(|(c, p)| c == code && p == path),
@@ -6892,77 +6896,94 @@ mod tests {
             !got.iter().any(|(c, _)| c == "invalid"),
             "这段场景不该出现兜底码 invalid：{got:?}"
         );
+        code
     }
 
     /// **稳定契约**：哪种问题给哪个码。这里每一条都是 agent 会用来分支的判定，
     /// 改了码（或改了 path）必须是有意识的决定，而不是顺手。
+    ///
+    /// 测试末尾做了**双向对账**：
+    /// - 正向：每条断言里的码都必须是码表里的码（`assert_code` 只接受 `&'static str`，
+    ///   但"码表里有"由 `error_codes_doc_matches_the_table` + 下面的反向断言共同锁住）；
+    /// - 反向：**码表里除兜底码 `invalid` 外的每一个码，都必须在这里有真实触发场景** ——
+    ///   这样"加了码但没有任何场景真的会发出它"（文档里躺着的死码）本地就红。
+    ///
+    /// `invalid` 是唯一豁免：它是老 JSON / 兜底路径的码，由
+    /// `diagnostics_without_a_code_deserialize_to_invalid` 单独守着。
     #[test]
     fn diagnostic_codes_are_stable_and_specific() {
-        // 结构层：JSON 一解析就失败
-        assert_code(r#"{"object": []}"#, "unknown_field", "object");
-        assert_code(r#"{"gravity": "up"}"#, "invalid_type", "gravity");
-        assert_code(
-            r#"{"objects":[{"shape":{"type":"pyramid"}}]}"#,
-            "invalid_value",
-            "objects[0].shape.type",
-        );
-        assert_code(
-            r#"{"objects":[{"name":"a","shape":{}}]}"#,
-            "missing_field",
-            "objects[0].shape",
-        );
-        // 引用 / 命名
-        assert_code(
-            r#"{"objects":[{"name":"a","body":"dynamic","shape":{"type":"box","size":[1,1,1]}}],
+        let mut covered = vec![
+            // 结构层：JSON 一解析就失败
+            assert_code(r#"{"object": []}"#, "unknown_field", "object"),
+            assert_code(r#"{"gravity": "up"}"#, "invalid_type", "gravity"),
+            assert_code(
+                r#"{"objects":[{"shape":{"type":"pyramid"}}]}"#,
+                "invalid_value",
+                "objects[0].shape.type",
+            ),
+            assert_code(
+                r#"{"objects":[{"name":"a","shape":{}}]}"#,
+                "missing_field",
+                "objects[0].shape",
+            ),
+            // 引用 / 命名
+            assert_code(
+                r#"{"objects":[{"name":"a","body":"dynamic","shape":{"type":"box","size":[1,1,1]}}],
                 "joints":[{"type":"fixed","a":"a","b":"nope"}]}"#,
-            "unknown_reference",
-            "joints[0].b",
-        );
-        assert_code(
-            r#"{"objects":[{"name":"a"},{"name":"a"}]}"#,
-            "duplicate_name",
-            "objects[1].name",
-        );
-        assert_code(
-            r#"{"objects":[{"name":"a","parent":"b"},{"name":"b","parent":"a"}]}"#,
-            "cycle",
-            "objects[0].parent",
-        );
-        assert_code(r#"{"cameras":{"default":{}}}"#, "reserved_name", "cameras");
-        // 取值 / 互斥 / 上限
-        assert_code(
-            r#"{"objects":[{"name":"a","shape":{"type":"box"},"shapes":[{"shape":{"type":"box"}}]}]}"#,
-            "mutually_exclusive",
-            "objects[0].shapes",
-        );
-        assert_code(
-            r#"{"camera":{"fov_deg":400}}"#,
-            "out_of_range",
-            "camera.fov_deg",
-        );
-        assert_code(
-            r#"{"simulate":{"steps":2000000}}"#,
-            "limit_exceeded",
-            "simulate.steps",
-        );
-        // 语义：写了不生效 / 单位易混 / 资源找不到
-        assert_code(
-            r#"{"objects":[{"name":"a","body":"none","velocity":[1,0,0]}]}"#,
-            "ineffective",
-            "objects[0].velocity",
-        );
-        assert_code(
-            r#"{"objects":[{"name":"a","body":"dynamic","shape":{"type":"box","size":[1,1,1]}},
+                "unknown_reference",
+                "joints[0].b",
+            ),
+            assert_code(
+                r#"{"objects":[{"name":"a"},{"name":"a"}]}"#,
+                "duplicate_name",
+                "objects[1].name",
+            ),
+            assert_code(
+                r#"{"objects":[{"name":"a","parent":"b"},{"name":"b","parent":"a"}]}"#,
+                "cycle",
+                "objects[0].parent",
+            ),
+            assert_code(r#"{"cameras":{"default":{}}}"#, "reserved_name", "cameras"),
+            // 取值 / 互斥 / 上限
+            assert_code(
+                r#"{"objects":[{"name":"a","shape":{"type":"box"},"shapes":[{"shape":{"type":"box"}}]}]}"#,
+                "mutually_exclusive",
+                "objects[0].shapes",
+            ),
+            assert_code(
+                r#"{"camera":{"fov_deg":400}}"#,
+                "out_of_range",
+                "camera.fov_deg",
+            ),
+            assert_code(
+                r#"{"simulate":{"steps":2000000}}"#,
+                "limit_exceeded",
+                "simulate.steps",
+            ),
+            // 语义：写了不生效 / 单位易混 / 资源找不到 / 合法但很可能不是本意
+            assert_code(
+                r#"{"objects":[{"name":"a","body":"none","velocity":[1,0,0]}]}"#,
+                "ineffective",
+                "objects[0].velocity",
+            ),
+            assert_code(
+                r#"{"objects":[{"name":"a","body":"dynamic","shape":{"type":"box","size":[1,1,1]}},
                  {"name":"b","body":"dynamic","shape":{"type":"box","size":[1,1,1]}}],
                 "joints":[{"type":"hinge","a":"a","b":"b","limits":[0,90]}]}"#,
-            "unit_ambiguity",
-            "joints[0].limits",
-        );
-        assert_code(
-            r#"{"models":[{"path":"definitely_missing_xyz.glb"}]}"#,
-            "asset_not_found",
-            "models[0].path",
-        );
+                "unit_ambiguity",
+                "joints[0].limits",
+            ),
+            assert_code(
+                r#"{"models":[{"path":"definitely_missing_xyz.glb"}]}"#,
+                "asset_not_found",
+                "models[0].path",
+            ),
+            assert_code(
+                r#"{"lighting":{"fog":{"density":5.0}}}"#,
+                "suspicious_value",
+                "lighting.fog.density",
+            ),
+        ];
         // io_error 走的是 `from_file`（读盘失败），不是 `from_json`
         let missing = std::env::temp_dir().join("quench3d_no_such_dir_55b/scene.json");
         let diags = match SceneDoc::from_file(&missing) {
@@ -6973,6 +6994,55 @@ mod tests {
             diags.iter().any(|d| d.code == ErrorCode::IoError),
             "读盘失败应当是 io_error：{diags:?}"
         );
+        covered.push("io_error");
+
+        // 反向对账：码表里（兜底码除外）每一个码都要在上面有真实触发场景。
+        covered.sort_unstable();
+        covered.dedup();
+        let mut expected: Vec<&str> = ErrorCode::TABLE
+            .iter()
+            .map(|(_, wire, _, _)| *wire)
+            .filter(|w| *w != ErrorCode::Invalid.as_str())
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(
+            covered,
+            expected,
+            "稳定契约的覆盖集与码表不一致：缺场景的码 = {:?}，多出来的 = {:?}",
+            expected
+                .iter()
+                .filter(|w| !covered.contains(w))
+                .collect::<Vec<_>>(),
+            covered
+                .iter()
+                .filter(|w| !expected.contains(w))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **码表里每个码都必须在源码里有真实发出点**（不是只在文档里躺着的死码）。
+    ///
+    /// 判据用源码对账（`include_str!` 读自己）：场景空间是无穷的，穷举不出所有码；
+    /// 但"某个码在源码里一次都没被用过"是可以机械判定的，而它正是"加了码忘了接线"
+    /// 的形状。数的是 `mod tests` **之前**的主体，所以测试自己引用变体不算数。
+    ///
+    /// 与 `diagnostic_codes_are_stable_and_specific` 互补：后者证"每个码都有场景"，
+    /// 前者证"每个码都有发出点"（含豁免的兜底码 `invalid`，它由两参数构造器发出）。
+    #[test]
+    fn every_code_in_the_table_is_emitted_by_the_source() {
+        let src = include_str!("scene_doc.rs");
+        let body = src
+            .split("mod tests {")
+            .next()
+            .expect("源码里应当有 mod tests");
+        for (code, wire, _, _) in ErrorCode::TABLE {
+            let needle = format!("ErrorCode::{code:?}");
+            assert!(
+                body.contains(&needle),
+                "码 `{wire}`（{needle}）在源码主体里没有任何发出点 —— 是死码：\
+                 要么接上真实的校验分支，要么从码表里删掉"
+            );
+        }
     }
 
     /// 老 JSON（诊断里没有 `code`）必须还能反序列化，并且落到兜底码。

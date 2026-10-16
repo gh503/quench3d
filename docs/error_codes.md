@@ -72,15 +72,65 @@ grep -c 'Diagnostic::error_code(\|Diagnostic::warn_code(' crates/quench3d-cli/sr
 grep -n 'Diagnostic::error(\|Diagnostic::warn(' crates/quench3d-cli/src/scene_doc.rs
 ```
 
+**代码 ↔ 本文件的一一对应**（可复核判据，不用读源码找字符串）：
+
+```bash
+# ① 权威码集：代码里的 ErrorCode::TABLE，经 schema 暴露（17 行）
+./target/debug/quench3d schema --json | python3 -c 'import json,sys
+print("\n".join(sorted(e["code"] for e in json.load(sys.stdin)["data"]["error_codes"])))' > /tmp/from_code.txt
+# ② 本文件码表第一列（17 行）
+python3 -c 'import re
+s=open("docs/error_codes.md",encoding="utf-8").read()
+b=s.split("<!-- BEGIN GENERATED TABLE")[1].split("<!-- END GENERATED TABLE -->")[0]
+print("\n".join(sorted(re.findall(r"^\| `([a-z_]+)` \|", b, re.M))))' > /tmp/from_doc.txt
+diff /tmp/from_code.txt /tmp/from_doc.txt && echo "1:1 一致"
+```
+
+⚠️ 两个**看着自然但其实数错**的 grep（别再用）：
+
+- `grep -oE 'code: "[a-z_.]+"' scene_doc.rs` → **0**：码不是结构体字面量，而是宏声明里的
+  `Variant => "wire_name",`，全文件每码**只出现这一次**（这正是"不可能只加一半"的原因）。
+- `` grep -oE '`[a-z][a-z_.]+`' docs/error_codes.md `` → **53**：反引号里除了码，还有散文里的
+  标识符（`classify_serde_code`、`assets.search_paths`、`check_at`……）。只有**表格行的第一列**
+  才是码。
+
+## 守卫测试（改坏了一定会红）
+
+| 测试 | 盯什么 |
+|---|---|
+| `error_code_table_is_self_consistent` | 表自身：名字唯一、snake_case、不含 `|`、serde 名一致、兜底码在位 |
+| `error_codes_doc_matches_the_table` | 本文件的表 ↔ `ErrorCode::TABLE` **逐格**（码/含义/动作三列）对账 |
+| `diagnostic_codes_are_stable_and_specific` | **稳定契约**：16 个非兜底码各有真实触发场景，钉死 `code` + `path`；末尾反向断言"覆盖集 == 码表 − `invalid`" |
+| `every_code_in_the_table_is_emitted_by_the_source` | **死码**：码表里每个码在 `mod tests` 之前的源码里至少有一个发出点（含兜底码） |
+| `serde_errors_classify_into_stable_codes` | 结构检查唯一出口的分类规则 |
+| `diagnostics_without_a_code_deserialize_to_invalid` | 老 JSON 向后兼容 |
+| `schema_error_codes_match_the_table` / `system_prompt_mentions_diagnostic_codes` | schema 与系统提示不漏码 |
+| e2e `diagnostics_carry_stable_machine_readable_codes` | 真跑二进制：每条诊断有码、具体问题具体码、码表可查、文本输出也带码 |
+
+**变异验证**（改坏 → 红 → 改回 → 绿，四条独立的都做过）：
+
+| 变异 | 变红的测试 |
+|---|---|
+| 改码名 `asset_not_found` → `asset_missing` | 文档对账 + 稳定性契约 + e2e（3 条独立守卫） |
+| 误改 `models[0].path` 的码 | 稳定性契约（文档对账**正确**地保持绿：表没变） |
+| 手改本文件某一格文案 | 文档对账 |
+| 停掉 `classify_serde_code` 的 unknown-field 分支 | 分类测试 |
+| 摘掉 `ReservedName` 的唯一发出点（造死码） | `every_code_in_the_table_is_emitted_by_the_source` |
+| 删掉 `suspicious_value` 的触发场景 | 稳定性契约（报"缺场景的码 = [suspicious_value]"） |
+
 ## 怎么加一个新码
 
 1. 在 `scene_doc.rs` 的 `define_error_codes!` 里加一行
    `Variant => "wire_name", "含义", "agent 该做什么";`（宏会同时生成枚举、总表与
    `as_str`/`meaning`/`agent_action`，**不可能只加一半**）；
 2. 重新生成上面 BEGIN/END 之间的表（用开头那条命令）；
-3. `cargo test -p quench3d-cli -- doc_matches`（`scene_doc.rs` 与 `schema.rs` 各一条
-   对账测试会同时检查本文件与 `quench3d schema --json` 的 `error_codes`）；
-4. 在 `CHANGELOG.md` 里写一句（新增码是**对 agent 的契约变更**，不是内部重构）。
+3. **把码接到真实的校验分支上**（`Diagnostic::error_code` / `warn_code`）——没接上的话
+   `every_code_in_the_table_is_emitted_by_the_source` 会红；
+4. 在 `diagnostic_codes_are_stable_and_specific` 的 `covered` 列表里补一条**真实场景**
+   （哪段 JSON 在哪个 `path` 上给出这个码）——没补的话那条测试末尾的反向断言会红；
+5. `cargo test -p quench3d-cli -- error_code diagnostic_codes every_code_in_the_table` ——
+   `scene_doc.rs` 与 `schema.rs` 各一条对账测试会同时检查本文件与 `quench3d schema --json`；
+6. 在 `CHANGELOG.md` 里写一句（新增码是**对 agent 的契约变更**，不是内部重构）。
 
 **不允许**：改已有码的名字或含义。要改就加新码、把旧码标成 deprecated 并保留映射。
 
