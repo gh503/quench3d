@@ -109,7 +109,7 @@ jobs:
           QUENCH3D_GPU_TESTS: ${{ matrix.gpu_tests }}
         run: |
           set -euo pipefail
-          echo "这条腿的 QUENCH3D_GPU_TESTS=$QUENCH3D_GPU_TESTS（1=真建上下文；0=整条跳过并打印原因）"
+          echo "这条腿的 QUENCH3D_GPU_TESTS=${QUENCH3D_GPU_TESTS}（1=真建上下文；0=整条跳过并打印原因）"
           cargo test --locked -p quench3d-render --test backend_fallback --test fog_and_shadow_quality --test material_pipeline_traits --test point_lights --test post_pipeline --test shadow_cascades -- --nocapture
           cargo test --locked -p quench3d-editor --test hierarchy --test history --test model_instances --test scene_roundtrip -- --nocapture
 

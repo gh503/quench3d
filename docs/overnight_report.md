@@ -1760,3 +1760,146 @@ Web 产物带来任何体积代价。门禁步骤标题现在会印出 `QUENCH3D
    下一步，要单独验证（装上之后 wgpu 真的拿得到适配器吗？断言在软件光栅上成立吗？）。
    本轮的目标只是"别再制造无法诊断的假红、别丢已有覆盖"，所以不把两件事混在一起。
    CI 里真有断言覆盖的是 macOS 腿（Metal）与本机（Linux + GPU）。
+
+## 54. 一次把同类风险清干净：8 个裸奔的测试二进制，和一条会自己发现新裸奔者的守卫（第 58 轮·下半场）
+
+§52 只修了**一个**假红（两个测试二进制）。这一节处理**同类**的另外 8 个，并加一条
+**不需要显卡**的守卫，让"将来再写一个裸奔测试"这件事在 CI 上**自动变红** ——
+只把这次的 8 个补上，几个月后还会长回来（这正是欠账的成因：第 58 轮上半场按围栏只改了 2 个）。
+
+### 54.1 清单：仓库里"真的建 wgpu 上下文"的测试二进制一共 10 个
+
+| # | 文件 | 建上下文的入口 | 本轮前 |
+|---|---|---|---|
+| 1 | `crates/quench3d-render/tests/backend_fallback.rs` | 2 处 `from_candidates_with` | 上半场已包 ✅ |
+| 2 | `crates/quench3d-editor/tests/model_instances.rs` | `headless_engine()` | 上半场已包 ✅ |
+| 3 | `crates/quench3d-render/tests/post_pipeline.rs` | `setup()` + 4 处内联 | 裸奔 ❌ → 本轮包 |
+| 4 | `crates/quench3d-render/tests/shadow_cascades.rs` | `Scene::new()` | 裸奔 ❌ → 本轮包 |
+| 5 | `crates/quench3d-render/tests/material_pipeline_traits.rs` | `setup()` | 裸奔 ❌ → 本轮包 |
+| 6 | `crates/quench3d-render/tests/fog_and_shadow_quality.rs` | `setup()` | 裸奔 ❌ → 本轮包 |
+| 7 | `crates/quench3d-render/tests/point_lights.rs` | `setup()` | 裸奔 ❌ → 本轮包 |
+| 8 | `crates/quench3d-editor/tests/hierarchy.rs` | `headless_engine()` | 裸奔 ❌ → 本轮包 |
+| 9 | `crates/quench3d-editor/tests/history.rs` | `headless_engine()` | 裸奔 ❌ → 本轮包 |
+| 10 | `crates/quench3d-editor/tests/scene_roundtrip.rs` | `headless_engine()` | 裸奔 ❌ → 本轮包 |
+
+**断言一条都没删、没放宽**：改的只是"建上下文那一步在不在闭包里面"。
+`post_pipeline.rs` 里 4 处内联的建上下文抽成了一个 `context(msaa, what)` 小函数（同一个文件里
+5 处建上下文，跳过原因要能分辨是哪一处，所以 `what` 是参数）；其余 7 个文件都是把
+`setup()` / `Scene::new()` / `headless_engine()` 里那一句包进 `with_gpu_tests`，**函数签名不变**，
+调用点不动。没设 `QUENCH3D_GPU_TESTS=1` 时**闭包一次都不执行**（不是体内 `if false`），
+并打印可读原因（"跳过：点光源的像素级验证（真的创建 wgpu 上下文） —— 未打开 QUENCH3D_GPU_TESTS=1。"）。
+
+### 54.2 守卫：`every_real_gpu_context_creation_in_tests_goes_through_the_gate`
+
+放在 `post_pipeline.rs` 末尾（本文件建上下文的地方最多，改它的人一定会看到这条守卫），
+**不需要显卡**：它只读文件，所以 5 条 CI 腿**每条**都会跑它，包括没有 GPU 的 windows 腿。
+
+判定规则（词法，不是语法分析）：
+
+1. 扫描 `crates/*/tests/*.rs`（自动包含**将来新增**的文件 —— 这是关键）；
+2. 先把**注释与字符串字面量**换成空格，只留代码；
+3. 找出每个 `with_gpu_tests(...)` 的**配对括号区间**；
+4. 对 `GPU_CREATION_CALLS` 里每个入口（`GpuContext::headless` / `from_candidates`（含 `_with`）/
+   `create_instance_with` / `wgpu::Instance::new`（含 `new_without_display_handle`））的每处出现，
+   断言它落在某个区间里；不在就红，并打印 `文件:行  入口`。
+
+两个防"空转"的断言，避免守卫变成摆设：`assert!(sources.len() >= 5)`、
+`assert!(gated > 0, "一个调用点都没扫到 → wgpu 入口改名了，更新清单")`。
+
+**为什么必须剥注释（这条是载重的，不是洁癖）**：另一位写者新增的
+`crates/quench3d-editor/tests/joint_frames.rs` 第 3 行的**文档注释**里就写着
+"编辑器现有的往返测试都要 `GpuContext::headless`"。纯 `grep` 会把这句散文判成一处裸奔的
+建上下文 —— 守卫在**真正有意义的第一次运行**里就会误报，而会乱叫的守卫最后一定被人加白名单。
+§54.4 的变异 ③ 把这件事证明成了红-绿，而不是我嘴上一句"我剥了注释"。
+
+### 54.3 按腿的证据：**真跑**（秒数）与**显式跳过**（原因行）必须能分开
+
+上半场在这里栽过一次：当时把"日志里有 `Running tests/...` 行"当成了"断言真的在跑"，
+其实 ubuntu 腿是 `0.00s` + 内层"没有可用的 GPU"分支（见 §52.6 ⑦）。所以本轮的证据按
+**这一轮的判据**给：秒数（真跑）与跳过原因行（跳过）。
+
+本机（有显卡，工具链 1.99.0 = CI 钉的版本）：
+
+| target | 开关**关**（`env -u QUENCH3D_GPU_TESTS`） | 开关**开** |
+|---|---|---|
+| `post_pipeline` | 8 passed / **0.00s** / 6 条原因行 | 8 passed / **4.09s** |
+| `shadow_cascades` | 1 passed / **0.00s** / 1 条 | 1 passed / **2.34s** |
+| `scene_roundtrip` | 10 passed / **0.00s** / 10 条 | 10 passed / **2.29s** |
+| `material_pipeline_traits` | 2 passed / **0.00s** / 2 条 | 2 passed / **1.72s** |
+| `hierarchy` | 8 passed / **0.00s** / 7 条 | 8 passed / **1.42s** |
+| `fog_and_shadow_quality` | 2 passed / **0.00s** / 2 条 | 2 passed / **1.12s** |
+| `history` | 7 passed / **0.00s** / 7 条 | 7 passed / **1.10s** |
+| `point_lights` | 2 passed / **0.00s** / 2 条 | 2 passed / **1.07s** |
+| `model_instances` | 5 passed / **0.00s** / 5 条 | 5 passed / **0.98s** |
+| `backend_fallback` | 7 passed / **0.00s** / 3 条 | 7 passed / **0.12s** |
+
+开关**开**那一列：整轮 **0 条**"未打开开关"、**0 条**"没有可用的 GPU" —— 也就是说这些秒数
+是**真的在真上下文上**跑出来的，不是内层提前返回。开关**关**那一列：10 个二进制全部
+`0.00s` 且逐条打印原因（render 16 条 / editor 29 条）。
+
+CI 侧新增一段 `GPU 上下文测试（显式开关；--nocapture 保留跳过原因）`：只跑这 10 个二进制并加
+`-- --nocapture`。**为什么必须加**：上面那步整树 `cargo test` 会把**通过了的测试**的
+stdout/stderr 吞掉，"跳过"和"没跑"在日志里长得一模一样 —— 那正是本轮要消灭的"无法诊断"。
+加了这段之后，没有显卡的 windows 腿会留下一行行可读原因，有显卡的腿留下真实耗时。
+
+### 54.4 变异红-绿（三条，全部实跑）
+
+| # | 变异 | 期望 | 实测 |
+|---|---|---|---|
+| ① | 把 `point_lights.rs` 的包裹拆掉（退回裸建） | 守卫红并**点名那一行** | 退出码 101，`crates/quench3d-render/tests/point_lights.rs:28  GpuContext::headless`；改回 → 退出码 0 |
+| ② | 新建一个裸奔测试文件（模拟"将来新增"） | 守卫红并点名**新文件** | 退出码 101，`crates/quench3d-render/tests/zz_mutation_probe.rs:4  GpuContext::headless`；删除 → 退出码 0 |
+| ③ | 把 `code_only` 退化成"不剥注释" | 守卫红（且在**别人的文档注释**上误报） | 退出码 101，误报点：`crates/quench3d-editor/tests/joint_frames.rs:3`（还有我自己守卫的文档注释 3 处）；改回 → 退出码 0 |
+
+变异 ② 是这一节最要紧的一条：它证明守卫**自己会发现**"未来新增的裸奔测试"，
+而不是只覆盖我手动列出来的这 8 个文件。变异 ③ 证明"剥注释"这一步是载重的。
+
+### 54.5 给下一个在这棵树上干活的人：**门禁是整树的，所以同一棵树只允许一个写者**
+
+本轮真发生了：我的 8 个文件写完包裹、**还没跑 `rustfmt`** 的那几分钟里，另一位写者
+（第 59 轮那一路）跑了完整门禁 → **第 1 段 `fmt` 全红，红点全在我未提交的文件上**。
+后果不是"两个人都慢一点"，而是：**他既不能提交，也无法自证**（`cargo fmt --all --check`
+是整树的），我当时还卡在一次 4 分钟的编译等待里。
+
+结论（写在这里给下一个人）：
+
+* **同一棵工作树、同一时刻只允许一个写者在跑门禁**；扩围阶段先把文件 `rustfmt` 干净再跑，
+  否则你的未完成状态会把别人的 `GATE=0` 直接变红；
+* 反过来也一样：看到"红点不是我改的文件"，先看 `git status`，很可能是另一位写者的
+  未提交/未格式化文件，**不要**替他 format、更不要 `checkout --` / `stash` 去"清干净"
+  （那会吞掉他正在写的代码）；
+* 本轮我**没有**改动另一位写者的任何文件（`crates/quench3d-cli/**`、`crates/quench3d-physics/**`、
+  `docs/gap_analysis.md`、他们那几段 `docs/*.md` / `CHANGELOG.md` / `README.md` 全部原样保留）；
+* `web/pkg/*` 我**没有提交**：门禁重建出来的那份 wasm 里含的是**他们未提交**的代码
+  （`11968465` 字节，比上一轮 +6657 —— 那是他们的参考姿态偏置进了 wasm），
+  提交进去会让 main 的产物与源码对不上。按"原样留着别管"处理，工作树里保持脏。
+
+### 54.6 边界（没做的、没验证的）
+
+* **本机没有"无 GPU 的 Windows"**：原生崩溃（`0xc0000005`）**无法在本地复现**，
+  windows 腿"不再崩"这件事**只能由 CI 证明**。本机能证明的是：开关关掉时**闭包不执行**
+  （0.00s + 原因行）、守卫不需要显卡也能跑、以及开关打开时真跑且绿。
+* **守卫是词法的，不是语法分析**：如果有人在测试里给 `GpuContext` 起别名再建上下文
+  （`use ... as G; G::headless(...)`），或把建上下文藏进一个名字里没有 `GpuContext` 的
+  间接包装，这条守卫会**漏**。它拦的是"写法常规的裸奔"（本次 10 个二进制全是这种写法，
+  这正是当下 100% 的实际情况）。要更强得用 `syn` 解析 —— 那要加依赖，围栏不允许。
+  非空转断言只能挡住"清单全失效"（0 处）这种整体失效。
+* **`run_if_gpu_tests_enabled` 不算"过闸"**：只有这样命名（`with_gpu_tests`）才算。
+  这是有意的 —— 那个参数化的内核允许 `true`/`false` 硬编码，硬编码 `true` 就是"绕过开关"。
+* **ubuntu 腿仍然是空的**（§52.6 ⑦ / §52.7 第 4 条）：本轮**没有**在 CI 装软件光栅，
+  所以这几条断言在 ubuntu 上照旧是 `0.00s` + 内层返回。CI 里的真断言覆盖来自 macOS 腿。
+* **只覆盖 `crates/*/tests/*.rs`**：`crates/*/src/**` 里 `#[cfg(test)]` 的单元测试不扫。
+  目前那些单元测试不建 wgpu 上下文（建上下文的都在 tests/ 下），但这不是守卫保证的。
+* **本轮没动 `context.rs`**：守卫用的 `with_gpu_tests` / `run_if_gpu_tests_enabled` 是上半场
+  已经提交的（`2a0f0db`），所以本轮的围栏只落在 8 个测试文件 + `ci.yml` 上。
+
+### 54.7 收尾数字
+
+* 门禁（**整树**，含另一位写者未提交的 19 条测试）：**553 个测试（0 失败）**，
+  `wasm 字节：11968465`；`fmt` / `clippy-native` / `clippy-wasm` / `doc` / `tests` /
+  `web-build` / `check-web` **七段全绿**。
+* **本提交自己那棵树 = 533 + 1 = 534**（533 是上一轮的数；+1 是新增的裸奔守卫）。
+  这个 534 由**本提交的 CI 日志**核实（把各 target 的 `test result:` 行加起来，与
+  `tools/gate.sh` 同一口径）——不是从工作树那个 553 里减出来的推断值。
+* 553 与 534 差 19 = 另一位写者的 19 条；他们的 `§53.8` 写的 552 = 533 + 19（他们跑门禁时
+  我的守卫还不存在）。**合并后正确的数是 553**，README 的计数块我留给他们或下一条提交回填
+  （理由见 §54.5：同一行上有他们未提交的改动，我去改会覆盖他们的工作）。

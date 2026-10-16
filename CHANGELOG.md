@@ -35,6 +35,22 @@
   走的是内层"没有可用的 GPU"分支），macOS `0.22s` / `0.17s`（真的建出了 Metal 上下文）。
   判据、为什么不选 `cfg!(windows)` / known-flake、以及边界（其余"真建上下文"的测试二进制
   仍是欠账）见 `docs/overnight_report.md` §52 与 `docs/production_readiness.md` §11。
+- **另外 8 个"真建 wgpu 上下文"的测试也改成了显式 opt-in，并加了一条会自己发现新裸奔者的守卫**
+  （第 58 轮下半场）：`post_pipeline` / `shadow_cascades` / `material_pipeline_traits` /
+  `fog_and_shadow_quality` / `point_lights`（render）与 `hierarchy` / `history` /
+  `scene_roundtrip`（editor）—— **断言一条没删、没放宽**，只是把建上下文那一步放进
+  `with_gpu_tests` 的闭包里（没设 `QUENCH3D_GPU_TESTS=1` 时闭包一次都不执行并打印原因）。
+  新增守卫 `every_real_gpu_context_creation_in_tests_goes_through_the_gate`（不需要显卡，
+  每条 CI 腿都跑）：扫描 `crates/*/tests/*.rs`，剥掉注释与字符串后断言"凡建 wgpu 上下文
+  必过 `with_gpu_tests`"，**自动覆盖将来新增的测试文件**。
+  验证：三条变异红-绿（拆掉 `point_lights.rs` 的包裹 → 红并点名 `point_lights.rs:28`；
+  新建一个裸奔测试文件 → 红并点名它；把 `code_only` 退化成不剥注释 → 红，误报点正是**别人**
+  文档注释里的 `GpuContext::headless`）；本机两态实测（关：10 个二进制全 `0.00s` + 逐条原因；
+  开：全真跑且绿，`post_pipeline` 4.09s / `shadow_cascades` 2.34s / `scene_roundtrip` 2.29s …）。
+  CI 另加一段"只跑这 10 个二进制并加 `-- --nocapture`"的步骤 —— 整树测试会把通过测试的输出
+  吞掉，"跳过"和"没跑"在日志里分不出来，那一段专门用来把跳过原因留在日志里。
+  判据、守卫的边界（词法）、以及"门禁是整树的、同一棵树只允许一个写者"这条教训见
+  `docs/overnight_report.md` §54 与 `docs/production_readiness.md` §13。
 
 ### 新增
 
