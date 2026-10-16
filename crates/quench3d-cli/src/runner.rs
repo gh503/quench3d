@@ -1106,6 +1106,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     }
     if let Some(v) = doc.physics.static_friction_speed {
         world.config.static_friction_speed = v;
+        world.config.speculative_margin = v;
     }
 
     if let Some(ground) = &doc.ground {

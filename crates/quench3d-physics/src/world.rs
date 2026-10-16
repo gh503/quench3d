@@ -1075,6 +1075,7 @@ impl PhysicsWorld {
             &self.manifolds,
             &self.cache,
             &self.config,
+            dt,
         );
         // 5.5 确定性 island 划分（诊断 + 将来并行求解的依据）
         self.islands.begin(&views);
@@ -1423,7 +1424,10 @@ impl PhysicsWorld {
                 if !self.joints.is_empty() && self.joint_blocks_contact(ia, ib) {
                     continue;
                 }
-                (collide_bodies(a, b), a.sensor || b.sensor)
+                (
+                    collide_bodies(a, b, self.config.speculative_margin),
+                    a.sensor || b.sensor,
+                )
             };
             let m = match manifold {
                 Some(m) => m,
@@ -1787,17 +1791,28 @@ fn feature_id_of(a: &RigidBody, b: &RigidBody, world: Vec3) -> u32 {
     )
 }
 
-fn collide_bodies(a: &RigidBody, b: &RigidBody) -> Option<ContactManifold> {
-    let mut m = collide_bodies_raw(a, b)?;
+fn collide_bodies(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactManifold> {
+    let mut m = collide_bodies_raw(a, b, margin)?;
+    if margin > 0.0 {
+        // 膨胀窄相把"分离 margin 以内"也算成接触，穿透量要减回去：
+        // 正值 = 重叠，负值 = 还差多少贴上（求解器据此决定允许多快逼近）。
+        for p in m.points.iter_mut() {
+            p.penetration -= margin;
+        }
+    }
     for p in m.points.iter_mut() {
         p.feature_id = feature_id_of(a, b, p.position);
     }
     Some(m)
 }
 
-fn collide_bodies_raw(a: &RigidBody, b: &RigidBody) -> Option<ContactManifold> {
+fn collide_bodies_raw(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactManifold> {
     if a.extra_parts.is_empty() && b.extra_parts.is_empty() {
-        return narrowphase::collide_shapes(&a.shape, &a.transform, &b.shape, &b.transform);
+        // 【边界】接触余量只作用于单形状刚体：复合刚体逐部件膨胀要重算局部质心与
+        // 聚合 AABB，收益（复合体在贴上前的早接触）远小于代价。
+        let sa = a.shape.inflated(margin);
+        let sb = b.shape.inflated(margin);
+        return narrowphase::collide_shapes(&sa, &a.transform, &sb, &b.transform);
     }
     let mut points: SmallVec<ContactPoint, { ContactManifold::MAX_POINTS }> = SmallVec::new();
     for (sa, ta) in a.parts() {

@@ -203,6 +203,11 @@ pub struct PhysicsDoc {
     /// 切向相对速度低于多少（m/s）算"静止接触"、改用静摩擦系数，缺省 0.02。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_friction_speed: Option<f32>,
+    /// 接触余量（米）：分离但距离小于它的形状对也生成接触点，让高速物体"即将接触"时
+    /// 就进入约束求解（少一帧穿透突跳）。缺省 0 = 只在重叠时生成接触（历史行为，结果
+    /// 逐位不变）。只作用于**单形状**刚体：复合形状不膨胀（见文档边界）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speculative_margin: Option<f32>,
 }
 
 /// 摩擦/恢复系数的合成规则（场景文件里的写法）。

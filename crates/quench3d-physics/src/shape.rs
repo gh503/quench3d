@@ -102,6 +102,41 @@ fn box_inertia(mass: f32, he: Vec3) -> Vec3 {
 }
 
 impl Shape {
+    /// 形状沿法线方向"长胖" `margin` 米（配合 `SolverConfig::speculative_margin`）。
+    ///
+    /// 用法是**接触余量**：拿膨胀后的形状做窄相，再把穿透量减去 `margin`，于是
+    /// "距离小于 margin 但还没碰上"也会得到接触点（穿透量为负 = 分离）。
+    /// 球/盒/胶囊/柱按半径或半长膨胀；平面、凸包、三角网**原样返回**
+    /// （平面余量没有意义；凸包/三角网要重算表面——都是明确边界，不是漏做）。
+    pub fn inflated(&self, margin: f32) -> Shape {
+        if margin <= 0.0 {
+            return self.clone();
+        }
+        match self {
+            Shape::Sphere { radius } => Shape::Sphere {
+                radius: radius + margin,
+            },
+            Shape::Box { half_extents } => Shape::Box {
+                half_extents: *half_extents + Vec3::splat(margin),
+            },
+            Shape::Capsule {
+                half_height,
+                radius,
+            } => Shape::Capsule {
+                half_height: *half_height,
+                radius: radius + margin,
+            },
+            Shape::Cylinder {
+                half_height,
+                radius,
+            } => Shape::Cylinder {
+                half_height: *half_height,
+                radius: radius + margin,
+            },
+            other => other.clone(),
+        }
+    }
+
     /// 体积（半空间/网格返回 0）。
     pub fn volume(&self) -> f32 {
         match self {

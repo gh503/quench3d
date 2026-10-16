@@ -787,3 +787,34 @@ fn contact_feature_ids_are_stable_and_discriminating() {
         0
     );
 }
+
+/// 接触余量（gap #20 第二条腿）：缺省关闭 = 历史行为逐位不变；形状按余量长大。
+#[test]
+fn speculative_margin_defaults_off_and_inflates_shapes() {
+    use crate::shape::Shape;
+    assert_eq!(
+        SolverConfig::default().speculative_margin,
+        0.0,
+        "缺省必须是 0：没写这一项的场景结果要与历史完全一致"
+    );
+    let b = Shape::Box {
+        half_extents: Vec3::new(0.5, 0.5, 0.5),
+    };
+    if let Shape::Box { half_extents } = b.inflated(0.02) {
+        assert!((half_extents.x - 0.52).abs() < 1e-6, "盒子按余量长大");
+        assert!((half_extents.y - 0.52).abs() < 1e-6);
+    } else {
+        panic!("膨胀不该改变形状类型");
+    }
+    let sphere = Shape::Sphere { radius: 1.0 };
+    if let Shape::Sphere { radius } = sphere.inflated(0.1) {
+        assert!((radius - 1.1).abs() < 1e-6, "球按半径膨胀");
+    } else {
+        panic!("膨胀不该改变形状类型");
+    }
+    // 余量 <= 0 时原样返回；平面没有"长胖"的概念，也原样返回
+    let plane = Shape::Plane { normal: Vec3::Y };
+    if let Shape::Plane { normal } = plane.inflated(0.1) {
+        assert_eq!(normal, Vec3::Y, "平面余量没有意义，原样返回");
+    }
+}

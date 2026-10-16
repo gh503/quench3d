@@ -62,6 +62,11 @@ pub struct SolverConfig {
     /// 静摩擦 ≥ 动摩擦是"推一下才滑动、松手就停住"的关键：只有一个摩擦系数时，
     /// 静止的箱子会以极小的速度缓慢蠕动（每一次求解都把切向冲量顶到锥面上）。
     pub static_friction_speed: f32,
+    /// 接触余量（米）：分离但距离小于它的形状对也生成接触点（穿透量为**负**=分离）。
+    ///
+    /// 缺省 `0.0` = 只在重叠时生成接触（历史行为，结果逐位不变）。写正值让快速
+    /// 下落/高速碰撞的物体"即将接触"时就进入约束求解，减少一帧的穿透突跳。
+    pub speculative_margin: f32,
 }
 
 impl Default for SolverConfig {
@@ -81,6 +86,7 @@ impl Default for SolverConfig {
             friction_combine: CombineRule::GeometricMean,
             restitution_combine: CombineRule::Max,
             static_friction_speed: 0.02,
+            speculative_margin: 0.0,
         }
     }
 }
@@ -365,7 +371,11 @@ pub(crate) struct SolverContact {
     /// 摩擦系数。
     pub friction: f32,
     /// 恢复目标速度。
+    /// 恢复系数偏置。
     pub restitution_bias: f32,
+    /// 接触余量偏置（gap #20）：接触点还**分离**时允许的逼近速度 `separation/dt`。
+    /// 0 = 已重叠（历史行为）。
+    pub speculative_bias: f32,
     /// 初始穿透深度。
     pub penetration: f32,
     /// 累积法向冲量。
@@ -434,6 +444,9 @@ pub(crate) struct ContactSolver {
 
 impl ContactSolver {
     /// 准备阶段：计算有效质量、恢复目标、热启动冲量。
+    // 参数确实多，但每一个都是"这一步需要的事实"（视图/材质/步前速度/流形/缓存/
+    // 配置/步长）。塞进一个结构体只会把调用点都改一遍、把借用关系搞复杂，换不来可读性。
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         views: &[BodyView],
@@ -442,6 +455,7 @@ impl ContactSolver {
         manifolds: &[ManifoldEntry],
         cache: &ContactCache,
         cfg: &SolverConfig,
+        dt: f32,
     ) {
         self.contacts.clear();
         for m in manifolds {
@@ -502,6 +516,17 @@ impl ContactSolver {
                 } else {
                     0.0
                 };
+                // 接触余量：穿透量为负 = 两点还差 `-penetration` 米才贴上，
+                // 这一步允许以 `separation/dt` 的速度继续逼近；否则物体在余量
+                // 距离上就被法向约束顶住（"悬空"）。
+                // 只在**用户显式开了接触余量**时才改速度目标：缺省 0 时必须与历史
+                // 逐位相同（窄相本来就会给少量负穿透，这里若不加这道门会把它们
+                // 也当成"分离的余量接触"，结果整体漂移——digest 测试当场抓出来）。
+                let speculative_bias = if cfg.speculative_margin > 0.0 && penetration < 0.0 {
+                    (penetration / dt).min(0.0)
+                } else {
+                    0.0
+                };
                 let local_a = va.rot.inverse().mul_vec3(position - va.pos);
                 let local_b = vb.rot.inverse().mul_vec3(position - vb.pos);
                 // 与宽相/窄相用同一个哈希，缓存键才对得上
@@ -549,6 +574,7 @@ impl ContactSolver {
                     k_tangent: [k1, k2],
                     friction,
                     restitution_bias,
+                    speculative_bias,
                     penetration,
                     normal_impulse,
                     tangent_impulse,
@@ -629,7 +655,8 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
             }
             // 法向
             let vn = vrel.dot(c.normal);
-            let mut d = -(vn - c.restitution_bias) / c.k_normal;
+            // `speculative_bias` 见 prepare：分离的接触点允许以 separation/dt 逼近
+            let mut d = -(vn - (c.restitution_bias + c.speculative_bias)) / c.k_normal;
             let new = (c.normal_impulse + d).max(0.0);
             d = new - c.normal_impulse;
             c.normal_impulse = new;

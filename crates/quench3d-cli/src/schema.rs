@@ -716,6 +716,7 @@ pub fn json_schema() -> Value {
             "friction_combine",
             "restitution_combine",
             "static_friction_speed",
+            "speculative_margin",
         ]),
     );
     defs.insert("simulate".into(), def(&["steps", "dt"]));
