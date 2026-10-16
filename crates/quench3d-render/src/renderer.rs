@@ -15,6 +15,7 @@ use crate::light::{Lighting, PointLight, SpotLight, MAX_POINT_LIGHTS};
 use crate::lines::{DebugLines, LineVertex};
 use crate::material::{MaterialDesc, MaterialId, MeshId, TextureId};
 use crate::mesh::MeshData;
+use crate::spot_shadow::{plan_spot_shadow, SpotShadowPlan};
 use crate::texture::{default_texture, GpuTexture, ImageData};
 
 const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
@@ -91,6 +92,16 @@ pub struct FrameUniforms {
     pub point_lights: [PointLightUniform; MAX_POINT_LIGHTS],
     /// x = 点光源数量，y = 绘制天空，z = 曝光，w = 网格高度。
     pub params2: [f32; 4],
+    /// 聚光灯阴影：世界 → 光的**透视**裁剪矩阵（第二张深度图，与 `shadow_matrix` 无关）。
+    ///
+    /// 没有投影灯时是单位矩阵（着色器靠 `spot_shadow_params.x < 0` 判断，不会用它）。
+    pub spot_shadow_matrix: [[f32; 4]; 4],
+    /// x = 投影灯在 [`Self::point_lights`] 里的下标（**< 0 = 本帧没有聚光阴影**）,
+    /// y = near（米）, z = far（米 = 灯的影响半径）, w = 深度偏移（纹素个数）。
+    pub spot_shadow_params: [f32; 4],
+    /// x = 1 / 贴图边长, y = `tan(fov / 2)`, z = 法线偏移（纹素个数）,
+    /// w = 斜率因子的系数（`1 - n·l * w`，与平行光同形状）。
+    pub spot_shadow_texel: [f32; 4],
 }
 
 /// 单盏点光源的 uniform 数据。
@@ -278,10 +289,15 @@ pub struct RenderStats {
     pub triangles: u64,
     /// 被视锥剔除的实例数。
     pub culled: u32,
-    /// 阴影绘制调用数。
+    /// 阴影绘制调用数（平行光；多级级联时每级各算一遍）。
     pub shadow_draw_calls: u32,
     /// 阴影实例数。
     pub shadow_instances: u32,
+    /// 聚光灯阴影的绘制调用数（0 = 这一帧没有投影聚光灯）。
+    ///
+    /// 与 [`Self::shadow_draw_calls`] 分开：一个是"太阳投不投影"、一个是"聚光投不投影"，
+    /// 合成一个数字就没法判断"影子没出来是哪一边的问题"。
+    pub spot_shadow_draw_calls: u32,
     /// 调试线段数。
     pub lines: u32,
     /// 后处理趟数（正常是 1；bloom 打开时是 1 + 3）。
@@ -498,6 +514,21 @@ pub struct Renderer {
     shadow_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
     shadow_bind_group: wgpu::BindGroup,
+    /// 聚光灯阴影图（**第二张** 2D 深度图，与平行光那张互不干扰）。
+    ///
+    /// 分辨率取 `shadow_map_size / 2`（与级联的一个分块同尺寸）：外锥通常比平行光的
+    /// 覆盖范围小得多，一倍分辨率的收益有限，而每帧多出来的显存是实打实的
+    /// （`2048²` 的 `Depth32Float` 是 16 MB）。想要更清晰就调 `shadow_map_size`。
+    spot_shadow_texture: wgpu::Texture,
+    spot_shadow_view: wgpu::TextureView,
+    /// 聚光阴影图的边长（像素）。
+    spot_shadow_map_size: u32,
+    /// 投影灯那一趟阴影 pass 自己的帧常量（顶点着色器只读 `shadow_matrix`）。
+    ///
+    /// 必须与级联的 4 个 buffer 分开：同一帧里两个 pass 读不同的矩阵，
+    /// 共用一个 uniform buffer 会让后写的那个覆盖先写的那个。
+    spot_shadow_frame_buffer: wgpu::Buffer,
+    spot_shadow_frame_bind_group: wgpu::BindGroup,
     /// 每一级各自的帧常量（阴影 pass 的顶点着色器只读 `shadow_matrix`，
     /// 一级一个 buffer 才能在同一帧里画完 4 级——同一 buffer 的多次写入只会在提交时生效）。
     shadow_frame_buffers: [wgpu::Buffer; MAX_SHADOW_CASCADES],
@@ -721,6 +752,19 @@ impl Renderer {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         // 阴影用比较采样器（textureSampleCompare）
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        // 聚光灯阴影图（第二张深度图，同一套 PCF、同一个比较采样器）。
+                        // 为什么放在同一个 group：着色器里两条路径在同一个 `fs_main`，
+                        // 拆成两个 group 只会让管线布局多一层、绑定多一次。
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
                         count: None,
                     },
                 ],
@@ -951,6 +995,42 @@ impl Renderer {
         let shadow_frame_bind_groups: [wgpu::BindGroup; MAX_SHADOW_CASCADES] =
             shadow_frame_bind_groups.try_into().expect("正好 4 个");
 
+        // 聚光灯阴影图：第二张同样格式的深度图，边长是平行光那张的一半
+        let spot_shadow_map_size = shadow_tile_size.max(256);
+        let spot_shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-spot-shadow-map"),
+            size: wgpu::Extent3d {
+                width: spot_shadow_map_size,
+                height: spot_shadow_map_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                // COPY_SRC：调试时要能回读（`read_spot_shadow_map`），与平行光那张一致
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let spot_shadow_view =
+            spot_shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let spot_shadow_frame_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-spot-shadow-frame-uniform"),
+            size: std::mem::size_of::<FrameUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let spot_shadow_frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-spot-shadow-frame-bind-group"),
+            layout: &frame_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: spot_shadow_frame_buffer.as_entire_binding(),
+            }],
+        });
+
         let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quench3d-shadow-bind-group"),
             layout: &shadow_bind_layout,
@@ -962,6 +1042,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&spot_shadow_view),
                 },
             ],
         });
@@ -1319,6 +1403,11 @@ impl Renderer {
             shadow_view,
             shadow_sampler,
             shadow_bind_group,
+            spot_shadow_texture,
+            spot_shadow_view,
+            spot_shadow_map_size,
+            spot_shadow_frame_buffer,
+            spot_shadow_frame_bind_group,
             shadow_frame_buffers,
             shadow_frame_bind_groups,
             shadow_tile_size,
@@ -1963,6 +2052,7 @@ impl Renderer {
         lighting: &Lighting,
         cascades: &[Mat4],
         splits: &[f32],
+        spot_shadow: Option<SpotShadowPlan>,
     ) -> FrameUniforms {
         let shadow_matrix = cascades.first().copied().unwrap_or(Mat4::IDENTITY);
         let mut shadow_matrices = [[[0.0f32; 4]; 4]; MAX_SHADOW_CASCADES];
@@ -1986,6 +2076,31 @@ impl Renderer {
 
         let (point_lights, count) =
             pack_local_lights(&lighting.point_lights, &lighting.spot_lights);
+
+        // 聚光阴影：没有投影灯时写 `x = -1`（着色器据此整段跳过），矩阵写单位阵
+        let (spot_shadow_matrix, spot_shadow_params, spot_shadow_texel) = match spot_shadow {
+            Some(p) => (
+                p.camera.view_proj.to_cols_arrays(),
+                [
+                    p.packed_index as f32,
+                    p.camera.near,
+                    p.camera.far,
+                    p.camera.depth_bias_texels,
+                ],
+                [
+                    1.0 / self.spot_shadow_map_size.max(1) as f32,
+                    p.camera.tan_half_fov,
+                    p.camera.normal_offset_texels,
+                    // 斜率因子不写死在 WGSL 里：它属于"参数"，与 bias 一起从 Rust 传
+                    crate::spot_shadow::SPOT_SHADOW_SLOPE_FACTOR,
+                ],
+            ),
+            None => (
+                Mat4::IDENTITY.to_cols_arrays(),
+                [-1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ),
+        };
 
         let (light_dir, light_color) = match sun {
             Some(s) => {
@@ -2070,6 +2185,9 @@ impl Renderer {
                 lighting.exposure.max(0.001),
                 lighting.sky.grid_height,
             ],
+            spot_shadow_matrix,
+            spot_shadow_params,
+            spot_shadow_texel,
         }
     }
 
@@ -2093,7 +2211,14 @@ impl Renderer {
 
         let (cascades, splits) = self.shadow_cascades_for(camera, lighting);
         let shadow_count = cascades.len().min(MAX_SHADOW_CASCADES);
-        let uniforms = self.build_frame_uniforms(camera, lighting, &cascades, &splits);
+        // 聚光阴影：整帧最多一盏（规则见 `spot_shadow::pick_spot_shadow`）。
+        // `self.options.shadows` 是总开关：关掉它，太阳与聚光都不投影。
+        let spot_shadow = plan_spot_shadow(
+            &lighting.point_lights,
+            &lighting.spot_lights,
+            self.options.shadows,
+        );
+        let uniforms = self.build_frame_uniforms(camera, lighting, &cascades, &splits, spot_shadow);
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniforms));
 
@@ -2108,6 +2233,14 @@ impl Renderer {
                 .to_cols_arrays();
             ctx.queue
                 .write_buffer(&self.shadow_frame_buffers[i], 0, bytemuck::bytes_of(&one));
+        }
+        // 投影聚光灯自己那一趟：复用 `shadow_matrix` 这个槽位，写进独立的 buffer
+        // （否则会和级联的最后一写互相覆盖）
+        if let Some(p) = spot_shadow {
+            let mut one = uniforms;
+            one.shadow_matrix = p.camera.view_proj.to_cols_arrays();
+            ctx.queue
+                .write_buffer(&self.spot_shadow_frame_buffer, 0, bytemuck::bytes_of(&one));
         }
 
         // 后处理参数（bloom 开关/强度/阈值 + bloom 贴图尺寸 + FXAA 阈值）
@@ -2177,11 +2310,15 @@ impl Renderer {
         let want_shadow = uniforms.light_color[3] > 0.5;
         // 每一级一个视锥：物体只要落在**任意一级**里就得画进阴影图，
         // 否则"远处的物体只出现在第 3 级里"这种情形会缺影子。
-        let shadow_frustums: Vec<Frustum> = cascades
+        // 聚光灯的锥也是同一份名单里的一员：它的遮挡物同样要进 `shadow_batches`。
+        let mut shadow_frustums: Vec<Frustum> = cascades
             .iter()
             .take(shadow_count.max(1))
             .map(Frustum::from_view_projection)
             .collect();
+        if let Some(p) = spot_shadow {
+            shadow_frustums.push(Frustum::from_view_projection(&p.camera.view_proj));
+        }
 
         let mut write = 0u32;
         let mut shadow_batches: Vec<(MeshId, u32, u32)> = Vec::new();
@@ -2199,7 +2336,7 @@ impl Renderer {
                 self.visible.push(*raw);
                 write += 1;
                 batch_count += 1;
-                if want_shadow && shadow_frustums.iter().any(|f| f.intersects_aabb(bounds)) {
+                if shadow_frustums.iter().any(|f| f.intersects_aabb(bounds)) {
                     shadow_any = true;
                 }
             }
@@ -2299,6 +2436,47 @@ impl Renderer {
                     stats.shadow_draw_calls += 1;
                 }
                 drop(pass);
+            }
+        }
+
+        // ---------- 聚光灯阴影 pass（第二张 2D 深度图，同一套管线/同一份 PCF） ----------
+        // 与级联共用 `shadow_pipeline`（只写深度、正面剔除、深度偏移），
+        // 只是把 `frame.shadow_matrix` 换成聚光灯那台的透视矩阵、把目标换成另一张图。
+        // 名单用的是同一份 `shadow_batches`（太阳视锥 ∪ 聚光锥的并集）：
+        // 多画几个在锥外的物体不会改变这张图的内容，换来的是一次剔除循环。
+        if spot_shadow.is_some() && !shadow_batches.is_empty() {
+            let size = self.spot_shadow_map_size as f32;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quench3d-spot-shadow-pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.spot_shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.spot_shadow_frame_bind_group, &[]);
+            pass.set_viewport(0.0, 0.0, size, size, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, self.spot_shadow_map_size, self.spot_shadow_map_size);
+            let mut current_mesh = u32::MAX;
+            for (mesh, first, cnt) in &shadow_batches {
+                if *mesh != current_mesh {
+                    let m = &self.meshes[*mesh as usize];
+                    pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                    pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    current_mesh = *mesh;
+                }
+                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                let m = &self.meshes[*mesh as usize];
+                pass.draw_indexed(0..m.index_count, 0, *first..(*first + *cnt));
+                stats.spot_shadow_draw_calls += 1;
             }
         }
 
@@ -2669,10 +2847,27 @@ impl Renderer {
         ImageData::from_rgba8(width, height, rgba).map_err(|e| e.to_string())
     }
 
-    /// 回读阴影贴图的深度值（调试用）：返回 `(宽, 高, 深度)`，1.0 表示没有遮挡物。
+    /// 回读平行光阴影贴图的深度值（调试用）：返回 `(宽, 高, 深度)`，1.0 表示没有遮挡物。
     pub fn read_shadow_map(&self, ctx: &GpuContext) -> Result<(u32, u32, Vec<f32>), String> {
-        let width = self.shadow_texture.width();
-        let height = self.shadow_texture.height();
+        self.read_depth_texture(ctx, &self.shadow_texture)
+    }
+
+    /// 回读**聚光灯**阴影贴图的深度值（调试用，语义同 [`Self::read_shadow_map`]）。
+    ///
+    /// 两张图是分开的：聚光那张是透视投影，直接在平行光那张上做"有没有影子"的判断
+    /// 会把两张图的坐标混起来。
+    pub fn read_spot_shadow_map(&self, ctx: &GpuContext) -> Result<(u32, u32, Vec<f32>), String> {
+        self.read_depth_texture(ctx, &self.spot_shadow_texture)
+    }
+
+    /// 回读一张 `Depth32Float` 纹理（调试用）。
+    fn read_depth_texture(
+        &self,
+        ctx: &GpuContext,
+        texture: &wgpu::Texture,
+    ) -> Result<(u32, u32, Vec<f32>), String> {
+        let width = texture.width();
+        let height = texture.height();
         let unpadded = width * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -2689,7 +2884,7 @@ impl Renderer {
             });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.shadow_texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::DepthOnly,
@@ -2781,6 +2976,21 @@ impl Renderer {
         &self.shadow_sampler
     }
 
+    /// 聚光灯阴影贴图视图（可视化调试用；与平行光那张是两张不同的图）。
+    pub fn spot_shadow_view(&self) -> &wgpu::TextureView {
+        &self.spot_shadow_view
+    }
+
+    /// 聚光灯阴影贴图纹理（回读/调试用）。
+    pub fn spot_shadow_texture(&self) -> &wgpu::Texture {
+        &self.spot_shadow_texture
+    }
+
+    /// 聚光灯阴影贴图的边长（像素）。
+    pub fn spot_shadow_map_size(&self) -> u32 {
+        self.spot_shadow_map_size
+    }
+
     /// 默认白色纹理视图（自定义管线可复用）。
     pub fn white_view(&self) -> &wgpu::TextureView {
         &self.white_texture.view
@@ -2822,14 +3032,50 @@ mod tests {
         assert_eq!(offset_of!(FrameUniforms, cascade_info), 592);
         assert_eq!(offset_of!(FrameUniforms, point_lights), 688);
         assert_eq!(offset_of!(FrameUniforms, params2), 1200);
-        assert_eq!(size_of::<FrameUniforms>(), 1216);
+        // 聚光阴影段紧跟在 params2 之后（WGSL 里也是这个顺序）：
+        // 矩阵 64 字节 + 两个 vec4，全部 16 字节对齐
+        assert_eq!(offset_of!(FrameUniforms, spot_shadow_matrix), 1216);
+        assert_eq!(offset_of!(FrameUniforms, spot_shadow_params), 1280);
+        assert_eq!(offset_of!(FrameUniforms, spot_shadow_texel), 1296);
+        assert_eq!(size_of::<FrameUniforms>(), 1312);
     }
 
     #[test]
     fn frame_uniforms_size_is_multiple_of_16() {
         let size = std::mem::size_of::<FrameUniforms>();
         assert_eq!(size % 16, 0, "uniform 结构大小必须是 16 的倍数: {size}");
-        assert_eq!(size, 1216, "FrameUniforms 布局与 WGSL 不一致");
+        assert_eq!(size, 1312, "FrameUniforms 布局与 WGSL 不一致");
+    }
+
+    /// 新增的聚光阴影字段必须在 `mat4x4<f32>` 的 16 字节边界上，
+    /// 否则 WGSL 那边的偏移会和 Rust 错开一个 vec4（画面只是"影子偏一点"，很难查）。
+    #[test]
+    fn frame_uniform_matrices_are_16_byte_aligned() {
+        use std::mem::offset_of;
+        for off in [
+            offset_of!(FrameUniforms, view_proj),
+            offset_of!(FrameUniforms, inv_view_proj),
+            offset_of!(FrameUniforms, shadow_matrix),
+            offset_of!(FrameUniforms, view),
+            offset_of!(FrameUniforms, shadow_matrices),
+            offset_of!(FrameUniforms, spot_shadow_matrix),
+        ] {
+            assert_eq!(off % 16, 0, "矩阵字段偏移 {off} 不是 16 的倍数");
+        }
+    }
+
+    /// 没写投影灯时 `spot_shadow_params.x` 必须是负数：着色器就是靠它跳过整个采样的。
+    #[test]
+    fn frame_uniforms_use_a_negative_index_for_no_spot_shadow() {
+        let light =
+            crate::light::SpotLight::new(Vec3::ZERO, Vec3::NEG_Y, Vec3::ONE, 1.0, 10.0, 10.0, 20.0);
+        assert!(plan_spot_shadow(&[], &[light], true).is_none());
+        assert!(
+            plan_spot_shadow(&[], &[light], false).is_none(),
+            "总开关关掉时没有投影灯"
+        );
+        let on = plan_spot_shadow(&[], &[light.with_cast_shadows(true)], true).expect("应当有");
+        assert_eq!(on.packed_index, 0);
     }
 
     #[test]

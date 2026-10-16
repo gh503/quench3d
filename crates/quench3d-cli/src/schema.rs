@@ -459,7 +459,7 @@ pub fn scene_grammar() -> Value {
             "sky": "是否绘制天空，缺省 true",
             "grid": "是否绘制无限网格，缺省 true",
             "shadows": "是否投射阴影，缺省 true",
-            "spot_lights": "聚光灯数组（有方向的局部光，与点光源共享 8 盏名额）",
+            "spot_lights": "聚光灯数组：{ position:[x,y,z], direction:[x,y,z]（会被归一化）, color:[r,g,b]（**线性**）, intensity（缺省 12）, radius（影响半径，缺省 18）, inner_deg（内锥角，缺省 20）, outer_deg（外锥角，缺省 30）, cast_shadows（缺省 **false** = 只照亮不投影）}；与点光源共享 8 盏名额。**投影整帧只支持一盏**：多盏勾上时按数组顺序取第一盏（校验会警告并说明用哪一盏）；点光源仍然不投影",
             "point_lights": "点光源数组：{ position:[x,y,z], color:[r,g,b]（**线性**、非 sRGB）, intensity（缺省 12）, radius（影响半径，缺省 18）}；最多 8 盏生效。**不写这个字段 = 保留预设自带的补光**，写 [] 才是显式清空",
             "fog": "指数距离雾：{ color:[r,g,b]（**线性**、非 sRGB，缺省跟随预设）, density（每米，缺省 0.02，0 = 关闭）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。天空与参考网格也会跟着淡出；常见 density 0.02~0.1（0.05 大约 20 米外看不清）",
             "shadow_quality": "阴影质量：{ strength（0~1，缺省 0.85；0 = 阴影不压暗，1 = 全黑）, radius（阴影相机覆盖半径，米，缺省 28）}。与开关 `shadows` 分开：这一节只调质量。radius 是「覆盖范围 ↔ 精度」的旋钮，给大能让远处也投上阴影但边缘更糊。**阴影贴图分辨率（像素）不在场景文件里**：它是渲染器构造参数",
@@ -706,6 +706,7 @@ pub fn json_schema() -> Value {
             "radius",
             "inner_deg",
             "outer_deg",
+            "cast_shadows",
         ]),
     );
     defs.insert("fog".into(), def(&["color", "density"]));
@@ -892,14 +893,17 @@ animations: [{ target, loop?, start?, speed?, weight?, position?: {times,values}
   （给了 orthographic_height 就是正交投影，没有近大远小）
 - lighting: { preset: "studio"|"day"|"night", sun_direction: [x,y,z], sun_intensity, ambient, exposure, sky: true, grid: true, shadows: true,
              point_lights: [ { position: [x,y,z], color: [r,g,b]（线性）, intensity: 12, radius: 18 } ],
-             spot_lights: [ { position: [x,y,z], direction: [0,-1,0], intensity: 12, radius: 18, inner_deg: 20, outer_deg: 30 } ],
+             spot_lights: [ { position: [x,y,z], direction: [0,-1,0], intensity: 12, radius: 18, inner_deg: 20, outer_deg: 30,
+                              cast_shadows: false } ],
              fog: { color: [r,g,b]（线性）, density: 0.03 },
              shadow_quality: { strength: 0.85, radius: 28 },
              sky_colors: { zenith: [r,g,b], horizon: [r,g,b], ground: [r,g,b] }（线性）,
              bloom: { enabled: true, intensity: 0.6, threshold: 1.0 },
              fxaa: { enabled: true, edge_threshold: 0.166 },
              ssao: { enabled: true, radius: 0.75, strength: 1.0 } }
-  （point_lights 最多 8 盏；不写就保留预设自带补光。bloom / fxaa / fog 不写 = 关闭；
+  （point_lights + spot_lights 共享 8 盏名额，点光源优先；不写 point_lights 就保留预设自带补光；
+    cast_shadows 缺省 false（只照亮不投影），**整帧只支持一盏投影聚光灯**——多盏勾上时按数组顺序
+    取第一盏，校验会警告说明实际用哪一盏；点光源仍然不投影。bloom / fxaa / fog 不写 = 关闭；
     threshold 是线性亮度，太阳圆盘/自发光可以远大于 1，所以 1.0 通常只让它们外溢；
     fxaa 是 tonemap 之后的后处理抗锯齿，和 render.msaa 可以同时开；
     ssao 让接触缝隙/墙角变暗，radius 单位是米，物体尺度 1~2 米时给 0.5~1.0；

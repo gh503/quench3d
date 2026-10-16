@@ -527,6 +527,47 @@ mod local_light_doc_tests {
         );
         let docs = spot_light_docs(std::slice::from_ref(&long)).unwrap();
         assert!((docs[0].direction[1] + 1.0).abs() < 1e-6);
+        assert_eq!(
+            docs[0].cast_shadows, None,
+            "没勾投影不许写这个字段（老场景存盘后要逐字节相同）"
+        );
+    }
+
+    /// 投影开关必须能原样往返：它是"预览 == 渲染"的一部分，
+    /// 丢了它编辑器里勾的框存盘就没了（而 CLI 渲出来当然也没有影子）。
+    #[test]
+    fn spot_shadow_switch_survives_the_round_trip() {
+        let base = quench3d::render::SpotLight::new(
+            Vec3::new(0.0, 9.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            30.0,
+            40.0,
+            15.0,
+            25.0,
+        );
+        let caster = base.with_cast_shadows(true);
+        let docs = spot_light_docs(&[base, caster]).expect("有聚光就该写");
+        assert_eq!(docs[0].cast_shadows, None);
+        assert_eq!(docs[1].cast_shadows, Some(true));
+
+        // 写进场景 JSON → 读回来，两步都不能丢（走 CLI 的同一份序列化，不是自己拼字符串）
+        let mut doc = quench3d_cli::scene_doc::SceneDoc::default();
+        doc.lighting.spot_lights = Some(docs);
+        let text = doc.to_json_pretty();
+        assert!(
+            text.contains("\"cast_shadows\": true"),
+            "勾了投影的场景存盘文本里必须有它: {text}"
+        );
+        assert_eq!(
+            text.matches("cast_shadows").count(),
+            1,
+            "没勾的那盏不许写出这个字段: {text}"
+        );
+        let back = quench3d_cli::scene_doc::SceneDoc::from_json(&text).unwrap();
+        let spots = back.lighting.spot_lights.expect("聚光还在");
+        assert_eq!(spots[0].cast_shadows, None);
+        assert_eq!(spots[1].cast_shadows, Some(true));
     }
 }
 
@@ -554,6 +595,9 @@ pub(crate) fn point_light_docs(
 ///
 /// 角度是**从余弦反解**出来的（引擎只存余弦），所以存回去的是等价角度，
 /// 与作者写下的原始小数可能有 1e-5 量级的差别 —— 语义完全一样。
+///
+/// `cast_shadows` 只在**为真**时写进文档：不写就是 `false`（老行为），
+/// 这样"编辑器里没勾过投影"的场景存盘后与打开前逐字节相同。
 pub(crate) fn spot_light_docs(
     lights: &[quench3d::render::SpotLight],
 ) -> Option<Vec<quench3d_cli::scene_doc::SpotLightDoc>> {
@@ -571,6 +615,7 @@ pub(crate) fn spot_light_docs(
                 radius: s.radius,
                 inner_deg: s.inner_cos.acos().to_degrees(),
                 outer_deg: s.outer_cos.acos().to_degrees(),
+                cast_shadows: if s.cast_shadows { Some(true) } else { None },
             })
             .collect(),
     )

@@ -1403,6 +1403,13 @@ pub struct SpotLightDoc {
     /// 外锥角（度）：这个角度外完全没有光，缺省 30，必须大于内锥角。
     #[serde(default = "default_spot_outer_deg")]
     pub outer_deg: f32,
+    /// 是否投射阴影，缺省 **false**（不写 = 老的"只照亮、不投影"，像素逐位不变）。
+    ///
+    /// 整帧**只支持一盏**投影聚光灯：多盏同时要求投影时，按 `spot_lights` 的顺序取
+    /// **第一盏**（规则见 `quench3d_render::spot_shadow::pick_spot_shadow`），
+    /// 校验会给一条警告说明实际用的是哪一盏。点光源仍然不投影。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_shadows: Option<bool>,
 }
 
 fn default_spot_inner_deg() -> f32 {
@@ -2723,6 +2730,43 @@ impl SceneDoc {
                 )
                 .with_hint("把远处的灯删掉，或把它们烘进自发光材质里"),
             );
+        }
+        // 聚光阴影：整帧只支持一盏（一张 2D 阴影图只能对应一个视锥）。
+        // 说清"实际会用哪一盏"——否则用户勾了三盏、只亮一盏，只能靠猜。
+        let casters: Vec<usize> = spots
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.cast_shadows == Some(true))
+            .map(|(i, _)| i)
+            .collect();
+        if casters.len() > 1 {
+            out.push(
+                Diagnostic::warn(
+                    format!("lighting.spot_lights[{}].cast_shadows", casters[0]),
+                    format!(
+                        "有 {} 盏聚光灯要求投影，但引擎只支持一盏：实际投影的是 spot_lights[{}]（第一盏要求投影的），其余照常照明但不投影",
+                        casters.len(),
+                        casters[0]
+                    ),
+                )
+                .with_hint("把其余聚光灯的 cast_shadows 改成 false，或把它们合并成一盏"),
+            );
+        }
+        // 投影灯被局部光名额挤掉时，它既不照明也不投影——这条比"超过 8 盏"那条更具体
+        if let Some(&first) = casters.first() {
+            let packed = point_lights.len().min(MAX_POINT_LIGHTS) + first;
+            if packed >= MAX_POINT_LIGHTS {
+                out.push(
+                    Diagnostic::warn(
+                        format!("lighting.spot_lights[{first}].cast_shadows"),
+                        format!(
+                            "这一盏排在第 {} 个局部光名额（点光源优先，一共只有 {MAX_POINT_LIGHTS} 个），它既不会照明也不会投影",
+                            packed + 1
+                        ),
+                    )
+                    .with_hint("减少点光源数量，或把这盏聚光灯挪到 spot_lights 前面"),
+                );
+            }
         }
 
         // 雾：颜色有限且非负、密度非负有限
@@ -5434,6 +5478,76 @@ mod tests {
             "9 盏聚光灯要警告超预算：{:?}",
             over.validate()
         );
+    }
+
+    /// 聚光阴影：只支持一盏，校验必须**说清用哪一盏**（否则用户只能靠猜）。
+    #[test]
+    fn spot_shadow_validation_allows_only_one_caster_and_says_which() {
+        let one = SceneDoc::from_value(json!({ "lighting": { "spot_lights": [
+            { "position": [0.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0], "cast_shadows": true } ] } }))
+        .unwrap();
+        let d = one.validate();
+        assert!(
+            d.iter().all(|x| x.severity != Severity::Warning),
+            "一盏投影灯应当完全合法、也没有警告：{d:?}"
+        );
+
+        // 两盏都勾：警告落在**第一盏**上，并指出实际用的是它
+        let two = SceneDoc::from_value(json!({ "lighting": { "spot_lights": [
+            { "position": [0.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0] },
+            { "position": [3.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0], "cast_shadows": true },
+            { "position": [6.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0], "cast_shadows": true } ] } }))
+        .unwrap();
+        let d = two.validate();
+        let w = d
+            .iter()
+            .find(|x| x.severity == Severity::Warning && x.path.ends_with("cast_shadows"))
+            .unwrap_or_else(|| panic!("两盏要求投影必须警告：{d:?}"));
+        assert_eq!(
+            w.path, "lighting.spot_lights[1].cast_shadows",
+            "警告要落在实际投影的那一盏（第一盏要求投影的）上：{d:?}"
+        );
+        assert!(
+            w.message.contains("spot_lights[1]"),
+            "警告里必须写清用哪一盏：{}",
+            w.message
+        );
+        assert!(w.hint.is_some(), "要给一条可执行的建议");
+
+        // 投影灯被局部光名额挤掉：8 盏点光已经占满 → 它既不照明也不投影
+        let points: Vec<serde_json::Value> = (0..8)
+            .map(|i| json!({ "position": [i as f32, 5.0, 0.0] }))
+            .collect();
+        let starved = SceneDoc::from_value(json!({ "lighting": {
+            "point_lights": points,
+            "spot_lights": [ { "position": [0.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0],
+                               "cast_shadows": true } ] } }))
+        .unwrap();
+        let d = starved.validate();
+        assert!(
+            d.iter().any(|x| x.severity == Severity::Warning
+                && x.path == "lighting.spot_lights[0].cast_shadows"
+                && x.message.contains("名额")),
+            "投影灯被名额挤掉时必须单独警告：{d:?}"
+        );
+
+        // 老场景（不写这个字段）= 不投影、零警告、零错误
+        let old = SceneDoc::from_value(json!({ "lighting": { "spot_lights": [
+            { "position": [0.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0] },
+            { "position": [3.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0] } ] } }))
+        .unwrap();
+        assert!(
+            old.validate()
+                .iter()
+                .all(|x| x.severity != Severity::Warning),
+            "不写 cast_shadows 的老场景不许多出任何警告：{:?}",
+            old.validate()
+        );
+        // 存盘文本里也不该冒出这个字段（不写 = 老行为）
+        assert!(!old.to_json_pretty().contains("cast_shadows"));
+        assert!(old.lighting.spot_lights.as_ref().unwrap()[0]
+            .cast_shadows
+            .is_none());
     }
 
     #[test]

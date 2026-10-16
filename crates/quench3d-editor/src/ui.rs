@@ -682,6 +682,9 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
         *changed = true;
     }
     let mut remove_spot = None;
+    // 投影灯**整帧只有一盏**：勾上某一盏之后要把别的都取消掉。
+    // 不能在 `iter_mut()` 里边遍历边改整个列表，所以先记下"要保留谁"，循环后再处理。
+    let mut keep_caster: Option<usize> = None;
     for (i, s) in lights.spot_lights.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             ui.label(format!("#{} 聚光", i + 1));
@@ -723,6 +726,21 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
                         .prefix("半径 "),
                 )
                 .changed();
+            let mut shadows = s.cast_shadows;
+            if ui
+                .checkbox(&mut shadows, "投影")
+                .on_hover_text(
+                    "整帧只支持一盏投影聚光灯：勾上这一盏会自动取消其它聚光灯的勾选。\
+                     点光源仍然不投影（立方体阴影图没做）。",
+                )
+                .changed()
+            {
+                s.cast_shadows = shadows;
+                if shadows {
+                    keep_caster = Some(i);
+                }
+                *changed = true;
+            }
             if ui.small_button("删").clicked() {
                 remove_spot = Some(i);
             }
@@ -748,14 +766,31 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
                 .changed();
             if a || b {
                 let (inner, outer) = (inner.min(outer), outer.max(inner));
-                let (position, direction, color, intensity, radius) =
-                    (s.position, s.direction, s.color, s.intensity, s.radius);
+                let (position, direction, color, intensity, radius, shadows) = (
+                    s.position,
+                    s.direction,
+                    s.color,
+                    s.intensity,
+                    s.radius,
+                    s.cast_shadows,
+                );
+                // `SpotLight::new` 缺省不投影，这里必须把开关带回去：
+                // 否则"改一下锥角就把投影勾掉了"——而且只在改角度时才复现，极难查
                 *s = quench3d::render::SpotLight::new(
                     position, direction, color, intensity, radius, inner, outer,
-                );
+                )
+                .with_cast_shadows(shadows);
                 *changed = true;
             }
         });
+    }
+    if let Some(keep) = keep_caster {
+        for (j, other) in lights.spot_lights.iter_mut().enumerate() {
+            if j != keep && other.cast_shadows {
+                other.cast_shadows = false;
+                *changed = true;
+            }
+        }
     }
     if let Some(i) = remove_spot {
         lights.spot_lights.remove(i);

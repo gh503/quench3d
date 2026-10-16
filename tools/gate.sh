@@ -71,7 +71,11 @@ else
 fi
 
 step "测试（全部 crate）"
-if cargo test --workspace >"$LOG_DIR/gate-test.log" 2>&1; then
+# --no-fail-fast：**必须**。cargo 缺省在第一个失败的测试二进制就收工，后面的 crate 根本
+# 不会跑 —— 门禁于是只报"第一个"失败，剩下的红点要等你修完它、再跑一次才浮出来
+# （第 53 轮实测：一次门禁只暴露一个 crate 的问题，改完重跑又冒出一个）。
+# 顺带让下面的"测试总数"是真的：缺省模式下没跑的 crate 根本不计入。
+if cargo test --workspace --no-fail-fast >"$LOG_DIR/gate-test.log" 2>&1; then
   ok tests
   grep -E '^test result:' "$LOG_DIR/gate-test.log" |
     awk '{gsub(/;/,"",$4); s+=$4} END {printf "  测试总数：%d（0 失败）\n", s}'

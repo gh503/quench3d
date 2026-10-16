@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::scene_doc::{
     arr, v3, ActionKind, BodyKind, JointDoc, JointKind, MaterialDoc, ProbeDoc, ProbeShapeDoc,
-    SceneDoc, ShapeDoc, ShapeKind,
+    SceneDoc, ShapeDoc, ShapeKind, SpotLightDoc,
 };
 
 /// 运行期错误。
@@ -2902,22 +2902,28 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
     }
     // 聚光灯：与点光源**共享**局部光名额（点光源优先），所以也放在最后覆盖。
     // 不写 = 没有聚光灯（预设里也没有），写 [] 同样是空——这里两种情况行为一致。
+    // `cast_shadows` 缺省 false = 老场景（那时没有这个字段）的像素逐位不变。
     if let Some(lights) = &l.spot_lights {
-        lighting.spot_lights = lights
-            .iter()
-            .map(|p| {
-                SpotLight::new(
-                    v3(p.position),
-                    v3(p.direction),
-                    Vec3::new(p.color[0], p.color[1], p.color[2]),
-                    p.intensity,
-                    p.radius,
-                    p.inner_deg,
-                    p.outer_deg,
-                )
-            })
-            .collect();
+        lighting.spot_lights = lights.iter().map(spot_light_from_doc).collect();
     }
+}
+
+/// 单盏聚光灯：场景文档 → 引擎。
+///
+/// 抽成纯函数是为了能**不用显卡**就钉住"字段有没有丢"：文档到引擎的映射错一个字段，
+/// 画面上只是"灯的位置/角度/投影有点不对"，靠眼睛看不出来（第 53 轮的教训）。
+pub fn spot_light_from_doc(p: &SpotLightDoc) -> SpotLight {
+    SpotLight::new(
+        v3(p.position),
+        v3(p.direction),
+        Vec3::new(p.color[0], p.color[1], p.color[2]),
+        p.intensity,
+        p.radius,
+        p.inner_deg,
+        p.outer_deg,
+    )
+    // 缺省 false = 老场景（那时没有这个字段）的像素逐位不变
+    .with_cast_shadows(p.cast_shadows.unwrap_or(false))
 }
 
 /// 应用相机配置。
@@ -3783,4 +3789,51 @@ pub fn run_doctor() -> DoctorReport {
         }
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 文档 → 引擎：聚光灯的每个字段都要落到引擎里，尤其是**投影开关**。
+    ///
+    /// 这条测试不需要显卡（纯映射），CI 也会跑。第 53 轮的教训是"子串断言既会误报也会漏报"，
+    /// 所以这里解析成类型之后**逐字段**断言，不去数字符串。
+    #[test]
+    fn spot_light_doc_maps_every_field_into_the_engine() {
+        let doc = SpotLightDoc {
+            position: [1.0, 9.0, -2.0],
+            direction: [0.0, -1.0, 0.5],
+            color: [0.9, 0.8, 0.7],
+            intensity: 30.0,
+            radius: 40.0,
+            inner_deg: 8.0,
+            outer_deg: 12.0,
+            cast_shadows: Some(true),
+        };
+        let light = spot_light_from_doc(&doc);
+        assert_eq!(light.position, Vec3::new(1.0, 9.0, -2.0));
+        assert_eq!(light.color, Vec3::new(0.9, 0.8, 0.7));
+        assert_eq!(light.intensity, 30.0);
+        assert_eq!(light.radius, 40.0);
+        assert!((light.inner_cos - 8.0f32.to_radians().cos()).abs() < 1e-6);
+        assert!((light.outer_cos - 12.0f32.to_radians().cos()).abs() < 1e-6);
+        assert!(light.cast_shadows, "文档里勾了投影，引擎里必须也是 true");
+        // 方向归一化
+        let d = light.dir();
+        assert!((d.length() - 1.0).abs() < 1e-5);
+        assert!(d.y < 0.0 && d.z > 0.0);
+
+        // 缺省（不写这个字段）= 不投影：老场景的像素必须逐位不变
+        let plain = SpotLightDoc {
+            cast_shadows: None,
+            ..doc
+        };
+        assert!(!spot_light_from_doc(&plain).cast_shadows);
+        let explicit = SpotLightDoc {
+            cast_shadows: Some(false),
+            ..doc
+        };
+        assert!(!spot_light_from_doc(&explicit).cast_shadows);
+    }
 }

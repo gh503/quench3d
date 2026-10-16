@@ -42,6 +42,14 @@ struct Frame {
     point_lights: array<PointLight, 8>,
     // x = 点光源数量, y = 是否绘制天空, z = 曝光, w = 备用
     params2: vec4<f32>,
+    // ---- 聚光灯阴影（整帧只支持一盏投影聚光灯，见 spot_shadow.rs）----
+    // 世界 → 光的**透视**裁剪空间矩阵（与平行光那张图无关，是第二张深度图）
+    spot_shadow_matrix: mat4x4<f32>,
+    // x = 投影灯在 point_lights 里的下标（< 0 = 本帧没有聚光阴影）,
+    // y = near（米）, z = far（米 = 灯的影响半径）, w = 深度偏移（纹素个数）
+    spot_shadow_params: vec4<f32>,
+    // x = 1 / 贴图边长（纹素）, y = tan(fov / 2), z = 法线偏移（纹素个数）, w = 斜率因子
+    spot_shadow_texel: vec4<f32>,
 };
 
 struct Material {

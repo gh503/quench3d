@@ -49,6 +49,7 @@ pub mod lines;
 pub mod material;
 pub mod mesh;
 pub mod renderer;
+pub mod spot_shadow;
 pub mod texture;
 
 pub use camera::{Camera, CameraInput, FlyCamera, Frustum, OrbitCamera, Projection};
@@ -66,6 +67,9 @@ pub use mesh::{MeshData, Vertex};
 pub use renderer::{
     BloomOptions, FxaaOptions, InstanceDesc, MaterialTextureSlot, RenderStats, Renderer,
     RendererOptions, SsaoOptions, DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,
+};
+pub use spot_shadow::{
+    pick_spot_shadow, plan_spot_shadow, spot_shadow_camera, SpotShadowCamera, SpotShadowPlan,
 };
 pub use texture::{Filter, GpuTexture, ImageData, TextureOptions};
 

@@ -1065,7 +1065,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 483 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 497 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1128,9 +1128,9 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 137 个测试分七块：
+命令行工具的 **152** 个测试（`cargo test -p quench3d-cli`：lib 73 + 5 个集成测试二进制 + 2 个 doctest），按目的分这几块：
 
-* **契约测试**（`tests/cli_e2e.rs`，50 个）真的去 spawn `quench3d` 子进程，断言
+* **契约测试**（`tests/cli_e2e.rs`，52 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；
   其中 4 条是「能力真的接线了」的像素/数值证据：**材质贴图**（同一箱子带/不带贴图的
   中心色差）、**点光源**（一盏红灯必须把箱子照红，且显式清空预设补光必须改变画面）、
@@ -1153,15 +1153,15 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
   HTTP 4xx 报错、连接被拒时的建议、环境变量优先级——不需要真的模型。
   还有一个**假 `curl`**：它抄下自己的 argv，断言 `https` 路径的 API key 不在命令行参数里、
   且配置文件权限是 `-rw-------`（把 key 塞回 argv，这条测试会真的变红）。
-* **agent 循环测试**（`tests/agent_tools.rs`，5 个）用假模型发出真实的 `tool_calls`，
+* **agent 循环测试**（`tests/agent_tools.rs`，6 个）用假模型发出真实的 `tool_calls`，
   验证「调用 → 执行 → 结果回喂 → 收尾」全链路、同一回复里的多个工具、
   工具失败时把诊断回喂、以及往返上限不会死循环。
-* **零分配回归**（`tests/steady_state_allocations.rs`，1 个）：计数分配器断言物理稳态
+* **零分配回归**（`tests/steady_state_allocations.rs`，2 个）：计数分配器断言物理稳态
   每步堆分配为 0、活动内存不增长。
 * **并行 == 串行（逐位）**（`api_tests.rs`，3 个）：无关节快速路径、有关节交错路径、
   以及**换线程数**（2/3/4 线程）结果不变；每个测试都先断言「并行真的启用了」，
   再逐位比较全部刚体状态。
-* **像素级能力验证**（`crates/quench3d-render/tests/`，4 个）：alpha 混合与双面渲染
+* **像素级能力验证**（`crates/quench3d-render/tests/`）：alpha 混合与双面渲染
   必须改变画面；**点光源必须真的亮**（单盏红灯：旧 SoA/AoS 布局错位时它完全不亮）；
   另有 `frame_uniform_layout_matches_wgsl` 把 Rust 与 WGSL 的结构体偏移量钉死。
 * **整岛休眠/唤醒**（`api_tests.rs`，2 个）：一摞箱子必须同步入睡且不来回醒；
@@ -1175,7 +1175,7 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
   「预计算世界逆惯量」与原来的两次四元数旋转数学等价（最大相对偏差 1.03e-6）。
 * **自动修复测试**（`tests/ask_repair.rs`，3 个）验证「模型第一次给错 → 诊断回喂 →
   第二次修好」这条闭环，以及修不好时按 `--repair-rounds` 停下。
-* **单元测试**（`src/`，38 个）覆盖场景解析与校验、规模上限诊断、结构诊断路径、生成与修复提示、
+* **单元测试**（`src/`，73 个）覆盖场景解析与校验、规模上限诊断、结构诊断路径、生成与修复提示、
   信封与退出码映射、MCP 协议形状与轨迹、agent 工具定义、base64、参数解析
   （含「schema 里每个带取值的参数都必须登记进 VALUE_FLAGS」这条守卫）。
 

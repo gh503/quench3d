@@ -111,6 +111,11 @@ pub struct PointLight {
 /// 与点光源**共享**每帧的局部光名额（[`MAX_POINT_LIGHTS`] 个，先放点光源、
 /// 再放聚光灯，放不下的忽略）——所以聚光灯多的时候点光源会被挤掉，这是有意的：
 /// 预算固定、行为可预测，比"有时亮有时不亮"更好查。
+///
+/// **投影**：`cast_shadows` 缺省 `false`（老场景逐像素不变）。整帧**只支持一盏**投影
+/// 聚光灯——选择规则见 [`crate::spot_shadow::pick_spot_shadow`]：
+/// "第一盏 `cast_shadows == true` 且没有被局部光名额挤掉的聚光灯"。
+/// 其余聚光灯照常照明，只是不投影；点光源**仍然**不投影（立方体阴影图没做）。
 #[derive(Clone, Copy, Debug)]
 pub struct SpotLight {
     /// 世界坐标。
@@ -127,6 +132,8 @@ pub struct SpotLight {
     pub inner_cos: f32,
     /// 外锥角余弦（此角外完全无光）。
     pub outer_cos: f32,
+    /// 是否投射阴影（缺省 false = 与加这个功能之前逐像素相同）。
+    pub cast_shadows: bool,
 }
 
 impl SpotLight {
@@ -152,7 +159,18 @@ impl SpotLight {
             radius,
             inner_cos: inner.cos(),
             outer_cos: outer.cos(),
+            // 缺省不投影：加了 `cast_shadows` 这个字段之后，老场景的像素必须逐位不变
+            cast_shadows: false,
         }
+    }
+
+    /// 打开/关闭投影（链式，给 `new` 之后用）。
+    ///
+    /// 为什么要有它：锥角编辑会整体重建一盏灯（引擎只存余弦，改角度只能重算），
+    /// 直接 `*s = SpotLight::new(..)` 会把投影开关悄悄清掉。
+    pub fn with_cast_shadows(mut self, cast_shadows: bool) -> Self {
+        self.cast_shadows = cast_shadows;
+        self
     }
 
     /// 单位方向（零向量时退化为向下照，避免 NaN）。
@@ -407,6 +425,25 @@ mod tests {
     fn to_light_is_opposite_of_direction() {
         let l = DirectionalLight::default();
         assert!((l.to_light() + l.direction.normalize_or_zero()).length() < 1e-5);
+    }
+
+    /// 加了 `cast_shadows` 之后，"缺省不投影"必须是构造器的行为，
+    /// 而不是靠每个调用点记得关——否则老场景会悄悄多出阴影。
+    #[test]
+    fn spot_lights_do_not_cast_shadows_unless_asked() {
+        let s = SpotLight::new(Vec3::ZERO, Vec3::NEG_Y, Vec3::ONE, 1.0, 10.0, 10.0, 20.0);
+        assert!(!s.cast_shadows);
+        assert!(s.with_cast_shadows(true).cast_shadows);
+        assert!(
+            !s.with_cast_shadows(true)
+                .with_cast_shadows(false)
+                .cast_shadows
+        );
+        // 链式调用不能改动别的字段（锥角编辑会重建整盏灯，靠这条保证开关不丢）
+        let t = s.with_cast_shadows(true);
+        assert_eq!(t.position, s.position);
+        assert_eq!(t.inner_cos, s.inner_cos);
+        assert_eq!(t.outer_cos, s.outer_cos);
     }
 
     #[test]
