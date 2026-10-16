@@ -61,6 +61,16 @@ impl MockLlm {
             {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // **必须显式设回阻塞**：BSD / macOS 的 `accept()` 会**继承** listener 的
+                        // `O_NONBLOCK`（Linux 的 `accept()` 不继承，所以本地永远复现不出来）。
+                        // 不设的话，`read_request` 里的 `set_read_timeout` 在非阻塞 socket 上
+                        // 不生效：请求字节只要还没到就立刻 `WouldBlock` → 被当成"对端没发请求"
+                        // → 线程退出、socket 关闭 → 客户端读到
+                        // `Connection reset by peer (os error 54)`。这就是 macOS 上偶发红的
+                        // 那一类（以前只在 accept 出错时补过重试，治的是另一个症状）。
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let tx = tx.clone();
                         let counter = counter.clone();
                         let replies = replies.clone();

@@ -229,11 +229,18 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 
 ---
 
-## 9. 已知问题（必须知道的两条）
+## 9. 已知问题
 
-1. **偶发测试**：`crates/quench3d-cli/tests/agent_tools.rs::agent_handles_multiple_tools_in_one_turn`
-   在 **macOS** 上偶发失败（本地 mock HTTP 服务与客户端之间的竞态；同提交的 ubuntu / windows /
-   wasm32 全绿，`gh run rerun --failed` 后转绿）。看到它红请先复跑再判断 —— 详见 `CHANGELOG.md` 的「已知问题」。
+1. ~~**macOS 偶发 flaky（假 LLM 服务）**~~ **已修（第 16 轮）**：
+   `agent_tools.rs::agent_handles_multiple_tools_in_one_turn` 与
+   `llm_mock.rs::chat_reads_content_length_response_and_sends_expected_request`
+   都在这条线上偶发红（同提交的 ubuntu / windows / wasm32 全绿，`gh run rerun --failed` 曾转绿）。
+   根因是 BSD / macOS 的 `accept()` 会**继承** listener 的 `O_NONBLOCK`（Linux 不继承），
+   假服务的 `set_read_timeout` 因此不生效：请求字节没到时立刻 `WouldBlock` → 当成"没请求"
+   关连接 → 客户端读到 `Connection reset by peer (os error 54)`。
+   修法是 accept 之后**显式设回阻塞**（`crates/quench3d-cli/tests/common/mod.rs`）。
+   验证方式是 **macOS CI 连续绿**（本地是 Linux，复现不出来，只能验"没改坏"：
+   `llm_mock` + `agent_tools` 连续 5 轮通过）。
 2. **Web 端仍需真机验证**：本会话所有浏览器验证跑在 headless Chrome + SwiftShader（`backend: "gl"`，
    即 WebGL2 回退），**真实设备的 WebGPU 路径没有验证过**（H4）。
 

@@ -33,6 +33,15 @@
 
 ### 修复
 
+- **macOS 上偶发红的假 LLM 服务（根因终于找到了）**：测试用的假服务把 listener 设成非阻塞，
+  而 **BSD / macOS 的 `accept()` 会继承 `O_NONBLOCK`**（Linux 的不会，所以本地永远复现不出来）。
+  于是 `read_request` 里的 `set_read_timeout` 在非阻塞 socket 上不生效：请求字节还没到就立刻
+  `WouldBlock`，被当成"对端没发请求"，线程退出、连接被关 → 客户端读到
+  `Connection reset by peer (os error 54)`。现在 accept 之后**显式设回阻塞**。
+  这条以前被记成"偶发 flaky"（只在 accept 出错时补过重试，治的是另一个症状），
+  实际是一个能解释清楚的平台差异；验证方式是 macOS CI 连续绿 + 本地 `llm_mock`/`agent_tools`
+  连续 5 轮通过（本地是 Linux，复现不出来）。
+
 - **编辑器：绕 Y 轴 ±90° 的物体存盘后会变成"另一个 90° 旋转"**（万向锁下的欧拉角反解写错了
   矩阵行）。单看这个物体看不出来（都是"转了 90°"），但它的**子物体会立刻跑到别的地方**；
   在没有层级之前这个 bug 表现为导出前后自身朝向不一致。现在改用矩阵第 2 行求解，
@@ -163,13 +172,19 @@
 
 ## 已知问题
 
-- **偶发（flaky）测试**：`crates/quench3d-cli/tests/agent_tools.rs` 的
-  `agent_handles_multiple_tools_in_one_turn` 在 **macOS** 上偶发失败
-  （`run_turn(...).unwrap()`，同一提交的 ubuntu / windows / wasm32 三个 job 全绿，
-  `gh run rerun --failed` 后转绿）。它用一个本地 mock HTTP 服务测 agent 的多工具回合，
-  看起来是服务线程与客户端之间的竞态。
-  **这不是功能缺陷，但会污染 CI 信号** —— **已修复**（根因不在这个用例本身）：假 LLM 服务一条连接只答一个请求就丢 socket，而 HTTP 客户端的
-  连接池会复用 socket —— 复用那一次拿到空响应/连接被关，于是**三个不同用例**在 macOS 上轮流偶发失败。
-  现在：连接线程循环 `read_request` 直到对端关闭（支持 keep-alive）、回复序号按**请求**递增、
-  `accept()` 的 `Interrupted`/`ConnectionAborted`/`ConnectionReset` 不再让服务退出。
-  验证：本地 `agent_tools` + `llm_mock` 连跑 3 次全过，macOS CI 全绿（`49cbf62`）。
+- ~~**偶发（flaky）测试**：`crates/quench3d-cli/tests/agent_tools.rs` 的
+  `agent_handles_multiple_tools_in_one_turn` 在 **macOS** 上偶发失败~~ —— **已修**，
+  但前面记的根因**只对了一半**（第 16 轮才找到真正的那个）：
+  1. 第 13 轮修的是"一条连接只答一个请求就丢 socket"（HTTP 客户端连接池会复用 socket，
+     复用那一次拿到空响应/连接被关）—— 这是真问题，也确实修掉了；
+  2. 但同类失败仍在 macOS 上偶发（第 16 轮又抓到一次，这次是
+     `llm_mock::chat_reads_content_length_response_and_sends_expected_request`，
+     报 `Connection reset by peer (os error 54)`）。真正的原因是**平台差异**：
+     BSD / macOS 的 `accept()` 会**继承** listener 的 `O_NONBLOCK`，而 Linux 的 `accept()`
+     不继承 —— 假服务把 listener 设成非阻塞（为了 accept 超时），于是 macOS 上连进来的
+     socket 也是非阻塞的，`set_read_timeout` 对它无效：请求字节还没到就立刻 `WouldBlock`，
+     被当成"对端没发请求"，线程退出、socket 关闭 → 客户端读到 RST。
+     这也解释了为什么"本地怎么跑都不红"。
+     修法：accept 之后**显式 `set_nonblocking(false)`**（`crates/quench3d-cli/tests/common/mod.rs`）。
+  验证：本地（Linux，复现不出该平台差异）`agent_tools` + `llm_mock` 连续 5 轮全过；
+  真正的验证是 **macOS CI 连续绿**。
