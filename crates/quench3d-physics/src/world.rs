@@ -38,6 +38,13 @@ pub const MAX_SUBSTEPS: usize = 8;
 /// 单次 `step` 接受的最大时间增量（防止卡顿后的「时间爆炸」）。
 pub const MAX_FRAME_DT: f32 = 0.25;
 
+/// 事件队列的默认上限。
+///
+/// 存在的理由：事件是**给宿主看的**，宿主忘了取（或跑了一万步不取）时，
+/// 无上限的队列会变成内存泄漏。到顶之后新事件被丢掉，但 [`PhysicsWorld::events_dropped`]
+/// 会记下来——"静默丢事件"比"内存涨到 OOM"好，但也要能被发现。
+pub const DEFAULT_EVENT_CAPACITY: usize = 4096;
+
 /// 射线命中结果。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RaycastHit {
@@ -198,6 +205,64 @@ pub struct SensorEvent {
     pub started: bool,
 }
 
+/// 事件种类。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PhysicsEventKind {
+    /// 两个刚体**开始**接触（上一步还没接触）。
+    ContactBegin,
+    /// 两个刚体**结束**接触。
+    ContactEnd,
+    /// 某刚体进入传感器。
+    SensorEnter,
+    /// 某刚体离开传感器。
+    SensorExit,
+    /// 刚体进入睡眠。
+    Sleep,
+    /// 刚体醒来。
+    Wake,
+    /// 关节被拉断。
+    JointBroken,
+}
+
+impl PhysicsEventKind {
+    /// 报告与测试里用的稳定名字（也是场景 JSON 里的字符串）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ContactBegin => "contact_begin",
+            Self::ContactEnd => "contact_end",
+            Self::SensorEnter => "sensor_enter",
+            Self::SensorExit => "sensor_exit",
+            Self::Sleep => "sleep",
+            Self::Wake => "wake",
+            Self::JointBroken => "joint_broken",
+        }
+    }
+}
+
+/// 事件总线里的一条事件。
+///
+/// 做成**扁平结构**（而不是带负载的枚举）有两个原因：
+/// * 队列是 `Vec<PhysicsEvent>`，扁平 + `Copy` 才好复用缓冲、也方便报告直接序列化；
+/// * 宿主按 `kind` 分支时字段含义是固定的（接触/传感器用 `a`/`b`，睡眠/唤醒用 `a`，
+///   断裂用 `joint` + `force`/`torque`），不需要为每种事件写一遍匹配。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhysicsEvent {
+    /// 发生时的**子步号**（世界里累计的子步计数）。
+    pub step: u64,
+    /// 种类。
+    pub kind: PhysicsEventKind,
+    /// 主体（接触/传感器的第一个刚体、睡眠/唤醒的那个刚体、断裂时关节的 A 端）。
+    pub a: BodyHandle,
+    /// 第二个刚体（单主体事件为 `None`）。
+    pub b: Option<BodyHandle>,
+    /// 断裂的关节（只有 [`PhysicsEventKind::JointBroken`] 有）。
+    pub joint: Option<JointHandle>,
+    /// 断裂时的力量级（N）。
+    pub force: f32,
+    /// 断裂时的力矩量级（N·m）。
+    pub torque: f32,
+}
+
 pub struct PhysicsWorld {
     bodies: Vec<BodySlot>,
     free: Vec<u32>,
@@ -221,6 +286,18 @@ pub struct PhysicsWorld {
     sensor_pairs_prev: Vec<(u32, u32)>,
     /// 本子步的传感器事件（进入/离开）。
     sensor_events: Vec<SensorEvent>,
+    /// 事件总线的队列（宿主用 [`PhysicsWorld::drain_events`] 取走）。
+    events: Vec<PhysicsEvent>,
+    /// 队列上限（默认 [`DEFAULT_EVENT_CAPACITY`]）。
+    event_capacity: usize,
+    /// 因为队列满而**丢掉**的事件数（> 0 就说明宿主取事件不够勤）。
+    events_dropped: u64,
+    /// 本子步所有**真实接触**的刚体对（与上一子步差分得到开始/结束）。
+    touch_pairs: Vec<(u32, u32)>,
+    /// 上一子步的真实接触对。
+    touch_pairs_prev: Vec<(u32, u32)>,
+    /// 上一子步每个槽位是否在睡（差分得到睡眠/唤醒事件）。
+    sleeping_prev: Vec<bool>,
     manifolds: Vec<ManifoldEntry>,
     cache: ContactCache,
     contact_solver: ContactSolver,
@@ -365,6 +442,12 @@ impl PhysicsWorld {
             sensor_pairs: Vec::new(),
             sensor_pairs_prev: Vec::new(),
             sensor_events: Vec::new(),
+            events: Vec::new(),
+            event_capacity: DEFAULT_EVENT_CAPACITY,
+            events_dropped: 0,
+            touch_pairs: Vec::new(),
+            touch_pairs_prev: Vec::new(),
+            sleeping_prev: Vec::new(),
             manifolds: Vec::new(),
             cache: ContactCache::default(),
             contact_solver: ContactSolver::default(),
@@ -533,6 +616,10 @@ impl PhysicsWorld {
         self.sensor_pairs.clear();
         self.sensor_pairs_prev.clear();
         self.sensor_events.clear();
+        self.events.clear();
+        self.touch_pairs.clear();
+        self.touch_pairs_prev.clear();
+        self.sleeping_prev.clear();
         self.bodies.clear();
         self.joints.clear();
         self.free.clear();
@@ -698,6 +785,64 @@ impl PhysicsWorld {
     /// 本子步的传感器事件（进入/离开）。停在里面不动时是空的。
     pub fn sensor_events(&self) -> &[SensorEvent] {
         &self.sensor_events
+    }
+
+    /// 事件总线里还没被取走的事件（按发生顺序，确定性）。
+    ///
+    /// 队列是**跨步累积**的：宿主可以每步取，也可以跑完再取。
+    /// 满了就丢新事件并记账（见 [`Self::events_dropped`]）。
+    pub fn events(&self) -> &[PhysicsEvent] {
+        &self.events
+    }
+
+    /// 取走全部事件（把世界的缓冲留给它自己复用，不产生分配）。
+    ///
+    /// 推荐宿主用一个长期存活的 `Vec` 反复调用它：
+    /// ```ignore
+    /// let mut buf = Vec::new();
+    /// world.drain_events(&mut buf);
+    /// for e in &buf { /* ... */ }
+    /// ```
+    pub fn drain_events(&mut self, out: &mut Vec<PhysicsEvent>) {
+        out.append(&mut self.events);
+    }
+
+    /// 取走全部事件并返回（内部会换成新缓冲，下一次取会重新分配）。
+    pub fn take_events(&mut self) -> Vec<PhysicsEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// 现场清空事件队列（不影响 [`Self::events_dropped`] 的计数）。
+    pub fn clear_events(&mut self) {
+        self.events.clear();
+    }
+
+    /// 设置队列上限（0 会退化成默认值：一个"永远丢事件"的总线没有意义）。
+    pub fn set_event_capacity(&mut self, capacity: usize) {
+        self.event_capacity = if capacity == 0 {
+            DEFAULT_EVENT_CAPACITY
+        } else {
+            capacity
+        };
+        if self.events.len() > self.event_capacity {
+            let excess = self.events.len() - self.event_capacity;
+            self.events.drain(0..excess);
+        }
+    }
+
+    /// 队列上限。
+    pub fn event_capacity(&self) -> usize {
+        self.event_capacity
+    }
+
+    /// 因为队列满而丢掉的事件数。
+    pub fn events_dropped(&self) -> u64 {
+        self.events_dropped
+    }
+
+    /// 清掉"丢过事件"的计数（报告下一次运行前用）。
+    pub fn reset_events_dropped(&mut self) {
+        self.events_dropped = 0;
     }
 
     /// 本子步里所有涉及传感器的接触对 `(传感器, 对方)`（按槽位排序）。
@@ -1072,7 +1217,7 @@ impl PhysicsWorld {
         {
             let magnitudes = self.joint_solver.break_magnitudes(dt);
             let mut k = 0usize;
-            let mut broken: Vec<JointHandle> = Vec::new();
+            let mut broken: Vec<(JointHandle, f32, f32)> = Vec::new();
             for (index, slot) in self.joints.iter().enumerate() {
                 if slot.joint.is_none() {
                     continue;
@@ -1082,15 +1227,33 @@ impl PhysicsWorld {
                 let force_break = slot.break_force.is_some_and(|limit| force > limit);
                 let torque_break = slot.break_torque.is_some_and(|limit| torque > limit);
                 if force_break || torque_break {
-                    broken.push(JointHandle {
-                        index: index as u32,
-                        generation: slot.generation,
-                    });
+                    broken.push((
+                        JointHandle {
+                            index: index as u32,
+                            generation: slot.generation,
+                        },
+                        force,
+                        torque,
+                    ));
                 }
             }
-            for handle in broken {
+            for (handle, force, torque) in broken {
+                let first = self
+                    .joint(handle)
+                    .map(|j| j.bodies().0)
+                    .unwrap_or(BodyHandle::new(0, 0));
                 if self.remove_joint(handle) {
                     self.broken_joints.push(handle);
+                    let step = self.step_count;
+                    self.push_event(PhysicsEvent {
+                        step,
+                        kind: PhysicsEventKind::JointBroken,
+                        a: first,
+                        b: None,
+                        joint: Some(handle),
+                        force,
+                        torque,
+                    });
                 }
             }
         }
@@ -1117,6 +1280,48 @@ impl PhysicsWorld {
         }
         solver::update_sleeping(&mut self.bodies, dt, &self.config, &self.islands, &actuated);
         self.scratch_actuated = actuated;
+        // 睡眠/唤醒事件：与"上一步谁在睡"做差分。
+        //
+        // 放在这里（而不是 `RigidBody::wake_up()` 里）是因为**唤醒的入口太多**：
+        // 手动 `wake_up` / `wake_up_all` / 接触唤醒 / 关节唤醒 / 手动 `sleep`。
+        // 逐入口埋点早晚会漏一个，而"每步比对一次状态"是单一事实来源。
+        if self.sleeping_prev.len() != self.bodies.len() {
+            self.sleeping_prev.clear();
+            self.sleeping_prev.resize(self.bodies.len(), false);
+        }
+        let step = self.step_count;
+        for i in 0..self.bodies.len() {
+            let (awake_now, handle) = match self.bodies[i].body.as_ref() {
+                Some(b) => (
+                    !b.sleeping,
+                    BodyHandle::new(i as u32, self.bodies[i].generation),
+                ),
+                None => continue,
+            };
+            let was_asleep = self.sleeping_prev[i];
+            if was_asleep && awake_now {
+                self.push_event(PhysicsEvent {
+                    step,
+                    kind: PhysicsEventKind::Wake,
+                    a: handle,
+                    b: None,
+                    joint: None,
+                    force: 0.0,
+                    torque: 0.0,
+                });
+            } else if !was_asleep && !awake_now {
+                self.push_event(PhysicsEvent {
+                    step,
+                    kind: PhysicsEventKind::Sleep,
+                    a: handle,
+                    b: None,
+                    joint: None,
+                    force: 0.0,
+                    torque: 0.0,
+                });
+            }
+            self.sleeping_prev[i] = !awake_now;
+        }
         self.step_count += 1;
         if let Some(prev) = lap_at {
             let now = now_seconds();
@@ -1148,10 +1353,12 @@ impl PhysicsWorld {
         let mut contacts = std::mem::take(&mut self.contacts);
         let mut wake = std::mem::take(&mut self.wake_list);
         let mut sensor_pairs = std::mem::take(&mut self.sensor_pairs);
+        let mut touch_pairs = std::mem::take(&mut self.touch_pairs);
         manifolds.clear();
         contacts.clear();
         wake.clear();
         sensor_pairs.clear();
+        touch_pairs.clear();
 
         // --- 代理 ---
         self.proxies.clear();
@@ -1239,6 +1446,8 @@ impl PhysicsWorld {
                 continue;
             }
 
+            // 事件总线用的"真实接触对"（不含传感器：传感器的进入/离开是另一类事件）
+            touch_pairs.push((ia as u32, ib as u32));
             let mut entry = ManifoldEntry {
                 a: ia,
                 b: ib,
@@ -1317,6 +1526,48 @@ impl PhysicsWorld {
             }
         }
         std::mem::swap(&mut self.sensor_pairs_prev, &mut sensor_pairs);
+
+        // 接触开始/结束：与上一子步的"真实接触对"做同样的差分。
+        //
+        // 顺序：按 (a, b) 排好再差分，保证事件顺序与宽相顺序无关（确定性）。
+        touch_pairs.sort_unstable();
+        touch_pairs.dedup();
+        self.touch_pairs_prev.sort_unstable();
+        self.touch_pairs_prev.dedup();
+        {
+            let (mut i, mut j) = (0usize, 0usize);
+            while i < touch_pairs.len() || j < self.touch_pairs_prev.len() {
+                let cur = touch_pairs.get(i).copied();
+                let prev = self.touch_pairs_prev.get(j).copied();
+                match (cur, prev) {
+                    (Some(c), Some(p)) if c == p => {
+                        i += 1;
+                        j += 1;
+                    }
+                    (Some(c), Some(p)) if c < p => {
+                        self.push_pair_event(PhysicsEventKind::ContactBegin, c.0, c.1);
+                        i += 1;
+                    }
+                    (Some(_), Some(_)) => {
+                        let p = self.touch_pairs_prev[j];
+                        self.push_pair_event(PhysicsEventKind::ContactEnd, p.0, p.1);
+                        j += 1;
+                    }
+                    (Some(c), None) => {
+                        self.push_pair_event(PhysicsEventKind::ContactBegin, c.0, c.1);
+                        i += 1;
+                    }
+                    (None, Some(_)) => {
+                        let p = self.touch_pairs_prev[j];
+                        self.push_pair_event(PhysicsEventKind::ContactEnd, p.0, p.1);
+                        j += 1;
+                    }
+                    (None, None) => break,
+                }
+            }
+        }
+        std::mem::swap(&mut self.touch_pairs_prev, &mut touch_pairs);
+        self.touch_pairs = touch_pairs;
 
         self.manifolds = manifolds;
         self.contacts = contacts;
@@ -1401,6 +1652,38 @@ impl PhysicsWorld {
     }
 
     /// 记录一条传感器事件（句柄带世代校验；槽位已经空掉的直接跳过）。
+    /// 往事件总线里放一条（满了就丢 + 记账）。
+    fn push_event(&mut self, event: PhysicsEvent) {
+        if self.events.len() >= self.event_capacity {
+            self.events_dropped += 1;
+            return;
+        }
+        self.events.push(event);
+    }
+
+    /// 两个刚体对的事件（接触开始/结束、传感器进入/离开）。
+    fn push_pair_event(&mut self, kind: PhysicsEventKind, first: u32, second: u32) {
+        let (Some(sa), Some(sb)) = (
+            self.bodies.get(first as usize),
+            self.bodies.get(second as usize),
+        ) else {
+            return;
+        };
+        if sa.body.is_none() || sb.body.is_none() {
+            return;
+        }
+        let event = PhysicsEvent {
+            step: self.step_count,
+            kind,
+            a: BodyHandle::new(first, sa.generation),
+            b: Some(BodyHandle::new(second, sb.generation)),
+            joint: None,
+            force: 0.0,
+            torque: 0.0,
+        };
+        self.push_event(event);
+    }
+
     fn push_sensor_event(&mut self, pair: (u32, u32), started: bool) {
         let (ia, ib) = (pair.0 as usize, pair.1 as usize);
         if let (Some(sa), Some(sb)) = (self.bodies.get(ia), self.bodies.get(ib)) {
@@ -1420,6 +1703,12 @@ impl PhysicsWorld {
                     BodyHandle::new(pair.0, sa.generation),
                 )
             };
+            let kind = if started {
+                PhysicsEventKind::SensorEnter
+            } else {
+                PhysicsEventKind::SensorExit
+            };
+            self.push_pair_event(kind, sensor.index, other.index);
             self.sensor_events.push(SensorEvent {
                 sensor,
                 other,

@@ -160,7 +160,7 @@ pub fn schema() -> Value {
                     { "name": "--dry-run", "type": "flag", "required": false, "description": "配 --render 用时：只校验 + 跑物理，不渲染不写盘。单独用（没有 --render）会报错——simulate 本身不写任何文件" },
                     { "name": "--no-clobber", "type": "flag", "required": false, "description": "配 --render 用时生效：渲染输出已存在就报错" }
                 ],
-                "output": "{ steps, dt, gravity, bodies, dynamic, sleeping, contacts, joints, joints_broken, nan_bodies, lowest_y, max_speed, states[], probes[]?, sensors[]?, warnings[], trajectories[]? }（sensors 是 objects[].sensor = true 的触发区观测：谁的 enter_step/exit_step/steps_inside/entries，按名字排序，输出稳定）",
+                "output": "{ steps, dt, gravity, bodies, dynamic, sleeping, contacts, joints, joints_broken, nan_bodies, lowest_y, max_speed, states[], events[]?, events_dropped, probes[]?, sensors[]?, warnings[], trajectories[]? }（events 是事件总线：{step, kind, a, b?, force?, torque?}，kind ∈ contact_begin / contact_end / sensor_enter / sensor_exit / sleep / wake / joint_broken）（sensors 是 objects[].sensor = true 的触发区观测：谁的 enter_step/exit_step/steps_inside/entries，按名字排序，输出稳定）",
                 "trajectory_fields": "name, shape, samples[{step,time,position,speed,displacement,tilt_deg,asleep}], start, end, min, max, fall, rise, travel, path_length, max_speed, max_tilt_deg, tilt_meaningful, tipped_over, last_motion_step",
                 "examples": [
                     "quench3d simulate scene.json --steps 600 --json",

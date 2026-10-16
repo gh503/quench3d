@@ -2360,3 +2360,256 @@ fn servo_keeps_its_body_awake() {
         "10 秒后仍该停在 30°：{angled:.2}°"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 13. 事件总线
+// ---------------------------------------------------------------------------
+
+/// 把事件压成 `(种类, 步号, a, b)` 便于比较（确定性断言用）。
+fn event_summary(events: &[crate::PhysicsEvent]) -> Vec<(&'static str, u64, u32, u32)> {
+    events
+        .iter()
+        .map(|e| {
+            (
+                e.kind.name(),
+                e.step,
+                e.a.index,
+                e.b.map(|b| b.index).unwrap_or(u32::MAX),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn event_bus_reports_contact_begin_and_end() {
+    // 一个球掉到静态地面上弹起来再离开：应当先 contact_begin、后 contact_end。
+    let mut w = PhysicsWorld::new();
+    let ground = w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+    let ball = w.add_body(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.3 })
+            .position(vec3(0.0, 2.0, 0.0))
+            .restitution(0.9)
+            .build(),
+    );
+    let mut all = Vec::new();
+    let mut frame = Vec::new();
+    for _ in 0..180 {
+        w.step(DT);
+        w.drain_events(&mut frame);
+        all.append(&mut frame);
+    }
+    let kinds: Vec<&str> = all.iter().map(|e| e.kind.name()).collect();
+    assert!(
+        kinds.contains(&"contact_begin"),
+        "球落到地面上应当报 contact_begin：{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"contact_end"),
+        "弹起来离开地面应当报 contact_end：{kinds:?}"
+    );
+    let begin = all
+        .iter()
+        .find(|e| e.kind == crate::PhysicsEventKind::ContactBegin)
+        .unwrap();
+    let end = all
+        .iter()
+        .find(|e| e.kind == crate::PhysicsEventKind::ContactEnd)
+        .unwrap();
+    assert!(begin.step <= end.step, "开始不可能晚于结束");
+    assert!(
+        begin.b.unwrap().index == ground.index || begin.a.index == ground.index,
+        "接触事件的两端该是地面和球"
+    );
+    assert!(begin.a.index == ball.index || begin.b.unwrap().index == ball.index);
+    // 不重复报"开始"：同一次接触只报一次（除非真的分开又碰上）
+    assert!(
+        all.iter()
+            .filter(|e| e.kind == crate::PhysicsEventKind::ContactBegin)
+            .count()
+            <= 4,
+        "反复报 begin 说明差分写错了：{:?}",
+        event_summary(&all)
+    );
+}
+
+#[test]
+fn event_bus_reports_sensor_enter_and_exit_and_sleep_and_wake() {
+    let mut w = PhysicsWorld::new();
+    let zone = w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: vec3(0.5, 0.5, 0.5),
+        })
+        .position(vec3(0.0, 1.0, 0.0))
+        .sensor(true)
+        .build(),
+    );
+    let faller = w.add_body(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+            .position(vec3(0.0, 4.0, 0.0))
+            .restitution(0.0)
+            .build(),
+    );
+    // 传感器不该唤醒/挡住它：球穿过触发区继续往地面走（这里没有地面，所以一直落）
+    let mut all = Vec::new();
+    let mut frame = Vec::new();
+    for _ in 0..240 {
+        w.step(DT);
+        w.drain_events(&mut frame);
+        all.append(&mut frame);
+    }
+    let enter = all
+        .iter()
+        .find(|e| e.kind == crate::PhysicsEventKind::SensorEnter)
+        .expect("球穿过触发区该报 sensor_enter");
+    assert_eq!(enter.a.index, zone.index, "sensor 事件的主体是传感器本体");
+    assert_eq!(enter.b.unwrap().index, faller.index);
+    // 传感器不产生接触
+    assert!(
+        !all.iter()
+            .any(|e| e.kind == crate::PhysicsEventKind::ContactBegin),
+        "触发区不该报接触开始"
+    );
+
+    // 睡眠/唤醒：静止 1 秒后入睡 → 报 sleep；给个冲量 → 报 wake
+    let mut w = PhysicsWorld::new();
+    let box_body = w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+    let sleeper = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.3),
+        })
+        .position(vec3(0.0, 0.3, 0.0))
+        .build(),
+    );
+    let _ = box_body;
+    let mut all = Vec::new();
+    let mut frame = Vec::new();
+    for _ in 0..120 {
+        w.step(DT);
+        w.drain_events(&mut frame);
+        all.append(&mut frame);
+    }
+    assert!(
+        all.iter()
+            .any(|e| e.kind == crate::PhysicsEventKind::Sleep && e.a.index == sleeper.index),
+        "静止够久该报 sleep：{:?}",
+        event_summary(&all)
+    );
+    all.clear();
+    w.body_mut(sleeper).unwrap().apply_impulse(Vec3::Y * 50.0);
+    w.step(DT);
+    w.drain_events(&mut frame);
+    all.append(&mut frame);
+    assert!(
+        all.iter()
+            .any(|e| e.kind == crate::PhysicsEventKind::Wake && e.a.index == sleeper.index),
+        "冲量唤醒该报 wake：{:?}",
+        event_summary(&all)
+    );
+}
+
+#[test]
+fn event_bus_reports_joint_break_and_is_bounded() {
+    // 断裂事件带量级
+    let mut w = PhysicsWorld::new();
+    let anchor = w.add_body(
+        BodyBuilder::r#static(Shape::Sphere { radius: 0.05 })
+            .position(vec3(0.0, 3.0, 0.0))
+            .build(),
+    );
+    let load = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.2),
+        })
+        .position(vec3(0.0, 1.0, 0.0))
+        .build(),
+    );
+    let rope = w.add_joint(Joint::Distance {
+        a: anchor,
+        b: load,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: Vec3::ZERO,
+        rest_length: 2.0,
+        stiffness: 0.0,
+        damping: 0.0,
+    });
+    w.set_joint_break(rope, Some(500.0), None);
+    let mut events = Vec::new();
+    for _ in 0..120 {
+        w.step(DT);
+        if w.events().is_empty() {
+            continue;
+        }
+        w.drain_events(&mut events);
+        if events
+            .iter()
+            .any(|e| e.kind == crate::PhysicsEventKind::JointBroken)
+        {
+            break;
+        }
+    }
+    let broken = events
+        .iter()
+        .find(|e| e.kind == crate::PhysicsEventKind::JointBroken)
+        .expect("关节断了该报 joint_broken");
+    assert_eq!(broken.joint.map(|j| j.index), Some(rope.index));
+    assert!(
+        broken.force > 500.0,
+        "事件里的力量级该超过阈值：{}",
+        broken.force
+    );
+
+    // 队列有上限：塞不满就会无限涨内存
+    let mut w = PhysicsWorld::new();
+    w.set_event_capacity(4);
+    assert_eq!(w.event_capacity(), 4);
+    let ground = w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+    assert!(matches!(ground.index, _));
+    for i in 0..6 {
+        let b = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+                .position(vec3(i as f32 * 1.5, 1.0, 0.0))
+                .build(),
+        );
+        assert!(w.body(b).is_some());
+    }
+    for _ in 0..120 {
+        w.step(DT);
+    }
+    assert!(w.events().len() <= 4, "队列不该超过上限");
+    assert!(w.events_dropped() > 0, "超上限的该被记账，而不是静默消失");
+    // 取走之后队列不该再"记账"（丢的是新事件，不是旧账）
+    w.clear_events();
+    for _ in 0..30 {
+        w.step(DT);
+    }
+    assert!(w.events().len() <= 4);
+    w.reset_events_dropped();
+    assert_eq!(w.events_dropped(), 0);
+    // 上限 0 会退化成默认值：一个"永远丢事件"的总线没有意义
+    w.set_event_capacity(0);
+    assert_eq!(w.event_capacity(), crate::DEFAULT_EVENT_CAPACITY);
+
+    // 确定性：同场景两次跑，事件序列（种类 + 步号 + 两端）逐条相同
+    fn run() -> Vec<(&'static str, u64, u32, u32)> {
+        let mut w = PhysicsWorld::new();
+        w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+        for i in 0..5 {
+            w.add_body(
+                BodyBuilder::dynamic(Shape::Box {
+                    half_extents: Vec3::splat(0.3),
+                })
+                .position(vec3(i as f32 * 0.01, 0.3 + i as f32 * 0.7, 0.0))
+                .build(),
+            );
+        }
+        let mut all = Vec::new();
+        let mut frame = Vec::new();
+        for _ in 0..180 {
+            w.step(DT);
+            w.drain_events(&mut frame);
+            all.append(&mut frame);
+        }
+        event_summary(&all)
+    }
+    assert_eq!(run(), run(), "事件序列必须确定性");
+}

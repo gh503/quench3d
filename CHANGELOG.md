@@ -10,6 +10,25 @@
 
 ### 新增
 
+- **事件总线：一步里"发生了什么"有地方问了**（gap #29）。以前只有
+  `sensor_events()` 与"当前接触表"，接触开始/结束、谁睡谁醒、哪个关节断了都只能自己
+  逐帧比对。现在 `PhysicsWorld` 有一条跨步累积的事件队列：
+  * 7 种事件：`contact_begin` / `contact_end` / `sensor_enter` / `sensor_exit` /
+    `sleep` / `wake` / `joint_broken`（扁平 `PhysicsEvent`：`step` + `kind` + `a`/`b` +
+    断裂时的 `joint`/`force`/`torque`）。
+  * 取事件：`drain_events(&mut buf)`（把世界的缓冲留给自己复用，零分配）或 `take_events()`。
+  * **队列有上限**（默认 4096）：到顶丢新事件但记在 `events_dropped()`——
+    "宿主忘了取"不该变成内存泄漏，也不该静默无痕。`set_event_capacity(0)` 会退化成默认值。
+  * 接触/传感器事件用**集合差分**（与上一子步比），所以不会重复报；睡觉/唤醒事件用
+    "每步比对沉睡状态"，因为唤醒入口太多（手动、全唤醒、接触、关节），逐个埋点必漏。
+    `sleep`/`wake` 每步最多一条；事件顺序按 (a, b) 排序后再差分，**与宽相顺序无关**。
+  * `simulate` 的报告里多了 `events[]`（`{step, kind, a, b?, force?, torque?}`，物体名已解析，
+    地面叫 `$ground`）与 `events_dropped`（永远输出，0 也输出，脚本要能区分"没丢"与"没这个字段"）。
+  * 编辑器状态栏**只读**显示队列深度、丢弃数与最近一条事件（句柄显示成 `#下标`）；
+    没有事件面板/时间线，也不能在界面上清空队列。
+  验证：`cargo test -p quench3d-physics --lib -- event_bus`、
+  `cargo test -p quench3d-cli --test cli_e2e -- simulate_report_includes_an_event_stream`。
+
 - **关节补全：球窝锥形限位、铰链伺服马达、断裂阈值、关节两端不再互相碰撞**（gap #11）。
   以前关节只能"焊/转/滑"，做布娃娃、机械臂、可破坏门都缺零件。现在四件事都能配：
   * `joints[].cone_limit = { half_angle_deg, axis_a?, axis_b? }`（仅 `type: "ball"`）：

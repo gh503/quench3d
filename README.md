@@ -474,6 +474,23 @@ assert_eq!(world.broken_joints().len(), 1);   // 超限之后这里会有记录
 > 另外：**被马达驱动的刚体不会自动睡眠**（伺服到位时速度正好是 0，否则会被冻结在
 > "还没到位"的角度上）。
 
+事件总线（"这一步发生了什么"）：接触开始/结束、传感器进入/离开、睡眠/唤醒、关节断裂。
+
+```rust
+let mut events = Vec::new();
+world.step(1.0 / 60.0);
+world.drain_events(&mut events);          // 缓冲复用，不产生分配
+for e in &events {
+    match e.kind {
+        PhysicsEventKind::ContactBegin => { /* 落地音效 */ }
+        PhysicsEventKind::JointBroken => { /* 断裂特效：e.force / e.torque */ }
+        _ => {}
+    }
+}
+// 队列有上限（默认 4096）：宿主忘取时会丢新事件，但 `events_dropped()` 会说明丢了多少
+assert_eq!(world.events_dropped(), 0);
+```
+
 角色控制器（胶囊、可上台阶、贴地、沿墙滑动）：
 
 ```rust
@@ -551,6 +568,7 @@ quench3d::write_png(&image, "out.png")?;
 | `headless` | 无窗口集成验证：240 步物理 + 渲染出图，并断言不穿地/无 NaN | `cargo run -p quench3d --example headless` |
 | `offline_render` | 渲染特性回归：天空、网格、阴影、地面逐个开关并统计像素 | `cargo run -p quench3d-render --example offline_render` |
 | `shadow_probe` | 阴影诊断：自阴影检测 + 阴影方向与解析落点对比（误差 < 1px） | `cargo run -p quench3d-render --example shadow_probe` |
+| `events` | 事件总线：接触开始/结束 · 传感器进出 · 睡眠/唤醒 · 关节断裂（报告里按物体名输出） | `cargo test -p quench3d-cli --test cli_e2e -- simulate_report_includes_an_event_stream` |
 | `joints` | 5 种关节：铰链门（速度马达 + **位置伺服**）、垂直滑块（轴向限位）、弹簧、焊接、球窝摆（**锥形限位**），以及**断裂阈值**与"关节两端不互相碰撞" | `cargo run -p quench3d --example joints` |
 | `model_viewer` | 模型加载：glTF/GLB/OBJ+MTL，轨道相机对准模型；`--collide` 把模型变成静态三角网格碰撞体（丢球验证） | `cargo run -p quench3d --example model_viewer` |
 | `bench` | 物理性能与分配基准（吞吐 / 分配次数 / 长跑稳定性，`--phases` 看阶段分解、`--layout` 换布局） | `cargo run --release -p quench3d-physics --example bench` |
@@ -990,7 +1008,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 430 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 434 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1044,6 +1062,7 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
 > 所以"点击操作界面"这条证据是在**浏览器**里取的，用的还是同一套界面代码。
 
 物理测试覆盖：自由落体、静置接触、三层堆叠、恢复系数、高/低摩擦斜面、静/动摩擦分离、
+**事件总线**（接触开始/结束、传感器进出、睡眠/唤醒、断裂、队列上限、确定性）、
 射线检测、铰链摆与马达、**位置伺服与锥形限位**、5 种关节、角度限位、**关节断裂**、
 **关节两端不互相碰撞**、确定性（逐位相等，含槽位复用）、
 200 体宽相、睡眠/唤醒、三角网格与凸包（含**薄板**：模型网格当碰撞体的典型情况）、
@@ -1483,12 +1502,13 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   （每个进过它的刚体一条：`enter_step` / `exit_step` / `steps_inside` / `entries`）。
 * 物理的碰撞过滤/传感器/CCD 都有**边界**：过滤是**对称**的（`A` 愿意碰 `B` 且 `B`
   也愿意才碰）、只作用于**物理**（射线/拾取/`overlap` 查询不看分组）；
-  传感器**不唤醒睡眠体**（巨大的触发区不该叫醒整个世界），事件是**每步轮询**
-  `sensor_events()`，没有回调/事件总线，也不保证"睡眠体从里面被搬走"能报离开；
+  传感器**不唤醒睡眠体**（巨大的触发区不该叫醒整个世界），事件是**每步轮询** `sensor_events()`
+  或事件总线（`drain_events()`），**没有回调/订阅**，也不保证"睡眠体从里面被搬走"能报离开；
   CCD 是"中心射线 + 只截**法向**位移"（切向保留，所以沿墙滑行不受影响），
   没有旋转扫掠、只扫中心线，动态×动态只有"两边都开才互相拦"的语义，
   极快 + 极薄（一步能跨过整个物体）仍可能漏。
-* 编辑器**没有**碰撞层/传感器/CCD 的编辑界面（面板里还看不到），但它不会吃掉这些字段：
+* 编辑器**没有**事件面板/时间线、也不能清空事件队列（状态栏只读显示队列深度、丢弃数与
+  最近一条事件）；**没有**碰撞层/传感器/CCD 的编辑界面（面板里还看不到），但它不会吃掉这些字段：
   导出时从物理刚体上读回来（有往返用例钉住）。
 * 查询的层过滤是**单向**的（`QueryFilter::mask` / `--mask` 只看被查方在不在掩码里），
   与物理碰撞的对称判据**故意不同**：查询是"我问你答"，只有提问方有立场。

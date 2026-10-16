@@ -265,6 +265,24 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
     });
 }
 
+/// 事件总线里一条事件的单行描述（句柄用 `#下标` 显示，名字查询留给场景树）。
+fn event_label(e: &PhysicsEvent) -> String {
+    let pair = |b: &Option<BodyHandle>| match b {
+        Some(b) => format!(" #{}", b.index),
+        None => String::new(),
+    };
+    let main = format!("#{}{}", e.a.index, pair(&e.b));
+    match e.kind {
+        PhysicsEventKind::JointBroken => format!(
+            "{} {main} {:.0}N/{:.0}N·m",
+            e.kind.name(),
+            e.force,
+            e.torque
+        ),
+        _ => format!("{} {main}", e.kind.name()),
+    }
+}
+
 /// 底部状态栏。
 fn status_bar(ui: &mut Ui, engine: &Engine, doc: &Doc, gizmo: &Gizmo) {
     egui::Panel::bottom("quench3d-status").show(ui, |ui| {
@@ -287,6 +305,25 @@ fn status_bar(ui: &mut Ui, engine: &Engine, doc: &Doc, gizmo: &Gizmo) {
             ui.label(format!("仿真 {:.2} s", engine.time));
             ui.separator();
             ui.label(format!("后端 {}", engine.gpu.adapter_info.name));
+            // 事件总线：**只读**显示队列深度与最近一条。
+            // 编辑器暂时没有事件面板/时间线，但"总线在动"这件事必须在界面上看得见，
+            // 否则它就成了只有 CLI 报告才知道的东西。
+            {
+                let events = engine.world.events();
+                let dropped = engine.world.events_dropped();
+                if !events.is_empty() || dropped > 0 {
+                    ui.separator();
+                    let last = events
+                        .last()
+                        .map(event_label)
+                        .unwrap_or_else(|| "—".to_string());
+                    ui.label(format!(
+                        "事件 {}（丢 {}）· 最近 {last}",
+                        events.len(),
+                        dropped
+                    ));
+                }
+            }
             if engine.paused {
                 ui.separator();
                 ui.label(RichText::new("已暂停").strong());

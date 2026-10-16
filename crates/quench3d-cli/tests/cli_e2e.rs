@@ -3546,3 +3546,95 @@ fn joint_servo_cone_limit_and_break_force_are_wired() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 事件总线：`simulate` 的报告里要能看到"发生了什么"，而且是**物体名**不是句柄。
+#[test]
+fn simulate_report_includes_an_event_stream() {
+    let dir = temp_dir("events");
+    let scene = dir.join("events.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "gravity": [0, -9.81, 0],
+          "ground": { "size": 20 },
+          "objects": [
+            { "name": "触发区", "shape": { "type": "box", "size": [2, 0.4, 2] },
+              "position": [0, 1.6, 0], "body": "static", "sensor": true },
+            { "name": "球", "shape": { "type": "sphere", "radius": 0.25 },
+              "position": [0, 4, 0], "body": "dynamic", "restitution": 0.4 },
+            { "name": "吊点", "shape": { "type": "sphere", "radius": 0.05 },
+              "position": [6, 5, 0], "body": "static" },
+            { "name": "重物", "shape": { "type": "box", "size": [0.4, 0.4, 0.4] },
+              "position": [6, 4, 0], "body": "dynamic" }
+          ],
+          "joints": [
+            { "type": "distance", "a": "吊点", "b": "重物", "rest_length": 1.0,
+              "break_force": 400.0 }
+          ],
+          "simulate": { "steps": 300, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let data = r.json();
+    let sim = &data["data"];
+    let events = sim["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("报告里该有 events：{sim}"));
+    assert_eq!(sim["events_dropped"], 0, "300 步不该丢事件");
+
+    let kind_of =
+        |k: &str| -> Vec<&serde_json::Value> { events.iter().filter(|e| e["kind"] == k).collect() };
+
+    // ① 球落到地面：contact_begin，两端用物体名
+    let begin = kind_of("contact_begin");
+    assert!(!begin.is_empty(), "该有接触开始：{events:?}");
+    // 地面在句柄表里的名字就是 `$ground`（与 `states` 里的名字一致）
+    assert!(
+        begin
+            .iter()
+            .any(|e| (e["a"] == "球" && e["b"] == "$ground")
+                || (e["a"] == "$ground" && e["b"] == "球")),
+        "接触事件该用物体名（球 / $ground）：{begin:?}"
+    );
+
+    // ② 球穿过触发区：sensor_enter + sensor_exit
+    assert_eq!(kind_of("sensor_enter").len(), 1, "{events:?}");
+    assert_eq!(kind_of("sensor_exit").len(), 1, "{events:?}");
+    assert_eq!(kind_of("sensor_enter")[0]["a"], "触发区");
+
+    // ③ 睡眠：球最终停下并睡着（同一子步只报一次）
+    let sleeps: Vec<_> = kind_of("sleep")
+        .into_iter()
+        .filter(|e| e["a"] == "球")
+        .collect();
+    assert_eq!(sleeps.len(), 1, "一次入睡只该有一条 sleep：{events:?}");
+    assert_eq!(kind_of("wake").len(), 0, "没东西被唤醒：{events:?}");
+
+    // ④ 断裂：吊点到重物的距离关节被拉断，事件里有力量级
+    let broken = kind_of("joint_broken");
+    assert_eq!(broken.len(), 1, "绳该断一次：{events:?}");
+    assert_eq!(broken[0]["a"], "吊点");
+    assert!(
+        broken[0]["force"].as_f64().unwrap() > 400.0,
+        "事件里的力量级该超过阈值：{}",
+        broken[0]["force"]
+    );
+    assert_eq!(sim["joints_broken"], 1);
+
+    // ⑤ 事件是**按发生顺序**的（步号单调不减），而不是乱序的集合
+    let steps: Vec<u64> = events.iter().map(|e| e["step"].as_u64().unwrap()).collect();
+    assert!(
+        steps.windows(2).all(|w| w[0] <= w[1]),
+        "事件顺序该按时间：{steps:?}"
+    );
+    // ⑥ 同一场景跑两次，事件流逐条相同（确定性）
+    let r2 = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    let data2 = r2.json();
+    assert_eq!(
+        data2["data"]["events"], sim["events"],
+        "事件流必须确定性（两次运行逐条相同）"
+    );
+}

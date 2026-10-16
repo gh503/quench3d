@@ -126,6 +126,14 @@ pub struct SimReport {
     pub joints: usize,
     /// 断掉的关节数（场景里没写 `break_force` / `break_torque` 时恒为 0）。
     pub joints_broken: usize,
+    /// 事件总线（按发生顺序；引擎默认上限 4096 条，超了记在 `events_dropped`）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<EventReport>,
+    /// 因为队列满被丢掉的事件数（正常 0）。
+    ///
+    /// 这一项**永远输出**（哪怕是 0）：脚本要能区分"没丢"与"这个字段不存在"。
+    #[serde(default)]
+    pub events_dropped: u64,
     /// 含 NaN/Inf 的刚体数（正常应为 0）。
     pub nan_bodies: usize,
     /// 最低点 y。
@@ -1331,6 +1339,61 @@ fn build_hinge_motor(j: &JointDoc) -> Result<Option<HingeMotor>, RunError> {
     }
 }
 
+/// 报告里的一条事件（刚体名已解析好，做断言不用自己查表）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventReport {
+    /// 子步号。
+    pub step: u64,
+    /// 种类：`contact_begin` / `contact_end` / `sensor_enter` / `sensor_exit` /
+    /// `sleep` / `wake` / `joint_broken`。
+    pub kind: String,
+    /// 主体名字（断裂事件里是关节 A 端的物体名）。
+    pub a: String,
+    /// 第二个物体名（单主体事件不出现）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<String>,
+    /// 断裂时的力量级（N，仅 `joint_broken`）。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub force: f32,
+    /// 断裂时的力矩量级（N·m，仅 `joint_broken`）。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub torque: f32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+
+/// 把事件总线翻译成报告条目（刚体句柄 → 物体名；找不到名字时退化成 `body#N`）。
+fn event_reports(build: &mut WorldBuild) -> (Vec<EventReport>, u64) {
+    let mut raw = Vec::new();
+    build.world.drain_events(&mut raw);
+    let dropped = build.world.events_dropped();
+    let mut by_handle: BTreeMap<(u32, u32), String> = BTreeMap::new();
+    for (name, handle) in &build.handles {
+        by_handle.insert((handle.index, handle.generation), name.clone());
+    }
+    let name_of = |h: BodyHandle| {
+        by_handle
+            .get(&(h.index, h.generation))
+            .cloned()
+            .unwrap_or_else(|| format!("body#{}", h.index))
+    };
+    let events = raw
+        .into_iter()
+        .map(|e| EventReport {
+            step: e.step,
+            kind: e.kind.name().to_string(),
+            a: name_of(e.a),
+            b: e.b.map(name_of),
+            force: e.force,
+            torque: e.torque,
+        })
+        .collect();
+    (events, dropped)
+}
+
 fn body_states(build: &WorldBuild) -> Vec<BodyState> {
     let touching: HashSet<BodyHandle> = build
         .world
@@ -1363,7 +1426,9 @@ fn body_states(build: &WorldBuild) -> Vec<BodyState> {
 }
 
 /// 汇总物理报告。
-pub fn summarize(build: &WorldBuild, steps: u32, dt: f32) -> SimReport {
+pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
+    // 先取事件（`drain_events` 需要 `&mut`），下面的统计只读。
+    let (events, events_dropped) = event_reports(build);
     let states = body_states(build);
     let mut nan = 0usize;
     let mut max_speed = 0.0f32;
@@ -1414,6 +1479,8 @@ pub fn summarize(build: &WorldBuild, steps: u32, dt: f32) -> SimReport {
         contacts: build.world.contacts().len(),
         joints: build.world.joint_count(),
         joints_broken: build.world.broken_joints().len(),
+        events,
+        events_dropped,
         nan_bodies: nan,
         lowest_y: if lowest_y == f32::MAX { 0.0 } else { lowest_y },
         max_speed,
@@ -1979,7 +2046,7 @@ pub fn run_simulate_traced(
         }
     }
 
-    let mut report = summarize(&build, steps, dt);
+    let mut report = summarize(&mut build, steps, dt);
     report.probes = script.report();
     report.sensors = script.sensor_report();
     let trajectories = traced
@@ -2587,7 +2654,7 @@ pub fn run_render(
     let probes = script.report();
     let sensors = script.sensor_report();
     let sim = if doc.simulate.steps > 0 {
-        let mut rep = summarize(&build, doc.simulate.steps, doc.simulate.dt);
+        let mut rep = summarize(&mut build, doc.simulate.steps, doc.simulate.dt);
         rep.probes.clone_from(&probes);
         rep.sensors.clone_from(&sensors);
         Some(rep)
