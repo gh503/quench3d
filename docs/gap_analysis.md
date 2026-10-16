@@ -622,10 +622,10 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | --- | --- | --- |
 | 13 | ~~CCD / 推测接触（子弹穿墙）~~ 🟡 2026-10-16（扫掠式，非精确 TOI） | 引擎 |
 | 14 | 🟡 2026-10-18：`templates`（字段集与物体相同）+ `objects[].template` + `objects[].instances[]`（每个副本一个独立刚体，名字 `本名#i`）；校验拦模板不存在/空实例/名字撞车。**没做**：外部场景引用（跨文件 include）、编辑器把 instances 存回时摊平 | 格式 |
-| 15 | `actions[]` + `probes[]`（行为与探针，让实验在一个文件里说清） | 格式 |
+| 15 | ✅ 2026-10-19 核对（第 29 轮）：**已实现**——`SceneDoc.actions`/`SceneDoc.probes`（`scene_doc.rs:158`/`:164`）走完"格式 + 校验 + 引擎 + CLI + 编辑器"全程：动作按 `at_step`/`at_time` 到点施力（`cli_e2e.rs:2345 scheduled_actions_reach_the_solver`），探针只读记录进出区域、不碰物理（`:2500 probes_observe_without_touching_physics`），三条渲染路径（render/movie/simulate）都能用（`:2577 actions_and_probes_work_on_all_three_paths`）；编辑器 `scene_io` 保留 `probes`、并在删除物体时同步清掉指向它的动作（`scene_io.rs:37`/`:386`）。**边界**：探针没有可视化绘制（只在报告里出现）；动作没有时间线 UI，只能手写 JSON | 格式 |
 | 16 | 相机完整参数 + 多相机（正交 / near·far / 多输出） | 格式 |
 | 17 | ~~光照透出：点光源 / 天空 / 雾 / 阴影质量参数~~ ✅ 2026-10-17：点光源（本来就有）、雾（`lighting.fog`，不写 = 关闭）、阴影质量（`strength`/`radius`）、天空颜色（`sky_colors`）。**没做**：阴影贴图分辨率（渲染器构造参数）、点光/聚光阴影（#24）、线性雾的起止距离（引擎只有指数雾） | 格式 |
-| 18 | 物理参数透出：角速度 / 阻尼 / gravity_scale / mass / sleep | 格式 |
+| 18 | ✅ 2026-10-19 核对（第 29 轮）：**已实现**——物体级 `velocity`/`angular_velocity`/`linear_damping`/`angular_damping`/`gravity_scale`/`mass`/`allow_sleep`（`scene_doc.rs:890-907`），世界级 `physics.friction_combine`/`restitution_combine`/`static_friction_speed`（`:195-205`）+ 物体级同名覆盖。**边界**：`mass` 与 `density` 同时写时密度优先（诊断里会提示）；没有 `sleep_threshold`/`sleep_time` 这类更细的睡眠参数（引擎内部常量） | 格式 |
 | 19 | ✅ 2026-10-18：`quench3d schema --json-schema`（draft 2020-12，`$defs` 24 个类型 + 6 个枚举，全部 `additionalProperties: false`；`include_str!` 源码对账测试保证与结构体同步）；版本策略写进 README 与 `version` 诊断（1→2 = 改版本号，无破坏性字段变化）。**没做**：外部 `$ref` / draft-07 兼容、`--json-schema` 的 `format`/`minimum` 等语义约束（那些仍以 `validate` 为准） | 格式 |
 | 20 | 🟡 部分（第 28 轮）：**接触特征 ID 已落地**——`ContactPoint.feature_id` 由两端局部坐标按 0.5 mm 量化哈希（`contact::feature_id_from_local`，宽相/窄相与求解器共用同一函数），热启动缓存**优先按 ID 精确匹配**、坐标容差匹配退化为兜底；这把"滑动中把冲量沿用到相邻特征点"这个真实问题解掉了（滑动/旋转接触的冲量现在跨帧对得上）。**没做**：接触余量（speculative margin，分离时提前生成接触）与"流形本身跨帧复用"（现在流形每步重算，只有身份与冲量跨帧）——两者都需要改窄相的距离查询与会话层，留作下一轮 | 物理 |
 | 21 | ~~查询补全 + 查询加速结构~~ ✅ 2026-10-17：`raycast_all` / 任意形状 `overlap_shape` / 单向 `QueryFilter`（mask + 传感器开关）/ `distance_to` + `QueryIndex` 快照网格（射线 3D DDA）；CLI `query`、MCP `quench3d_query`、编辑器 F7 查询探针。**没做**：`shape_cast` 仍线性、CLI 不做批量查询、索引是快照（世界一动就回退线性） | 引擎 |
