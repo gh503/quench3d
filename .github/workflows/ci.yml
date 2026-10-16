@@ -55,6 +55,11 @@ jobs:
       - name: Clippy（警告即失败）
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      # `cargo doc -D warnings`：文档链到私有项、拼错路径这类腐烂在 CI 就该红。
+      # 本地同样的一段在 tools/gate.sh（PASS doc）。
+      - name: cargo doc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --workspace
+
       - name: 全部测试
         run: cargo test --locked --workspace
 

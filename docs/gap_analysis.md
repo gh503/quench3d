@@ -637,7 +637,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 27 | 资源管线：Web 端模型加载（bytes/fetch）✅ 2026-10-15（`load_model_from_bytes` + wasm 探针验证）+ 模型缓存 ❌ + 显存释放 ❌ | 引擎 |
 | 28 | agent 幂等与安全：`--out` 冲突保护 ✅、`--dry-run` ✅、**API key 不再走 argv** ✅、MCP annotations/outputSchema ✅（全部 2026-10-15） | 交付 |
 | 29 | 事件总线 ✅ 2026-10-18（`PhysicsWorld::events()/drain_events()/take_events()`，7 种事件：接触开始/结束、传感器进入/离开、睡眠/唤醒、关节断裂；队列有上限 4096 + `events_dropped()` 记账；`simulate` 报告里输出 `events[]`（物体名 + 步号）+ `events_dropped`；**仍缺**生命周期钩子与用户回调——没有脚本层，`on_scene_loaded`/`on_destroy` 只能由宿主轮询，编辑器只有状态栏只读显示） | 引擎 |
-| 30 | 文档数字与门禁对齐（测试数、示例数、"ab_bench 在 CI"、island 未实施、CSM 说法）+ MSRV/`--locked`/`cargo doc` 进 CI | 交付 |
+| 30 | 🟡 部分（第 32 轮）：**测试数/示例数**每轮随门禁更新（与门禁输出一致）；**`--locked`** 早已在 CI 每条 cargo 命令上；**MSRV `rust-version = 1.90`** 写在 Cargo.toml（CI 固定 toolchain 1.99.0）；本轮补上 **`cargo doc -D warnings`**（gate 第七段 `PASS doc` + CI 步骤，并修掉 16 处既有 rustdoc 告警，没有用 allow 掩盖）。**没做**：没在 1.90 上真的跑过构建（只固定了较新的 1.99.0）；「ab_bench 在 CI」与 island 未实施的措辞核对未做 | 文档/CI |
 
 ### P2（长尾，按需）
 

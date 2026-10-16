@@ -478,6 +478,23 @@ CCD 只扫**中心线**（球擦着墙角过去、或细长物旋转扫过薄壁
 
 ---
 
+## 31. 第 32 轮：rustdoc 进门禁与 CI（gap #30 的一部分）
+
+门禁原本六段（fmt / clippy 原生 / clippy wasm / 测试 / wasm 构建 / web 产物检查），
+这一轮加了第七段 `PASS doc`（`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace`），
+CI 里同样加了一步。理由很直接：**rustdoc 告警是唯一"没人看就永远没人看"的一类**——
+`cargo test`/`clippy` 都会碰到代码，文档链接不会。
+
+代价是先还债：既有 16 处告警，全是「公开文档链到私有项」（`lib.rs` 的模块清单）与
+「字面量被当成链接」（`[x,y,z]`）。修法是**改成纯代码字体**，不是
+`#[allow(rustdoc::private_intra_doc_links)]`——那种掩法等于把这段门禁废掉。
+
+`--locked` 与 MSRV 声明早就齐了（CI 每条 cargo 命令都带 `--locked`，Cargo.toml 有
+`rust-version = "1.90"`），所以 #30 只剩「在 1.90 上真的跑一次 MSRV 构建」与两处措辞核对
+没做——都写进了 gap 行，没有含糊过去。
+
+**验证**：`tools/gate.sh` 七段全绿（448 测试 0 失败、wasm 11,742,106 字节、`PASS doc`）。
+
 ## 30. 第 31 轮：相机参数核对（gap #16 收窄成"只差多相机"）
 
 用第 29 轮定下的四问核对 gap #16：**正交投影**不是"格式里有字段"而已——
