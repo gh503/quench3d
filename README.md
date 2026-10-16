@@ -857,6 +857,8 @@ NaN 刚体  : 0
   **每个副本是一个独立物体/刚体**：不是共享刚体，也不是 GPU 实例化——所以关节/动作要写
   `本名#序号`，副本多了就是真实的物理开销（>64 个给警告）。
   校验会拦：模板不存在、`instances: []`、展开后名字重复、实例里的未知字段。
+* 命名相机：`cameras: { 名字 → 相机对象 }`（缺省空 = 只渲 `camera` 段那台）。校验拦空名与
+  保留名 `default`；`--camera <名字>` 选择与多输出（`render.outputs[]`）是下一步。
 * 机器可读的 JSON Schema：`quench3d schema --json-schema`（draft 2020-12，可直接喂给
   编辑器补全 / CI 校验 / agent 自检）。**schema 管"结构"（哪些键、嵌套、不许有额外字段），
   `quench3d validate` 管"语义"（范围、互斥、交叉引用）**——schema 过了不等于场景能跑。
@@ -1058,7 +1060,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 448 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 449 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

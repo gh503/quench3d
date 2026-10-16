@@ -777,3 +777,10 @@ Prefab / 实例（同一模型引用两次会展开成两批物体，不共享�
 **测试（都不需要显卡）**：`--camera` 名字解析与错误路径；多输出场景 → N 个文件都存在且尺寸随各自
 `width`/`height`；单相机/单输出场景的报告与旧版字段一致（向后兼容）；`--no-clobber` 在多输出下任一目标
 存在就整体退出 2 且不写任何文件。
+
+### 9.1 进度（第 34 轮）
+
+**第 1 步已完成**（`cameras` 格式 + 校验 + 预检白名单 + `schema()`/`json_schema()`/系统提示同步 +
+往返测试 `named_cameras_parse_validate_and_round_trip`）。**第 2 步未做**：`--camera <名字>`
+选择（含 `unknown_camera` 退出码 2 与 hint）；**第 3、4 步未做**：`render.outputs[]` 多输出与
+`outputs[]`/`--no-clobber` 语义。下一步从第 2 步开始。

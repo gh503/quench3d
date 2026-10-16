@@ -453,7 +453,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 13 | **多文件组合（include / prefab / variant）** | 无（全仓无命中） | 大场景不能拆分复用 |
 | 14 | **单位与轴向写进文件** | 约定在 README:430 与 schema 文字里，文件本身没有 | 与外部工具交换时需要口头约定 |
 | 15 | **关节锚点与参考姿态** | 引擎 `Joint` 有 `local_anchor_a/b`、`local_frame_a/b`、`local_axis_a/b`（joints.rs:34-118）；`runner.rs:452-474` 把锚点硬编码为 `Vec3::ZERO`、`local_axis_a/b` 赋**同一个向量** | 文档说 `axis` 是"世界轴"，但只有两刚体都没旋转时才成立；门上装合页（锚点在门边缘）、摆锤挂杆子末端——做不到 |
-| 16 | **凸包渲染** | `ShapeKind::Convex` 的渲染网格直接取 `unit_cube`，缩放取 `plane_size`（runner.rs:339,860） | 写一个 4 点凸包石块 → 物理是石头，画面是**边长 40 米的立方体**糊住全场 |
+| 16 | 🟡 部分（第 31/34 轮核对+第一步）：**正交 / near·far / fov / 距离 / 偏航俯仰 / 自动取景都已落地**（`render/camera.rs:58/275/310`，e2e `cli_e2e.rs:2015` 钉住"参数被采纳"与 `near>far` 报错）。**命名相机已落地**：`cameras: {名字 → 相机对象}`（缺省空=行为不变；空名与保留名 `default` 报错；预检白名单/schema/系统提示/json_schema 全同步，有一致性测试盯着）。**没做**：`--camera <名字>` 选择、`render.outputs[]` 多输出（设计与验收点见 `production_readiness.md §9`） | 格式 |
 | 17 | **地面全局唯一** | `ground` 是单个 `Option`；物理面无限大、摩擦**硬编码 0.85**（runner.rs:374-376），`size` 只管视觉 | 冰面 + 草地共存、可调摩擦——做不到 |
 | 18 | **形状集合固定 6 种** | 引擎有 `TriMesh`（仅能靠 `models[].collide` 间接用）；无 Compound / HeightField / Cone / 圆角盒 | 地形高度场、L 形刚体只能拆成多个物体用 fixed 关节凑 |
 | 19 | **物理参数只暴露了一小部分** | 引擎 `BodyBuilder` 有 `angular_velocity` / `linear_damping` / `angular_damping` / `gravity_scale` / `mass` / `allow_sleep`（body.rs:336-351）；格式只有 `velocity` 线速度 | 陀螺自转、气球（低重力）、按克数给质量、休眠控制——都表达不了 |

@@ -10,6 +10,11 @@
 
 ### 新增
 
+- **命名相机 `cameras`（gap #16 第一步）**：`cameras: { 名字 → 相机对象 }`，缺省空 = 行为与
+  今天完全一致（只渲 `camera` 段那台）。校验只拦两种真会出事的名字：空名（没法被引用）与保留名
+  `default`（它是 `camera` 段的别名）；手写 JSON 预检的白名单、`schema()` 语法表、系统提示、
+  `json_schema()` 的属性表全部同步（一致性测试会盯着，漏一个就红）。**没做**：`--camera <名字>`
+  的选择与 `render.outputs[]` 多输出——下一步（设计见 `docs/production_readiness.md §9`）。
 - **`cargo doc -D warnings` 进门禁与 CI（gap #30 的一部分）**：rustdoc 的「文档链到私有项 /
   拼错路径」以前没人管，现在 `tools/gate.sh` 多一段 `PASS doc`、CI 多一个 `cargo doc` 步骤；
   为此修掉全部 16 处既有告警（私有模块、私有函数、字面量被当成链接），改成纯代码字体，

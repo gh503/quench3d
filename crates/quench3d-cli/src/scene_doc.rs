@@ -165,6 +165,11 @@ pub struct SceneDoc {
     /// 相机。
     #[serde(default)]
     pub camera: CameraDoc,
+    /// 命名相机：`--camera <名字>` 用来选一台渲染（多个视角一次说清）。
+    ///
+    /// 缺省空 = 行为与今天完全一致（只渲 `camera` 段这台）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cameras: BTreeMap<String, CameraDoc>,
     /// 光照与天空。
     #[serde(default)]
     pub lighting: LightingDoc,
@@ -564,6 +569,7 @@ impl Default for SceneDoc {
     fn default() -> Self {
         Self {
             format: default_format(),
+            cameras: BTreeMap::new(),
             version: VERSION,
             name: None,
             gravity: None,
@@ -1633,6 +1639,7 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     check_section::<[f32; 3]>(map.get("gravity"), "gravity", &mut out);
     check_section::<GroundDoc>(map.get("ground"), "ground", &mut out);
     check_section::<CameraDoc>(map.get("camera"), "camera", &mut out);
+    check_section::<BTreeMap<String, CameraDoc>>(map.get("cameras"), "cameras", &mut out);
     check_section::<LightingDoc>(map.get("lighting"), "lighting", &mut out);
     check_section::<SimulateDoc>(map.get("simulate"), "simulate", &mut out);
     check_section::<RenderDoc>(map.get("render"), "render", &mut out);
@@ -2005,6 +2012,26 @@ impl SceneDoc {
 
     /// 语义校验；返回全部诊断（含警告），调用方自行判断是否有 `Error`。
     pub fn validate(&self) -> Vec<Diagnostic> {
+        // 命名相机（`cameras`）：格式与校验先落地；`--camera <名字>` 的选择留到下一步。
+        // 名字只在两处会出问题：空名（无从引用）与保留名 `default`（它是 `camera` 段的别名）。
+        let mut cam_diags = Vec::new();
+        for name in self.cameras.keys() {
+            if name.trim().is_empty() {
+                cam_diags.push(
+                    Diagnostic::error("cameras", "相机名字不能为空").with_hint(
+                        "空名字没法被 `--camera` 引用；给它起个名字，或直接写 `camera` 段",
+                    ),
+                );
+            } else if name == "default" {
+                cam_diags.push(
+                    Diagnostic::error("cameras", "`default` 是保留名（指 `camera` 段这台）")
+                        .with_hint("把这一项改名，例如 `default` → `main`"),
+                );
+            }
+        }
+        if !cam_diags.is_empty() {
+            return cam_diags;
+        }
         // 有模板/实例时：先在**声明的**文档上做结构检查（引用、实例、名字、未用模板），
         // 再把其余一切交给展开后的文档验一遍。这样每条问题只报一次，
         // 而物体字段/材质/关节那些检查一个字都不用改。
@@ -5342,5 +5369,43 @@ mod tests {
         let diags = doc.validate();
         let d = diag_at(&diags, "version").expect("版本 1 必须报错");
         assert!(d.message.contains("当前支持 2"), "{}", d.message);
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    /// 命名相机：解析、校验、往返；保留名与空名必须报错。
+    #[test]
+    fn named_cameras_parse_validate_and_round_trip() {
+        let json = r#"{
+            "format": "quench3d.scene", "version": 2,
+            "cameras": {
+                "正面": { "position": [0, 1, 8], "look_at": [0, 1, 0] },
+                "俯视": { "position": [0, 9, 0.1], "look_at": [0, 1, 0], "fov_deg": 35 }
+            }
+        }"#;
+        let doc = SceneDoc::from_json(json).expect("命名相机应当能解析");
+        assert_eq!(doc.cameras.len(), 2);
+        assert!(
+            !SceneDoc::has_errors(&doc.validate()),
+            "正常名字不该报错：{:?}",
+            doc.validate()
+        );
+
+        // 往返：命名相机不能丢
+        let round = SceneDoc::from_json(&doc.to_json_pretty()).expect("往返要能再解析");
+        assert_eq!(round.cameras.len(), 2);
+        assert_eq!(round.cameras["俯视"].fov_deg, Some(35.0));
+
+        // 保留名与空名
+        for bad in [
+            r#"{"format":"quench3d.scene","version":2,"cameras":{"default":{}}}"#,
+            r#"{"format":"quench3d.scene","version":2,"cameras":{" ":{}}}"#,
+        ] {
+            let d = SceneDoc::from_json(bad).expect("要能解析");
+            assert!(SceneDoc::has_errors(&d.validate()), "坏名字必须报错：{bad}");
+        }
     }
 }

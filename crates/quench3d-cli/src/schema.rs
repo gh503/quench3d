@@ -306,6 +306,7 @@ pub fn scene_grammar() -> Value {
             "actions": "定时动作数组：在指定步/秒对刚体施加冲量、力、速度或瞬移",
             "probes": "区域探针数组：只读记录谁何时进入/离开某个球形或盒形区域",
             "camera": "相机对象",
+            "cameras": "命名相机表：名字 → 相机对象（`--camera <名字>` 选一台）",
             "lighting": "光照对象",
             "simulate": "物理步进对象",
             "render": "渲染输出对象"
@@ -749,6 +750,9 @@ pub fn json_schema() -> Value {
                 "actions": { "type": "array", "items": { "$ref": "#/$defs/action" } },
                 "probes": { "type": "array", "items": { "$ref": "#/$defs/probe" } },
                 "camera": { "$ref": "#/$defs/camera" },
+                "cameras": { "type": "object",
+                             "additionalProperties": { "$ref": "#/$defs/camera" },
+                             "description": "命名相机：--camera <名字> 选一台渲染" },
                 "lighting": { "$ref": "#/$defs/lighting" },
                 "simulate": { "$ref": "#/$defs/simulate" },
                 "render": { "$ref": "#/$defs/render" }
@@ -833,6 +837,7 @@ pub fn system_prompt() -> String {
    半空间（地面）没有有限包围盒，探针监测不到它）
 - models: 数组：{ path: "xx.glb"|"xx.obj", position, rotation_deg, scale, collide: false }
 - camera: { position: [x,y,z], look_at: [x,y,z], fov_deg: 50, near: 0.05, far: 5000,
+cameras: 命名相机表（名字 → 相机对象）；`--camera <名字>` 选一台渲染，缺省用 camera 段
             orthographic_height: 5, frame_scene: false }
   或者 { distance: 12, yaw_deg: 30, pitch_deg: 20, look_at: [0,1,0] }
   （给了 orthographic_height 就是正交投影，没有近大远小）
@@ -1159,6 +1164,7 @@ mod tests {
     fn system_prompt_mentions_every_top_level_scene_field() {
         let prompt = system_prompt();
         for field in [
+            "cameras",
             "gravity",
             "ground",
             "materials",
