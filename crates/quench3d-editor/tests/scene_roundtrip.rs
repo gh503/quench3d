@@ -69,7 +69,7 @@ fn scene_json_roundtrip_keeps_objects_and_ground() {
         "编辑器存的场景应当通过 CLI 校验：{diagnostics:?}"
     );
     let ground = parsed.ground.as_ref().expect("应当写成 ground 字段");
-    let shape = &parsed.objects[0].shape;
+    let shape = parsed.objects[0].primary_shape();
     assert_eq!(shape.kind, ShapeKind::Box, "第一个物体应当是方块");
 
     // 装回引擎（同一个引擎，先清空重建）——模拟"打开文件"。
@@ -724,4 +724,91 @@ fn model_transform_edits_are_exported() {
         "位置没读回来"
     );
     assert_eq!(base2.models[0].scale, Some(2.5), "缩放没读回来");
+}
+
+/// 复合形状：导出要写 `shapes`，而"部件绘制物体"不许被当成独立物体写出去。
+///
+/// 这条测试盯的是一个很容易发生、却很难发现的损坏：复合形状在渲染上要拆成多个绘制
+/// 物体，如果导出时把它们也写进 `objects`，场景每"存一次"就多出几个物体。
+#[test]
+fn compound_bodies_export_as_shapes_without_duplicating_parts() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+
+    // 顶板 + 一条腿：一个刚体两个部件
+    let body = engine.world.add_builder(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::new(0.6, 0.05, 0.4),
+        })
+        .position(Vec3::new(1.5, 2.0, 0.0))
+        .part_at(
+            Shape::Box {
+                half_extents: Vec3::new(0.05, 0.35, 0.05),
+            },
+            Vec3::new(0.5, -0.4, 0.0),
+        ),
+    );
+    let mesh = engine.assets.unit_cube;
+    let material = engine.scene.objects[1].material;
+    let index = engine
+        .scene
+        .add_with_body(mesh, material, body, &engine.world, "复合桌子");
+    // 手工放一个"附加部件伪物体"（CLI 装载场景时就是这么建的）
+    let child = engine
+        .scene
+        .add_named(mesh, material, Transform::IDENTITY, "复合桌子#1");
+    engine.scene.objects[child].parent = Some(index);
+    engine.scene.objects[child].owner_part = Some(index);
+
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    assert!(
+        saved.json.contains("\"shapes\""),
+        "复合形状要写成 shapes：\n{}",
+        saved.json
+    );
+    assert_eq!(
+        saved.json.matches("\"复合桌子\"").count(),
+        1,
+        "部件伪物体不该被导出成独立物体：\n{}",
+        saved.json
+    );
+
+    // 用 CLI 的解析器 + 校验器读回来：必须仍然是 2 个部件、1 个物体
+    let parsed = SceneDoc::from_json(&saved.json).expect("解析必须成功");
+    let diagnostics = parsed.validate();
+    assert!(
+        !SceneDoc::has_errors(&diagnostics),
+        "编辑器存的复合形状必须过 CLI 校验：{diagnostics:?}"
+    );
+    let table = parsed
+        .objects
+        .iter()
+        .find(|o| o.name.as_deref() == Some("复合桌子"))
+        .expect("应当有复合桌子");
+    assert_eq!(table.parts().len(), 2, "两个部件要原样写回");
+    assert!(table.shape.is_none(), "复合形状不该同时写 shape");
+    assert_eq!(
+        table.parts()[1].position,
+        Some([0.5, -0.4, 0.0]),
+        "部件局部位姿要保住"
+    );
+    // 再装回引擎一次：物理侧也必须仍然是"一个刚体两个部件"
+    let (count, _) = scene_io::load_into_engine(&mut engine, &saved.json).expect("导入必须成功");
+    assert!(count >= 1);
+    let index = engine.scene.find("复合桌子").expect("导入后该有复合桌子");
+    let handle = engine.scene.objects[index].body.expect("该带刚体");
+    let body = engine.world.body(handle).expect("刚体该在");
+    assert_eq!(body.part_count(), 2, "读回来仍然是两个部件");
+    assert!(body.extra_parts().len() == 1);
+    // 部件伪物体在导入后**重新**由装载器生成（数量对得上），但文档里只有一个物体
+    assert!(
+        !parsed
+            .objects
+            .iter()
+            .any(|o| o.name.as_deref().unwrap_or("").contains('#')),
+        "文档里不该出现 `名字#序号` 这种伪物体"
+    );
 }

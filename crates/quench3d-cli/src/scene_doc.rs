@@ -452,6 +452,53 @@ pub enum BodyKind {
     Kinematic,
 }
 
+/// 复合形状的一个部件：形状 + 相对刚体原点的局部位姿。
+///
+/// 写成 `{ "shape": {...}, "position": [...], "rotation_deg": [...] }` 而不是把形状字段
+/// 摊平：`ShapeDoc` 是 `deny_unknown_fields` 的，摊平（serde flatten）与它冲突，
+/// 而且摊平之后"`position` 是物体的还是部件的"会变得很难读。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShapePartDoc {
+    /// 部件形状。
+    pub shape: ShapeDoc,
+    /// 相对刚体原点的位置（米），缺省原点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f32; 3]>,
+    /// 相对刚体坐标系的欧拉角（**度**，XYZ），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<[f32; 3]>,
+}
+
+impl ObjectDoc {
+    /// 归一化后的形状部件：`shape` 视作一个单位位姿的部件，`shapes` 原样。
+    ///
+    /// 校验保证二者恰有一个（或都不写 = 缺省立方体），所以这里**不会**返回空表之外的东西；
+    /// 真为空时调用方给缺省立方体（校验已经先报错了）。
+    pub fn parts(&self) -> Vec<ShapePartDoc> {
+        if let Some(list) = &self.shapes {
+            return list.clone();
+        }
+        if let Some(shape) = &self.shape {
+            return vec![ShapePartDoc {
+                shape: shape.clone(),
+                position: None,
+                rotation_deg: None,
+            }];
+        }
+        Vec::new()
+    }
+
+    /// 主形状（第一个部件；没有就退回缺省立方体）。
+    pub fn primary_shape(&self) -> ShapeDoc {
+        self.parts()
+            .into_iter()
+            .next()
+            .map(|p| p.shape)
+            .unwrap_or_default()
+    }
+}
+
 /// 一个图元物体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -459,9 +506,18 @@ pub struct ObjectDoc {
     /// 名称（关节引用、报告输出都靠它），缺省自动编号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// 形状，缺省 1×1×1 立方体。
-    #[serde(default)]
-    pub shape: ShapeDoc,
+    /// 形状（单形状物体的写法），缺省 1×1×1 立方体。
+    ///
+    /// **与 `shapes` 二选一**：两个都写会报错（不猜"以哪个为准"），
+    /// 两个都不写等于缺省的 1×1×1 立方体（老行为）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ShapeDoc>,
+    /// 复合形状（一个刚体多个 Shape），与 `shape` 二选一。
+    ///
+    /// 每个部件的 `position` / `rotation_deg` 是**相对刚体原点**的局部位姿；
+    /// 质量、质心、惯性张量按所有部件合成，碰撞/AABB/查询都逐部件处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shapes: Option<Vec<ShapePartDoc>>,
     /// 父物体的**名字**（`objects[].name`），缺省为根物体。
     ///
     /// 给了父物体之后，`position` / `rotation_deg` 都变成**相对父物体**的局部量：
@@ -1339,6 +1395,30 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     if let Some(shape) = map.get("shape") {
         check_shape(shape, &format!("{path}.shape"), out);
     }
+    if let Some(shapes) = map.get("shapes") {
+        if let Some(list) = shapes.as_array() {
+            for (i, part) in list.iter().enumerate() {
+                let pp = format!("{path}.shapes[{i}]");
+                let Some(pmap) = part.as_object() else {
+                    out.push(Diagnostic::error(
+                        pp.clone(),
+                        "部件必须是对象 { shape, position?, rotation_deg? }",
+                    ));
+                    continue;
+                };
+                if let Some(shape) = pmap.get("shape") {
+                    check_shape(shape, &format!("{pp}.shape"), out);
+                }
+                check_field::<[f32; 3]>(pmap, "position", &pp, out);
+                check_field::<[f32; 3]>(pmap, "rotation_deg", &pp, out);
+            }
+        } else {
+            out.push(Diagnostic::error(
+                format!("{path}.shapes"),
+                "shapes 必须是数组（每个元素 { shape, position?, rotation_deg? }）",
+            ));
+        }
+    }
     check_field::<[f32; 3]>(map, "position", path, out);
     check_field::<[f32; 3]>(map, "rotation_deg", path, out);
     check_field::<[f32; 3]>(map, "scale", path, out);
@@ -1910,7 +1990,62 @@ impl SceneDoc {
         // 物体
         for (i, o) in self.objects.iter().enumerate() {
             let p = format!("objects[{i}]");
-            validate_shape(&o.shape, &format!("{p}.shape"), &mut out);
+            // 形状：`shape` 与 `shapes` 二选一
+            if o.shape.is_some() && o.shapes.is_some() {
+                out.push(
+                    Diagnostic::error(
+                        format!("{p}.shapes"),
+                        "shape 与 shapes 只能写一个（单形状用 shape，复合形状用 shapes）",
+                    )
+                    .with_hint("把单形状那个改写成 shapes 数组，或删掉多余的字段"),
+                );
+            }
+            match (&o.shape, &o.shapes) {
+                (Some(shape), None) => validate_shape(shape, &format!("{p}.shape"), &mut out),
+                (None, Some(parts)) => {
+                    if parts.is_empty() {
+                        out.push(Diagnostic::error(
+                            format!("{p}.shapes"),
+                            "shapes 不能是空数组（至少一个部件）",
+                        ));
+                    }
+                    for (i, part) in parts.iter().enumerate() {
+                        let pp = format!("{p}.shapes[{i}]");
+                        validate_shape(&part.shape, &format!("{pp}.shape"), &mut out);
+                        if let Some(v) = &part.position {
+                            if !finite3(v) {
+                                out.push(Diagnostic::error(
+                                    format!("{pp}.position"),
+                                    "部件位置必须是有限数",
+                                ));
+                            }
+                        }
+                        if let Some(v) = &part.rotation_deg {
+                            if !finite3(v) {
+                                out.push(Diagnostic::error(
+                                    format!("{pp}.rotation_deg"),
+                                    "部件欧拉角必须是有限数",
+                                ));
+                            }
+                        }
+                        if part.shape.kind == ShapeKind::Plane {
+                            out.push(Diagnostic::warn(
+                                &pp,
+                                "无限半空间当复合形状的一个部件：整个刚体都会被它撑成无限大（通常只想当整个物体用）",
+                            ));
+                        }
+                    }
+                    if parts.len() == 1 {
+                        out.push(Diagnostic::warn(
+                            format!("{p}.shapes"),
+                            "只写了一个部件：用 shape 更直接（行为完全一样）",
+                        ));
+                    }
+                }
+                (None, None) => {}
+                // 两个都写了：上面已经报 error（这里不重复报，也不猜以谁为准）
+                (Some(_), Some(_)) => {}
+            }
             if let Some(v) = &o.position {
                 if !finite3(v) {
                     out.push(Diagnostic::error(
@@ -2066,7 +2201,11 @@ impl SceneDoc {
                     ));
                 }
             }
-            if o.shape.kind == ShapeKind::Plane && o.body == BodyKind::Dynamic {
+            let has_plane = o
+                .parts()
+                .iter()
+                .any(|part| part.shape.kind == ShapeKind::Plane);
+            if has_plane && o.body == BodyKind::Dynamic {
                 out.push(
                     Diagnostic::error(
                         format!("{p}.body"),
@@ -2160,7 +2299,7 @@ impl SceneDoc {
                         "传感器不产生冲量，恢复系数/摩擦对它没有意义",
                     ));
                 }
-                if o.shape.kind == ShapeKind::Plane {
+                if has_plane {
                     out.push(Diagnostic::warn(
                         format!("{p}.sensor"),
                         "无限半空间当传感器：整个空间永远在里面，事件只在开始时报一次",
@@ -2175,7 +2314,7 @@ impl SceneDoc {
                         format!("body 是 {:?}，CCD 只对 dynamic 生效，会被忽略", o.body),
                     ));
                 }
-                if matches!(o.shape.kind, ShapeKind::Plane) {
+                if has_plane {
                     out.push(Diagnostic::warn(
                         format!("{p}.ccd"),
                         "无限半空间不需要 CCD（它不会动）",
@@ -3629,7 +3768,7 @@ mod tests {
         assert!(doc.validate().iter().all(|d| d.severity != Severity::Error));
         let again = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
         assert_eq!(again.objects.len(), 1);
-        assert_eq!(again.objects[0].shape.kind, ShapeKind::Sphere);
+        assert_eq!(again.objects[0].primary_shape().kind, ShapeKind::Sphere);
         assert_eq!(again.simulate.steps, 60);
         assert_eq!(again.render.output, PathBuf::from("x.png"));
     }
@@ -4325,6 +4464,109 @@ mod tests {
         )
         .unwrap();
         assert!(!SceneDoc::has_errors(&ok.validate()));
+    }
+
+    #[test]
+    fn compound_shapes_parse_validate_and_round_trip() {
+        // 合法：三条腿的桌子（顶板 + 两条腿），部件的 position/rotation_deg 是局部量
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [
+                   { "name": "桌子", "body": "dynamic",
+                     "shapes": [
+                       { "shape": { "type": "box", "size": [1.2, 0.1, 0.8] },
+                         "position": [0, 0.75, 0] },
+                       { "shape": { "type": "cylinder", "radius": 0.05, "half_height": 0.35 },
+                         "position": [0.5, 0.35, 0.3] },
+                       { "shape": { "type": "cylinder", "radius": 0.05, "half_height": 0.35 },
+                         "position": [-0.5, 0.35, -0.3], "rotation_deg": [0, 0, 15] } ] } ] }"#,
+        )
+        .unwrap();
+        assert!(
+            !SceneDoc::has_errors(&doc.validate()),
+            "{:?}",
+            doc.validate()
+        );
+        let parts = doc.objects[0].parts();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].shape.kind, ShapeKind::Box);
+        assert_eq!(parts[0].position, Some([0.0, 0.75, 0.0]));
+        assert_eq!(parts[1].shape.kind, ShapeKind::Cylinder);
+        assert_eq!(parts[2].rotation_deg, Some([0.0, 0.0, 15.0]));
+        // 主形状就是第一个部件
+        assert_eq!(doc.objects[0].primary_shape().kind, ShapeKind::Box);
+        // 往返：`shapes` 必须原样写回去（不是被"归一成单形状"吃掉）
+        let json = doc.to_json_pretty();
+        let back = SceneDoc::from_json(&json).unwrap();
+        assert_eq!(back.objects[0].parts().len(), 3);
+        assert!(json.contains("\"shapes\""));
+        assert!(back.objects[0].shape.is_none(), "复合形状不该同时写 shape");
+
+        // 单形状：老写法仍然只有 `shape`，`parts()` 归一成一项
+        let single = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "球", "shape": { "type": "sphere", "radius": 0.3 } } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(single.objects[0].parts().len(), 1);
+        assert!(single.objects[0].shapes.is_none());
+        assert_eq!(single.objects[0].primary_shape().kind, ShapeKind::Sphere);
+        // 两个都不写 = 缺省 1×1×1 立方体（老行为）
+        let bare = SceneDoc::from_json(r#"{ "objects": [ { "name": "默认" } ] }"#).unwrap();
+        assert_eq!(bare.objects[0].primary_shape().kind, ShapeKind::Box);
+        assert_eq!(
+            bare.objects[0].primary_shape().size,
+            None,
+            "缺省尺寸靠 ShapeDoc 的缺省值，不写字面量"
+        );
+
+        // 错误①：shape 与 shapes 同时写
+        let both = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "甲", "shape": { "type": "box" },
+                 "shapes": [ { "shape": { "type": "sphere" } } ] } ] }"#,
+        );
+        assert!(
+            both.is_ok(),
+            "解析层允许（校验层报错），避免 serde 报错信息不可读"
+        );
+        let diags = both.unwrap().validate();
+        assert!(
+            SceneDoc::has_errors(&diags),
+            "shape 与 shapes 同时写必须报错：{diags:?}"
+        );
+        // 错误②：空数组
+        let empty =
+            SceneDoc::from_json(r#"{ "objects": [ { "name": "乙", "shapes": [] } ] }"#).unwrap();
+        assert!(SceneDoc::has_errors(&empty.validate()));
+        // 错误③：部件位置 NaN（JSON 里写不出 NaN，用字符串探针验一下别的非法值）
+        let bad_pos = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "丙", "shapes": [
+                 { "shape": { "type": "box" }, "position": [0, 0, 0], "rotation_deg": [0, 0, 0],
+                   "extra": 1 } ] } ] }"#,
+        );
+        assert!(
+            bad_pos.is_err(),
+            "部件里的未知字段要报错（deny_unknown_fields）"
+        );
+
+        // 警告①：只写一个部件；警告②：半空间当部件
+        let warn = SceneDoc::from_json(
+            r#"{ "objects": [
+                 { "name": "丁", "shapes": [ { "shape": { "type": "box" } } ] },
+                 { "name": "戊", "body": "static",
+                   "shapes": [ { "shape": { "type": "plane" } },
+                               { "shape": { "type": "box" } } ] } ] }"#,
+        )
+        .unwrap();
+        let diags = warn.validate();
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+        let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("只写了一个部件")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| m.contains("无限半空间当复合形状")),
+            "{msgs:?}"
+        );
     }
 
     #[test]

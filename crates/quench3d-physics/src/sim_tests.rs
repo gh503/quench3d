@@ -2613,3 +2613,146 @@ fn event_bus_reports_joint_break_and_is_bounded() {
     }
     assert_eq!(run(), run(), "事件序列必须确定性");
 }
+
+// ---------------------------------------------------------------------------
+// 14. 复合形状（一个刚体多个 Shape）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compound_mass_properties_add_up() {
+    // 两个 1×1×1 的盒子放在 x = ±1：质量翻倍、质心仍在原点、
+    // 绕 X 的惯量不变（离转轴没距离），绕 Y/Z 的惯量加上平行轴项。
+    let single = PhysicsWorld::new();
+    let _ = single;
+    let cube = Shape::Box {
+        half_extents: Vec3::splat(0.5),
+    };
+    let one = BodyBuilder::dynamic(cube.clone()).build();
+    let m = one.mass;
+    assert!(m > 0.0);
+
+    let two = BodyBuilder::dynamic(cube.clone())
+        .part_at(cube.clone(), vec3(1.0, 0.0, 0.0))
+        .part_at(cube.clone(), vec3(-1.0, 0.0, 0.0))
+        .build();
+    assert_eq!(two.part_count(), 3);
+    assert!((two.mass - 3.0 * m).abs() < 1e-3 * m, "质量该是 3 倍");
+    assert!(
+        two.local_center.length() < 1e-4,
+        "对称摆放的质心该在原点：{:?}",
+        two.local_center
+    );
+    // 单盒绕自己质心的惯量（对角全相同）：m/6
+    let i_box = m / 6.0;
+    // 绕 X：两个偏心盒都在 y=z=0，平行轴项为 0
+    let expect_x = 3.0 * i_box;
+    // 绕 Y/Z：平行轴项 m*(1²)
+    let expect_yz = 3.0 * i_box + 2.0 * m * 1.0;
+    assert!(
+        (two.inertia_local.x - expect_x).abs() < 1e-3 * expect_x.max(1.0),
+        "Ix {:?} 期望 {expect_x}",
+        two.inertia_local
+    );
+    assert!(
+        (two.inertia_local.y - expect_yz).abs() < 1e-3 * expect_yz.max(1.0),
+        "Iy {:?} 期望 {expect_yz}",
+        two.inertia_local
+    );
+    assert!((two.inertia_local.z - expect_yz).abs() < 1e-3 * expect_yz.max(1.0));
+    // 绕各轴都为正、且不是 NaN
+    assert!(two.inertia_local.x > 0.0 && two.inertia_local.y > 0.0 && two.inertia_local.z > 0.0);
+
+    // AABB 是并集：x 方向从 -1.5 到 1.5
+    let aabb = two.world_aabb();
+    assert!((aabb.min.x + 1.5).abs() < 1e-4, "{:?}", aabb);
+    assert!((aabb.max.x - 1.5).abs() < 1e-4, "{:?}", aabb);
+    assert!((aabb.max.y - 0.5).abs() < 1e-4, "{:?}", aabb);
+}
+
+#[test]
+fn compound_extra_parts_really_collide() {
+    // 主形状（小球）挂在高处，附加部件（盒子）在下方：落地的是**附加部件**。
+    // 如果窄相只看主形状，刚体会一路掉到 y≈0.15（小球半径）——这就是回归判据。
+    let mut w = PhysicsWorld::new();
+    w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+    let body = w.add_body(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.15 })
+            .position(vec3(0.0, 2.0, 0.0))
+            .part_at(
+                Shape::Box {
+                    half_extents: Vec3::splat(0.25),
+                },
+                vec3(0.0, -0.75, 0.0),
+            )
+            .build(),
+    );
+    for _ in 0..240 {
+        w.step(DT);
+    }
+    let y = w.body(body).unwrap().position().y;
+    assert!(
+        (y - 1.0).abs() < 0.05,
+        "该停在 1.0 附近（附加盒子的底面贴地），实际 {y}"
+    );
+    // 睡着之后窄相不再为它生成接触（睡眠体整岛跳过）——所以这里看的是"停在哪"，
+    // 而不是"还有没有接触"（后者是睡眠的语义，不是复合形状的）。
+    assert!(w.body(body).unwrap().sleeping, "静止够久该睡着");
+
+    // 射线：小球的顶面在 body_y + 0.15 ≈ 1.15；附加盒子的顶面在 body_y - 0.5 ≈ 0.5。
+    // 两条不同 x 的竖直线分别打中**两个不同的部件**——这是"查询也看得见部件"的判据。
+    // 射线只打 1.0 米（起点 1.4 → 最低到 0.4），免得打到无限大的地面半空间
+    let sphere_top = w
+        .raycast(vec3(0.0, 1.4, 0.0), Vec3::NEG_Y, 1.0)
+        .expect("x=0 该打中小球");
+    assert!(
+        (sphere_top.point.y - (y + 0.15)).abs() < 0.05,
+        "x=0 该打中小球顶面（{}），实际 {}",
+        y + 0.15,
+        sphere_top.point.y
+    );
+    let box_top = w
+        .raycast(vec3(0.2, 1.4, 0.0), Vec3::NEG_Y, 1.0)
+        .expect("x=0.2 该打中附加盒子");
+    assert!(
+        (box_top.point.y - (y - 0.5)).abs() < 0.05,
+        "x=0.2 该打中附加盒子顶面（{}），实际 {}",
+        y - 0.5,
+        box_top.point.y
+    );
+    // 再偏到 x = 0.6：小球半径 0.15、盒子半宽 0.25 → 两个部件都打不中
+    assert!(
+        w.raycast(vec3(0.6, 1.4, 0.0), Vec3::NEG_Y, 1.0).is_none(),
+        "x=0.6 处不该命中任何部件"
+    );
+}
+
+#[test]
+fn compound_body_is_one_rigid_body_and_the_old_shapes_still_match() {
+    // 部件不影响"一个刚体"这件事：一个刚体、质量是两部分之和、
+    // 而且**单形状刚体的质量属性与以前逐位一致**（同一分支）。
+    let cube = Shape::Box {
+        half_extents: Vec3::splat(0.5),
+    };
+    let plain = BodyBuilder::dynamic(cube.clone()).build();
+    let mp = cube.mass_properties(1000.0);
+    assert_eq!(plain.mass, mp.mass, "单形状必须走老路径（逐位相等）");
+    assert_eq!(plain.inertia_local, mp.inertia);
+    assert_eq!(plain.local_center, mp.center);
+
+    let mut w = PhysicsWorld::new();
+    let h = w.add_body(
+        BodyBuilder::dynamic(cube.clone())
+            .part_at(cube.clone(), vec3(0.0, 1.0, 0.0))
+            .build(),
+    );
+    assert_eq!(w.body_count(), 1, "复合形状仍然是**一个**刚体");
+    let body = w.body(h).unwrap();
+    assert_eq!(body.part_count(), 2);
+    // 质心在两部分中间（y = 0.5）
+    assert!(
+        (body.local_center.y - 0.5).abs() < 1e-4,
+        "{:?}",
+        body.local_center
+    );
+    assert!(w.raycast(vec3(0.0, 5.0, 0.0), Vec3::NEG_Y, 20.0).is_some());
+}

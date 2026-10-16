@@ -11,7 +11,6 @@
 use quench3d_math::*;
 
 use crate::gjk;
-use crate::narrowphase;
 use crate::shape::Shape;
 use crate::world::PhysicsWorld;
 
@@ -194,9 +193,7 @@ impl CharacterController {
             let mut best_normal = Vec3::ZERO;
             let t = Transform::from_translation(pos);
             for (_, body) in world.bodies() {
-                if let Some(m) =
-                    narrowphase::collide_shapes(shape, &t, &body.shape, &body.transform)
-                {
+                if let Some(m) = crate::world::collide_shape_with_body(shape, &t, body) {
                     for cp in &m.points {
                         // n 由角色指向刚体 → 角色应沿 -n 退出。
                         let push = -cp.normal;
@@ -246,7 +243,7 @@ impl CharacterController {
         let mut best_y = -1.0f32;
         let mut normal = Vec3::ZERO;
         for (_, body) in world.bodies() {
-            if let Some(m) = narrowphase::collide_shapes(shape, &t, &body.shape, &body.transform) {
+            if let Some(m) = crate::world::collide_shape_with_body(shape, &t, body) {
                 for cp in &m.points {
                     let n = -cp.normal;
                     if n.y > best_y && cp.penetration > 0.0 {

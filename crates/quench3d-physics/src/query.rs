@@ -29,16 +29,62 @@ pub(crate) struct DistanceResult {
 }
 
 /// 查询形状与单个刚体的距离（半空间解析处理，其余走 GJK）。
+///
+/// 复合形状**逐部件**求距离，取最近的那一组；单形状走老路径（只有一个部件）。
 pub(crate) fn distance_to_body(shape: &Shape, t: &Transform, body: &RigidBody) -> DistanceResult {
-    if let Shape::Plane { normal } = body.shape {
-        let n = body
-            .transform
+    if body.extra_parts.is_empty() {
+        return distance_to_shape(shape, t, &body.shape, &body.transform);
+    }
+    let mut best: Option<DistanceResult> = None;
+    for (part, local) in body.parts() {
+        let world = body.part_world_transform(&local);
+        let d = distance_to_shape(shape, t, part, &world);
+        if best.as_ref().is_none_or(|b| d.distance < b.distance) {
+            best = Some(d);
+        }
+    }
+    best.unwrap_or_else(|| distance_to_shape(shape, t, &body.shape, &body.transform))
+}
+
+/// 射线与**一个刚体**求交：逐部件求交，取最近的命中。
+///
+/// 单形状走老路径（一个部件），行为与以前一致。
+pub(crate) fn ray_body(
+    body: &RigidBody,
+    origin: Vec3,
+    d: Vec3,
+    max_distance: f32,
+) -> Option<(f32, Vec3)> {
+    if body.extra_parts.is_empty() {
+        return ray_shape(&body.shape, &body.transform, origin, d, max_distance);
+    }
+    let mut best: Option<(f32, Vec3)> = None;
+    for (part, local) in body.parts() {
+        let world = body.part_world_transform(&local);
+        if let Some((t, n)) = ray_shape(part, &world, origin, d, max_distance) {
+            if t.is_finite() && t >= 0.0 && best.as_ref().is_none_or(|b| t < b.0) {
+                best = Some((t, n));
+            }
+        }
+    }
+    best
+}
+
+/// 查询形状与"某个形状 + 世界变换"的距离。
+fn distance_to_shape(
+    shape: &Shape,
+    t: &Transform,
+    target: &Shape,
+    target_t: &Transform,
+) -> DistanceResult {
+    if let Shape::Plane { normal } = target {
+        let n = target_t
             .rotation
             .mul_vec3(normal.normalize_or_zero())
             .normalize_or_zero();
         let sup = Support::new(shape, t);
         let p = sup.support(-n);
-        let sd = n.dot(p - body.transform.position);
+        let sd = n.dot(p - target_t.position);
         return DistanceResult {
             point_a: p,
             point_b: p - n * sd,
@@ -47,7 +93,7 @@ pub(crate) fn distance_to_body(shape: &Shape, t: &Transform, body: &RigidBody) -
             normal: -n,
         };
     }
-    let (pa, pb, d, n) = gjk::closest_points(shape, t, &body.shape, &body.transform);
+    let (pa, pb, d, n) = gjk::closest_points(shape, t, target, target_t);
     DistanceResult {
         point_a: pa,
         point_b: pb,
@@ -134,12 +180,10 @@ pub fn overlap_shape_filtered(
         if !filter.accepts(body) {
             continue;
         }
-        // 半空间没有有限 AABB，只能直接算距离（`distance_to_body` 对它是解析的）。
-        if !matches!(body.shape, Shape::Plane { .. }) && probe_aabb.is_valid() {
-            let aabb = body
-                .shape
-                .local_aabb()
-                .transformed_conservative(&body.transform.matrix());
+        // 半空间没有有限 AABB（`world_aabb` 无效），只能直接算距离
+        // （`distance_to_body` 对它是解析的）。复合形状的 `world_aabb` 已经是并集。
+        if probe_aabb.is_valid() && body.world_aabb().is_valid() {
+            let aabb = body.world_aabb();
             if !aabb.intersects(&probe_aabb) {
                 continue;
             }
@@ -207,17 +251,14 @@ pub fn raycast_all_filtered(
         if !filter.accepts(body) {
             continue;
         }
-        if !matches!(body.shape, Shape::Plane { .. }) {
-            let aabb = body
-                .shape
-                .local_aabb()
-                .transformed_conservative(&body.transform.matrix());
+        let aabb = body.world_aabb();
+        if aabb.is_valid() {
             match aabb.intersect_ray(origin, d) {
                 Some(t) if t <= max_distance => {}
                 _ => continue,
             }
         }
-        if let Some((t, n)) = ray_shape(&body.shape, &body.transform, origin, d, max_distance) {
+        if let Some((t, n)) = ray_body(body, origin, d, max_distance) {
             if t.is_finite() && t >= 0.0 && t <= max_distance {
                 let normal = if n.dot(d) > 0.0 { -n } else { n };
                 out.push(RaycastHit {
@@ -269,17 +310,14 @@ pub(crate) fn raycast_world(
         if !filter(handle) {
             continue;
         }
-        if !matches!(body.shape, Shape::Plane { .. }) {
-            let aabb = body
-                .shape
-                .local_aabb()
-                .transformed_conservative(&body.transform.matrix());
+        let aabb = body.world_aabb();
+        if aabb.is_valid() {
             match aabb.intersect_ray(origin, d) {
                 Some(t) if t <= max_distance => {}
                 _ => continue,
             }
         }
-        if let Some((t, n)) = ray_shape(&body.shape, &body.transform, origin, d, max_distance) {
+        if let Some((t, n)) = ray_body(body, origin, d, max_distance) {
             if t.is_finite() && t >= 0.0 && t <= max_distance {
                 let better = match &best {
                     Some(b) => t < b.distance,

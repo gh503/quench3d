@@ -114,6 +114,11 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     // 场景物体下标 → 导出后 `objects` 里的下标（父子关系要靠它对上）。
     let mut exported: Vec<(usize, usize)> = Vec::new();
     for (index, object) in engine.scene.objects.iter().enumerate() {
+        // 复合形状的附加部件是"绘制用"的伪物体：它们归主物体，不单独导出
+        // （导出去会让场景每存一次就多出几个物体——静默的数据繁殖）。
+        if object.owner_part.is_some() {
+            continue;
+        }
         let name = if object.name.trim().is_empty() {
             format!("物体 {}", index + 1)
         } else {
@@ -121,7 +126,38 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         };
         let body = object.body.and_then(|h| engine.world.body(h));
         // 形状：有刚体就用物理形状（权威），没有就从预设网格反推。
+        let mut parts_doc: Option<Vec<quench3d_cli::scene_doc::ShapePartDoc>> = None;
         let shape = match body {
+            Some(b) if !b.extra_parts().is_empty() => {
+                // 复合形状：逐部件导出（局部位姿原样写回去）
+                let mut list = Vec::new();
+                let mut bad = false;
+                for (part_shape, local) in b.parts() {
+                    match shape_doc_from_shape(part_shape, object.transform.scale) {
+                        Some(doc) => list.push(quench3d_cli::scene_doc::ShapePartDoc {
+                            shape: doc,
+                            position: Some([local.position.x, local.position.y, local.position.z]),
+                            rotation_deg: Some(to_euler_xyz_deg(local.rotation)),
+                        }),
+                        None => {
+                            skipped.push(format!("{name}（三角网部件）"));
+                            bad = true;
+                            break;
+                        }
+                    }
+                }
+                if bad {
+                    continue;
+                }
+                parts_doc = Some(list);
+                match shape_doc_from_shape(&b.shape, object.transform.scale) {
+                    Some(shape) => shape,
+                    None => {
+                        skipped.push(format!("{name}（三角网碰撞体）"));
+                        continue;
+                    }
+                }
+            }
             Some(b) => match shape_doc_from_shape(&b.shape, object.transform.scale) {
                 Some(shape) => shape,
                 None => {
@@ -142,7 +178,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         // 高度取**地面表面**而不是物体原点：物理上的半空间就在原点平面上，
         // 而视觉上多半放了一块"薄板"（把单位立方体压扁、中心压在 -半厚处）。
         // 直接写原点的话，存一次再读一次地面会掉下去半个板厚。
-        if matches!(shape.kind, ShapeKind::Plane) {
+        if parts_doc.is_none() && matches!(shape.kind, ShapeKind::Plane) {
             if let Some(b) = body {
                 if b.is_static() {
                     out.ground = Some(quench3d_cli::scene_doc::GroundDoc {
@@ -235,9 +271,14 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             Some(b) if b.is_static() => DocBodyKind::Static,
             Some(_) => DocBodyKind::Kinematic,
         };
+        let (shape_field, shapes_field) = match parts_doc {
+            Some(list) => (None, Some(list)),
+            None => (Some(shape), None),
+        };
         out.objects.push(ObjectDoc {
             name: Some(name),
-            shape,
+            shape: shape_field,
+            shapes: shapes_field,
             parent: None, // 循环之后再补：那时才知道父物体有没有被导出
             position: Some([position.x, position.y, position.z]),
             rotation_deg: Some(rotation_deg),

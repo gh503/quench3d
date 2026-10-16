@@ -10,6 +10,30 @@
 
 ### 新增
 
+- **复合形状：一个刚体多个 Shape**（gap #12）。桌子的"板 + 腿"、载具的底盘 + 车厢、
+  角色的躯干 + 四肢碰撞体，以前只能拿多个刚体 + 关节硬拼（会晃、会漏、要调关节参数）。
+  现在一个刚体就能带多个形状：
+  * 场景格式：`objects[].shapes = [ { shape, position?, rotation_deg? } ]`，与 `shape`
+    **二选一**（两个都写报错、空数组报错、部件里的未知字段报错）。部件的
+    `position` / `rotation_deg` 是**相对刚体原点**的局部位姿（度）。
+  * 引擎：`BodyBuilder::part(ShapePart)` / `.part_at(shape, offset)`，
+    `RigidBody::parts()` / `part_count()` / `extra_parts()` / `part_world_transform()`。
+  * 质量属性按所有部件合成：质量相加、质心是一阶矩的加权平均、惯性张量是
+    "零件惯量转到刚体坐标系 + 平行轴（`m·r²`）"再挪回合成质心。**单形状刚体走原路径**，
+    数值与以前逐位一致（不是"应该一样"，是同一个分支没动）。
+  * 碰撞、AABB、射线/距离/重叠查询、角色控制器全部**逐部件**处理；每对刚体最多保留
+    **8 个接触点**（超限按穿透深度取最深的，稳定排序保证确定性）。任一部件是
+    半空间/三角网 → 整个刚体强制静态。
+  * 渲染：每个部件一个绘制物体（附加部件挂成主物体的子物体，跟着刚体走）。
+    `SceneObject::owner_part` 标记"这个绘制物体是我的第几个部件"——**编辑器的场景树、
+    导出、选择都把它当主物体的一部分**。少了这条线，场景每存一次就会多出几个物体。
+  * 编辑器：不做部件编辑面板，但复合形状**原样往返**（导出写 `shapes`，导入重建部件），
+    `tests/scene_roundtrip.rs` 里连"伪物体不许被写成独立物体"一起钉住。
+  验证：`cargo test -p quench3d-physics --lib -- compound`、
+  `cargo test -p quench3d-cli --lib -- compound_shapes`、
+  `cargo test -p quench3d-cli --test cli_e2e -- compound_shapes`、
+  `cargo test -p quench3d-editor --test scene_roundtrip -- compound`。
+
 - **事件总线：一步里"发生了什么"有地方问了**（gap #29）。以前只有
   `sensor_events()` 与"当前接触表"，接触开始/结束、谁睡谁醒、哪个关节断了都只能自己
   逐帧比对。现在 `PhysicsWorld` 有一条跨步累积的事件队列：

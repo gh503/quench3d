@@ -36,6 +36,12 @@ pub struct SceneObject {
     ///
     /// 子物体继承父物体的**位置与朝向**，但**不继承缩放**（原因见 [`rigid_only`]）。
     pub parent: Option<usize>,
+    /// 这个物体是"某个复合形状物体的第几个附加部件"（`None` = 普通物体）。
+    ///
+    /// 复合形状在渲染上要拆成多个绘制物体（每个部件一个网格），但它们**不是**场景里
+    /// 独立的物体：场景树、导出、选择都当归主物体的一部分。这个字段就是那条"归属线"——
+    /// 少了它，编辑器把场景存回去会把附加部件写成一堆独立物体（静默的数据繁殖）。
+    pub owner_part: Option<usize>,
     /// 关联的物理刚体（`None` 表示纯静态显示）。
     ///
     /// **带刚体的物体必须是根**（[`Scene::set_parent`] 会拒绝，场景校验器也会报错）：
@@ -111,6 +117,7 @@ impl Scene {
             material,
             transform,
             parent: None,
+            owner_part: None,
             body: None,
             visible: true,
             color: Vec4::new(1.0, 1.0, 1.0, 1.0),

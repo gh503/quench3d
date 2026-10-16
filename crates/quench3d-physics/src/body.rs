@@ -189,13 +189,154 @@ impl CombineRule {
     }
 }
 
+/// 复合形状的一个部件：形状 + 它相对**刚体原点**的局部位姿。
+///
+/// 刚体的主形状（[`RigidBody::shape`]）永远是"单位位姿的那个部件"，
+/// 附加部件放在 [`RigidBody::extra_parts`] 里——这样"只有一个形状"的绝大多数物体
+/// 走的是**和以前完全一样**的代码路径（质量属性、AABB、窄相、查询都先看部件数）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapePart {
+    /// 形状。
+    pub shape: Shape,
+    /// 相对刚体原点的位置。
+    pub offset: Vec3,
+    /// 相对刚体坐标系的朝向。
+    pub rotation: Quat,
+}
+
+impl ShapePart {
+    /// 单位位姿的部件。
+    pub fn new(shape: Shape) -> Self {
+        Self {
+            shape,
+            offset: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }
+    }
+
+    /// 带偏移与朝向的部件。
+    pub fn at(shape: Shape, offset: Vec3, rotation: Quat) -> Self {
+        Self {
+            shape,
+            offset,
+            rotation,
+        }
+    }
+
+    /// 局部变换。
+    pub fn transform(&self) -> Transform {
+        Transform::new(self.offset, self.rotation, Vec3::ONE)
+    }
+}
+
+/// 刚体的形状部件迭代器：第一个是主形状（单位位姿），后面是附加部件。
+///
+/// 产出的变换是**相对刚体原点**的局部变换；世界变换用
+/// [`RigidBody::part_world_transform`] 拼。
+pub struct ShapeParts<'a> {
+    body: &'a RigidBody,
+    index: usize,
+}
+
+impl<'a> Iterator for ShapeParts<'a> {
+    type Item = (&'a Shape, Transform);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == 0 {
+            self.index = 1;
+            return Some((
+                &self.body.shape,
+                Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
+            ));
+        }
+        let part = self.body.extra_parts.get(self.index - 1)?;
+        self.index += 1;
+        Some((&part.shape, part.transform()))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = 1 + self.body.extra_parts.len() - self.index.min(self.index);
+        (left, Some(left))
+    }
+}
+
+impl ExactSizeIterator for ShapeParts<'_> {}
+
+/// 合成质量属性：主形状 + 附加部件。
+///
+/// **单形状（没有附加部件）走的是和以前一模一样的路径**——直接把
+/// `shape.mass_properties(density)` 原样返回。这不是省事：把"零件惯量 → 平移到原点 →
+/// 再平移回质心"算一遍，浮点上是 `(I + a) - a`，**不保证逐位等于 I**，
+/// 而现有场景的 digest 回归就是拿这些位钉着的。
+pub(crate) fn combine_mass_properties(
+    shape: &Shape,
+    extra: &[ShapePart],
+    density: f32,
+) -> (f32, Vec3, Vec3) {
+    let mp = shape.mass_properties(density);
+    if extra.is_empty() {
+        return (mp.mass, mp.inertia, mp.center);
+    }
+    let mut mass = mp.mass;
+    let mut moment = mp.center * mp.mass; // 一阶矩（相对刚体原点）
+                                          // 每个部件：绕自己质心的对角惯量 → 转到刚体坐标系 → 平移到刚体原点
+    let mut inertia_at_origin =
+        diagonal_inertia_at(&mp, &Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE));
+    for part in extra {
+        let p = part.shape.mass_properties(density);
+        let t = part.transform();
+        mass += p.mass;
+        moment += t.transform_point(p.center) * p.mass;
+        let i = diagonal_inertia_at(&p, &t);
+        inertia_at_origin += i;
+    }
+    let center = if mass > 1e-9 {
+        moment / mass
+    } else {
+        Vec3::ZERO
+    };
+    // 从"绕原点"挪到"绕质心"：I_cm = I_origin - m(|c|²E - c cᵀ)
+    let shift = Vec3::new(
+        center.y * center.y + center.z * center.z,
+        center.x * center.x + center.z * center.z,
+        center.x * center.x + center.y * center.y,
+    ) * mass;
+    (mass, (inertia_at_origin - shift).max(Vec3::ZERO), center)
+}
+
+/// 把零件的对角惯量（绕自己质心、零件坐标系）换算成"绕刚体原点、刚体坐标系"的对角量。
+///
+/// 只取对角项族：引擎的惯量一直是对角表示（没有惯性积），这里保持同一约定。
+fn diagonal_inertia_at(mp: &MassProperties, t: &Transform) -> Vec3 {
+    let c = t.transform_point(mp.center);
+    let m = mp.mass;
+    // 旋转后的对角：I'[i] = Σ_k R[i][k]² I[k]，列向量就是基向量转过去
+    let cx = t.rotation.mul_vec3(Vec3::X);
+    let cy = t.rotation.mul_vec3(Vec3::Y);
+    let cz = t.rotation.mul_vec3(Vec3::Z);
+    let i = mp.inertia;
+    let rotated = Vec3::new(
+        cx.x * cx.x * i.x + cy.x * cy.x * i.y + cz.x * cz.x * i.z,
+        cx.y * cx.y * i.x + cy.y * cy.y * i.y + cz.y * cz.y * i.z,
+        cx.z * cx.z * i.x + cy.z * cy.z * i.y + cz.z * cz.z * i.z,
+    );
+    let r2 = c.length_squared();
+    let parallel = Vec3::new(r2 - c.x * c.x, r2 - c.y * c.y, r2 - c.z * c.z) * m;
+    rotated + parallel
+}
+
 /// 刚体。
 #[derive(Clone, Debug, PartialEq)]
 pub struct RigidBody {
     /// 刚体类型。
     pub body_type: BodyType,
-    /// 形状。
+    /// 形状（主形状，位姿为单位变换；复合形状的其余部件在 `extra_parts`）。
     pub shape: Shape,
+    /// 复合形状的**附加**部件（不含主形状）。
+    ///
+    /// 空 Vec = 单形状刚体：这时质量属性、AABB、窄相、查询全部走老路径，
+    /// 数值与以前**逐位一致**（不是"应该一样"，是同一个分支）。
+    pub(crate) extra_parts: Vec<ShapePart>,
     /// 位姿（`position` 为形状本地原点在世界中的位置）。
     pub transform: Transform,
     /// 线速度（质心速度）。
@@ -452,9 +593,47 @@ impl RigidBody {
     pub fn world_aabb(&self) -> Aabb {
         let local = self.shape.local_aabb();
         if !local.is_valid() {
-            return local; // 半空间
+            return local; // 半空间（无限）：并集还是无限
         }
-        local.transformed_conservative(&self.transform.matrix())
+        let mut aabb = local.transformed_conservative(&self.transform.matrix());
+        for part in &self.extra_parts {
+            let part_local = part.shape.local_aabb();
+            if !part_local.is_valid() {
+                return part_local; // 某个部件是半空间 → 整体无限
+            }
+            let world = self.transform.mul_transform(&part.transform()).matrix();
+            aabb = aabb.union(&part_local.transformed_conservative(&world));
+        }
+        aabb
+    }
+
+    /// 形状部件迭代器：`(形状, 相对刚体原点的局部变换)`。
+    ///
+    /// 单形状刚体只会产出一项（主形状 + 单位变换），调用方不必特判。
+    pub fn parts(&self) -> ShapeParts<'_> {
+        ShapeParts {
+            body: self,
+            index: 0,
+        }
+    }
+
+    /// 形状部件数（至少 1）。
+    pub fn part_count(&self) -> usize {
+        1 + self.extra_parts.len()
+    }
+
+    /// 某个部件的**世界**变换（`local` 来自 [`Self::parts`]）。
+    pub fn part_world_transform(&self, local: &Transform) -> Transform {
+        local.mul_transform(&self.transform)
+    }
+
+    /// 附加部件（只读；部件在 [`BodyBuilder`] 阶段配置）。
+    ///
+    /// 为什么不在 `build()` 之后提供 `add_part`：质量/质心/惯量是**建体那一刻**按
+    /// 所有部件算好的派生量，事后加部件就得连带做同步——而"改了形状但要记得手动
+    /// 重算质量属性"正是这类引擎最经典的静默 bug。要复合形状就在 builder 里写全。
+    pub fn extra_parts(&self) -> &[ShapePart] {
+        &self.extra_parts
     }
 
     /// 世界空间某点的速度：`v + ω × (p - com)`。
@@ -509,6 +688,8 @@ impl RigidBody {
 /// 刚体构建器。
 pub struct BodyBuilder {
     shape: Shape,
+    /// 复合形状的附加部件（`BodyBuilder::part` 追加）。
+    extra_parts: Vec<ShapePart>,
     body_type: BodyType,
     transform: Transform,
     linear_velocity: Vec3,
@@ -535,6 +716,7 @@ impl BodyBuilder {
     fn new(shape: Shape, body_type: BodyType) -> Self {
         Self {
             shape,
+            extra_parts: Vec::new(),
             body_type,
             transform: Transform::IDENTITY,
             linear_velocity: Vec3::ZERO,
@@ -736,21 +918,37 @@ impl BodyBuilder {
         self
     }
 
+    /// 追加一个复合形状部件（可以调多次）。
+    ///
+    /// 部件相对**刚体原点**摆位；质量、质心、惯性张量按所有部件重新合成。
+    pub fn part(mut self, part: ShapePart) -> Self {
+        self.extra_parts.push(part);
+        self
+    }
+
+    /// 追加一个只有偏移的部件（朝向为单位四元数）。
+    pub fn part_at(mut self, shape: Shape, offset: Vec3) -> Self {
+        self.extra_parts
+            .push(ShapePart::at(shape, offset, Quat::IDENTITY));
+        self
+    }
+
     /// 构建刚体。
     pub fn build(self) -> RigidBody {
         let mut body_type = self.body_type;
-        // 半空间/三角网格只能是静态体。
-        if self.shape.is_static_only() {
+        // 半空间/三角网格只能是静态体；**任一部件**是这类形状就整体静态
+        // （一个无限半空间挂在动态体上没有意义）。
+        if self.shape.is_static_only() || self.extra_parts.iter().any(|p| p.shape.is_static_only())
+        {
             body_type = BodyType::Static;
         }
-        let mp: MassProperties = self.shape.mass_properties(self.density);
-        let mut mass = mp.mass;
-        let mut inertia = mp.inertia;
+        let (mut mass, mut inertia, center) =
+            combine_mass_properties(&self.shape, &self.extra_parts, self.density);
         if let Some(m) = self.mass_override {
-            let scale = if mp.mass > 1e-9 { m / mp.mass } else { 0.0 };
+            let scale = if mass > 1e-9 { m / mass } else { 0.0 };
             if scale > 0.0 {
                 mass = m;
-                inertia = mp.inertia * scale;
+                inertia *= scale;
             }
         }
         let (inv_mass, inv_inertia_local) = match body_type {
@@ -767,6 +965,7 @@ impl BodyBuilder {
         RigidBody {
             body_type,
             shape: self.shape,
+            extra_parts: self.extra_parts,
             transform: Transform::new(
                 self.transform.position,
                 self.transform.rotation.normalize_or_identity(),
@@ -790,8 +989,8 @@ impl BodyBuilder {
             inv_mass,
             inertia_local: inertia,
             inv_inertia_local,
-            local_center: if mp.center.is_finite() {
-                mp.center
+            local_center: if center.is_finite() {
+                center
             } else {
                 Vec3::ZERO
             },

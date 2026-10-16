@@ -3638,3 +3638,85 @@ fn simulate_report_includes_an_event_stream() {
         "事件流必须确定性（两次运行逐条相同）"
     );
 }
+
+/// 复合形状：一个刚体多个 Shape，端到端（装配 → 物理 → 报告 → 渲染场景）。
+#[test]
+fn compound_shapes_stand_on_their_own_legs() {
+    let dir = temp_dir("compound");
+    let scene = dir.join("table.json");
+    // 桌子的"主形状"是顶板（悬在 y≈0.7），两条腿是附加部件（伸到 y=0）。
+    // 如果附加部件不参与碰撞，刚体会带着顶板一路落到地面（位移 ≈ 0.7）——
+    // 这就是这条端到端测试的判据。
+    std::fs::write(
+        &scene,
+        r#"{
+          "ground": { "size": 20 },
+          "objects": [
+            { "name": "桌子", "body": "dynamic", "position": [0, 0, 0],
+              "shapes": [
+                { "shape": { "type": "box", "size": [1.2, 0.1, 0.8] }, "position": [0, 0.75, 0] },
+                { "shape": { "type": "box", "size": [0.1, 0.7, 0.1] }, "position": [0.5, 0.35, 0.3] },
+                { "shape": { "type": "box", "size": [0.1, 0.7, 0.1] }, "position": [-0.5, 0.35, -0.3] } ] }
+          ],
+          "simulate": { "steps": 180, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let data = r.json();
+    let sim = &data["data"];
+    // 三个部件仍然是**一个**刚体
+    assert_eq!(sim["dynamic"], 1, "三个部件该是一个动态刚体：{sim}");
+    let table = sim["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "桌子")
+        .expect("报告里该有桌子");
+    let y = table["position"][1].as_f64().unwrap();
+    assert!(
+        y.abs() < 0.1,
+        "桌子该靠两条腿站住（物体原点基本不动），实际 y = {y}"
+    );
+    assert!(
+        table["displacement"].as_f64().unwrap() < 0.1,
+        "站住的桌子位移该接近 0（掉下去会是 0.7 量级）：{table}"
+    );
+
+    // 对照：只有顶板（不带 shapes），放在同一高度 → 直接落到地面（位移 ≈ 0.95）。
+    let plain = dir.join("plate.json");
+    std::fs::write(
+        &plain,
+        r#"{
+          "ground": { "size": 20 },
+          "objects": [
+            { "name": "桌子", "body": "dynamic", "position": [0, 1.0, 0],
+              "shape": { "type": "box", "size": [1.2, 0.1, 0.8] } }
+          ],
+          "simulate": { "steps": 180, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+    let r2 = run(&["simulate", plain.to_str().unwrap(), "--json"]);
+    assert_eq!(r2.code, 0, "stderr: {}", r2.stderr);
+    let plate = r2.json()["data"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "桌子")
+        .cloned()
+        .expect("对照场景里该有桌子");
+    let plate_drop = plate["displacement"].as_f64().unwrap();
+    assert!(
+        plate_drop > 0.5,
+        "没有腿的顶板该落到地面（位移 ≈ 0.95），实际 {plate_drop}"
+    );
+    // 带腿的桌子站在地面附近（位移 ≈ 0）——这就是"附加部件真的在碰撞"的端到端证据
+    assert!(
+        table["displacement"].as_f64().unwrap() < plate_drop - 0.5,
+        "带腿的桌子位移该远小于裸顶板：{} vs {plate_drop}",
+        table["displacement"]
+    );
+}

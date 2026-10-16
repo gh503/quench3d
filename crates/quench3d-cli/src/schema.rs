@@ -338,7 +338,8 @@ pub fn scene_grammar() -> Value {
         },
         "object": {
             "name": "名称（关节引用与报告都用它；缺省 objects[i]）",
-            "shape": "形状对象，缺省 1×1×1 立方体",
+            "shape": "形状对象，缺省 1×1×1 立方体；与 shapes **二选一**（两个都写报错）",
+            "shapes": "复合形状（一个刚体多个 Shape）：[{ shape, position?, rotation_deg? }]，部件的 position/rotation_deg 是**相对刚体原点**的局部位姿；质量/质心/惯量按所有部件合成，碰撞/AABB/查询逐部件；【边界】部件形状不能是三角网模型；每对刚体最多保留 8 个接触点（取最深的）",
             "parent": "父物体名（objects[].name）；给了之后 position/rotation_deg 变成**相对父物体**的局部量（继承位置与朝向，**不继承缩放**）。带刚体的物体不能有父物体",
             "position": "[x, y, z]，缺省原点；有 parent 时是局部的",
             "rotation_deg": "欧拉角 XYZ，单位度",

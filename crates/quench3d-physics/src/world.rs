@@ -21,7 +21,7 @@ use quench3d_math::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{Broadphase, Proxy};
-use crate::contact::ContactPair;
+use crate::contact::{ContactManifold, ContactPair, ContactPoint};
 use crate::island::{IslandStats, Islands};
 use crate::joints::{Joint, JointEntry, JointHandle, JointImpulses, JointSolver};
 use crate::narrowphase;
@@ -44,6 +44,9 @@ pub const MAX_FRAME_DT: f32 = 0.25;
 /// 无上限的队列会变成内存泄漏。到顶之后新事件被丢掉，但 [`PhysicsWorld::events_dropped`]
 /// 会记下来——"静默丢事件"比"内存涨到 OOM"好，但也要能被发现。
 pub const DEFAULT_EVENT_CAPACITY: usize = 4096;
+
+/// 复合形状**每对刚体**最多保留的接触点数（按穿透深度取最深的几个）。
+pub const MAX_COMPOUND_POINTS: usize = 8;
 
 /// 射线命中结果。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1420,10 +1423,7 @@ impl PhysicsWorld {
                 if !self.joints.is_empty() && self.joint_blocks_contact(ia, ib) {
                     continue;
                 }
-                (
-                    narrowphase::collide_shapes(&a.shape, &a.transform, &b.shape, &b.transform),
-                    a.sensor || b.sensor,
-                )
+                (collide_bodies(a, b), a.sensor || b.sensor)
             };
             let m = match manifold {
                 Some(m) => m,
@@ -1766,6 +1766,77 @@ impl PhysicsWorld {
             pair.impulse = sum;
         }
     }
+}
+
+/// 一对刚体的所有部件两两求交，把接触点合成**一个**流形。
+///
+/// 单形状 × 单形状（绝大多数场景）直接走老路径 `collide_shapes`，一个点都不多算——
+/// 这是"复合形状不改变现有场景结果"的关键（不是"应该一样"，是同一个分支）。
+///
+/// 多个部件命中时把点合起来，最多 [`MAX_COMPOUND_POINTS`] 个：多了对求解器没有好处，
+/// 还会让热启动缓存抖动。超限时按**穿透深度**取最深的那几个（稳定排序，确定性）。
+fn collide_bodies(a: &RigidBody, b: &RigidBody) -> Option<ContactManifold> {
+    if a.extra_parts.is_empty() && b.extra_parts.is_empty() {
+        return narrowphase::collide_shapes(&a.shape, &a.transform, &b.shape, &b.transform);
+    }
+    let mut points: SmallVec<ContactPoint, { ContactManifold::MAX_POINTS }> = SmallVec::new();
+    for (sa, ta) in a.parts() {
+        let wa = a.part_world_transform(&ta);
+        for (sb, tb) in b.parts() {
+            let wb = b.part_world_transform(&tb);
+            if let Some(m) = narrowphase::collide_shapes(sa, &wa, sb, &wb) {
+                points.extend_from_slice(&m.points);
+            }
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    if points.len() > MAX_COMPOUND_POINTS {
+        let mut order: Vec<usize> = (0..points.len()).collect();
+        // 稳定排序：深度相同就按下标（部件顺序）——保证确定性
+        order.sort_by(|&i, &j| {
+            points[j]
+                .penetration
+                .partial_cmp(&points[i].penetration)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then(i.cmp(&j))
+        });
+        order.truncate(MAX_COMPOUND_POINTS);
+        order.sort_unstable();
+        let kept: SmallVec<ContactPoint, { ContactManifold::MAX_POINTS }> =
+            order.iter().map(|&i| points[i]).collect();
+        return Some(ContactManifold { points: kept });
+    }
+    Some(ContactManifold { points })
+}
+
+/// 一个形状 vs 一个刚体（逐部件）求交，接触点合成一个流形。
+///
+/// 角色控制器用它做胶囊 vs 世界的接触查询；单形状刚体走老路径。
+pub(crate) fn collide_shape_with_body(
+    shape: &Shape,
+    t: &Transform,
+    body: &RigidBody,
+) -> Option<ContactManifold> {
+    if body.extra_parts.is_empty() {
+        return narrowphase::collide_shapes(shape, t, &body.shape, &body.transform);
+    }
+    let mut points: SmallVec<ContactPoint, { ContactManifold::MAX_POINTS }> = SmallVec::new();
+    for (part, local) in body.parts() {
+        let world = body.part_world_transform(&local);
+        if let Some(m) = narrowphase::collide_shapes(shape, t, part, &world) {
+            points.extend_from_slice(&m.points);
+            if points.len() >= MAX_COMPOUND_POINTS {
+                break;
+            }
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    points.truncate(MAX_COMPOUND_POINTS);
+    Some(ContactManifold { points })
 }
 
 #[cfg(test)]

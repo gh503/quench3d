@@ -474,6 +474,39 @@ assert_eq!(world.broken_joints().len(), 1);   // 超限之后这里会有记录
 > 另外：**被马达驱动的刚体不会自动睡眠**（伺服到位时速度正好是 0，否则会被冻结在
 > "还没到位"的角度上）。
 
+复合形状（一个刚体多个 Shape）：桌子的"板 + 腿"、载具的底盘 + 车厢不再需要多刚体 + 关节硬拼。
+
+```rust
+use quench3d::prelude::*;
+
+// 顶板 + 两条腿：**一个**刚体、三个形状
+let table = world.add_builder(
+    BodyBuilder::dynamic(Shape::Box { half_extents: vec3(0.6, 0.05, 0.4) })
+        .position(vec3(0.0, 0.75, 0.0))
+        .part_at(Shape::Cylinder { radius: 0.05, half_height: 0.35 }, vec3(0.5, -0.4, 0.3))
+        .part_at(Shape::Cylinder { radius: 0.05, half_height: 0.35 }, vec3(-0.5, -0.4, -0.3)),
+);
+let body = world.body(table).unwrap();
+assert_eq!(body.part_count(), 3);
+assert_eq!(world.body_count(), 1);        // 仍然是**一个**刚体
+
+// 部件可以带朝向（局部位姿相对刚体原点）
+let arm = world.add_builder(
+    BodyBuilder::dynamic(Shape::Capsule { radius: 0.1, half_height: 0.3 })
+        .part(ShapePart::at(
+            Shape::Box { half_extents: Vec3::splat(0.15) },
+            vec3(0.0, -0.45, 0.0),
+            Vec3::Z.axis_angle(0.5),
+        )),
+);
+let _ = arm;
+```
+
+> 质量、质心、惯性张量按所有部件合成；碰撞、AABB、射线/距离/重叠查询、角色控制器都**逐部件**处理；
+> 每对刚体最多保留 **8 个接触点**（超限按穿透深度取最深的）。**单形状刚体走原来的路径**，
+> 数值与以前逐位一致。任一部件是半空间/三角网 → 整个刚体强制静态。
+> 部件**没有**自己的摩擦/恢复（那是刚体级的），也**不能**是三角网。
+
 事件总线（"这一步发生了什么"）：接触开始/结束、传感器进入/离开、睡眠/唤醒、关节断裂。
 
 ```rust
@@ -816,6 +849,10 @@ NaN 刚体  : 0
 * **关节的单位有两套，别混**：`limits` 是**弧度**（铰链）/ 米（滑块），`motor_velocity` 是
   **弧度/秒**；而 `motor_target_deg`、`cone_limit.half_angle_deg` 是**度**（名字里带 `_deg`）。
   校验器会对"限位 > 6.5 弧度""伺服目标 > 3600 度"这类明显写错单位的地方报警告。
+* `objects[].shape` 与 `objects[].shapes` **二选一**：单形状用 `shape`（老写法不变），
+  一个刚体多个形状用 `shapes: [ { shape, position?, rotation_deg? } ]`。
+  部件的 `position` / `rotation_deg` 是**相对刚体原点**的局部位姿；两个都写、空数组、
+  部件里的未知字段都是 error；半空间当部件、只写一个部件是 warning（能跑但多半写错了）。
 * `joints[].cone_limit`（只有 `ball` 有）把两端两根局部轴的夹角限制在 `half_angle_deg` 内：
   管"摆的方向"，**绕轴自转仍然自由**；它是速度级约束，半秒内压回锥面，不是硬夹住。
 * `joints[].motor_target_deg` 一给就进**位置伺服**（同时给 `motor_velocity` 会警告"速度被忽略"）；
@@ -1008,7 +1045,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 434 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 440 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1062,7 +1099,7 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
 > 所以"点击操作界面"这条证据是在**浏览器**里取的，用的还是同一套界面代码。
 
 物理测试覆盖：自由落体、静置接触、三层堆叠、恢复系数、高/低摩擦斜面、静/动摩擦分离、
-**事件总线**（接触开始/结束、传感器进出、睡眠/唤醒、断裂、队列上限、确定性）、
+**复合形状**（质量/质心/惯量合成、AABB 并集、附加部件真的参与碰撞与查询）、**事件总线**（接触开始/结束、传感器进出、睡眠/唤醒、断裂、队列上限、确定性）、
 射线检测、铰链摆与马达、**位置伺服与锥形限位**、5 种关节、角度限位、**关节断裂**、
 **关节两端不互相碰撞**、确定性（逐位相等，含槽位复用）、
 200 体宽相、睡眠/唤醒、三角网格与凸包（含**薄板**：模型网格当碰撞体的典型情况）、
@@ -1507,6 +1544,9 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   CCD 是"中心射线 + 只截**法向**位移"（切向保留，所以沿墙滑行不受影响），
   没有旋转扫掠、只扫中心线，动态×动态只有"两边都开才互相拦"的语义，
   极快 + 极薄（一步能跨过整个物体）仍可能漏。
+* **复合形状的边界**：部件没有自己的摩擦/恢复/传感器/CCD（都是刚体级）；部件不能是三角网
+  （凸包也只能当整个刚体用）；编辑器没有部件编辑面板——能原样往返，但界面上既不能增删部件、
+  也看不到部件的选择框；接触点每对刚体最多 8 个；惯量是对角近似（没有惯性积）。
 * 编辑器**没有**事件面板/时间线、也不能清空事件队列（状态栏只读显示队列深度、丢弃数与
   最近一条事件）；**没有**碰撞层/传感器/CCD 的编辑界面（面板里还看不到），但它不会吃掉这些字段：
   导出时从物理刚体上读回来（有往返用例钉住）。

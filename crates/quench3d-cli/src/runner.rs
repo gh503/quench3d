@@ -1124,12 +1124,34 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if o.body == BodyKind::None {
             continue;
         }
+        // 形状部件：单形状（`shape`）归一成一个单位位姿的部件，复合形状用 `shapes`。
+        // 部件位姿是**相对刚体原点**的局部位姿，所以直接交给 BodyBuilder。
+        // 主形状进 builder 的第一个参数，**其余部件才用 `part()`**：
+        // 把主形状也当附加部件加一遍＝同一个形状重叠两份（质量、惯量、接触点全都翻倍）。
+        let parts = o.parts();
+        let mut iter = parts.iter();
+        let primary = match iter.next() {
+            Some(p) => ShapePart::at(
+                physics_shape(&p.shape),
+                v3(p.position.unwrap_or([0.0, 0.0, 0.0])),
+                euler_quat(p.rotation_deg),
+            ),
+            // 校验保证至少一个部件；真为空时退回缺省立方体（不让构建期 panic）。
+            None => ShapePart::new(physics_shape(&ShapeDoc::default())),
+        };
         let mut builder = match o.body {
-            BodyKind::Static => BodyBuilder::r#static(physics_shape(&o.shape)),
-            BodyKind::Dynamic => BodyBuilder::dynamic(physics_shape(&o.shape)),
-            BodyKind::Kinematic => BodyBuilder::kinematic(physics_shape(&o.shape)),
+            BodyKind::Static => BodyBuilder::r#static(primary.shape.clone()),
+            BodyKind::Dynamic => BodyBuilder::dynamic(primary.shape.clone()),
+            BodyKind::Kinematic => BodyBuilder::kinematic(primary.shape.clone()),
             BodyKind::None => unreachable!(),
         };
+        for part in iter {
+            builder = builder.part(ShapePart::at(
+                physics_shape(&part.shape),
+                v3(part.position.unwrap_or([0.0, 0.0, 0.0])),
+                euler_quat(part.rotation_deg),
+            ));
+        }
         let pos = v3(o.position.unwrap_or([0.0, 0.0, 0.0]));
         let friction = o.friction.unwrap_or(0.5);
         builder = builder
@@ -2095,7 +2117,7 @@ struct Tracing {
 fn shape_kind_of(doc: &SceneDoc, name: &str) -> &'static str {
     for (i, o) in doc.objects.iter().enumerate() {
         if object_name(doc, i) == name {
-            return match o.shape.kind {
+            return match o.primary_shape().kind {
                 ShapeKind::Box => "box",
                 ShapeKind::Sphere => "sphere",
                 ShapeKind::Capsule => "capsule",
@@ -2233,55 +2255,77 @@ pub fn setup_visuals(
             .as_ref()
             .and_then(|n| materials.get(n).copied())
             .unwrap_or(default_material);
-        let mesh = match o.shape.kind {
-            ShapeKind::Box => engine.assets.unit_cube,
-            ShapeKind::Sphere => engine.assets.unit_sphere,
-            ShapeKind::Capsule => engine.assets.unit_capsule,
-            ShapeKind::Cylinder => engine.assets.unit_cylinder,
-            ShapeKind::Plane => engine.assets.unit_plane,
-            ShapeKind::Convex => engine.assets.unit_cube,
-        };
+        // 每个部件的渲染数据：`(网格, 缩放, 局部位置, 局部朝向)`。
         // 凸包没有三角化网格（物理只用支撑函数）：用点集的 AABB 盒体近似，
         // 并把盒体中心平移到点集中心——以前是拿单位立方体按 plane_size 缩放，
         // 结果一个 40 米的巨箱顶在那儿（见 gap_analysis §3.3）。
-        let hull = match o.shape.kind {
-            ShapeKind::Convex => {
-                let (lo, hi) = convex_bounds(o.shape.points.as_deref().unwrap_or(&[]));
-                Some((lo, hi))
-            }
-            _ => None,
-        };
-        let scale = o.scale.map(v3).unwrap_or_else(|| match hull {
-            Some((lo, hi)) => (hi - lo).max(Vec3::splat(0.01)),
-            None => render_scale(&o.shape, plane_size),
-        });
+        let parts = o.parts();
+        let mut rendered: Vec<(MeshId, Vec3, Vec3, Quat)> = Vec::with_capacity(parts.len());
+        for part in &parts {
+            let mesh = match part.shape.kind {
+                ShapeKind::Box => engine.assets.unit_cube,
+                ShapeKind::Sphere => engine.assets.unit_sphere,
+                ShapeKind::Capsule => engine.assets.unit_capsule,
+                ShapeKind::Cylinder => engine.assets.unit_cylinder,
+                ShapeKind::Plane => engine.assets.unit_plane,
+                ShapeKind::Convex => engine.assets.unit_cube,
+            };
+            let hull = match part.shape.kind {
+                ShapeKind::Convex => {
+                    let (lo, hi) = convex_bounds(part.shape.points.as_deref().unwrap_or(&[]));
+                    Some((lo, hi))
+                }
+                _ => None,
+            };
+            let rotation = euler_quat(part.rotation_deg);
+            let scale = o.scale.map(v3).unwrap_or_else(|| match hull {
+                Some((lo, hi)) => (hi - lo).max(Vec3::splat(0.01)),
+                None => render_scale(&part.shape, plane_size),
+            });
+            // 盒体以物体原点为中心，所以要把原点移到点集中心（旋转后再平移）
+            let local = v3(part.position.unwrap_or([0.0, 0.0, 0.0]))
+                + match hull {
+                    Some((lo, hi)) => rotation * ((lo + hi) * 0.5),
+                    None => Vec3::ZERO,
+                };
+            rendered.push((mesh, scale, local, rotation));
+        }
         let rotation = euler_quat(o.rotation_deg);
         let position = v3(o.position.unwrap_or([0.0, 0.0, 0.0]));
-        // 盒体以物体原点为中心，所以要把原点移到点集中心（旋转后再平移）
-        let origin = match hull {
-            Some((lo, hi)) => position + rotation * ((lo + hi) * 0.5),
-            None => position,
-        };
+        let (mesh, scale, local_pos, local_rot) = rendered.first().cloned().unwrap_or((
+            engine.assets.unit_cube,
+            Vec3::ONE,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        ));
+        // 主部件的位姿 = 物体变换 ⊕ 部件局部位姿（父物体的情况下一层交给 scene 的层级）
+        let main_transform =
+            Transform::new(position + rotation * local_pos, rotation * local_rot, scale);
         let name = object_name(doc, i);
         let index = match (o.body, handles.get(&name)) {
-            (BodyKind::None, _) => {
-                engine
-                    .scene
-                    .add_named(mesh, mat, Transform::new(origin, rotation, scale), &name)
-            }
+            (BodyKind::None, _) => engine.scene.add_named(mesh, mat, main_transform, &name),
             (_, Some(h)) => engine
                 .scene
                 .add_with_body(mesh, mat, *h, &engine.world, &name),
-            (_, None) => {
-                engine
-                    .scene
-                    .add_named(mesh, mat, Transform::new(origin, rotation, scale), &name)
-            }
+            (_, None) => engine.scene.add_named(mesh, mat, main_transform, &name),
         };
         if let Some(obj) = engine.scene.objects.get_mut(index) {
             obj.visible = o.visible;
             // 刚体的位姿来自物理，缩放只影响渲染
             obj.transform.scale = scale;
+        }
+        // 附加部件挂成主物体的**子物体**：刚体一动它们跟着动（层级自动传递），
+        // 不需要每帧单独同步。名字是 `主名#序号`，在场景树里看得见。
+        for (k, (mesh, scale, local, rot)) in rendered.iter().enumerate().skip(1) {
+            let child = engine.scene.add_named(
+                *mesh,
+                mat,
+                Transform::new(*local, *rot, *scale),
+                &format!("{name}#{k}"),
+            );
+            engine.scene.objects[child].parent = Some(index);
+            engine.scene.objects[child].owner_part = Some(index);
+            engine.scene.objects[child].visible = o.visible;
         }
         doc_to_scene.push(index);
     }

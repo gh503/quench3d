@@ -100,14 +100,8 @@ impl QueryIndex {
         let mut spread: Vec<(Aabb, BodyHandle)> = Vec::new();
         for (handle, body) in world.bodies() {
             index.bodies += 1;
-            if matches!(body.shape, Shape::Plane { .. }) {
-                index.globals.push(handle);
-                continue;
-            }
-            let aabb = body
-                .shape
-                .local_aabb()
-                .transformed_conservative(&body.transform.matrix());
+            let aabb = body.world_aabb();
+            // 半空间没有有限 AABB（复合形状的 `world_aabb` 已经是所有部件的并集）。
             if !aabb.is_valid() {
                 // 坐标是 NaN 的刚体铺不进格子；当全局代理处理，
                 // "宁可贵一点也不能漏"（它的精确求交自己会拒绝）。
@@ -483,17 +477,14 @@ fn ray_candidate(
     tested: &mut usize,
 ) {
     *tested += 1;
-    if !matches!(body.shape, Shape::Plane { .. }) {
-        let aabb = body
-            .shape
-            .local_aabb()
-            .transformed_conservative(&body.transform.matrix());
+    let aabb = body.world_aabb();
+    if aabb.is_valid() {
         match aabb.intersect_ray(origin, d) {
             Some(t) if t <= max_distance => {}
             _ => return,
         }
     }
-    if let Some((t, n)) = query::ray_shape(&body.shape, &body.transform, origin, d, max_distance) {
+    if let Some((t, n)) = query::ray_body(body, origin, d, max_distance) {
         if t.is_finite() && t >= 0.0 && t <= max_distance {
             let normal = if n.dot(d) > 0.0 { -n } else { n };
             hits.push(RaycastHit {
@@ -520,12 +511,9 @@ fn overlap_candidate(
         return;
     };
     *tested += 1;
-    if !matches!(body.shape, Shape::Plane { .. }) && probe_aabb.is_valid() {
-        let aabb = body
-            .shape
-            .local_aabb()
-            .transformed_conservative(&body.transform.matrix());
-        if !aabb.intersects(probe_aabb) {
+    if probe_aabb.is_valid() {
+        let aabb = body.world_aabb();
+        if aabb.is_valid() && !aabb.intersects(probe_aabb) {
             return;
         }
     }
