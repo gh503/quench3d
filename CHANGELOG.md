@@ -187,4 +187,5 @@
      这也解释了为什么"本地怎么跑都不红"。
      修法：accept 之后**显式 `set_nonblocking(false)`**（`crates/quench3d-cli/tests/common/mod.rs`）。
   验证：本地（Linux，复现不出该平台差异）`agent_tools` + `llm_mock` 连续 5 轮全过；
-  真正的验证是 **macOS CI 连续绿**。
+  真正的验证是 **macOS CI 连续 3 次绿**（`38835476605` 原始跑 + 该 run 的 macOS 复跑 +
+  `38835998073` 全平台，均 success）。

@@ -239,8 +239,9 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
    假服务的 `set_read_timeout` 因此不生效：请求字节没到时立刻 `WouldBlock` → 当成"没请求"
    关连接 → 客户端读到 `Connection reset by peer (os error 54)`。
    修法是 accept 之后**显式设回阻塞**（`crates/quench3d-cli/tests/common/mod.rs`）。
-   验证方式是 **macOS CI 连续绿**（本地是 Linux，复现不出来，只能验"没改坏"：
-   `llm_mock` + `agent_tools` 连续 5 轮通过）。
+   验证方式是 **macOS CI 连续 3 次绿**（`38835476605` 原始跑 + 该 run 的 macOS 复跑 +
+   `38835998073` 全平台，四个 job 全 success；本地是 Linux，复现不出来，
+   只能验"没改坏"：`llm_mock` + `agent_tools` 连续 5 轮通过）。
 2. **Web 端仍需真机验证**：本会话所有浏览器验证跑在 headless Chrome + SwiftShader（`backend: "gl"`，
    即 WebGL2 回退），**真实设备的 WebGPU 路径没有验证过**（H4）。
 
@@ -346,6 +347,12 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 
 **没有做（别误以为有）**：场景树里拖放改父（只有下拉框）；多选成组变换；空物体（没有网格的节点）；
 Prefab / 实例（同一个模型引用两次会展开成两批互不相干的物体）；版本 1 的迁移器（**刻意不做**）。
+
+**这一轮顺带挖出了那个"偶发 flaky"的真根因**：BSD / macOS 的 `accept()` 会继承
+listener 的 `O_NONBLOCK`（Linux 不继承）—— 假 LLM 服务为了 accept 超时把 listener 设成
+非阻塞，于是 macOS 上连进来的 socket 也是非阻塞，`set_read_timeout` 无效，请求字节没到就
+当成"对端没发请求"关连接，客户端读到 RST。修法是 accept 之后显式设回阻塞；
+macOS CI 连续 3 次绿（含一次全平台 dispatch 跑）。
 
 **这一轮的一个反面教材（已变成机制）**：格式升到 v2 时，仓库里两份**写在代码之外**的场景夹具
 （`.github/workflows/ci.yml` 的冒烟测试、`tools/mock_llm_server.py` 的假场景）还是 v1 ——
