@@ -39,7 +39,7 @@
 | 色调映射可选性 | 全部 | 算子**不可选不可关**，只有一条 ACES 路径（→ H1） | 🟠 |
 | 阴影 | 全部 | 1 张方向光阴影贴图（`renderer.rs:339`，Depth32Float），3×3 PCF（`pbr.wgsl:105`），分辨率 512–4096（缺省 2048）；**无 CSM** | 🟡 |
 | 阴影可调参数 | Blender / Unity | bias 是编译期常量（`renderer.rs:795`），**没有公开字段**；只有 `DirectionalLight.cast_shadows` + 全局开关 | 🟠 |
-| 后处理链 | 全部 | 固定四步（阴影 → PBR → bloom → post，FXAA 打开时多一趟）；**无 TAA、无 SSAO、无 DOF、无自定义 pass / render graph** | ❌ |
+| 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph** | 🟡 |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4 | ✅ |
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent（`mesh.rs:14`）；**无顶点色、无骨骼蒙皮、无 morph** | 🟡 |
 | 实例化 | 全部 | 有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
@@ -456,6 +456,30 @@
 
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
+
+### 8.3 「后处理 FXAA + SSAO」怎么落的（第 17 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-render --test post_pipeline`
+> （**像素级**，本机有 GPU 真跑；3 个新用例：FXAA 两条 + SSAO 一条）、
+> `cargo test -p quench3d-cli --lib fxaa` / `ssao`（格式与校验）。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 渲染器（FXAA） | `lighting.fxaa` → `FxaaOptions{enabled, edge_threshold, edge_threshold_min}` | 在 tonemap **之后**做（阈值按感知亮度定）；中间目标 `rgba16float`，写 sRGB 目标时硬件编码一次；关闭时不建目标、不跑那一趟 |
+| 渲染器（SSAO） | `lighting.ssao` → `SsaoOptions{enabled, radius, bias, strength, samples}` | 深度-only：法线由视空间位置的屏幕导数重建；半球采样黄金角螺旋 + **交错梯度噪声**旋转；判据 `bias < p.z - q.z < radius`（**上界不能省**，否则掠射角下同一个平面自己遮自己） |
+| 深度 | `DEPTH_FORMAT` `Depth24Plus` → `Depth32Float` | 前者**不可采样**；SSAO 必须把深度当纹理读。MSAA > 1 时多一趟 `depth_resolve.wgsl`（取第 0 号采样；深度**不能**平均，边缘上的平均深度是虚构的） |
+| 管线 | `post_ldr_pipeline`（写 LDR 中间目标）与 `fxaa_pipeline`（写最终目标） | 颜色附件格式不同 = 必须是不同的管线（wgpu 会当场拒绝复用） |
+| 编辑器 | 视口面板两个勾选框（FXAA / SSAO） | 开关是**运行时**改 `options`，所以 `ensure_targets` 的提前返回要把"SSAO 深度是否就绪"算进去，否则勾了不生效 |
+
+**踩过的两个坑（都留在注释里）**：
+① `in.position.xy` 在片元着色器里**已经是像素中心**（+0.5），再 `+0.5` 会让 bloom 采样整体偏移半像素；
+② 遮挡判据一开始只写"谁更靠近相机"，实测**远处平坦地面平均暗 3.5/255**（掠射角下切平面上的
+采样点滑到旁边，投回屏幕落在更近的地面上）；加上半径上界后降到 0.45。中间试过"把偏移投影到
+法线上"这个更漂亮的判据，结果因为掠射角下法线误差最大，反而恶化到 11/255——**越"正确"的公式越吃误差**，
+最后选了不依赖法线精度的深度比较。
+
+**没做（诚实边界）**：AO 没有单独的目标与双边模糊（所以接触处有轻微颗粒，16 抽样 + IGN）；
+没有 TAA / 景深 / CSM；FXAA 是 console 档（无子像素锯齿消除）。
 
 ### 8.2 「场景层级（父子变换）+ 格式 v2」怎么落的（第 16 轮，已跑门禁）
 

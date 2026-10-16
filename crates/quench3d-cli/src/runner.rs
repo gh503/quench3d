@@ -1689,6 +1689,21 @@ fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
     }
 }
 
+/// 把场景里的 SSAO 配置翻成渲染器选项（缺省关闭）。
+fn ssao_options(doc: &SceneDoc) -> quench3d::render::SsaoOptions {
+    let Some(a) = &doc.lighting.ssao else {
+        return quench3d::render::SsaoOptions::default();
+    };
+    let defaults = quench3d::render::SsaoOptions::default();
+    quench3d::render::SsaoOptions {
+        enabled: a.enabled.unwrap_or(true),
+        radius: a.radius.unwrap_or(defaults.radius),
+        bias: a.bias.unwrap_or(defaults.bias),
+        strength: a.strength.unwrap_or(defaults.strength),
+        samples: a.samples.unwrap_or(defaults.samples),
+    }
+}
+
 fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
     let l = &doc.lighting;
     // 未知预设由 `SceneDoc::validate` 拦下（`load_scene` 会拒绝带 error 的场景），
@@ -1867,6 +1882,7 @@ pub fn run_render(
         renderer: quench3d::render::RendererOptions {
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
+            ssao: ssao_options(doc),
             ..Default::default()
         },
         ..Default::default()
@@ -2276,6 +2292,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         renderer: quench3d::render::RendererOptions {
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
+            ssao: ssao_options(doc),
             ..Default::default()
         },
         ..Default::default()

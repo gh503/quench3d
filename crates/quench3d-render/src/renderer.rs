@@ -26,6 +26,7 @@ const LINE_WGSL: &str = include_str!("shaders/line.wgsl");
 const POST_WGSL: &str = include_str!("shaders/post.wgsl");
 const BLOOM_WGSL: &str = include_str!("shaders/bloom.wgsl");
 const FXAA_WGSL: &str = include_str!("shaders/fxaa.wgsl");
+const DEPTH_RESOLVE_WGSL: &str = include_str!("shaders/depth_resolve.wgsl");
 
 /// 把 `//@include common` 展开为公共 uniform 定义。
 fn expand(source: &str) -> String {
@@ -33,7 +34,11 @@ fn expand(source: &str) -> String {
 }
 
 /// 场景深度格式。
-pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+///
+/// 用 `Depth32Float` 而不是 `Depth24Plus`：后者**不可采样**（wgpu 的
+/// `TextureSampleType::Depth` 不接受它），而 SSAO 必须把深度当纹理读。
+/// 32 位浮点的精度对"从深度反投影出视空间位置"也更友好；代价是每像素多 1 字节。
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// HDR 中间目标格式（线性、可混合、可过滤；WebGPU 核心里 `rgba16float` 三样都支持）。
 ///
 /// 为什么不是 `rgba32float`：它在 WebGPU 核心里**不可混合**（要 `float32-blendable` 特性），
@@ -236,8 +241,11 @@ pub struct RenderStats {
     pub frame_index: u64,
 }
 
-/// 后处理参数（与 `post.wgsl` / `bloom.wgsl` 的 `PostParams` 逐字节一致）。
-#[repr(C)]
+/// 后处理参数（与 `post.wgsl` / `bloom.wgsl` / `fxaa.wgsl` 的 `PostParams` 逐字节一致）。
+///
+/// `align(16)`：末尾两个矩阵按 WGSL 的 `mat4x4<f32>` 规则要 16 字节对齐，
+/// 前面的字段正好都是 `vec4`，所以偏移天然对齐——这个标注是把这件事写死。
+#[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct PostUniforms {
     /// x = bloom 开关，y = 强度，z = 阈值，w = 预留。
@@ -251,6 +259,14 @@ pub struct PostUniforms {
     pub target_texel: [f32; 4],
     /// x = FXAA 开关（0/1），y = 相对边缘阈值，z = 绝对边缘阈值下限，w = 预留。
     pub fxaa: [f32; 4],
+    /// SSAO：x = 开关（0/1），y = 半径（视空间，米），z = 深度偏移 bias，w = 强度。
+    pub ssao: [f32; 4],
+    /// SSAO：x = 采样数，yzw = 预留。
+    pub ssao2: [f32; 4],
+    /// 投影矩阵（视空间 → 裁剪空间）：把半球采样点投回屏幕要用。
+    pub proj: [[f32; 4]; 4],
+    /// 逆投影矩阵（裁剪空间 → 视空间）：从深度反投影出视空间位置要用。
+    pub inv_proj: [[f32; 4]; 4],
 }
 
 /// Bloom 配置。
@@ -300,6 +316,42 @@ impl Default for FxaaOptions {
     }
 }
 
+/// SSAO（屏幕空间环境光遮蔽）配置。
+///
+/// 实现是**深度-only** 的：没有法线缓冲，法线由视空间位置的屏幕导数重建；
+/// 半球采样点在切空间里按黄金角螺旋分布，每像素旋转一个随机角度；
+/// 遮挡判定是"该屏幕位置上真实几何比采样点更靠近相机"。
+/// 结果乘在**间接光**意义上的整幅 HDR 颜色上（不区分直接光/间接光）——这是
+/// 后处理式 SSAO 的固有简化，也是它便宜的原因。
+#[derive(Clone, Copy, Debug)]
+pub struct SsaoOptions {
+    /// 是否启用（缺省关闭：多一趟深度解析 + 每像素 N 次采样）。
+    pub enabled: bool,
+    /// 采样半径（视空间米数）：物体尺度 1~2 米时 0.5~1.0 比较合适。
+    pub radius: f32,
+    /// 深度偏移（米）：压掉"同一个面上自己遮自己"的自遮蔽噪声。
+    pub bias: f32,
+    /// 强度（0 = 不暗，1 = 全黑）：乘在遮蔽比例上。
+    pub strength: f32,
+    /// 每像素采样数（1~64）：越多越平滑也越贵。
+    ///
+    /// 缺省 16：12 时接触处的颗粒感还看得出来（每像素旋转的螺旋图案），
+    /// 16 是这个 pass 的画质/开销平衡点（再多收益很小，画面已经不是瓶颈）。
+    pub samples: u32,
+}
+
+impl Default for SsaoOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            radius: 0.75,
+            bias: 0.025,
+            strength: 1.0,
+            samples: 16,
+        }
+    }
+}
+
 /// 渲染器创建选项。
 #[derive(Clone, Copy, Debug)]
 pub struct RendererOptions {
@@ -317,6 +369,8 @@ pub struct RendererOptions {
     pub bloom: BloomOptions,
     /// FXAA（缺省关闭）。
     pub fxaa: FxaaOptions,
+    /// SSAO（缺省关闭）。
+    pub ssao: SsaoOptions,
 }
 
 impl Default for RendererOptions {
@@ -329,6 +383,7 @@ impl Default for RendererOptions {
             sky: true,
             bloom: BloomOptions::default(),
             fxaa: FxaaOptions::default(),
+            ssao: SsaoOptions::default(),
         }
     }
 }
@@ -359,10 +414,14 @@ pub struct Renderer {
     bloom_blur_v_pipeline: wgpu::RenderPipeline,
     /// FXAA：tonemap 之后的画面 → 抗锯齿 → 目标（见 `fxaa.wgsl`）。
     fxaa_pipeline: wgpu::RenderPipeline,
+    /// SSAO 需要单采样深度；`sample_count > 1` 时靠这一趟把 MSAA 深度解析出来。
+    depth_resolve_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
     bloom_layout: wgpu::BindGroupLayout,
     /// FXAA 的绑定组布局（比后处理少一张 bloom 贴图）。
     fxaa_layout: wgpu::BindGroupLayout,
+    /// 深度解析的绑定组布局（只读多采样深度）。
+    depth_resolve_layout: wgpu::BindGroupLayout,
     post_uniform: wgpu::Buffer,
     post_sampler: wgpu::Sampler,
     /// 依赖尺寸，随 HDR 目标一起重建。
@@ -371,6 +430,7 @@ pub struct Renderer {
     bloom_blur_h_bind_group: Option<wgpu::BindGroup>,
     bloom_blur_v_bind_group: Option<wgpu::BindGroup>,
     fxaa_bind_group: Option<wgpu::BindGroup>,
+    depth_resolve_bind_group: Option<wgpu::BindGroup>,
 
     // 帧资源
     frame_uniform: wgpu::Buffer,
@@ -419,6 +479,17 @@ pub struct Renderer {
     ///
     /// 只在开了 FXAA 时才会被写/读；关着的时候它只是占内存，不影响任何像素。
     ldr_view: Option<wgpu::TextureView>,
+    /// 单采样深度（SSAO 的输入）。`sample_count == 1` 时就是主 pass 那一张，
+    /// 多采样时是 `depth_resolve.wgsl` 写出来的那一张。
+    ///
+    /// 只在开了 SSAO 时才建/才读。
+    resolved_depth_view: Option<wgpu::TextureView>,
+    /// 1×1 的占位深度视图：SSAO 关闭时占住后处理绑定组的 binding 4。
+    ///
+    /// 为什么需要它：布局要求单采样深度，而 MSAA > 1 时主 pass 的深度视图是**多采样**的，
+    /// 绑上去会被 wgpu 当场拒绝。占位资源只占几十字节，比"为了绑定而多建一张全屏深度"
+    /// 划算，也比"按开关改布局"（那样管线也得跟着重建）简单。
+    dummy_depth_view: wgpu::TextureView,
     /// Bloom ping-pong（半分辨率）。
     bloom_a_view: Option<wgpu::TextureView>,
     bloom_b_view: Option<wgpu::TextureView>,
@@ -646,6 +717,17 @@ impl Renderer {
                     count: None,
                 },
                 texture_binding(3),
+                // 深度（单采样）：SSAO 用。只用 `textureLoad`，所以不需要采样器
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let bloom_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -700,12 +782,34 @@ impl Renderer {
             bind_group_layouts: &[Some(&fxaa_layout)],
             immediate_size: 0,
         });
+        // 深度解析：只读一张多采样深度纹理
+        let depth_resolve_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("quench3d-depth-resolve-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                }],
+            });
+        let depth_resolve_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quench3d-depth-resolve-pipeline-layout"),
+                bind_group_layouts: &[Some(&depth_resolve_layout)],
+                immediate_size: 0,
+            });
 
         // ---------- 着色器 ----------
         let pbr_module = ctx.create_shader("quench3d-pbr", &expand(PBR_WGSL));
         let post_module = ctx.create_shader("quench3d-post", POST_WGSL);
         let bloom_module = ctx.create_shader("quench3d-bloom", BLOOM_WGSL);
         let fxaa_module = ctx.create_shader("quench3d-fxaa", FXAA_WGSL);
+        let depth_resolve_module = ctx.create_shader("quench3d-depth-resolve", DEPTH_RESOLVE_WGSL);
         let shadow_module = ctx.create_shader("quench3d-shadow", &expand(SHADOW_WGSL));
         let sky_module = ctx.create_shader("quench3d-sky", &expand(SKY_WGSL));
         let grid_module = ctx.create_shader("quench3d-grid", &expand(GRID_WGSL));
@@ -1017,6 +1121,29 @@ impl Renderer {
             "fs_blur_v",
             HDR_FORMAT,
         );
+        // 深度解析：没有颜色附件，只有深度附件；`frag_depth` 写回同一格式的深度目标。
+        // 比较函数是 `Always`（我们不是在做深度测试，只是在搬运数值）。
+        let depth_resolve_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-depth-resolve",
+                layout: &depth_resolve_pipeline_layout,
+                module: &depth_resolve_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![],
+                targets: vec![],
+                depth: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                sample_count: 1,
+                primitive: wgpu::PrimitiveState::default(),
+            },
+        );
         // FXAA 输出到**真正的目标**（`ctx.format`，sRGB）：着色器给的是线性值，
         // 编码由目标格式的硬件转换完成（和 post 那一趟一样）。
         let fxaa_pipeline = build_fullscreen_pipeline(
@@ -1028,6 +1155,21 @@ impl Renderer {
             ctx.format,
         );
 
+        let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-dummy-depth"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let dummy_depth_view = dummy_depth.create_view(&wgpu::TextureViewDescriptor::default());
         let post_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quench3d-post-uniform"),
             size: std::mem::size_of::<PostUniforms>() as u64,
@@ -1108,9 +1250,11 @@ impl Renderer {
             bloom_blur_h_pipeline,
             bloom_blur_v_pipeline,
             fxaa_pipeline,
+            depth_resolve_pipeline,
             post_layout,
             bloom_layout,
             fxaa_layout,
+            depth_resolve_layout,
             post_uniform,
             post_sampler,
             post_bind_group: None,
@@ -1118,10 +1262,13 @@ impl Renderer {
             bloom_blur_h_bind_group: None,
             bloom_blur_v_bind_group: None,
             fxaa_bind_group: None,
+            depth_resolve_bind_group: None,
             depth_view: None,
             msaa_view: None,
             hdr_view: None,
             ldr_view: None,
+            resolved_depth_view: None,
+            dummy_depth_view,
             bloom_a_view: None,
             bloom_b_view: None,
             bloom_size: (0, 0),
@@ -1446,7 +1593,10 @@ impl Renderer {
     }
 
     fn ensure_targets(&mut self, ctx: &GpuContext, size: (u32, u32)) {
-        if self.target_size == size && self.depth_view.is_some() {
+        // 开了 SSAO 就得有单采样深度可用（多采样时是解析出来的那一张）。
+        // 这一条必须进提前返回的判断：编辑器里勾选 SSAO 是**运行时**改 options 的。
+        let ssao_depth_ready = self.options.ssao.enabled == self.resolved_depth_view.is_some();
+        if self.target_size == size && self.depth_view.is_some() && ssao_depth_ready {
             return;
         }
         let device = &ctx.device;
@@ -1462,10 +1612,12 @@ impl Renderer {
             sample_count: self.sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // TEXTURE_BINDING：SSAO 要把深度当纹理读（`sample_count == 1` 时直接读这一张）
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        self.depth_view = Some(depth.create_view(&wgpu::TextureViewDescriptor::default()));
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        self.depth_view = Some(depth_view.clone());
 
         // HDR 中间目标：场景渲染到这里（线性、rgba16float），后处理再读它做 tonemap。
         let hdr = device.create_texture(&wgpu::TextureDescriptor {
@@ -1504,6 +1656,44 @@ impl Renderer {
         });
         let ldr_view = ldr.create_view(&wgpu::TextureViewDescriptor::default());
         self.ldr_view = Some(ldr_view.clone());
+
+        // SSAO 的深度输入：多采样时先解析成单采样；单采样时就是主 pass 那一张。
+        // 只在开了 SSAO 时建（关掉就什么都不多占用、像素也与以前逐位相同）。
+        if self.options.ssao.enabled && self.sample_count > 1 {
+            let resolved = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("quench3d-depth-resolved"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let resolved_view = resolved.create_view(&wgpu::TextureViewDescriptor::default());
+            self.depth_resolve_bind_group =
+                Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("quench3d-depth-resolve-bind-group"),
+                    layout: &self.depth_resolve_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                    }],
+                }));
+            self.resolved_depth_view = Some(resolved_view);
+        } else {
+            self.depth_resolve_bind_group = None;
+            self.resolved_depth_view = if self.options.ssao.enabled {
+                Some(depth_view.clone())
+            } else {
+                None
+            };
+        }
 
         if self.sample_count > 1 {
             let msaa = device.create_texture(&wgpu::TextureDescriptor {
@@ -1554,28 +1744,40 @@ impl Renderer {
         self.bloom_b_view = Some(bloom_b.clone());
 
         // 绑定组随尺寸重建
-        self.post_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("quench3d-post-bind-group"),
-            layout: &self.post_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&hdr_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.post_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&bloom_a),
-                },
-            ],
-        }));
+        self.post_bind_group = Some(
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quench3d-post-bind-group"),
+                layout: &self.post_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&hdr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.post_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&bloom_a),
+                    },
+                    // 深度：SSAO 关闭时绑 1×1 占位（布局固定；着色器在 `ssao.x <= 0.5`
+                    // 时根本不读它）。不能绑主 pass 那一张：MSAA > 1 时它是多采样的。
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.resolved_depth_view
+                                .as_ref()
+                                .unwrap_or(&self.dummy_depth_view),
+                        ),
+                    },
+                ],
+            }),
+        );
         let bloom_bind = |label: &str, src: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
@@ -1761,6 +1963,11 @@ impl Renderer {
         let bloom_on = bloom.enabled;
         let fxaa = self.options.fxaa;
         let fxaa_on = fxaa.enabled;
+        let ssao = self.options.ssao;
+        let ssao_on = ssao.enabled;
+        // 半球采样点要投回屏幕（proj）、深度要反投影成视空间位置（inv_proj）
+        let proj = camera.projection_matrix();
+        let inv_proj = proj.inverse();
         let post = PostUniforms {
             params: [
                 if bloom_on { 1.0 } else { 0.0 },
@@ -1785,6 +1992,25 @@ impl Renderer {
                 fxaa.edge_threshold.max(0.0),
                 fxaa.edge_threshold_min.max(0.0),
                 0.0,
+            ],
+            ssao: [
+                if ssao_on { 1.0 } else { 0.0 },
+                ssao.radius.max(1e-3),
+                ssao.bias.max(0.0),
+                ssao.strength.clamp(0.0, 1.0),
+            ],
+            ssao2: [ssao.samples.clamp(1, 64) as f32, 0.0, 0.0, 0.0],
+            proj: [
+                proj.cols[0].to_array(),
+                proj.cols[1].to_array(),
+                proj.cols[2].to_array(),
+                proj.cols[3].to_array(),
+            ],
+            inv_proj: [
+                inv_proj.cols[0].to_array(),
+                inv_proj.cols[1].to_array(),
+                inv_proj.cols[2].to_array(),
+                inv_proj.cols[3].to_array(),
             ],
         };
         ctx.queue
@@ -1989,6 +2215,34 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.line_buffer.slice(..));
                 pass.draw(0..self.lines.vertices.len() as u32, 0..1);
                 stats.lines = self.lines.line_count() as u32;
+            }
+        }
+
+        // ---------- 深度解析（可选：开了 SSAO 且 MSAA > 1） ----------
+        // 把多采样深度的第 0 号采样搬到单采样深度贴图，供后处理按像素读取。
+        if ssao_on {
+            if let (Some(bind_group), Some(resolved)) =
+                (&self.depth_resolve_bind_group, &self.resolved_depth_view)
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quench3d-depth-resolve-pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: resolved,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.depth_resolve_pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.draw(0..3, 0..1);
+                stats.post_passes += 1;
             }
         }
 

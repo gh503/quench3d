@@ -62,7 +62,7 @@ pub use material::{MaterialDesc, MaterialId, MeshId, TextureId};
 pub use mesh::{MeshData, Vertex};
 pub use renderer::{
     BloomOptions, FxaaOptions, InstanceDesc, MaterialTextureSlot, RenderStats, Renderer,
-    RendererOptions, DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,
+    RendererOptions, SsaoOptions, DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,
 };
 pub use texture::{Filter, GpuTexture, ImageData, TextureOptions};
 
@@ -77,6 +77,7 @@ pub mod prelude {
     pub use crate::mesh::MeshData;
     pub use crate::renderer::{
         BloomOptions, FxaaOptions, InstanceDesc, RenderStats, Renderer, RendererOptions,
+        SsaoOptions,
     };
     pub use crate::texture::ImageData;
     pub use quench3d_math::{

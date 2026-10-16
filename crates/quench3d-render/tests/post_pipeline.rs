@@ -569,3 +569,189 @@ fn fxaa_threshold_actually_gates_the_filter() {
         }
     }
 }
+
+/// 画"地面 + 坐在上面的方块"，返回 `(开 SSAO, 关 SSAO)` 两张图 + 相机。
+///
+/// 用 **msaa = 4**：SSAO 要单采样深度，而 msaa > 1 时深度附件是多采样的——
+/// 这条路径（`depth_resolve.wgsl` 那一趟）只有这里才会被真正执行。
+/// 同一个 renderer 先关后开，顺带验证"运行时改 `options.ssao.enabled`"能生效
+/// （编辑器里勾选框走的就是这条路：`ensure_targets` 必须察觉开关变了）。
+fn ssao_images() -> Option<(ImageData, ImageData, Camera)> {
+    let ctx = match pollster::block_on(GpuContext::headless(
+        W,
+        H,
+        GpuOptions {
+            msaa_samples: 4,
+            ..Default::default()
+        },
+    )) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!("跳过：没有可用的 GPU（{e}）");
+            return None;
+        }
+    };
+    let mut ctx = ctx;
+    let mut renderer = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: false,
+            shadows: false,
+            sky: false,
+            ..Default::default()
+        },
+    );
+    // 无光照中灰：AO 是乘上去的，平坦面上"暗了多少"可以逐像素直接读
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.6, 0.6, 0.6, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    // 地面：12×0.4×12，顶面正好在 y = 0
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::from_position(vec3(0.0, -0.2, 0.0), 12.0),
+    );
+    let ground = InstanceDesc::new(Transform::from_trs(
+        vec3(0.0, -0.2, 0.0),
+        Quat::IDENTITY,
+        vec3(12.0, 0.4, 12.0),
+    ));
+    renderer.draw(cube, mat, ground);
+    // 方块：1.2 边长，底面正好在 y = 0（与地面接触 → 接缝处应当有明显 AO）
+    let box_desc = InstanceDesc::new(Transform::from_trs(
+        vec3(0.0, 0.6, 0.0),
+        Quat::IDENTITY,
+        vec3(1.2, 1.2, 1.2),
+    ));
+    renderer.draw(cube, mat, box_desc);
+    // 外圈地面上的另一个方块，用来确认 AO 不是"整幅画都压暗"
+    let far_box = InstanceDesc::new(Transform::from_trs(
+        vec3(-4.0, 0.6, -4.0),
+        Quat::IDENTITY,
+        vec3(1.2, 1.2, 1.2),
+    ));
+    renderer.draw(cube, mat, far_box);
+
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(3.2, 2.2, 4.2);
+    camera.look_at(vec3(0.0, 0.5, 0.0));
+
+    let lighting = Lighting {
+        exposure: 1.0,
+        ..Default::default()
+    };
+    let off = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染（关 SSAO）");
+    // 运行时打开：`ensure_targets` 必须重建（多采样深度要解析成单采样）
+    renderer.options.ssao.enabled = true;
+    let on = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染（开 SSAO）");
+    Some((on, off, camera))
+}
+
+/// 一个屏幕窗口内的平均亮度（0~255）。
+fn window_mean(image: &ImageData, center: (f32, f32), half: i32) -> f64 {
+    let (cx, cy) = (center.0.round() as i32, center.1.round() as i32);
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in (cy - half)..=(cy + half) {
+        for x in (cx - half)..=(cx + half) {
+            if x < 0 || y < 0 || x >= image.width as i32 || y >= image.height as i32 {
+                continue;
+            }
+            let p = pixel(image, x as u32, y as u32);
+            sum += (p[0] + p[1] + p[2]) as f64 / 3.0;
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        f64::NAN
+    } else {
+        sum / n
+    }
+}
+
+/// SSAO 的像素级验证：**接触处变暗、远处与天空不动**，且运行时开关立刻生效。
+#[test]
+fn ssao_darkens_contacts_and_leaves_the_far_plane_alone() {
+    let Some((on, off, camera)) = ssao_images() else {
+        return;
+    };
+    let viewport = vec2(W as f32, H as f32);
+
+    // ① 方块与地面的接缝：AO 应当把它压暗
+    let contact = camera
+        .world_to_screen(vec3(0.62, 0.02, 0.62), viewport)
+        .expect("接缝在屏幕内");
+    let contact_off = window_mean(&off, (contact.x, contact.y), 5);
+    let contact_on = window_mean(&on, (contact.x, contact.y), 5);
+    let contact_drop = contact_off - contact_on;
+    eprintln!("接缝：关 {contact_off:.2} → 开 {contact_on:.2}（暗了 {contact_drop:.2}）");
+    // 峰值：接缝上最暗的那一个像素暗了多少（均值会被窗口里没接触的像素摊薄）
+    let (mut peak, mut peak_at) = (0.0f64, (0, 0));
+    for y in 0..H {
+        for x in 0..W {
+            let a = pixel(&off, x, y);
+            let b = pixel(&on, x, y);
+            let drop = ((a[0] + a[1] + a[2]) - (b[0] + b[1] + b[2])) as f64 / 3.0;
+            if drop > peak {
+                peak = drop;
+                peak_at = (x, y);
+            }
+        }
+    }
+    let peak_dist = (((peak_at.0 as f32 - contact.x).powi(2)
+        + (peak_at.1 as f32 - contact.y).powi(2))
+    .sqrt()) as f64;
+    eprintln!("最暗像素在 {peak_at:?}，暗了 {peak:.2}，离接缝 {peak_dist:.1} 像素");
+    assert!(
+        peak >= 20.0,
+        "整幅图没有任何一个像素被明显压暗（最暗只有 {peak:.2}），不像在做 AO"
+    );
+    assert!(
+        peak_dist <= 12.0,
+        "最暗的地方离接缝 {peak_dist:.1} 像素，AO 没有集中在接触处"
+    );
+    assert!(
+        contact_drop >= 3.0,
+        "接缝没有被环境光遮蔽压暗：{contact_off:.2} → {contact_on:.2}"
+    );
+    assert!(
+        contact_drop <= 120.0,
+        "接缝被压得太狠（{contact_drop:.1}），不像 AO 像黑影"
+    );
+
+    // ② 远处的地面（离最近的方块 3 米以上，远超 0.75 米半径）：必须几乎不动
+    let far = camera
+        .world_to_screen(vec3(-2.0, 0.0, 2.0), viewport)
+        .expect("远地面在屏幕内");
+    let far_off = window_mean(&off, (far.x, far.y), 5);
+    let far_on = window_mean(&on, (far.x, far.y), 5);
+    eprintln!(
+        "远处地面：关 {far_off:.2} → 开 {far_on:.2}（差 {:.2}）",
+        far_on - far_off
+    );
+    assert!(
+        (far_on - far_off).abs() <= 2.0,
+        "远离遮挡物的地面不该变暗：{far_off:.2} → {far_on:.2}"
+    );
+
+    // ③ 天空（没有几何，深度 = 1）：**逐位不变**——远平面提前退出
+    for (x, y) in [(0, 0), (W - 1, 0), (W / 2, 0)] {
+        let (a, b) = (pixel(&off, x, y), pixel(&on, x, y));
+        assert_eq!(a, b, "({x},{y}) 是天空，SSAO 不该碰它");
+    }
+
+    // ④ 整幅图确实变了（否则上面那条"接缝变暗"可能只是巧合）
+    let mut changed = 0;
+    for y in 0..H {
+        for x in 0..W {
+            if pixel(&off, x, y) != pixel(&on, x, y) {
+                changed += 1;
+            }
+        }
+    }
+    eprintln!("改动像素 {changed} / {}", W * H);
+    assert!(changed > 100, "开 SSAO 后画面几乎没变：{changed} 个像素");
+}

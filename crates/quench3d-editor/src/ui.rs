@@ -188,6 +188,10 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                 .on_hover_text(
                     "后处理抗锯齿：在 tonemap 之后的画面上找边缘做定向模糊。\n                     关掉时画面与不开这个功能完全一致；MSAA 与它互不替代，可以同时开。",
                 );
+            ui.checkbox(&mut engine.renderer.options.ssao.enabled, "环境光遮蔽（SSAO）")
+                .on_hover_text(
+                    "屏幕空间环境光遮蔽：让物体与地面接触的缝隙、墙角变暗。\n                     深度-only 实现，只影响间接光的近似；半径/强度在场景文件的 lighting.ssao 里调。",
+                );
             ui.checkbox(&mut engine.debug.axes, "坐标轴");
 
             let mode_label = match engine.camera_mode {

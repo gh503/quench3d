@@ -814,6 +814,37 @@ pub struct LightingDoc {
     /// （着色噪声、材质内部的高频），代价是细节会略微变软。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fxaa: Option<FxaaDoc>,
+    /// SSAO（屏幕空间环境光遮蔽）。
+    ///
+    /// **不写 = 关闭**（像素与加这个功能之前逐位相同）；写了这一节就是打开。
+    /// 它让"物体与地面接触的缝隙、墙角"变暗，是廉价版的接触阴影。
+    /// 实现是**深度-only** 的（没有法线缓冲，法线由深度重建），
+    /// 结果乘在整幅 HDR 颜色上（不区分直接光/间接光）——这是后处理式 SSAO 的固有简化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssao: Option<SsaoDoc>,
+}
+
+/// SSAO（屏幕空间环境光遮蔽）配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SsaoDoc {
+    /// 是否启用，缺省 true（写了这一节就是想开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 采样半径（**米**，视空间），缺省 0.75：影响多大的范围算"邻居"。
+    ///
+    /// 物体尺度 1~2 米时 0.5~1.0 合适；给太大远处的墙也会把画面压暗。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    /// 深度偏移（米），缺省 0.025：压掉"同一个面上自己遮自己"的自遮蔽。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bias: Option<f32>,
+    /// 强度，缺省 1.0（0 = 不暗，越大接触处越黑）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f32>,
+    /// 每像素采样数，缺省 16（1~64）：越多越平滑也越贵。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<u32>,
 }
 
 /// FXAA（后处理抗锯齿）配置。
@@ -2291,6 +2322,74 @@ impl SceneDoc {
             }
         }
 
+        // SSAO：半径/偏移/强度/采样数都得是能用的量（"开了但值为 0"等于没开）
+        if let Some(a) = &self.lighting.ssao {
+            let enabled = a.enabled.unwrap_or(true);
+            if let Some(r) = a.radius {
+                if !r.is_finite() || r <= 0.0 {
+                    out.push(Diagnostic::error(
+                        "lighting.ssao.radius",
+                        "SSAO 半径必须是正数（单位：米）",
+                    ));
+                } else if r > 20.0 {
+                    out.push(
+                        Diagnostic::warn(
+                            "lighting.ssao.radius",
+                            format!("半径 {r} 米太大，几乎整屏都会被压暗"),
+                        )
+                        .with_hint("物体尺度 1~2 米时用 0.5~1.0"),
+                    );
+                }
+            }
+            if let Some(b) = a.bias {
+                if !b.is_finite() || b < 0.0 {
+                    out.push(Diagnostic::error(
+                        "lighting.ssao.bias",
+                        "SSAO 深度偏移不能是负数",
+                    ));
+                } else if let Some(r) = a.radius {
+                    if r.is_finite() && r > 0.0 && b >= r {
+                        out.push(
+                            Diagnostic::warn(
+                                "lighting.ssao.bias",
+                                format!("偏移 {b} 不小于半径 {r}，遮挡会被全部滤掉"),
+                            )
+                            .with_hint("bias 是压自遮蔽用的小量，通常 0.01~0.05"),
+                        );
+                    }
+                }
+            }
+            if let Some(st) = a.strength {
+                if !st.is_finite() || st < 0.0 {
+                    out.push(Diagnostic::error(
+                        "lighting.ssao.strength",
+                        "SSAO 强度不能是负数",
+                    ));
+                } else if st == 0.0 && enabled {
+                    out.push(
+                        Diagnostic::warn("lighting.ssao.strength", "SSAO 开着但强度为 0，等于没开")
+                            .with_hint("想要接触阴影就给个正数（例如 1.0），或者去掉 ssao 这一节"),
+                    );
+                } else if st > 1.0 {
+                    out.push(Diagnostic::warn(
+                        "lighting.ssao.strength",
+                        format!("强度 {st} 大于 1，接触处会被压得过黑"),
+                    ));
+                }
+            }
+            if let Some(n) = a.samples {
+                if !(1..=64).contains(&n) {
+                    out.push(
+                        Diagnostic::error(
+                            "lighting.ssao.samples",
+                            format!("SSAO 采样数 {n} 超出范围（1~64）"),
+                        )
+                        .with_hint("16 是画质/开销的平衡点；超过 32 收益很小"),
+                    );
+                }
+            }
+        }
+
         // 光照预设：以前写错名字会静默退回 studio，现在直接报错
         if let Some(preset) = self.lighting.preset.as_deref() {
             if !matches!(preset, "studio" | "day" | "night" | "none") {
@@ -2764,6 +2863,69 @@ mod tests {
 
         // 字段名拼错要报未知字段，而不是静默忽略
         assert!(SceneDoc::from_json(r#"{"objects":[],"lighting":{"fxaa":{"knee":1.0}}}"#).is_err());
+    }
+
+    #[test]
+    fn ssao_defaults_and_validation() {
+        // 缺省 = 关闭：不写这一节时序列化结果里不该冒出新字段（对已有场景零影响）
+        let doc = SceneDoc::from_json(r#"{"objects":[]}"#).unwrap();
+        assert!(doc.lighting.ssao.is_none());
+        assert!(!serde_json::to_string(&doc).unwrap().contains("ssao"));
+
+        // 写了这一节（哪怕空对象）就解析出来，参数留给渲染器缺省
+        let doc = SceneDoc::from_json(r#"{"objects":[],"lighting":{"ssao":{}}}"#).unwrap();
+        let a = doc.lighting.ssao.expect("ssao 节应当被解析出来");
+        assert_eq!(a.enabled, None);
+        assert_eq!(a.radius, None);
+        assert_eq!(a.samples, None);
+        assert!(!SceneDoc::has_errors(&doc.validate()));
+
+        // 半径非正、采样数为 0 或过大：都是错误
+        let doc =
+            SceneDoc::from_json(r#"{"objects":[],"lighting":{"ssao":{"radius":0.0,"samples":0}}}"#)
+                .unwrap();
+        let diags = doc.validate();
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "lighting.ssao.radius" && d.severity == Severity::Error));
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "lighting.ssao.samples" && d.severity == Severity::Error));
+
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[],"lighting":{"ssao":{"samples":200,"radius":50.0,"bias":-1.0,"strength":3.0}}}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        for (path, sev) in [
+            ("lighting.ssao.samples", Severity::Error),
+            ("lighting.ssao.radius", Severity::Warning),
+            ("lighting.ssao.bias", Severity::Error),
+            ("lighting.ssao.strength", Severity::Warning),
+        ] {
+            assert!(
+                diags.iter().any(|d| d.path == path && d.severity == sev),
+                "缺少 {path} 的 {sev:?} 诊断: {diags:?}"
+            );
+        }
+
+        // 偏移不小于半径 = 遮挡全被滤掉（警告）；强度 0 = 等于没开（警告）
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[],"lighting":{"ssao":{"radius":0.5,"bias":0.6,"strength":0.0}}}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "lighting.ssao.bias" && d.severity == Severity::Warning));
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "lighting.ssao.strength" && d.severity == Severity::Warning));
+
+        // 字段名拼错要报未知字段，而不是静默忽略
+        assert!(
+            SceneDoc::from_json(r#"{"objects":[],"lighting":{"ssao":{"range":1.0}}}"#).is_err()
+        );
     }
 
     #[test]

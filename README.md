@@ -432,7 +432,7 @@ quench3d::write_png(&image, "out.png")?;
 | 能力 | 说明 |
 | --- | --- |
 | 着色 | 前向 Cook–Torrance PBR（金属度/粗糙度）、法线贴图、指数雾；物体写**线性 HDR** |
-| 后处理 | `rgba16float` 中间目标 → 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一 ACES 色调映射（**唯一一份**，`post.wgsl`），混合因此发生在 tonemap 之前；可选 FXAA（tonemap **之后**、同样的 `rgba16float` 中间目标，见 `fxaa.wgsl`） |
+| 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一 ACES 色调映射（**唯一一份**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`） |
 | 阴影 | 单张 2048² `Depth32Float` 阴影贴图，按纹素对齐的正交拟合，3×3 PCF（硬件比较采样） |
 | 光照 | 1 个平行光 + 最多 **8** 个点光源（`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，环境光 + 程序化天空（互为补充的 IBL 近似） |
 | 天空/地面 | 全屏三角形程序化天空 + 解析无限网格（`fwidth` 抗锯齿 + 深度写入） |
@@ -657,6 +657,11 @@ NaN 刚体  : 0
 * `lighting.bloom` **不写 = 关闭**（像素与关闭时逐位相同）；写了就是打开（`enabled` 缺省 true）。
   `threshold` 是**线性**亮度（Rec.709），太阳圆盘/自发光可以远大于 1，所以 1.0 通常只让它们外溢；
   bloom 加在 tonemap **之前**，所以亮区外溢不会过曝成白块。
+* `lighting.ssao` 同样**不写 = 关闭**（像素与关闭时逐位相同）；写 `{}` 就是打开。
+  `radius` 单位是**米**（视空间），物体尺度 1~2 米时给 0.5~1.0；`samples` 缺省 16。
+  它是**深度-only** 的（没有法线缓冲，法线由视空间位置的屏幕导数重建）、结果乘在整幅
+  HDR 颜色上（不区分直接光/间接光）——这是后处理式 SSAO 的固有简化；
+  平坦区域在掠射角下仍可能暗 1~2 个色阶（已知边界，见 §9）。
 * `lighting.fxaa` 同样**不写 = 关闭**（像素与关闭时逐位相同）；写 `{}` 就是打开。
   它工作在 tonemap **之后**的画面上（阈值按 0~1 的**感知**亮度定，不是线性光强），
   找边缘做一次定向模糊：平坦区域逐位不变，斜边/细边变柔和。
@@ -1291,7 +1296,8 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   `TriMesh↔TriMesh`、`Plane↔Plane` 不产生接触。
   `Joint::Fixed` 的角约束是速度级的：焊接的是**创建时**的相对姿态，不是参考姿态。
 * 渲染：单张阴影贴图（大场景需要更小的 `shadow_radius` 或后续加 CSM）；
-  有 HDR 中间目标 + bloom + FXAA，但**还没有** SSAO / 景深 / TAA、没有骨骼动画、没有延迟管线；
+  有 HDR 中间目标 + bloom + FXAA + SSAO，但**还没有**景深 / TAA / AO 去噪（AO 是 16 抽样
+  交错梯度噪声，接触处仍有轻微颗粒）、没有骨骼动画、没有延迟管线；
   Alpha 混合物体不写深度（后处理链已经能把混合放到 tonemap 之前，见 §4）。
 * 工程：窗口截图需要能创建 GPU 设备；无头验证依赖软件光栅（lavapipe）时较慢。
 * Web：没有 WebGPU 适配器的浏览器走 WebGL2（先探再定，见 §2 的「后端怎么选」）。
@@ -1327,8 +1333,12 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   **固定 example 名**（`web_client`）打包的，页面 `import` 的符号必须与之一致
   （`tools/check_web.mjs` 会静态核对）。
 * MCP：只实现 stdio 传输与工具（无 resources / prompts / HTTP SSE）。
-* 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA 都在；SSAO / 景深 / TAA 还没接，
+* 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO 都在；景深 / TAA 还没接，
   详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
+* SSAO 是**深度-only**、无去噪：没有法线缓冲（法线由深度重建），也没有单独的 AO 模糊
+  （AO 直接在后处理里算完就用）。表现是接触处有轻微颗粒（16 抽样 + 交错梯度噪声），
+  以及掠射角下的平坦地面可能暗 1~2 个色阶；要更干净需要加一张 AO 目标 + 双边模糊。
+* SSAO 需要采样深度，所以深度格式是 `Depth32Float`（`Depth24Plus` 不可采样）。
 * FXAA 是 console/低质量档（没有子像素锯齿消除），且在**线性**空间混合、只在判断边缘时
   转成 sRGB 亮度——和 FXAA 原版"整条都在 gamma 空间"略有差别，见 `fxaa.wgsl` 顶部注释。
 
