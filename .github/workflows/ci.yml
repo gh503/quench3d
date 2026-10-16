@@ -318,3 +318,26 @@ jobs:
           # 必须与 web/index.html 里的 import 对应：页面现在服务的是编辑器客户端。
           tools/build_web.sh web_client
           node tools/check_web.mjs
+
+  # MSRV：把 Cargo.toml 里声明的 `rust-version = "1.90"` 真的编一遍。
+  # 以前这个数字是"从依赖元数据推出来的下界"，没有任何东西验证它——声明与事实之间
+  # 没有防线，就等于没有声明。
+  #
+  # 范围说明（有意排除编辑器）：`quench3d-editor` 单独声明 `rust-version = "1.95"`，
+  # 因为 egui 0.37 要求它（工作区注释里写了）。所以这一腿检查的是"工作区里除编辑器
+  # 之外的成员 + 编辑器以外的工具链下界"，而不是含糊的"整个工作区都过了"。
+  msrv:
+    name: msrv (1.90)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 MSRV 工具链
+        uses: dtolnay/rust-toolchain@1.90.0
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+      - name: cargo check（MSRV 1.90，编辑器除外）
+        run: >-
+          cargo check --locked
+          -p quench3d-math -p quench3d-physics -p quench3d-render
+          -p quench3d -p quench3d-cli
+          --all-targets
