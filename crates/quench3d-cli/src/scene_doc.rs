@@ -156,6 +156,9 @@ pub struct SceneDoc {
     /// **不写这个字段 = 不施加任何作用**，物理结果与没有这个字段时逐位一致。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionDoc>,
+    /// 关键帧动画：按时间推着物体走（缺省空 = 行为与今天逐位一致）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animations: Vec<AnimationDoc>,
     /// 区域探针：只读地记录"谁在什么时候进了这个区域"。
     ///
     /// 探针只观测、不参与物理（不会唤醒睡眠刚体、不会产生接触），
@@ -283,6 +286,44 @@ fn default_format() -> String {
 
 fn default_version() -> u32 {
     VERSION
+}
+/// 一条关键帧轨道：`times`（秒，严格递增）与 `values` 一一对应。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackDoc {
+    /// 关键帧时间（秒），严格递增。
+    pub times: Vec<f32>,
+    /// 关键帧取值：位置是米；旋转是欧拉角 XYZ（度）。
+    pub values: Vec<[f32; 3]>,
+}
+
+/// 关键帧动画：按时间推着某个物体走（**运动学**：每步直接设变换，不是施加力）。
+///
+/// `position` / `rotation` 至少给一条。`rotation` 的关键帧是欧拉角 XYZ（度），
+/// 采样时转成四元数做 slerp（所以不会出现"绕远路"的中间姿态）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnimationDoc {
+    /// 名字（只用于诊断；场景里唯一）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 目标刚体名（`objects[].name`）。
+    pub target: String,
+    /// 从第几秒开始（缺省 0）。开始之前保持第一条关键帧的姿态。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<f32>,
+    /// 播放倍速（缺省 1，必须 > 0）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// 是否循环（缺省 false：播完停在最后一帧）。
+    #[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub looping: Option<bool>,
+    /// 位置轨道（米）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<TrackDoc>,
+    /// 朝向轨道（欧拉角 XYZ，度）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<TrackDoc>,
 }
 
 impl SceneDoc {
@@ -570,6 +611,7 @@ impl Default for SceneDoc {
         Self {
             format: default_format(),
             cameras: BTreeMap::new(),
+            animations: Vec::new(),
             version: VERSION,
             name: None,
             gravity: None,
@@ -1666,6 +1708,7 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     check_section::<[f32; 3]>(map.get("gravity"), "gravity", &mut out);
     check_section::<GroundDoc>(map.get("ground"), "ground", &mut out);
     check_section::<CameraDoc>(map.get("camera"), "camera", &mut out);
+    check_section::<Vec<AnimationDoc>>(map.get("animations"), "animations", &mut out);
     check_section::<BTreeMap<String, CameraDoc>>(map.get("cameras"), "cameras", &mut out);
     check_section::<LightingDoc>(map.get("lighting"), "lighting", &mut out);
     check_section::<SimulateDoc>(map.get("simulate"), "simulate", &mut out);
@@ -2088,9 +2131,6 @@ impl SceneDoc {
                 );
             }
         }
-        if !cam_diags.is_empty() {
-            return cam_diags;
-        }
         // `render.outputs`：名字不能重复/带路径分隔符，相机必须存在，宽高不能为 0。
         // 这些都会让"一次渲多张"产出用户没预期的文件，属于值得当场拦下的错误。
         let mut seen: Vec<&str> = Vec::new();
@@ -2130,6 +2170,77 @@ impl SceneDoc {
                 }
             }
             let _ = i;
+        }
+        // 关键帧动画：轨道本身要自洽（长度一致、时间严格递增、>= 0、数值有限），
+        // 目标名与"至少一条轨道"也要当场拦住——这些都是"跑起来才发现"的错。
+        for a in &self.animations {
+            let label = a.name.clone().unwrap_or_else(|| a.target.clone());
+            if a.target.trim().is_empty() {
+                cam_diags.push(Diagnostic::error("animations", "动画的 target 不能为空"));
+            }
+            if a.position.is_none() && a.rotation.is_none() {
+                cam_diags.push(Diagnostic::error(
+                    "animations",
+                    format!(
+                        "动画 `{label}` 至少要有一条 position 或 rotation 轨道（否则它什么都不做）"
+                    ),
+                ));
+            }
+            if let Some(sp) = a.speed {
+                if !(sp.is_finite() && sp > 0.0) {
+                    cam_diags.push(Diagnostic::error("animations", "speed 必须是正的有限值"));
+                }
+            }
+            if let Some(st) = a.start {
+                if !st.is_finite() {
+                    cam_diags.push(Diagnostic::error("animations", "start 必须是有限值"));
+                }
+            }
+            for (what, tr) in [("position", &a.position), ("rotation", &a.rotation)] {
+                let Some(tr) = tr else { continue };
+                if tr.times.len() != tr.values.len() {
+                    cam_diags.push(Diagnostic::error(
+                        "animations",
+                        format!("{what} 轨道的关键帧 times 与 values 长度必须一致"),
+                    ));
+                }
+                if tr.times.is_empty() {
+                    cam_diags.push(Diagnostic::error("animations", "关键帧不能是空的"));
+                }
+                let mut prev = f32::NEG_INFINITY;
+                for (k, t) in tr.times.iter().enumerate() {
+                    if !t.is_finite() || *t < 0.0 {
+                        cam_diags.push(Diagnostic::error(
+                            "animations",
+                            format!("{what} 轨道的关键帧时间必须是非负有限值"),
+                        ));
+                    }
+                    if *t <= prev {
+                        cam_diags.push(Diagnostic::error(
+                            "animations",
+                            format!(
+                                "{what} 轨道的关键帧时间必须严格递增（同一时刻只能有一个取值）"
+                            ),
+                        ));
+                    }
+                    prev = *t;
+                    if let Some(v) = tr.values.get(k) {
+                        if v.iter().any(|c| !c.is_finite()) {
+                            cam_diags.push(Diagnostic::error(
+                                "animations",
+                                format!("{what} 轨道的关键帧取值必须是有限数"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // 这三组检查（命名相机 / render.outputs / 关键帧动画）走"早退"路径：
+        // 只要它们有问题就直接返回，不再往下跑语义校验。**guard 必须放在最后**——
+        // 放在中间会让后面追加的诊断被静默丢掉（这是本轮真实踩到的 bug：
+        // 动画时间不递增时 validate 报 valid: true）。
+        if !cam_diags.is_empty() {
+            return cam_diags;
         }
         // 有模板/实例时：先在**声明的**文档上做结构检查（引用、实例、名字、未用模板），
         // 再把其余一切交给展开后的文档验一遍。这样每条问题只报一次，

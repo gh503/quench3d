@@ -10,6 +10,21 @@
 
 ### 新增
 
+- **关键帧动画 `animations[]`（gap #23 第一步）**：`{ target, loop?, start?, speed?, position?: {times, values}, rotation?: {times, values} }`，
+  按时间把物体推着走（**运动学**：每步直接设变换）。`position` 段内线性插值，`rotation` 段内**四元数 slerp**
+  （关键帧写欧拉角 XYZ 度，所以不会出现绕远路的中间姿态）；`start` 之前保持第一帧，不循环时末尾截断，
+  循环按轨道时长取模（`speed` 在取模之前生效）。缺省空 = 行为与今天逐位一致。
+  - 引擎实现放在 `crates/quench3d/src/animation.rs`（**纯计算**，可在无显卡环境完整单测：插值/截断/循环/slerp/倍速/起始保持共 4 条测试）。
+  - 播放接在 CLI 脚本层：`Script::step` 里 **先动画、再动作、最后步进物理**（顺序写在注释里，反了动作会被动画抹掉）；
+    位置轨道用**有限差分**补线速度（`Δ位置/dt`），让接触与摩擦看到"它在动"而不是"它每步瞬移"。
+  - 校验：轨道长度一致、时间非负且严格递增、取值有限、至少一条轨道、`speed > 0`、目标名不能为空。
+  - e2e（无显卡）：0.5 秒时 y 到 5、循环 1.5 秒后回到顶部附近、目标不存在 → 退出码 2 且错误里带目标名、
+    时间不递增 → `validate` 判 `valid: false` 并指出"严格递增"。
+  - **顺手修掉一个真 bug**：三组早退检查（命名相机 / `render.outputs` / 动画）的 guard 原先夹在中间，
+    导致**后面追加的诊断被静默丢掉**——动画时间不递增时 `validate` 报 `valid: true`。guard 挪到三组检查之后，
+    并把这条教训写进注释。
+  - **没做**：glTF 动画/蒙皮导入、顶点蒙皮（skin）、两条 clip 之间的混合、编辑器的播放/时间轴 UI；
+    `rotation` 只设姿态不推角速度（滚动/摩擦耦合不精确）。
 - **MSRV 1.90 由 CI 验证（gap #30 收尾）**：新增 `msrv (1.90)` 腿，用 1.90.0 工具链对
   `quench3d-math` / `-physics` / `-render` / `quench3d` / `quench3d-cli` 跑
   `cargo check --locked --all-targets`（首次即全绿）。此前 `rust-version = "1.90"` 只是

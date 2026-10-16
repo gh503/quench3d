@@ -631,6 +631,12 @@ struct PreparedAction {
     index: usize,
 }
 
+/// 一条编译好的动画：采样是纯计算，这里只多带一个句柄。
+#[derive(Debug, Clone)]
+struct PreparedAnimation {
+    anim: quench3d::animation::Animation,
+    handle: BodyHandle,
+}
 /// 场景里的"行为与探针"：定时动作 + 只读区域探针。
 ///
 /// 两条硬性约束：
@@ -650,6 +656,10 @@ pub struct Script {
     /// 句柄 → 名字（事件里给的是句柄，报告要用名字）。
     names: HashMap<BodyHandle, String>,
     step: u32,
+    /// 关键帧动画（目标已解析成句柄）。
+    animations: Vec<PreparedAnimation>,
+    /// 已经过的时间（秒），动画采样用。
+    time: f32,
 }
 
 impl Script {
@@ -746,11 +756,52 @@ impl Script {
             }
         }
 
+        // 关键帧动画：目标必须存在——否则就是"跑了半天没动"，最难查的那种静默失效。
+        let mut animations: Vec<PreparedAnimation> = Vec::new();
+        for a in &doc.animations {
+            let handle = *handles
+                .get(&a.target)
+                .ok_or_else(|| RunError::scene(format!("动画目标 \"{}\" 不存在", a.target)))?;
+            let position = match &a.position {
+                Some(tr) => Some(
+                    quench3d::animation::Track::new(
+                        tr.times.clone(),
+                        tr.values.iter().map(|v| v3(*v)).collect(),
+                    )
+                    .map_err(RunError::scene)?,
+                ),
+                None => None,
+            };
+            let rotation = match &a.rotation {
+                Some(tr) => Some(
+                    quench3d::animation::RotationTrack::new(
+                        tr.times.clone(),
+                        tr.values.iter().map(|v| v3(*v)).collect(),
+                    )
+                    .map_err(RunError::scene)?,
+                ),
+                None => None,
+            };
+            let anim = quench3d::animation::Animation::new(
+                a.name.clone(),
+                a.target.clone(),
+                a.start.unwrap_or(0.0),
+                a.speed.unwrap_or(1.0),
+                a.looping.unwrap_or(false),
+                position,
+                rotation,
+            )
+            .map_err(RunError::scene)?;
+            animations.push(PreparedAnimation { anim, handle });
+        }
+
         Ok(Self {
             actions,
             probes,
             sensors,
             names,
+            animations,
+            time: 0.0,
             step: 0,
         })
     }
@@ -760,7 +811,10 @@ impl Script {
     /// 传感器也算"配了"：它虽然不写世界，但要靠 [`Script::step`] 采事件，
     /// 谁要是拿这个函数去跳过 `Script`，传感器报告就会空掉。
     pub fn is_empty(&self) -> bool {
-        self.actions.is_empty() && self.probes.is_empty() && self.sensors.is_empty()
+        self.actions.is_empty()
+            && self.probes.is_empty()
+            && self.sensors.is_empty()
+            && self.animations.is_empty()
     }
 
     /// 汇总传感器报告（传感器按名字排序，刚体按名字排序，输出稳定）。
@@ -800,6 +854,10 @@ impl Script {
 
     /// 推进一个物理步：先施加本步的动作，再步进，最后只读地采集探针。
     pub fn step(&mut self, world: &mut PhysicsWorld, dt: f32) {
+        // 顺序是有意的：先动画（它决定"这一刻物体该在哪"），再动作（力/冲量/瞬移这类事件），
+        // 最后才步进物理。反过来的话，同一帧里动作会被动画抹掉。
+        self.time += dt;
+        self.apply_animations(world, dt);
         self.apply_actions(world);
         world.step(dt);
         self.observe(world);
@@ -837,6 +895,35 @@ impl Script {
                     body.set_transform(Transform::new(a.position, rot, Vec3::ONE));
                 }
             }
+        }
+    }
+
+    /// 把关键帧动画采样出来的姿态写进世界。
+    ///
+    /// 这是**运动学**覆盖：每步直接设变换。为了让接触/摩擦看到"它在动"而不是"它每步瞬移"，
+    /// 位置轨道还会用有限差分补一个线速度（`Δ位置/dt`）。朝向轨道只设姿态、不动角速度——
+    /// 这条边界写在文档里（要精确的滚动/摩擦耦合得等角速度推算那一步）。
+    fn apply_animations(&mut self, world: &mut PhysicsWorld, dt: f32) {
+        if self.animations.is_empty() {
+            return;
+        }
+        let time = self.time;
+        for pa in &self.animations {
+            let (pos, rot) = pa.anim.sample(time);
+            if pos.is_none() && rot.is_none() {
+                continue;
+            }
+            let Some(body) = world.body_mut(pa.handle) else {
+                continue;
+            };
+            let cur = body.transform();
+            let want_pos = pos.unwrap_or(cur.position);
+            let want_rot = rot.unwrap_or(cur.rotation);
+            body.set_transform(Transform::new(want_pos, want_rot, Vec3::ONE));
+            if pos.is_some() && dt > 0.0 {
+                body.set_linear_velocity((want_pos - cur.position) / dt);
+            }
+            body.wake_up();
         }
     }
 

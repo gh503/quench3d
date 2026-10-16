@@ -121,6 +121,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod animation;
 pub mod app;
 pub mod assets;
 pub mod clock;

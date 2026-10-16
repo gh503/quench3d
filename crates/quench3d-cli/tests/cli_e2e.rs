@@ -4023,3 +4023,129 @@ fn multiple_render_outputs_resolve_before_writing_and_honour_no_clobber() {
     );
     assert_eq!(v["data"]["would_write"].as_array().unwrap().len(), 1);
 }
+
+/// 关键帧动画：`animations[]` 真的按时间推动物体（用 `simulate` 报告的 `states` 观测）。
+///
+/// 观测点选得很"笨"但很硬：0.5 秒时 y 应当到 5，循环播放 1.5 秒后应当回到起点附近。
+#[test]
+fn keyframe_animations_move_bodies_on_a_schedule() {
+    let dir = temp_dir("animation");
+    let scene = |extra: &str| -> String {
+        format!(
+            r#"{{
+                "format": "quench3d.scene", "version": 2, "name": "动画",
+                "ground": {{ "size": 20 }},
+                "objects": [{{
+                    "name": "箱", "shape": {{ "type": "box" }},
+                    "position": [0, 1, 0], "body": "kinematic"
+                }}],
+                "simulate": {{ "steps": 30, "dt": 0.01666667 }},
+                "animations": [{extra}]
+            }}"#
+        )
+    };
+    let y_at = |path: &std::path::Path| -> f64 {
+        let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+        assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+        let d = r.json();
+        assert_eq!(d["ok"], true, "{d}");
+        d["data"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "箱")
+            .unwrap_or_else(|| panic!("报告里应有 箱：{d}"))["position"][1]
+            .as_f64()
+            .unwrap()
+    };
+
+    // 0 → 0.5 → 1.0 秒，y 从 1 升到 5 再回落；30 步 × 1/60 秒 = 0.5 秒
+    let path = dir.join("up.json");
+    std::fs::write(
+        &path,
+        scene(
+            r#"{ "target": "箱", "position": {
+            "times": [0.0, 0.5, 1.0], "values": [[0,1,0], [0,5,0], [0,1,0]] } }"#,
+        ),
+    )
+    .unwrap();
+    let y = y_at(&path);
+    assert!((y - 5.0).abs() < 0.35, "0.5 秒时应当接近顶点 5，实际 {y}");
+
+    // 循环：轨道只有 1 秒，跑 1.5 秒 ≈ 回到 0.5 秒处，也就是又接近顶部
+    let path = dir.join("loop.json");
+    std::fs::write(
+        &path,
+        scene(
+            r#"{ "target": "箱", "loop": true, "position": {
+            "times": [0.0, 0.5, 1.0], "values": [[0,1,0], [0,5,0], [0,1,0]] } }"#,
+        ),
+    )
+    .unwrap();
+    let r = run(&[
+        "simulate",
+        path.to_str().unwrap(),
+        "--json",
+        "--steps",
+        "90",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let y = r.json()["data"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "箱")
+        .unwrap()["position"][1]
+        .as_f64()
+        .unwrap();
+    assert!(y > 4.5, "循环 1.5 秒后应当又接近顶部，实际 {y}");
+
+    // 目标不存在：这是"跑了半天没动"的静默失效，必须当场报错
+    let path = dir.join("missing.json");
+    std::fs::write(
+        &path,
+        scene(
+            r#"{ "target": "不存在的物体", "position": { "times": [0.0], "values": [[0,1,0]] } }"#,
+        ),
+    )
+    .unwrap();
+    let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    let v = r.json();
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("不存在的物体"),
+        "错误里要点出目标名：{}",
+        v["error"]
+    );
+
+    // 轨道自相矛盾（时间不递增）：validate 要报出来，而不是等运行期
+    let path = dir.join("bad.json");
+    std::fs::write(
+        &path,
+        scene(r#"{ "target": "箱", "position": { "times": [0.5, 0.5], "values": [[0,1,0], [0,2,0]] } }"#),
+    )
+    .unwrap();
+    let r = run(&["validate", path.to_str().unwrap(), "--json"]);
+    // 注意 `validate` 的约定：**命令本身**成功（ok: true），"场景不合法"体现在
+    // `data.valid = false` 与 diagnostics 里。
+    let v = r.json();
+    assert_eq!(
+        v["data"]["valid"], false,
+        "时间不严格递增必须判为不合法：{v}"
+    );
+    assert_eq!(v["data"]["errors"], 1, "{v}");
+    assert!(
+        v["data"]["diagnostics"]
+            .as_array()
+            .map(|d| d.iter().any(|x| x["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("严格递增")))
+            .unwrap_or(false),
+        "要指出是严格递增的问题：{v}"
+    );
+}

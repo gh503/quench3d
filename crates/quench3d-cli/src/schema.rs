@@ -721,6 +721,13 @@ pub fn json_schema() -> Value {
         ]),
     );
     defs.insert("simulate".into(), def(&["steps", "dt"]));
+    defs.insert("track".into(), def(&["times", "values"]));
+    defs.insert(
+        "animation".into(),
+        def(&[
+            "name", "target", "start", "speed", "loop", "position", "rotation",
+        ]),
+    );
     defs.insert(
         "renderOutput".into(),
         def(&["name", "camera", "width", "height"]),
@@ -754,6 +761,9 @@ pub fn json_schema() -> Value {
                 "actions": { "type": "array", "items": { "$ref": "#/$defs/action" } },
                 "probes": { "type": "array", "items": { "$ref": "#/$defs/probe" } },
                 "camera": { "$ref": "#/$defs/camera" },
+                "animations": { "type": "array",
+                                "items": { "$ref": "#/$defs/animation" },
+                                "description": "关键帧动画：按时间推着物体走（运动学）" },
                 "cameras": { "type": "object",
                              "additionalProperties": { "$ref": "#/$defs/camera" },
                              "description": "命名相机：--camera <名字> 选一台渲染" },
@@ -842,6 +852,7 @@ pub fn system_prompt() -> String {
 - models: 数组：{ path: "xx.glb"|"xx.obj", position, rotation_deg, scale, collide: false }
 - camera: { position: [x,y,z], look_at: [x,y,z], fov_deg: 50, near: 0.05, far: 5000,
 cameras: 命名相机表（名字 → 相机对象）；`--camera <名字>` 选一台渲染，缺省用 camera 段
+animations: [{ target, loop?, start?, speed?, position?: {times,values}, rotation?: {times,values} }]（关键帧动画；缺省空）
             orthographic_height: 5, frame_scene: false }
   或者 { distance: 12, yaw_deg: 30, pitch_deg: 20, look_at: [0,1,0] }
   （给了 orthographic_height 就是正交投影，没有近大远小）
@@ -1080,6 +1091,8 @@ mod tests {
             ("SimulateDoc", "simulate"),
             ("RenderDoc", "render"),
             ("OutputDoc", "renderOutput"),
+            ("TrackDoc", "track"),
+            ("AnimationDoc", "animation"),
         ] {
             let fields: Vec<String> = struct_fields(src, sname)
                 .into_iter()
@@ -1169,6 +1182,7 @@ mod tests {
     fn system_prompt_mentions_every_top_level_scene_field() {
         let prompt = system_prompt();
         for field in [
+            "animations",
             "cameras",
             "gravity",
             "ground",
