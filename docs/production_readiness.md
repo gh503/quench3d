@@ -936,8 +936,7 @@ cargo test -p quench3d-cli --bin quench3d -- schema_global_flags
 cargo test -p quench3d-cli --bin quench3d -- every_valued_flag
 ```
 
-白名单里现在有 `--scene`、`--device`、`--ray`、`--overlap`、`--mask`、`--max`——
-我**没有**给它们编帮助文本：不清楚语义就写文档比不写更糟。这是一份诚实的欠账清单。
+白名单在**第 50 轮被清空**了（见 §13.5）：`--ray/--overlap/--mask/--max` 本来就写在 `schema` 的 query 参数里（我当时只看 `--help`，看漏了），`--scene/--device` 则是**从来没有任何代码读过的死旗标**，已直接删掉 —— 与其给死旗标编说明，不如让它消失。
 
 ### 13.2 `--asset-path`（第 45 轮）：旗标要登记在**进程级**
 
