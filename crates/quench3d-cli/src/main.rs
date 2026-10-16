@@ -41,8 +41,6 @@ const VALUE_FLAGS: &[&str] = &[
     "--render",
     "--base-url",
     "--model",
-    "--scene",
-    "--device",
     "--max-rounds",
     "--repair-rounds",
     "--trace",
@@ -1849,21 +1847,18 @@ mod tests {
     }
 
     #[test]
-    fn every_valued_flag_is_in_help_or_explicitly_deferred() {
-        // 旗标加了、帮助里却没写 → 用户与 agent 只能靠猜（`schema` 目前不描述旗标）。
-        // 钉死规则：要么在帮助里出现，要么写进下面的白名单。
-        // 白名单是"已知没写"的**诚实清单，只应该变短**（这些多数是 query/bench 用的）。
-        const DEFERRED: &[&str] = &[
-            "--scene",
-            "--device",
-            "--ray",
-            "--overlap",
-            "--mask",
-            "--max",
-        ];
-        // 按"词"匹配，不能只看子串：`--max` 是 `--max-rounds` 的前缀，
-        // 用 contains 会把 `--max` 误判成"已经写进帮助"（这个误判正是第一版守卫的 bug）。
+    fn every_valued_flag_is_documented_in_help_or_schema() {
+        // 旗标加了、文档里却没写 → 用户与 agent 只能靠猜。规则：
+        //   每个 VALUE_FLAGS 项要么在 `--help` 里独立出现，要么在 `schema` 的某个命令参数里
+        //   被描述（query 的 --ray/--overlap/--mask/--max 本来就写在 schema 里）。
+        //
+        // 第 47 轮这里挂过一张"已知没写"的白名单，第 50 轮把它清空了，两种情况都不是"待办"：
+        //   · --ray/--overlap/--mask/--max：**本来就写在 schema 里**，是我的白名单看漏了；
+        //   · --scene/--device：**从来没有任何代码读过它们**（全仓只有 VALUE_FLAGS 与白名单
+        //     提到过），是死旗标 —— 与其给它们编一段说明，不如删掉：一个"看着能传值、
+        //     其实被静默忽略"的旗标比没有这个旗标更坏。
         fn mentions(help: &str, flag: &str) -> bool {
+            // 按"词"匹配，不能只看子串：`--max` 是 `--max-rounds` 的前缀
             help.match_indices(flag).any(|(i, _)| {
                 let rest = &help[i + flag.len()..];
                 !rest.starts_with('-')
@@ -1874,23 +1869,25 @@ mod tests {
             })
         }
         let help = help_text();
+        let schema = quench3d_cli::schema::schema();
+        let documented: Vec<String> = schema["commands"]
+            .as_array()
+            .expect("commands")
+            .iter()
+            .flat_map(|cmd| cmd["args"].as_array().cloned().unwrap_or_default())
+            .filter_map(|arg| arg["name"].as_str().map(str::to_string))
+            .filter(|name| name.starts_with("--"))
+            .collect();
         let mut missing = Vec::new();
         for flag in VALUE_FLAGS {
-            if !mentions(&help, flag) && !DEFERRED.contains(flag) {
+            if !mentions(&help, flag) && !documented.iter().any(|d| d == flag) {
                 missing.push(*flag);
             }
         }
         assert!(
             missing.is_empty(),
-            "这些带值旗标既没写进 --help 也不在白名单里：{missing:?}"
+            "这些带值旗标在 --help 与 schema 里都没有说明：{missing:?}"
         );
-        // 白名单不许留已经写进帮助的项（白名单只能变短）
-        for flag in DEFERRED {
-            assert!(
-                !mentions(&help, flag),
-                "{flag} 已经写进帮助了，请从白名单里删掉"
-            );
-        }
     }
 
     #[test]
