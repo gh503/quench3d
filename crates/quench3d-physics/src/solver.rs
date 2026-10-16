@@ -10,8 +10,8 @@
 use quench3d_math::*;
 
 use crate::body::{
-    BodyType, RigidBody, MAX_ANGULAR_SPEED, MAX_LINEAR_SPEED, SLEEP_ANGULAR_TOL, SLEEP_LINEAR_TOL,
-    SLEEP_TIME,
+    BodyType, CombineRule, RigidBody, MAX_ANGULAR_SPEED, MAX_LINEAR_SPEED, SLEEP_ANGULAR_TOL,
+    SLEEP_LINEAR_TOL, SLEEP_TIME,
 };
 use crate::contact::ContactPoint;
 use crate::small_vec::SmallVec;
@@ -51,6 +51,17 @@ pub struct SolverConfig {
     pub restitution_threshold: f32,
     /// 是否启用自动睡眠。
     pub sleep_enabled: bool,
+    /// 世界的**缺省**摩擦合成规则（两端都没显式指定时用它）。
+    pub friction_combine: CombineRule,
+    /// 世界的**缺省**恢复合成规则（两端都没显式指定时用它）。
+    ///
+    /// 缺省 `Max` 是为了与历史行为逐位一致（旧实现写死 `max(ea, eb)`）。
+    pub restitution_combine: CombineRule,
+    /// 切向相对速度**低于**这个值（m/s）时用静摩擦系数，高于则用动摩擦系数。
+    ///
+    /// 静摩擦 ≥ 动摩擦是"推一下才滑动、松手就停住"的关键：只有一个摩擦系数时，
+    /// 静止的箱子会以极小的速度缓慢蠕动（每一次求解都把切向冲量顶到锥面上）。
+    pub static_friction_speed: f32,
 }
 
 impl Default for SolverConfig {
@@ -67,6 +78,9 @@ impl Default for SolverConfig {
             max_correction_velocity: 3.0,
             restitution_threshold: 1.0,
             sleep_enabled: true,
+            friction_combine: CombineRule::GeometricMean,
+            restitution_combine: CombineRule::Max,
+            static_friction_speed: 0.02,
         }
     }
 }
@@ -349,6 +363,42 @@ pub(crate) struct SolverContact {
     pub pseudo_impulse: f32,
 }
 
+/// 求解器看到的"材质"：一对刚体接触时需要的全部摩擦/恢复参数。
+///
+/// `friction_combine` / `restitution_combine` 各自独立：PhysX 与 Unity 都允许
+/// "摩擦取最大值、恢复取平均值"这类组合，用一个全局规则会逼着用户把所有材质
+/// 调成同一套。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ContactMaterial {
+    /// 动摩擦系数（已经在滑动时用）。
+    pub dynamic_friction: f32,
+    /// 静摩擦系数（相对切向速度很小时用）。
+    pub static_friction: f32,
+    /// 恢复系数。
+    pub restitution: f32,
+    /// 摩擦的合成规则；`None` = 这一端没指定。
+    pub friction_combine: Option<CombineRule>,
+    /// 恢复的合成规则；`None` = 这一端没指定。
+    pub restitution_combine: Option<CombineRule>,
+}
+
+/// 解析一对材质的合成规则：先显式、后缺省；两端都显式且不同时用 `a`。
+///
+/// 为什么不是"两端的规则再合成一次"：Min/Max 可以合成，`Average` 与
+/// `GeometricMean` 混在一起没有物理意义（"平均的平均"是什么？）。
+fn resolve_rule(
+    a: Option<CombineRule>,
+    b: Option<CombineRule>,
+    world_default: CombineRule,
+) -> CombineRule {
+    match (a, b) {
+        (Some(ra), Some(rb)) if ra == rb => ra,
+        (Some(ra), _) => ra,
+        (None, Some(rb)) => rb,
+        (None, None) => world_default,
+    }
+}
+
 /// 一个待求解的接触流形（记录刚体下标）。
 #[derive(Clone, Debug)]
 pub(crate) struct ManifoldEntry {
@@ -372,7 +422,8 @@ impl ContactSolver {
     pub fn prepare(
         &mut self,
         views: &[BodyView],
-        materials: &[(f32, f32)],
+        materials: &[ContactMaterial],
+        pre_velocities: &[(Vec3, Vec3)],
         manifolds: &[ManifoldEntry],
         cache: &ContactCache,
         cfg: &SolverConfig,
@@ -380,18 +431,36 @@ impl ContactSolver {
         self.contacts.clear();
         for m in manifolds {
             let (a, b) = (m.a, m.b);
-            let (fa, ea) = match materials.get(a) {
+            let ma = match materials.get(a) {
                 Some(x) => *x,
                 None => continue,
             };
-            let (fb, eb) = match materials.get(b) {
+            let mb = match materials.get(b) {
                 Some(x) => *x,
                 None => continue,
             };
             let va = views[a];
             let vb = views[b];
-            let friction = (fa.max(0.0) * fb.max(0.0)).sqrt();
-            let restitution = ea.max(eb);
+            // 合成规则怎么定（**先显式、后缺省**，与 Unity 的 per-collider
+            // combine + 工程缺省同一套思路）：
+            // 1. 只有一端显式指定 → 用它（"我只在冰面上写 min" 能生效）；
+            // 2. 两端都指定且相同 → 就是它；
+            // 3. 两端都指定但不同 → 用 **A**（`ContactPair` 的 A 是 slot 序号小的
+            //    那个，宽相输出按序号有序，所以结果与线程数/遍历顺序无关）；
+            // 4. 两端都没指定 → 世界的缺省规则。
+            let friction_rule = resolve_rule(
+                ma.friction_combine,
+                mb.friction_combine,
+                cfg.friction_combine,
+            );
+            let restitution_rule = resolve_rule(
+                ma.restitution_combine,
+                mb.restitution_combine,
+                cfg.restitution_combine,
+            );
+            let friction_dynamic = friction_rule.combine(ma.dynamic_friction, mb.dynamic_friction);
+            let friction_static = friction_rule.combine(ma.static_friction, mb.static_friction);
+            let restitution = restitution_rule.combine(ma.restitution, mb.restitution);
             for cp in &m.points {
                 let (position, normal, penetration) = (cp.position, cp.normal, cp.penetration);
                 if !position.is_finite() || !normal.is_finite() || !penetration.is_finite() {
@@ -420,6 +489,26 @@ impl ContactSolver {
                 };
                 let local_a = va.rot.inverse().mul_vec3(position - va.pos);
                 let local_b = vb.rot.inverse().mul_vec3(position - vb.pos);
+                // 静摩擦 vs 动摩擦：看**施力之前**的切向相对速度（`pre_velocities`）。
+                //
+                // 两个"必须"：
+                // * 必须用施力前的速度：静止的箱子被推的那一步，施力后速度已经是
+                //   Δt × 加速度（1/60 秒 × 5 m/s² ≈ 0.08 m/s），按它判定会永远走
+                //   动摩擦，"静摩擦"这一项就形同虚设；
+                // * 必须在准备阶段定一次：如果每次速度迭代重新判断，摩擦锥上界会在
+                //   迭代中跳变，收敛会变差，而且结果依赖迭代次数。
+                let vt = {
+                    let (la, wa) = pre_velocities.get(a).copied().unwrap_or_default();
+                    let (lb, wb) = pre_velocities.get(b).copied().unwrap_or_default();
+                    let vrel = (lb + wb.cross(rb)) - (la + wa.cross(ra));
+                    let tangential = vrel - n * vrel.dot(n);
+                    tangential.length()
+                };
+                let friction = if vt > cfg.static_friction_speed {
+                    friction_dynamic
+                } else {
+                    friction_static
+                };
                 let mut normal_impulse = 0.0;
                 let mut tangent_impulse = [0.0f32; 2];
                 if cfg.warm_starting {

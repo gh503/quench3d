@@ -1086,6 +1086,16 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     if let Some(g) = doc.gravity {
         world.set_gravity(v3(g));
     }
+    // 世界级物理参数：不写就是引擎缺省（因此行为与这一节不存在时逐位相同）
+    if let Some(r) = doc.physics.friction_combine {
+        world.config.friction_combine = r.into();
+    }
+    if let Some(r) = doc.physics.restitution_combine {
+        world.config.restitution_combine = r.into();
+    }
+    if let Some(v) = doc.physics.static_friction_speed {
+        world.config.static_friction_speed = v;
+    }
 
     if let Some(ground) = &doc.ground {
         let pos = Vec3::new(0.0, ground.y, 0.0);
@@ -1111,11 +1121,20 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             BodyKind::None => unreachable!(),
         };
         let pos = v3(o.position.unwrap_or([0.0, 0.0, 0.0]));
+        let friction = o.friction.unwrap_or(0.5);
         builder = builder
             .position(pos)
             .rotation(euler_quat(o.rotation_deg))
             .restitution(o.restitution.unwrap_or(0.2))
-            .friction(o.friction.unwrap_or(0.5));
+            .friction(friction)
+            // 静摩擦缺省跟随动摩擦：只写 `friction` 的场景行为完全不变
+            .static_friction(o.static_friction.unwrap_or(friction));
+        if let Some(r) = o.friction_combine {
+            builder = builder.friction_combine(r.into());
+        }
+        if let Some(r) = o.restitution_combine {
+            builder = builder.restitution_combine(r.into());
+        }
         if let Some(d) = o.density {
             builder = builder.density(d);
         }

@@ -291,6 +291,12 @@ pub fn scene_grammar() -> Value {
             "version": "整数，当前 2（版本 2 起 parent 生效；不兼容版本 1）",
             "name": "场景名（可选）",
             "gravity": "[x, y, z]，缺省 [0, -9.81, 0]",
+            "physics": {
+                "friction_combine": ["geometric_mean（缺省，= sqrt(a×b)，历史行为）", "average", "min", "max", "multiply"],
+                "restitution_combine": ["缺省 max（= max(ea,eb)，历史行为）", "average", "min", "geometric_mean", "multiply"],
+                "static_friction_speed": "切向速度低于它就算静止接触（m/s），缺省 0.02；写大 = 更容易「黏住」",
+                "note": "世界级缺省；物体上的同名字段优先。不写这一节 = 全用引擎缺省（结果与没有这一节逐位相同）"
+            },
             "ground": { "size": "f32 边长，缺省 40", "material": "材质名（可选）", "y": "f32 高度，缺省 0" },
             "materials": "名字 → 材质对象",
             "objects": "图元物体数组",
@@ -341,7 +347,10 @@ pub fn scene_grammar() -> Value {
             "body": ["none（纯显示，缺省）", "static", "dynamic", "kinematic"],
             "density": "kg/m³，缺省 1000",
             "restitution": "0~1，缺省 0.2",
-            "friction": "缺省 0.5",
+            "friction": "动摩擦系数，缺省 0.5",
+            "static_friction": "静摩擦系数（切向速度很小时用），缺省跟随 friction；≥ friction 才「推得动又推不住」",
+            "friction_combine": "覆盖 physics.friction_combine（两端都写时取 slot 靠前的那个）",
+            "restitution_combine": "覆盖 physics.restitution_combine",
             "velocity": "初始线速度 [x,y,z]",
             "angular_velocity": "初始角速度 [x,y,z]（弧度/秒）",
             "linear_damping": "线性阻尼 ≥0，缺省 0（不衰减）",
@@ -465,7 +474,11 @@ pub fn system_prompt() -> String {
   - position: [x,y,z]（米，有 parent 时是相对父物体的）, rotation_deg: [x,y,z]（度）
   - material: 材质名
   - body: "none"|"static"|"dynamic"|"kinematic"（缺省 none 表示纯显示，不参与物理）
-  - density: kg/m³（缺省 1000）, restitution: 0~1（缺省 0.2）, friction:（缺省 0.5）
+  - density: kg/m³（缺省 1000）, restitution: 0~1（缺省 0.2）, friction:（动摩擦，缺省 0.5）
+  - static_friction（缺省跟随 friction）, friction_combine / restitution_combine（覆盖 world.physics）
+- physics: { friction_combine: "min", restitution_combine: "max", static_friction_speed: 0.02 }
+  （世界缺省；不写 = 引擎缺省。`friction_combine` 缺省 geometric_mean、`restitution_combine`
+   缺省 max —— 这两个缺省值就是老行为，改了会改变已有场景的观感）
   - velocity: [x,y,z] 初始速度, angular_velocity: [x,y,z]（弧度/秒）
   - linear_damping / angular_damping（≥0，缺省 0）, gravity_scale（缺省 1，0 表示失重）
   - mass（kg，覆盖 density×体积）, allow_sleep: false（永不自动睡眠）

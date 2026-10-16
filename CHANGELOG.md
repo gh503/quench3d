@@ -10,6 +10,25 @@
 
 ### 新增
 
+- **物理材质：静摩擦 + 摩擦/恢复的合成规则**（gap #22）。以前 `friction` / `restitution`
+  各写一个，接触时到底听谁的**没有选择**：摩擦写死几何平均、恢复写死取大。
+  现在两个都能选，而且"静摩擦"独立出来了：
+  * `physics.{friction_combine, restitution_combine, static_friction_speed}`：世界级缺省；
+    `objects[].{friction_combine, restitution_combine}` 按物体覆盖。规则有
+    `geometric_mean`（摩擦缺省，= 老行为）/ `average` / `min` / `max` / `multiply`；
+    恢复的缺省是 `max`（= 老行为）。
+  * `objects[].static_friction`（缺省跟随 `friction`）：切向相对速度低于阈值时用静摩擦，
+    高于则用动摩擦——"推得动、但自己不会慢慢滑"。判定用**施力之前**的速度
+    （用施力后的速度会让静止的箱子永远走"滑动"分支，静摩擦形同虚设）。
+  * 一切缺省都等于老行为：不写这些字段的场景，仿真结果**逐位不变**
+    （digest 回归测试钉着）。
+  * 编辑器：物理面板多了「静摩擦」滑块与「摩擦合成 / 弹性合成」下拉（含"（缺省）"
+    一项，点了能回到跟随世界缺省），导出时从刚体写回。
+  验证：`cargo test -p quench3d-physics --lib -- static_friction friction_combine combine_rule`、
+  `cargo test -p quench3d-cli --lib -- physics_materials`、
+  `cargo test -p quench3d-cli --test cli_e2e -- static_friction_and_combine`、
+  `cargo test -p quench3d-editor --test scene_roundtrip -- export_preserves`。
+
 - **睡眠 API 补全：`RigidBody::sleep()` 公开 + `PhysicsWorld::wake_up_all()`**。
   以前只能 `wake_up()`（叫醒一个），想让"体检式"地批量唤醒或手动让某个物体入睡，
   得自己遍历（而且 `sleep()` 是 crate 私有）。现在：

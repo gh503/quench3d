@@ -417,6 +417,17 @@ for e in world.sensor_events() {  // 只在进入/离开的那一子步有内容
     println!("{} {:?} {:?}", if e.started { "进入" } else { "离开" }, e.sensor, e.other);
 }
 
+// 物理材质：静摩擦独立于动摩擦；摩擦/恢复的合成规则可选（缺省 = 老行为）
+world.add_builder(
+    BodyBuilder::dynamic(Shape::Box { half_extents: Vec3::splat(0.5) })
+        .friction(0.4)                    // 动摩擦（已经在滑动时）
+        .static_friction(0.9)             // 静摩擦（切向速度很小时）——"推得动但推不住"
+        .friction_combine(CombineRule::Min)   // 与别的物体接触时听谁的
+        .restitution_combine(CombineRule::Average)
+);
+world.config.friction_combine = CombineRule::Min;      // 世界缺省（不设 = 几何平均）
+world.config.restitution_combine = CombineRule::Max;  //              （不设 = 取大）
+
 // 睡眠：自动（静止 0.5 秒后整岛一起睡）之外，也能手动控制
 world.wake_up_all();                  // 一趟唤醒全部，返回"叫醒了几个"
 if let Some(b) = world.body_mut(handle) {
@@ -693,6 +704,8 @@ NaN 刚体  : 0
                 "shadow_quality": { "strength": 0.85, "radius": 28 },
                 "sky_colors": { "zenith": [0.22, 0.42, 0.78], "horizon": [0.62, 0.74, 0.88] },
                 "bloom": { "intensity": 0.6, "threshold": 1.0 } },
+  "physics": { "friction_combine": "min", "restitution_combine": "max",
+               "static_friction_speed": 0.02 },
   "simulate": { "steps": 180, "dt": 0.0166667 },
   "render": { "output": "scene.png", "width": 960, "height": 600, "msaa": 4 }
 }
@@ -710,6 +723,12 @@ NaN 刚体  : 0
 * `lighting.point_lights` 最多 8 盏生效，**不写这个字段 = 保留预设自带的补光**，写 `[]` 才是显式清空。
 * `lighting.bloom` / `lighting.fog` **不写 = 关闭**（像素与关闭时逐位相同）；写了就是打开
   （fog 的 `density` 缺省 0.02，写 0 等于关）。
+* `objects[].static_friction` 缺省**跟随 `friction`**（只管动摩擦的老场景行为逐位不变）；
+  想表达"推得动、但推住之后不会慢慢滑"就把它写得比 `friction` 大。
+* `friction_combine` / `restitution_combine` 可写在世界级 `physics` 段（缺省）或单个物体上
+  （覆盖缺省）。缺省规则是**几何平均**（摩擦）与**取大**（恢复）——正是老行为；
+  改成 `average`/`min`/`max`/`multiply` 会改变已有场景的观感，属于**有意**调整。
+  两端都显式写了不同规则时，取 slot 序号靠前的那个（宽相输出按序号有序，所以与线程数无关）。
 * `lighting.point_lights.color` / `lighting.fog.color` / `lighting.sky_colors.*` 都是
   **线性空间**数值（跟 `materials.*.color` 的 sRGB 约定不同）——想要暖光就写
   `[1, 0.92, 0.85]` 这种数，写 `[1, 235, 220]` 那种 0~255 的整数会过曝或全黑。

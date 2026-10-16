@@ -193,6 +193,8 @@ fn export_preserves_sections_the_editor_does_not_model() {
       "name": "preserve",
       "gravity": [0, -9.81, 0],
       "ground": { "size": 24, "friction": 0.7 },
+      "physics": { "friction_combine": "min", "restitution_combine": "average",
+                   "static_friction_speed": 0.03 },
       "lighting": { "preset": "studio", "sun_direction": [-0.4, -1, -0.35], "sun_intensity": 3.5, "ambient": 0.25, "exposure": 1.4, "shadows": true, "sky": true,
                     "fog": { "color": [0.18, 0.22, 0.3], "density": 0.04 },
                     "shadow_quality": { "strength": 0.65, "radius": 45 },
@@ -205,7 +207,9 @@ fn export_preserves_sections_the_editor_does_not_model() {
       },
       "objects": [
         { "name": "box", "shape": { "type": "box", "size": [0.8, 0.8, 0.8] },
-          "position": [0, 2.0, 0], "material": "wood", "body": "dynamic", "density": 400 },
+          "position": [0, 2.0, 0], "material": "wood", "body": "dynamic", "density": 400,
+          "friction": 0.35, "static_friction": 0.9, "friction_combine": "max",
+          "restitution_combine": "multiply" },
         { "name": "peg", "shape": { "type": "sphere", "radius": 0.25 },
           "position": [0, 4.0, 0], "body": "static" }
       ],
@@ -228,6 +232,10 @@ fn export_preserves_sections_the_editor_does_not_model() {
         "\"fog\"",
         "\"shadow_quality\"",
         "\"sky_colors\"",
+        // 物理材质（静摩擦 + 合成规则）：编辑器能改，导出必须带上
+        "\"static_friction\": 0.9",
+        "\"friction_combine\": \"max\"",
+        "\"restitution_combine\": \"multiply\"",
         "\"simulate\"",
         "\"steps\": 240",
         "\"render\"",
@@ -271,6 +279,43 @@ fn export_preserves_sections_the_editor_does_not_model() {
     assert!((quality.radius.unwrap() - 45.0).abs() < 1e-6, "{quality:?}");
     let sky = reread.lighting.sky_colors.expect("天空颜色被丢了");
     assert_eq!(sky.zenith, Some([0.1, 0.2, 0.6]), "{sky:?}");
+    // 物理材质：世界缺省段要原样保留（编辑器不建模它，但绝不能丢）
+    assert_eq!(
+        reread.physics.friction_combine,
+        Some(quench3d_cli::scene_doc::CombineRuleDoc::Min),
+        "physics 段被丢了：{:?}",
+        reread.physics
+    );
+    assert_eq!(reread.physics.static_friction_speed, Some(0.03));
+    let box_obj = reread
+        .objects
+        .iter()
+        .find(|o| o.name.as_deref() == Some("box"))
+        .expect("box 被丢了");
+    assert_eq!(box_obj.static_friction, Some(0.9), "{box_obj:?}");
+    assert_eq!(
+        box_obj.friction_combine,
+        Some(quench3d_cli::scene_doc::CombineRuleDoc::Max),
+        "{box_obj:?}"
+    );
+    assert_eq!(
+        box_obj.restitution_combine,
+        Some(quench3d_cli::scene_doc::CombineRuleDoc::Multiply),
+        "{box_obj:?}"
+    );
+
+    // 物理材质**编辑**也要能存下去（编辑器 UI 里拖静摩擦、选合成规则走的就是这条路）
+    let target = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "box")
+        .and_then(|o| o.body)
+        .expect("box 应当有刚体");
+    if let Some(b) = engine.world.body_mut(target) {
+        b.static_friction = 1.35;
+        b.friction_combine = Some(quench3d::prelude::CombineRule::Multiply);
+    }
 
     // 光照**编辑**必须能存下去（这是"能改光照"这件事的行为证据，不只是"不丢"）。
     engine.scene.lighting.exposure = 2.25;
@@ -317,6 +362,20 @@ fn export_preserves_sections_the_editor_does_not_model() {
     );
     let edit_sky = edited_reread.lighting.sky_colors.expect("天空颜色被丢了");
     assert_eq!(edit_sky.horizon, Some([0.9, 0.8, 0.7]), "{edit_sky:?}");
+    let edit_box = edited_reread
+        .objects
+        .iter()
+        .find(|o| o.name.as_deref() == Some("box"))
+        .expect("box 被丢了");
+    assert!(
+        (edit_box.static_friction.unwrap() - 1.35).abs() < 1e-6,
+        "改了静摩擦却没写进文件：{edit_box:?}"
+    );
+    assert_eq!(
+        edit_box.friction_combine,
+        Some(quench3d_cli::scene_doc::CombineRuleDoc::Multiply),
+        "改了合成规则却没写进文件：{edit_box:?}"
+    );
 
     // 存储必须是固定点：存 → 读 → 再存，字节相同。
     let Some(mut engine2) = headless_engine() else {

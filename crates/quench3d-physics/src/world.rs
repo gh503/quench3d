@@ -229,7 +229,13 @@ pub struct PhysicsWorld {
     /// 每步复用的刚体视图缓冲（避免每步重新分配 O(n) 内存）。
     scratch_views: Vec<BodyView>,
     /// 每步复用的材质缓冲 `(摩擦, 恢复)`。
-    scratch_materials: Vec<(f32, f32)>,
+    scratch_materials: Vec<solver::ContactMaterial>,
+    /// 本步**施力之前**的线/角速度（按 slot 下标对齐）。
+    ///
+    /// 静摩擦/动摩擦的判定用它，而不是"施力之后"的速度：一个静止的箱子被推的
+    /// 那一步，施力后的速度已经不低了（Δt × 加速度），拿它判定会永远选动摩擦，
+    /// 于是"推得动、但推不住"变成"一推就走、一直滑"。
+    scratch_pre_velocities: Vec<(Vec3, Vec3)>,
     /// 每步复用的关节条目缓冲。
     scratch_joint_entries: Vec<JointEntry>,
     /// 每步复用的关节冲量缓冲。
@@ -360,6 +366,7 @@ impl PhysicsWorld {
             wake_list: Vec::new(),
             scratch_views: Vec::new(),
             scratch_materials: Vec::new(),
+            scratch_pre_velocities: Vec::new(),
             scratch_joint_entries: Vec::new(),
             scratch_joint_impulses: Vec::new(),
             config: SolverConfig::default(),
@@ -746,6 +753,15 @@ impl PhysicsWorld {
                 }
             };
         }
+        // 0. 快照"施力之前"的速度（静摩擦/动摩擦判定要用，见 `scratch_pre_velocities`）
+        let mut pre_velocities = std::mem::take(&mut self.scratch_pre_velocities);
+        pre_velocities.clear();
+        for slot in self.bodies.iter() {
+            match &slot.body {
+                Some(b) => pre_velocities.push((b.linear_velocity, b.angular_velocity)),
+                None => pre_velocities.push((Vec3::ZERO, Vec3::ZERO)),
+            }
+        }
         // 1. 速度积分
         solver::integrate_velocities(&mut self.bodies, self.gravity, dt);
         lap!(integrate_velocity_us);
@@ -761,11 +777,23 @@ impl PhysicsWorld {
             match &slot.body {
                 Some(b) => {
                     views.push(BodyView::from_body(b));
-                    materials.push((b.friction, b.restitution));
+                    materials.push(solver::ContactMaterial {
+                        dynamic_friction: b.friction,
+                        static_friction: b.static_friction,
+                        restitution: b.restitution,
+                        friction_combine: b.friction_combine,
+                        restitution_combine: b.restitution_combine,
+                    });
                 }
                 None => {
                     views.push(BodyView::frozen());
-                    materials.push((0.0, 0.0));
+                    materials.push(solver::ContactMaterial {
+                        dynamic_friction: 0.0,
+                        static_friction: 0.0,
+                        restitution: 0.0,
+                        friction_combine: None,
+                        restitution_combine: None,
+                    });
                 }
             }
         }
@@ -796,6 +824,7 @@ impl PhysicsWorld {
         self.contact_solver.prepare(
             &views,
             &materials,
+            &pre_velocities,
             &self.manifolds,
             &self.cache,
             &self.config,
@@ -930,6 +959,7 @@ impl PhysicsWorld {
         }
         self.joints = joints;
         // 归还复用缓冲（下一步继续用，稳态下不再分配）
+        self.scratch_pre_velocities = pre_velocities;
         self.scratch_views = views;
         self.scratch_materials = materials;
         self.scratch_joint_impulses = impulses;

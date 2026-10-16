@@ -5,7 +5,7 @@
 
 use quench3d_math::*;
 
-use crate::body::{BodyBuilder, InteractionGroups};
+use crate::body::{BodyBuilder, CombineRule, InteractionGroups};
 use crate::contact::ContactPair;
 use crate::joints::Joint;
 use crate::query::QueryFilter;
@@ -1853,4 +1853,112 @@ fn wake_up_all_wakes_every_sleeper_and_manual_sleep_clears_velocity() {
         !w.body(awake).unwrap().is_sleeping(),
         "allow_sleep = false 的刚体不该停在睡眠状态"
     );
+}
+
+#[test]
+fn static_friction_holds_a_box_that_low_static_friction_lets_slide() {
+    // 同一个推力、同一个动摩擦，只有静摩擦不同：一个被按住，一个滑出去。
+    //
+    // 水平推力折合 **5 m/s²**（箱子 1 m³、密度 1000 → 1000 kg，力就是 5000 N）：
+    // * 静摩擦 1.0：μ_s = sqrt(1.0 × 0.5 地面) ≈ 0.707 → 阈值 6.9 m/s² > 5，按住；
+    // * 静摩擦 0.05：μ_s ≈ 0.158 → 阈值 1.6 m/s² < 5，滑走。
+    // （动摩擦两例都是 sqrt(0.3 × 0.5) ≈ 0.387，所以差异只来自静摩擦这一项。）
+    fn displacement(static_friction: f32) -> f32 {
+        let mut w = PhysicsWorld::new();
+        add_ground(&mut w, 0.5, 0.0);
+        let mass = 1000.0;
+        let h = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            })
+            .position(vec3(0.0, 0.5, 0.0))
+            .friction(0.3)
+            .static_friction(static_friction)
+            .build(),
+        );
+        let start = w.body(h).unwrap().position();
+        for _ in 0..120 {
+            if let Some(b) = w.body_mut(h) {
+                b.apply_force(Vec3::X * (5.0 * mass));
+            }
+            w.step(DT);
+        }
+        (w.body(h).unwrap().position() - start).length()
+    }
+
+    let held = displacement(1.0);
+    let slid = displacement(0.05);
+    assert!(held < 0.05, "静摩擦 1.0 该把箱子按住，实际位移 {held:.4} m");
+    assert!(slid > 0.5, "静摩擦 0.05 该滑出去，实际位移 {slid:.4} m");
+}
+
+#[test]
+fn friction_combine_rule_changes_how_far_a_box_slides() {
+    // 箱子与地面各写自己的摩擦，`friction_combine` 决定听谁的：
+    // `min` → 0.3，`max` → 0.5（地面 0.5）。摩擦越大滑得越近。
+    fn travelled(rule: CombineRule) -> f32 {
+        let mut w = PhysicsWorld::new();
+        add_ground(&mut w, 0.5, 0.0);
+        let h = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            })
+            .position(vec3(0.0, 0.5, 0.0))
+            .friction(0.3)
+            // 静摩擦给 0：箱子一开始就在滑动，测到的就是动摩擦合成规则本身
+            .static_friction(0.0)
+            .friction_combine(rule)
+            .build(),
+        );
+        w.body_mut(h)
+            .unwrap()
+            .set_linear_velocity(vec3(4.0, 0.0, 0.0));
+        let start = w.body(h).unwrap().position();
+        for _ in 0..180 {
+            w.step(DT);
+        }
+        w.body(h).unwrap().position().x - start.x
+    }
+
+    let soft = travelled(CombineRule::Min);
+    let hard = travelled(CombineRule::Max);
+    assert!(
+        soft > hard + 0.3,
+        "取小的摩擦该滑得更远：min → {soft:.3} m，max → {hard:.3} m"
+    );
+}
+
+#[test]
+fn combine_rule_math_and_names() {
+    // 五条规则的数学定义
+    assert!((CombineRule::GeometricMean.combine(0.5, 0.5) - 0.5).abs() < 1e-6);
+    assert!((CombineRule::GeometricMean.combine(0.0, 1.0)).abs() < 1e-6);
+    assert!((CombineRule::Average.combine(0.2, 0.8) - 0.5).abs() < 1e-6);
+    assert!((CombineRule::Min.combine(0.2, 0.8) - 0.2).abs() < 1e-6);
+    assert!((CombineRule::Max.combine(0.2, 0.8) - 0.8).abs() < 1e-6);
+    assert!((CombineRule::Multiply.combine(0.5, 0.5) - 0.25).abs() < 1e-6);
+    // 负数当 0、非有限当 0（一个 NaN 材质不该把整个世界传染成 NaN）
+    assert_eq!(CombineRule::Average.combine(-1.0, 0.4), 0.2);
+    assert_eq!(CombineRule::Max.combine(f32::NAN, 0.4), 0.4);
+    assert_eq!(CombineRule::Min.combine(f32::INFINITY, 0.4), 0.0);
+    // 名字与解析互逆（场景文件、报告、编辑器下拉框都用这些名字）
+    for rule in CombineRule::ALL {
+        assert_eq!(CombineRule::from_name(rule.name()), Some(rule));
+    }
+    assert_eq!(CombineRule::from_name("geometric"), None);
+    // 缺省规则必须与历史行为一致：摩擦 = 几何平均，恢复 = 取大
+    let b = BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+        .friction(0.4)
+        .restitution(0.6)
+        .build();
+    assert_eq!(b.friction_combine, None, "不指定就是 None（用世界缺省）");
+    assert_eq!(b.restitution_combine, None);
+    // 静摩擦缺省跟随动摩擦（只用 friction 的老代码行为不变）
+    assert_eq!(b.static_friction, 0.4);
+    let c = BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+        .friction(0.4)
+        .static_friction(0.9)
+        .build();
+    assert_eq!(c.friction, 0.4);
+    assert_eq!(c.static_friction, 0.9);
 }

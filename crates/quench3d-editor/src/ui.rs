@@ -73,6 +73,33 @@ pub fn panels(
     req
 }
 
+/// 合成规则下拉框：返回 `true` 表示用户改了它。
+///
+/// `None` = "跟随世界缺省"，所以下拉里除了五条规则还有一个"（缺省）"选项——
+/// 少了它，用户一旦点过下拉框就再也回不到"跟随世界"的状态。
+fn combine_rule_combo(ui: &mut Ui, label: &str, value: &mut Option<CombineRule>) -> bool {
+    let mut changed = false;
+    let text = value.map(|r| r.name()).unwrap_or("（缺省）");
+    egui::ComboBox::from_id_salt(label)
+        .selected_text(format!("{label}：{text}"))
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(value.is_none(), "（缺省）").clicked() {
+                *value = None;
+                changed = true;
+            }
+            for rule in CombineRule::ALL {
+                if ui
+                    .selectable_label(*value == Some(rule), rule.name())
+                    .clicked()
+                {
+                    *value = Some(rule);
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
 /// 顶部工具栏。
 fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, req: &mut Requests) {
     egui::Panel::top("quench3d-toolbar").show(ui, |ui| {
@@ -1176,6 +1203,50 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                                     if let Some(h) = object.body {
                                         if let Some(b) = engine.world.body_mut(h) {
                                             b.restitution = restitution;
+                                        }
+                                    }
+                                }
+                                // 静摩擦：切向速度很小时用（"推得动但自己不会慢慢滑"）。
+                                // 缺省跟随动摩擦，所以这里显示的初值就是动摩擦的值。
+                                let mut static_friction = object
+                                    .body
+                                    .and_then(|h| engine.world.body(h))
+                                    .map(|b| b.static_friction)
+                                    .unwrap_or(friction);
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut static_friction, 0.0..=2.0)
+                                            .text("静摩擦"),
+                                    )
+                                    .on_hover_text("切向速度很小时用的摩擦系数（≥ 动摩擦才「推得动又推不住」）")
+                                    .changed()
+                                {
+                                    if let Some(h) = object.body {
+                                        if let Some(b) = engine.world.body_mut(h) {
+                                            b.static_friction = static_friction;
+                                        }
+                                    }
+                                }
+                                // 合成规则：和别的物体接触时听谁的（缺省 = 世界规则）
+                                let mut f_rule = object
+                                    .body
+                                    .and_then(|h| engine.world.body(h))
+                                    .and_then(|b| b.friction_combine);
+                                let mut r_rule = object
+                                    .body
+                                    .and_then(|h| engine.world.body(h))
+                                    .and_then(|b| b.restitution_combine);
+                                if combine_rule_combo(ui, "摩擦合成", &mut f_rule) {
+                                    if let Some(h) = object.body {
+                                        if let Some(b) = engine.world.body_mut(h) {
+                                            b.friction_combine = f_rule;
+                                        }
+                                    }
+                                }
+                                if combine_rule_combo(ui, "弹性合成", &mut r_rule) {
+                                    if let Some(h) = object.body {
+                                        if let Some(b) = engine.world.body_mut(h) {
+                                            b.restitution_combine = r_rule;
                                         }
                                     }
                                 }

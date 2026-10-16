@@ -457,6 +457,27 @@
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
 
+### 8.8 「物理材质：静摩擦 + 合成规则」怎么落的（第 22 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-physics --lib -- static_friction friction_combine`、
+> `cargo test -p quench3d-cli --lib -- physics_materials`、
+> `cargo test -p quench3d-cli --test cli_e2e -- static_friction_and_combine`、
+> `cargo test -p quench3d-editor --test scene_roundtrip -- export_preserves`。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 引擎 | `CombineRule`（几何平均/平均/取小/取大/相乘）+ `RigidBody::static_friction` | 缺省规则必须是 `GeometricMean`（摩擦）/ `Max`（恢复），否则**现有场景的观感会变**（digest 回归测试就是这条的护栏） |
+| 引擎 | 静/动摩擦的判定用**施力之前**的速度 | 第一版用施力后的速度：静止箱子被推的那一步速度已经是 Δt×a ≈ 0.08 m/s > 阈值，于是永远走"滑动"分支，"静摩擦"这项形同虚设。现在在 `step` 开头快照速度（复用缓冲，稳态零分配） |
+| 引擎 | 每次接触只在**准备阶段**定一次摩擦锥上界 | 若在速度迭代里反复判定，上界会跳变，收敛变差且结果依赖迭代次数 |
+| 规则解析 | 先显式、后缺省；两端都显式且不同时取 A（slot 靠前者） | 与 Unity 的 per-collider combine + 工程缺省一个思路。不做"两端的规则再合成一次"：`Average` 与 `GeometricMean` 混在一起没有物理意义 |
+| 格式 | 顶层 `physics` 段 + 物体级覆盖字段 | 三段都可选、都不写就是引擎缺省 → 老场景逐位不变 |
+| 编辑器 | 「静摩擦」滑块 + 两个合成规则下拉 | 下拉里必须有"（缺省）"项：少了它，用户点过一次就再也回不到"跟随世界缺省" |
+| 校验 | 负静摩擦/负阈值 = error；静摩擦 < 动摩擦、阈值 > 1 m/s、没有刚体却写规则 = warning | 后三条都是"能跑但多半写错了"，所以是警告不是错误 |
+
+**没做（诚实边界）**：没有各向异性摩擦/滚动摩擦；没有"摩擦-速度曲线"（只有静/动两档）；
+两端都显式指定**不同**规则时只有一条确定性优先级（slot 靠前者），格式层没有额外警告；
+`static_friction_speed` 是引擎级参数，没有按材质给不同阈值。
+
 ### 8.7 「睡眠 API 补全」怎么落的（第 21 轮，已跑门禁）
 
 > **状态：已实施**。验证：`cargo test -p quench3d-physics --lib -- wake_up_all`、

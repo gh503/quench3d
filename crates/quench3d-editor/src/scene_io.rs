@@ -251,6 +251,15 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             density: None,
             restitution: body.map(|b| b.restitution),
             friction: body.map(|b| b.friction),
+            static_friction: body.map(|b| b.static_friction),
+            // 合成规则：编辑器能改（见光照面板下面的物理段），导出时从刚体读回来，
+            // 这样"载入带规则的场景 → 存盘"不会把规则丢掉。
+            friction_combine: body
+                .and_then(|b| b.friction_combine)
+                .map(quench3d_cli::scene_doc::CombineRuleDoc::from),
+            restitution_combine: body
+                .and_then(|b| b.restitution_combine)
+                .map(quench3d_cli::scene_doc::CombineRuleDoc::from),
             velocity: body
                 .map(|b| b.linear_velocity())
                 .filter(|v| v.length_squared() > 0.0)

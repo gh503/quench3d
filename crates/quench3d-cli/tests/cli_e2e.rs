@@ -852,6 +852,103 @@ fn absurd_scene_sizes_are_rejected_with_clear_diagnostics() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// 物理材质接线（gaps #22）：静摩擦与摩擦合成规则**真的改变仿真结果**。
+///
+/// 只断言"字段解析成功了"是不够的：这两个参数的全部价值就是让箱子
+/// "按住 / 滑走""滑得远 / 滑得近"，所以这里用 `simulate` 报告里的 `displacement`
+/// 直接量它。场景不需要显卡。
+#[test]
+fn static_friction_and_combine_rule_change_the_simulation() {
+    let dir = temp_dir("materials");
+    // 水平推力 5000 N，箱子 1 m³、密度 1000 → 1000 kg → 折合 5 m/s²。
+    // 地面摩擦 0.5（静摩擦跟随）。几何平均下 μ = sqrt(摩擦 × 0.5)。
+    let scene = |obj_extra: serde_json::Value, physics: serde_json::Value| {
+        let mut o = serde_json::json!({
+            "name": "箱子", "shape": { "type": "box", "size": [1, 1, 1] },
+            "body": "dynamic", "position": [0, 0.5, 0], "friction": 0.3
+        });
+        for (k, v) in obj_extra.as_object().expect("extra 要是对象") {
+            o[k] = v.clone();
+        }
+        serde_json::json!({
+            "gravity": [0.0, -9.81, 0.0],
+            "ground": { "size": 40, "friction": 0.5 },
+            "physics": physics,
+            "objects": [o],
+            "actions": [ { "type": "force", "target": "箱子", "at_step": 0, "steps": 120,
+                           "value": [5000, 0, 0] } ],
+            "simulate": { "steps": 150 }
+        })
+    };
+    let displacement = |file: &str, doc: serde_json::Value| -> f64 {
+        let path = write_scene(&dir, file, doc);
+        let v = run(&["simulate", path.to_str().unwrap(), "--json"]).json();
+        assert_eq!(v["ok"], true, "{file}: {v}");
+        // **按名字取**：`states` 里第一个是地面（静态，永远零位移），
+        // 直接取 `[0]` 会得到"位移恒为 0"的假证据（这条坑踩过一次）。
+        v["data"]["states"]
+            .as_array()
+            .expect("要有 states")
+            .iter()
+            .find(|s| s["name"] == "箱子")
+            .and_then(|s| s["displacement"].as_f64())
+            .unwrap_or_else(|| panic!("{file} 缺 箱子 的 displacement: {v}"))
+    };
+
+    // 1. 静摩擦 1.0（μ_s = sqrt(1.0 × 0.5) ≈ 0.707 → 阈值 6.9 m/s² > 5）：按住
+    let held = displacement(
+        "held.json",
+        scene(
+            serde_json::json!({ "static_friction": 1.0 }),
+            serde_json::json!({}),
+        ),
+    );
+    // 2. 静摩擦 0.05（μ_s ≈ 0.158 → 阈值 1.6 m/s²）：滑走
+    let slid = displacement(
+        "slid.json",
+        scene(
+            serde_json::json!({ "static_friction": 0.05 }),
+            serde_json::json!({}),
+        ),
+    );
+    assert!(held < 0.05, "静摩擦 1.0 该按住，实际 {held:.4} m");
+    assert!(slid > 0.5, "静摩擦 0.05 该滑走，实际 {slid:.4} m");
+
+    // 3. 世界级合成规则：同样的场景，`min` 的摩擦比 `max` 小 → 滑得更远
+    //    （箱子 0.3 / 地面 0.5，静摩擦设 0 让它一开始就在滑动，测的是动摩擦）
+    let soft = displacement(
+        "soft.json",
+        scene(
+            serde_json::json!({ "static_friction": 0.0 }),
+            serde_json::json!({ "friction_combine": "min" }),
+        ),
+    );
+    let hard = displacement(
+        "hard.json",
+        scene(
+            serde_json::json!({ "static_friction": 0.0 }),
+            serde_json::json!({ "friction_combine": "max" }),
+        ),
+    );
+    assert!(
+        soft > hard + 0.3,
+        "取小的摩擦该滑得更远：min → {soft:.3} m，max → {hard:.3} m"
+    );
+
+    // 4. 物体级规则覆盖世界缺省：世界 `max`、只有箱子写 `min` → 与世界 `min` 一致
+    let overridden = displacement(
+        "override.json",
+        scene(
+            serde_json::json!({ "static_friction": 0.0, "friction_combine": "min" }),
+            serde_json::json!({ "friction_combine": "max" }),
+        ),
+    );
+    assert!(
+        (overridden - soft).abs() < 1e-3,
+        "物体级规则该盖过世界缺省：{overridden:.4} vs {soft:.4}"
+    );
+}
+
 /// `wake` 动作的 `target: "*"`：一次唤醒**所有**睡着的刚体（引擎 `wake_up_all`）。
 ///
 /// 为什么用"整场景都睡着的零重力场景"：它把睡眠这件事变成**确定**的

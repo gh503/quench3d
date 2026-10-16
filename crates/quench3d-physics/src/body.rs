@@ -124,6 +124,71 @@ pub(crate) fn safe_inv(v: f32) -> f32 {
     }
 }
 
+/// 两个材质接触时，摩擦/恢复系数怎么合成。
+///
+/// 为什么必须有它：`friction` 是**每端各写一个**的，接触时到底听谁的？
+/// 没有显式规则时，引擎只能替你决定（本引擎缺省是几何平均，与改这一版之前的行为
+/// 逐位相同）。可一旦要和别的工具对齐（PhysX 的 `eAVERAGE`、Unity 的
+/// `Average`/`Min`/`Maximum`/`Multiply`），"我写了 0.5 和 0.5 却得到 0.5"这类
+/// 问题就会反复出现——所以把规则摆到台面上。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CombineRule {
+    /// 几何平均 `sqrt(a*b)`（**缺省**，与历史行为一致）。
+    #[default]
+    GeometricMean,
+    /// 算术平均 `(a+b)/2`（PhysX 的 `eAVERAGE`）。
+    Average,
+    /// 取小 `min(a,b)`（"软的说了算"，最保守）。
+    Min,
+    /// 取大 `max(a,b)`（"硬的说了算"，最容易打滑/弹跳）。
+    Max,
+    /// 相乘 `a*b`（Unity 的 `Multiply`）。
+    Multiply,
+}
+
+impl CombineRule {
+    /// 全部规则（UI 下拉框、文档与测试都靠它遍历）。
+    pub const ALL: [CombineRule; 5] = [
+        CombineRule::GeometricMean,
+        CombineRule::Average,
+        CombineRule::Min,
+        CombineRule::Max,
+        CombineRule::Multiply,
+    ];
+
+    /// 场景文件 / 报告里用的名字（与 serde 的 `rename_all = "snake_case"` 一致）。
+    pub fn name(self) -> &'static str {
+        match self {
+            CombineRule::GeometricMean => "geometric_mean",
+            CombineRule::Average => "average",
+            CombineRule::Min => "min",
+            CombineRule::Max => "max",
+            CombineRule::Multiply => "multiply",
+        }
+    }
+
+    /// 从场景文件/报告里的名字解析（与 [`Self::name`] 互逆）。
+    pub fn from_name(name: &str) -> Option<Self> {
+        CombineRule::ALL.into_iter().find(|r| r.name() == name)
+    }
+
+    /// 按规则合成两个系数。
+    ///
+    /// 负数被当作 0（摩擦/恢复没有负值）；非有限值被当作 0，
+    /// 免得一个 NaN 材质把整个世界变成 NaN 速度。
+    pub fn combine(self, a: f32, b: f32) -> f32 {
+        let a = if a.is_finite() { a.max(0.0) } else { 0.0 };
+        let b = if b.is_finite() { b.max(0.0) } else { 0.0 };
+        match self {
+            CombineRule::GeometricMean => (a * b).sqrt(),
+            CombineRule::Average => 0.5 * (a + b),
+            CombineRule::Min => a.min(b),
+            CombineRule::Max => a.max(b),
+            CombineRule::Multiply => a * b,
+        }
+    }
+}
+
 /// 刚体。
 #[derive(Clone, Debug, PartialEq)]
 pub struct RigidBody {
@@ -139,8 +204,23 @@ pub struct RigidBody {
     pub angular_velocity: Vec3,
     /// 恢复系数 [0, 1]。
     pub restitution: f32,
-    /// 库仑摩擦系数。
+    /// 动摩擦系数（已经在滑动时用；`friction` 这个老名字就是它）。
     pub friction: f32,
+    /// 静摩擦系数（切向相对速度 < `SolverConfig::static_friction_speed` 时用）。
+    ///
+    /// 缺省等于 `friction`（只用老字段的行为完全不变）；想表达"推得动但推不住"
+    /// 就把它设得比 `friction` 大（真实世界里木头/橡胶就是这么干的）。
+    pub static_friction: f32,
+    /// 摩擦系数的合成规则；`None` = 没指定，用世界的缺省规则。
+    ///
+    /// 为什么要区分"没指定"和"指定成几何平均"：两端都写了规则时得有个确定的
+    /// 优先级，`None` 让"我只在一端写了 min"能生效（见 `ContactMaterial` 的解析）。
+    pub friction_combine: Option<CombineRule>,
+    /// 恢复系数的合成规则；`None` = 没指定，用世界的缺省规则。
+    ///
+    /// 世界的缺省是 `Max`：旧实现写死"取两个里大的"（`max(ea, eb)`），
+    /// 换成平均会让所有球都跳得不一样，缺省必须保住逐位一致。
+    pub restitution_combine: Option<CombineRule>,
     /// 线速度阻尼（每秒比例）。
     pub linear_damping: f32,
     /// 角速度阻尼。
@@ -437,6 +517,10 @@ pub struct BodyBuilder {
     mass_override: Option<f32>,
     restitution: f32,
     friction: f32,
+    /// `None` = 跟随 `friction`（在 `build()` 里定下来）。
+    static_friction: Option<f32>,
+    friction_combine: Option<CombineRule>,
+    restitution_combine: Option<CombineRule>,
     linear_damping: f32,
     angular_damping: f32,
     gravity_scale: f32,
@@ -459,6 +543,9 @@ impl BodyBuilder {
             mass_override: None,
             restitution: 0.0,
             friction: 0.5,
+            static_friction: None,
+            friction_combine: None,
+            restitution_combine: None,
             linear_damping: 0.0,
             angular_damping: 0.0,
             gravity_scale: 1.0,
@@ -557,6 +644,29 @@ impl BodyBuilder {
         if f.is_finite() {
             self.friction = f.max(0.0);
         }
+        self
+    }
+
+    /// 静摩擦系数（非负）；不给就跟随 [`Self::friction`]。
+    ///
+    /// 只在"切向相对速度足够小"时生效（阈值见 `SolverConfig::static_friction_speed`）。
+    /// 表现为"推得动、但自己不会慢慢滑"。
+    pub fn static_friction(mut self, f: f32) -> Self {
+        if f.is_finite() {
+            self.static_friction = Some(f.max(0.0));
+        }
+        self
+    }
+
+    /// 指定摩擦系数的合成规则（不指定就用世界的缺省）。
+    pub fn friction_combine(mut self, rule: CombineRule) -> Self {
+        self.friction_combine = Some(rule);
+        self
+    }
+
+    /// 指定恢复系数的合成规则（不指定就用世界的缺省）。
+    pub fn restitution_combine(mut self, rule: CombineRule) -> Self {
+        self.restitution_combine = Some(rule);
         self
     }
 
@@ -666,6 +776,9 @@ impl BodyBuilder {
             angular_velocity: self.angular_velocity.clamp_length(MAX_ANGULAR_SPEED),
             restitution: self.restitution,
             friction: self.friction,
+            static_friction: self.static_friction.unwrap_or(self.friction),
+            friction_combine: self.friction_combine,
+            restitution_combine: self.restitution_combine,
             linear_damping: self.linear_damping,
             angular_damping: self.angular_damping,
             gravity_scale: self.gravity_scale,

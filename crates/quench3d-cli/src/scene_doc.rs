@@ -126,6 +126,9 @@ pub struct SceneDoc {
     /// 重力加速度，缺省 `[0, -9.81, 0]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gravity: Option<[f32; 3]>,
+    /// 世界级物理参数（缺省即引擎缺省；**不写 = 行为与以前逐位相同**）。
+    #[serde(default)]
+    pub physics: PhysicsDoc,
     /// 地面：静态平面 + 可视平面。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ground: Option<GroundDoc>,
@@ -173,6 +176,71 @@ pub struct SceneDoc {
     pub base_dir: Option<PathBuf>,
 }
 
+/// 世界级物理参数。
+///
+/// 这里的每一项都有"引擎缺省"，**不写就是缺省**（且与这一节不存在时逐位相同）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicsDoc {
+    /// 摩擦系数的**缺省**合成规则（两端都没显式指定时用），缺省 `geometric_mean`。
+    ///
+    /// 这个缺省是历史行为：`sqrt(fa × fb)`。想改成"取小/取大/平均/相乘"就在这里写，
+    /// 或者只在某个物体上写 `friction_combine`（显式优先于这里的缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_combine: Option<CombineRuleDoc>,
+    /// 恢复系数的**缺省**合成规则，缺省 `max`（历史行为是取两个里大的）。
+    ///
+    /// 换成 `average` 会让同一批球跳得不一样高——这是**观感变化**，不是 bug 修复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restitution_combine: Option<CombineRuleDoc>,
+    /// 切向相对速度低于多少（m/s）算"静止接触"、改用静摩擦系数，缺省 0.02。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_friction_speed: Option<f32>,
+}
+
+/// 摩擦/恢复系数的合成规则（场景文件里的写法）。
+///
+/// 与引擎里的 [`CombineRule`] 一一对应；分开定义是因为引擎 crate 不依赖 serde
+/// （解析层的东西不该渗进物理内核）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CombineRuleDoc {
+    /// 几何平均 `sqrt(a×b)`（缺省）。
+    GeometricMean,
+    /// 算术平均 `(a+b)/2`。
+    Average,
+    /// 取小。
+    Min,
+    /// 取大。
+    Max,
+    /// 相乘 `a×b`。
+    Multiply,
+}
+
+impl From<CombineRule> for CombineRuleDoc {
+    fn from(rule: CombineRule) -> Self {
+        match rule {
+            CombineRule::GeometricMean => CombineRuleDoc::GeometricMean,
+            CombineRule::Average => CombineRuleDoc::Average,
+            CombineRule::Min => CombineRuleDoc::Min,
+            CombineRule::Max => CombineRuleDoc::Max,
+            CombineRule::Multiply => CombineRuleDoc::Multiply,
+        }
+    }
+}
+
+impl From<CombineRuleDoc> for CombineRule {
+    fn from(rule: CombineRuleDoc) -> Self {
+        match rule {
+            CombineRuleDoc::GeometricMean => CombineRule::GeometricMean,
+            CombineRuleDoc::Average => CombineRule::Average,
+            CombineRuleDoc::Min => CombineRule::Min,
+            CombineRuleDoc::Max => CombineRule::Max,
+            CombineRuleDoc::Multiply => CombineRule::Multiply,
+        }
+    }
+}
+
 impl MaterialDoc {
     /// 四个贴图槽位：`(JSON 字段名, 路径, 是否按 sRGB 采样)`。
     ///
@@ -207,6 +275,7 @@ impl Default for SceneDoc {
             version: VERSION,
             name: None,
             gravity: None,
+            physics: PhysicsDoc::default(),
             ground: None,
             materials: BTreeMap::new(),
             objects: Vec::new(),
@@ -423,9 +492,21 @@ pub struct ObjectDoc {
     /// 恢复系数 0~1，缺省 0.2。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restitution: Option<f32>,
-    /// 摩擦系数，缺省 0.5。
+    /// 动摩擦系数，缺省 0.5。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub friction: Option<f32>,
+    /// 静摩擦系数（切向速度很小时用），缺省**跟随 `friction`**。
+    ///
+    /// 想让"推得动但自己不会慢慢滑"就把它写得比 `friction` 大（真实材质大多如此，
+    /// 木头 0.4/0.5、橡胶 0.6/1.0 之类）。写 0 = 放下就开始滑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_friction: Option<f32>,
+    /// 这个物体的摩擦系数合成规则（覆盖 `physics.friction_combine`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_combine: Option<CombineRuleDoc>,
+    /// 这个物体的恢复系数合成规则（覆盖 `physics.restitution_combine`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restitution_combine: Option<CombineRuleDoc>,
     /// 初始线速度，缺省 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velocity: Option<[f32; 3]>,
@@ -1464,6 +1545,23 @@ impl SceneDoc {
                 .with_hint("把大场景拆成若干个场景文件，或用 --steps 分帧推进"),
             );
         }
+        if let Some(v) = self.physics.static_friction_speed {
+            if !v.is_finite() || v < 0.0 {
+                out.push(Diagnostic::error(
+                    "physics.static_friction_speed",
+                    "静/动摩擦的切换速度必须是非负的有限数",
+                ));
+            } else if v > 1.0 {
+                out.push(
+                    Diagnostic::warn(
+                        "physics.static_friction_speed",
+                        format!("阈值 {v} m/s 偏大：慢速滑行会被当成静止接触（表现为「滑到一半突然很黏」）"),
+                    )
+                    .with_hint("多数场景 0.01~0.1 就够"),
+                );
+            }
+        }
+
         if self.simulate.steps > MAX_STEPS {
             out.push(
                 Diagnostic::error(
@@ -1825,6 +1923,38 @@ impl SceneDoc {
                         "摩擦系数必须是非负数",
                     ));
                 }
+            }
+            if let Some(sf) = o.static_friction {
+                if !sf.is_finite() || sf < 0.0 {
+                    out.push(Diagnostic::error(
+                        format!("{p}.static_friction"),
+                        "静摩擦系数必须是非负数",
+                    ));
+                } else if let Some(df) = o.friction {
+                    if df.is_finite() && sf < df - 1e-6 {
+                        out.push(
+                            Diagnostic::warn(
+                                format!("{p}.static_friction"),
+                                format!(
+                                    "静摩擦 {sf} 比动摩擦 {df} 小：不会更黏，只会更容易起步滑动"
+                                ),
+                            )
+                            .with_hint("真实材质通常静摩擦 ≥ 动摩擦（想「推不动」就写大一点）"),
+                        );
+                    }
+                }
+            }
+            if o.friction_combine.is_some() && o.body == BodyKind::None {
+                out.push(Diagnostic::warn(
+                    &p,
+                    "这个物体没有刚体（body = none），friction_combine 不会生效",
+                ));
+            }
+            if o.restitution_combine.is_some() && o.body == BodyKind::None {
+                out.push(Diagnostic::warn(
+                    &p,
+                    "这个物体没有刚体（body = none），restitution_combine 不会生效",
+                ));
             }
             if let Some(v) = &o.velocity {
                 if !finite3(v) {
@@ -4042,6 +4172,101 @@ mod tests {
         )
         .unwrap();
         assert!(!SceneDoc::has_errors(&ok.validate()));
+    }
+
+    #[test]
+    fn physics_materials_parse_validate_and_round_trip() {
+        // 合法：世界缺省 + 物体覆盖都写全
+        let doc = SceneDoc::from_json(
+            r#"{ "physics": { "friction_combine": "min", "restitution_combine": "average",
+                            "static_friction_speed": 0.05 },
+                 "objects": [
+                   { "name": "箱子", "body": "dynamic", "friction": 0.4, "static_friction": 0.8,
+                     "friction_combine": "max", "restitution_combine": "multiply" } ] }"#,
+        )
+        .unwrap();
+        assert!(!SceneDoc::has_errors(&doc.validate()));
+        assert_eq!(
+            doc.physics.friction_combine,
+            Some(CombineRuleDoc::Min),
+            "世界缺省要解析出来"
+        );
+        assert_eq!(doc.physics.static_friction_speed, Some(0.05));
+        let o = &doc.objects[0];
+        assert_eq!(o.static_friction, Some(0.8));
+        assert_eq!(o.friction_combine, Some(CombineRuleDoc::Max));
+        assert_eq!(o.restitution_combine, Some(CombineRuleDoc::Multiply));
+
+        // JSON 往返：写出去再读回来，数值按类型核对（不做字符串匹配）
+        let json = serde_json::to_string(&doc).unwrap();
+        let back = SceneDoc::from_json(&json).unwrap();
+        assert_eq!(back.physics.friction_combine, Some(CombineRuleDoc::Min));
+        assert_eq!(back.objects[0].static_friction, Some(0.8));
+        assert_eq!(back.objects[0].friction_combine, Some(CombineRuleDoc::Max));
+
+        // 不写 = 全 None（行为与以前逐位相同）
+        let plain = SceneDoc::from_json(r#"{ "objects": [ { "name": "a", "body": "dynamic" } ] }"#)
+            .unwrap();
+        assert_eq!(plain.physics.friction_combine, None);
+        assert_eq!(plain.physics.restitution_combine, None);
+        assert_eq!(plain.physics.static_friction_speed, None);
+        assert_eq!(plain.objects[0].static_friction, None);
+        assert_eq!(plain.objects[0].friction_combine, None);
+
+        // 非法：负的静摩擦 / 负的切换速度 / 未知规则名
+        let bad = SceneDoc::from_json(
+            r#"{ "physics": { "static_friction_speed": -1.0 },
+                 "objects": [ { "name": "a", "body": "dynamic", "static_friction": -0.2 } ] }"#,
+        )
+        .unwrap();
+        let diags = bad.validate();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path == "objects[0].static_friction" && d.severity == Severity::Error),
+            "{diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path == "physics.static_friction_speed"
+                    && d.severity == Severity::Error),
+            "{diags:?}"
+        );
+        let err = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "dynamic", "friction_combine": "geometric" } ] }"#,
+        )
+        .unwrap_err();
+        // serde 的报错路径指到**物体**上（它不知道是哪个字段），但消息里列全了合法值，
+        // 够定位了：`objects[0]` + "expected one of `geometric_mean`, ..."
+        let text = format!("{err:?}");
+        assert!(text.contains("objects[0]"), "要指到物体上：{text}");
+        assert!(text.contains("geometric_mean"), "要列出合法值：{text}");
+
+        // 警告：静摩擦比动摩擦小 / 切换速度偏大 / 没有刚体却写了合成规则
+        let warn = SceneDoc::from_json(
+            r#"{ "physics": { "static_friction_speed": 3.0 },
+                 "objects": [
+                   { "name": "a", "body": "dynamic", "friction": 0.9, "static_friction": 0.1 },
+                   { "name": "b", "body": "none", "friction_combine": "min" } ] }"#,
+        )
+        .unwrap();
+        let diags = warn.validate();
+        assert!(!SceneDoc::has_errors(&diags), "这些都只是警告：{diags:?}");
+        assert!(
+            diags.iter().any(|d| d.path == "objects[0].static_friction"),
+            "{diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path == "physics.static_friction_speed"),
+            "{diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.path.starts_with("objects[1]")),
+            "{diags:?}"
+        );
     }
 
     #[test]

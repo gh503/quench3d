@@ -55,7 +55,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
   让四个 crate 直接红。**本机工具链已升到 1.99 与 CI 对齐**，这类"本地绿、CI 红"的漂移随之消失。
 * 剩余大件（都在 §4 P1/P2，不是本轮范围）：
   复合形状、关节锚点/限位补全、渲染大件（CSM 级联阴影/IBL/动画蒙皮/点光与聚光阴影/景深与 TAA）、
-  物理材质 combine mode、事件总线。
+  事件总线、脚本/动画。
   （~~查询补全 + 加速结构~~ ✅ 2026-10-17 已做，见 §4。）
   （~~父层级~~ ✅ 2026-10-17 第 16 轮已做，见 §3.2 与 §4。）
 
@@ -629,7 +629,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 19 | 机器可读 JSON Schema（`--json-schema`）+ 版本迁移策略 | 格式 |
 | 20 | 接触特征 ID + 持久流形 + 接触余量 | 引擎 |
 | 21 | ~~查询补全 + 查询加速结构~~ ✅ 2026-10-17：`raycast_all` / 任意形状 `overlap_shape` / 单向 `QueryFilter`（mask + 传感器开关）/ `distance_to` + `QueryIndex` 快照网格（射线 3D DDA）；CLI `query`、MCP `quench3d_query`、编辑器 F7 查询探针。**没做**：`shape_cast` 仍线性、CLI 不做批量查询、索引是快照（世界一动就回退线性） | 引擎 |
-| 22 | 物理材质与 combine mode、静/动摩擦分离 | 引擎 |
+| 22 | ~~物理材质与 combine mode、静/动摩擦分离~~ ✅ 2026-10-17：`CombineRule`（5 条：几何平均/平均/取小/取大/相乘，摩擦缺省几何平均、恢复缺省取大 = 老行为）、`static_friction`（缺省跟随动摩擦）、世界级 `physics.{friction_combine,restitution_combine,static_friction_speed}` + 物体级覆盖、编辑器滑块与下拉。判定用**施力前**速度（否则静摩擦永远不生效）。**没做**：材质的各向异性/滚动摩擦、`friction_combine` 在两端都显式且不同时只有一条确定性优先级（取 slot 靠前者） | 引擎 |
 | 23 | 动画/蒙皮（glTF animations/skins 导入 + 播放 + 混合） | 引擎（大） |
 | 24 | CSM 级联阴影 + 点光/聚光阴影 + 聚光灯 | 引擎 |
 | 25 | 后处理链骨架（HDR 中间目标 + tonemap 移出物体着色器）✅ 2026-10-16 + Bloom ✅（`lighting.bloom`）+ FXAA ✅（`lighting.fxaa`）+ SSAO ✅（`lighting.ssao`，深度-only、无去噪）+ TAA/景深 ❌ | 引擎（大） |
