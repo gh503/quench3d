@@ -8,29 +8,43 @@
 //!   tonemap **之后**——硬件把 tonemapped 值当线性值去混合，再编码一次。
 //!   现在是：物体写线性 HDR → `rgba16float` 中间目标（在这里混合）→ 统一 tonemap。
 //!
-//! 没有可用 GPU 时直接跳过（CI 机器通常没有软件光栅驱动）。
+//! **显式 opt-in**：这个二进制要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1`
+//! 才执行（见 `with_gpu_tests`），否则整条测试体不跑并打印跳过原因 —— 在没有 GPU 的
+//! Windows runner 上建上下文是**原生崩溃**（`0xc0000005`），`Result::Err` 接不住。
 
+use quench3d_render::context::with_gpu_tests;
 use quench3d_render::prelude::*;
 use quench3d_render::{BloomOptions, FxaaOptions, RendererOptions};
 
 const W: u32 = 64;
 const H: u32 = 64;
 
-fn setup(bloom: BloomOptions) -> Option<(GpuContext, Renderer)> {
-    let ctx = match pollster::block_on(GpuContext::headless(
-        W,
-        H,
-        GpuOptions {
-            msaa_samples: 1,
-            ..Default::default()
-        },
-    )) {
-        Ok(ctx) => ctx,
+/// 建一个无窗上下文；没显式打开开关、或本机没有 GPU 时返回 `None`（测试跳过）。
+///
+/// **创建上下文那一步在闭包里面**：没设 `QUENCH3D_GPU_TESTS=1` 时它一次都不会被调用。
+/// `what` 是跳过原因：同一个文件里建上下文的地方有好几处，只说"跳过"分不清是哪一条。
+fn context(msaa_samples: u32, what: &str) -> Option<GpuContext> {
+    let ctx = with_gpu_tests(what, || {
+        pollster::block_on(GpuContext::headless(
+            W,
+            H,
+            GpuOptions {
+                msaa_samples,
+                ..Default::default()
+            },
+        ))
+    })?;
+    match ctx {
+        Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("跳过：没有可用的 GPU（{e}）");
-            return None;
+            None
         }
-    };
+    }
+}
+
+fn setup(bloom: BloomOptions) -> Option<(GpuContext, Renderer)> {
+    let ctx = context(1, "后处理链的像素级验证（真的创建 wgpu 上下文）")?;
     let renderer = Renderer::new(
         &ctx,
         RendererOptions {
@@ -216,19 +230,9 @@ fn bloom_off_ignores_the_bloom_parameters() {
     let Some((mut ctx_a, mut a)) = setup(BloomOptions::default()) else {
         return;
     };
-    let ctx2 = match pollster::block_on(GpuContext::headless(
-        W,
-        H,
-        GpuOptions {
-            msaa_samples: 1,
-            ..Default::default()
-        },
-    )) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("跳过：没有可用的 GPU（{e}）");
-            return;
-        }
+    let Some(ctx2) = context(1, "bloom 关闭时的后处理链对比（真的创建 wgpu 上下文）")
+    else {
+        return;
     };
     let mut ctx_b = ctx2;
     // 故意给一组很激进的参数，但开关是关的：结果必须与缺省逐像素一致
@@ -279,19 +283,9 @@ fn bloom_makes_bright_areas_bleed() {
     let Some((mut ctx_off, mut off)) = setup(BloomOptions::default()) else {
         return;
     };
-    let ctx_on = match pollster::block_on(GpuContext::headless(
-        W,
-        H,
-        GpuOptions {
-            msaa_samples: 1,
-            ..Default::default()
-        },
-    )) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("跳过：没有可用的 GPU（{e}）");
-            return;
-        }
+    let Some(ctx_on) = context(1, "bloom 亮区外溢的对比（真的创建 wgpu 上下文）")
+    else {
+        return;
     };
     let mut ctx_on = ctx_on;
     let mut on = Renderer::new(
@@ -392,20 +386,7 @@ fn bloom_makes_bright_areas_bleed() {
 /// 用**转过角度**的立方体：轮廓上有浅斜边，FXAA 的定向模糊才有东西可做。
 /// 正对镜头的立方体是纯水平/垂直边——那是理想边缘，FXAA 原版也（正确地）不动它。
 fn fxaa_image(fxaa: FxaaOptions) -> Option<ImageData> {
-    let ctx = match pollster::block_on(GpuContext::headless(
-        W,
-        H,
-        GpuOptions {
-            msaa_samples: 1,
-            ..Default::default()
-        },
-    )) {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            eprintln!("跳过：没有可用的 GPU（{e}）");
-            return None;
-        }
-    };
+    let ctx = context(1, "FXAA 的像素级验证（真的创建 wgpu 上下文）")?;
     let mut ctx = ctx;
     let mut renderer = Renderer::new(
         &ctx,
@@ -577,20 +558,7 @@ fn fxaa_threshold_actually_gates_the_filter() {
 /// 同一个 renderer 先关后开，顺带验证"运行时改 `options.ssao.enabled`"能生效
 /// （编辑器里勾选框走的就是这条路：`ensure_targets` 必须察觉开关变了）。
 fn ssao_images() -> Option<(ImageData, ImageData, Camera)> {
-    let ctx = match pollster::block_on(GpuContext::headless(
-        W,
-        H,
-        GpuOptions {
-            msaa_samples: 4,
-            ..Default::default()
-        },
-    )) {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            eprintln!("跳过：没有可用的 GPU（{e}）");
-            return None;
-        }
-    };
+    let ctx = context(4, "SSAO 的像素级验证（真的创建 wgpu 上下文）")?;
     let mut ctx = ctx;
     let mut renderer = Renderer::new(
         &ctx,
@@ -761,4 +729,276 @@ fn ssao_darkens_contacts_and_leaves_the_far_plane_alone() {
     }
     eprintln!("改动像素 {changed} / {}", W * H);
     assert!(changed > 100, "开 SSAO 后画面几乎没变：{changed} 个像素");
+}
+
+// ---------------------------------------------------------------------------
+// 「裸奔守卫」：不需要显卡，每条 CI 腿都会跑
+//
+// 为什么需要它：第 58 轮只给两个测试二进制（`backend_fallback` / `model_instances`）
+// 加了 `with_gpu_tests`，其余 8 个仍会**直接建 wgpu 上下文** —— 在没有 GPU 的 Windows
+// runner 上那是**原生崩溃**（`0xc0000005`），`Result::Err` 接不住，红得无法诊断。
+// 只把那 8 个补上只能解决"这一次"；这条守卫解决"下一次有人新写一个"。
+// ---------------------------------------------------------------------------
+
+/// 会**真的建 wgpu 上下文 / 实例**的调用（按子串匹配）。
+///
+/// * `GpuContext::from_candidates` 同时覆盖 `from_candidates_with`；
+/// * `wgpu::Instance::new` 同时覆盖 `new_without_display_handle`。
+///
+/// 只看这几个**入口**：适配器请求、设备请求都在它们内部（自己拆开写的话，
+/// 入口那一步已经被这里拦住了）。API 改名时这条守卫会以"一个调用点都没扫到"报红，
+/// 提醒你更新这份清单 —— 而不是静默空转。
+const GPU_CREATION_CALLS: &[&str] = &[
+    "GpuContext::headless",
+    "GpuContext::from_candidates",
+    "GpuContext::create_instance_with",
+    "wgpu::Instance::new",
+];
+
+fn blank(out: &mut [u8], i: usize) {
+    if out[i] != b'\n' && out[i] != b'\r' {
+        out[i] = b' ';
+    }
+}
+
+/// 把注释与字符串字面量换成空格（保留换行），只留下**代码**。
+///
+/// 为什么必须先做这一步：`crates/quench3d-editor/tests/joint_frames.rs` 的**文档注释**里
+/// 就写着「编辑器现有的往返测试都要 `GpuContext::headless`」—— 纯 `grep` 会把那句散文
+/// 当成一处裸奔的建上下文。会乱叫的守卫最后一定会被人加白名单，那等于没有守卫。
+///
+/// 已知边界：不特殊处理字符字面量（`'"'` 会看岔，仓库里没有）；`r#标识符` 会按普通代码走。
+fn code_only(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        // 行注释
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                blank(&mut out, i);
+                i += 1;
+            }
+            continue;
+        }
+        // 块注释（Rust 允许嵌套）
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            let mut depth = 0usize;
+            while i < b.len() {
+                if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                    depth += 1;
+                    blank(&mut out, i);
+                    blank(&mut out, i + 1);
+                    i += 2;
+                } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                    blank(&mut out, i);
+                    blank(&mut out, i + 1);
+                    i += 2;
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    blank(&mut out, i);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // 原始字符串：r"..." / r#"..."# / r##"..."##（先数 # 再找配对的收尾）
+        if b[i] == b'r' {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < b.len() && b[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'"' {
+                let mut k = j + 1;
+                loop {
+                    if k >= b.len() {
+                        break;
+                    }
+                    if b[k] == b'"' {
+                        let mut h = 0usize;
+                        while k + 1 + h < b.len() && b[k + 1 + h] == b'#' {
+                            h += 1;
+                        }
+                        if h >= hashes {
+                            k += 1 + hashes;
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                for x in i..k.min(b.len()) {
+                    blank(&mut out, x);
+                }
+                i = k;
+                continue;
+            }
+        }
+        // 普通字符串（含 b"..."，转义用 \ ）
+        if b[i] == b'"' {
+            blank(&mut out, i);
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\\' {
+                    blank(&mut out, i);
+                    i += 1;
+                    if i < b.len() {
+                        blank(&mut out, i);
+                        i += 1;
+                    }
+                    continue;
+                }
+                let done = b[i] == b'"';
+                blank(&mut out, i);
+                i += 1;
+                if done {
+                    break;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    String::from_utf8(out).expect("逐字节替换成空格不会破坏 UTF-8")
+}
+
+/// `with_gpu_tests(...)` 覆盖的字节区间（括号配对；注释与字符串已剥掉，可以直接数括号）。
+fn gated_spans(code: &str) -> Vec<(usize, usize)> {
+    let b = code.as_bytes();
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(off) = code[from..].find("with_gpu_tests") {
+        let at = from + off;
+        from = at + "with_gpu_tests".len();
+        let mut i = from;
+        while i < b.len() && (b[i] as char).is_whitespace() {
+            i += 1;
+        }
+        if i >= b.len() || b[i] != b'(' {
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut j = i;
+        while j < b.len() {
+            match b[j] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        j += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        spans.push((at, j));
+    }
+    spans
+}
+
+/// 仓库根：`crates/quench3d-render` 往上两级。
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("仓库根")
+        .to_path_buf()
+}
+
+/// 所有 `crates/*/tests/*.rs`（仓库根相对路径 + 内容），按路径排序。
+fn test_sources() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut crates: Vec<_> = std::fs::read_dir(root.join("crates"))
+        .expect("读 crates/")
+        .map(|e| e.expect("crates/ 目录项").path())
+        .collect();
+    crates.sort();
+    let mut out = Vec::new();
+    for krate in crates {
+        let tests = krate.join("tests");
+        if !tests.is_dir() {
+            continue;
+        }
+        let mut files: Vec<_> = std::fs::read_dir(&tests)
+            .expect("读 tests/")
+            .map(|e| e.expect("tests/ 目录项").path())
+            .collect();
+        files.sort();
+        for f in files {
+            if f.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = f
+                .strip_prefix(&root)
+                .expect("在仓库根下")
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((name, std::fs::read_to_string(&f).expect("读测试文件")));
+        }
+    }
+    out
+}
+
+fn line_of(code: &str, at: usize) -> usize {
+    1 + code[..at].matches('\n').count()
+}
+
+/// 扫描 `crates/*/tests/*.rs`：**凡是真的建 wgpu 上下文的地方，都必须经过 `with_gpu_tests`**。
+///
+/// 这条测试不需要显卡（只读文件），所以它在**每条** CI 腿上都跑 —— 包括没有 GPU 的
+/// Windows 腿。它自动覆盖**将来新增**的测试文件：新写一个裸建上下文的测试，
+/// 这里立刻红，不用等人想起"哦还有一条腿会崩"。
+#[test]
+fn every_real_gpu_context_creation_in_tests_goes_through_the_gate() {
+    let sources = test_sources();
+    assert!(
+        sources.len() >= 5,
+        "只扫到 {} 个测试文件，守卫退化了（crates/*/tests/*.rs 的布局变了？）",
+        sources.len()
+    );
+
+    let mut gated = 0usize;
+    let mut bare: Vec<String> = Vec::new();
+    for (name, src) in &sources {
+        let code = code_only(src);
+        let spans = gated_spans(&code);
+        for needle in GPU_CREATION_CALLS {
+            let mut from = 0;
+            while let Some(off) = code[from..].find(needle) {
+                let at = from + off;
+                from = at + needle.len();
+                if spans.iter().any(|(s, e)| at >= *s && at < *e) {
+                    gated += 1;
+                } else {
+                    bare.push(format!("{name}:{}  {needle}", line_of(&code, at)));
+                }
+            }
+        }
+    }
+
+    assert!(
+        gated > 0,
+        "一个「建上下文且已过 with_gpu_tests」的调用点都没扫到：要么 wgpu 入口改名了\
+         （更新 GPU_CREATION_CALLS），要么测试被搬走了 —— 守卫不能是空转的"
+    );
+    assert!(
+        bare.is_empty(),
+        "这些地方真的建了 wgpu 上下文却没走 `with_gpu_tests`（在没有 GPU 的 Windows runner 上\
+         会**原生崩溃** `0xc0000005`，`Result::Err` 接不住）：\n  {}\n\
+         修法：把 `GpuContext::headless(...)` 那一句放进 `with_gpu_tests(\"原因（真的创建 wgpu 上下文）\", || ...)` \
+         的闭包里；断言一条都不用改。",
+        bare.join("\n  ")
+    );
+    eprintln!(
+        "裸奔守卫：扫了 {} 个测试文件，{} 处建上下文全部经过 with_gpu_tests",
+        sources.len(),
+        gated
+    );
 }

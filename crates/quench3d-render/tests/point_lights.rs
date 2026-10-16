@@ -10,24 +10,35 @@
 //! 1. 灯真的亮（旧布局下单灯亮度为零，测试会失败）；
 //! 2. 颜色取自 `PointLight::color` 而不是别处的字节（旧布局下会取到位置）。
 //!
-//! 没有可用 GPU 时直接跳过（CI 机器通常没有软件光栅驱动）。
+//! **显式 opt-in**：这个二进制要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1`
+//! 才执行（见 `with_gpu_tests`），否则整条测试体不跑并打印跳过原因 —— 在没有 GPU 的
+//! Windows runner 上建上下文是**原生崩溃**（`0xc0000005`），`Result::Err` 接不住。
 
+use quench3d_render::context::with_gpu_tests;
 use quench3d_render::prelude::*;
 use quench3d_render::{RendererOptions, MAX_POINT_LIGHTS};
 
 const W: u32 = 96;
 const H: u32 = 64;
 
-/// 建一个无窗上下文；没有 GPU 时返回 `None`（测试跳过）。
+/// 建一个无窗上下文；没显式打开开关、或本机没有 GPU 时返回 `None`（测试跳过）。
+///
+/// **创建上下文那一步在闭包里面**：没设 `QUENCH3D_GPU_TESTS=1` 时它一次都不会被调用。
 fn setup() -> Option<(GpuContext, Renderer)> {
-    let ctx = match pollster::block_on(GpuContext::headless(
-        W,
-        H,
-        GpuOptions {
-            msaa_samples: 1,
-            ..Default::default()
+    let ctx = with_gpu_tests(
+        "点光源的像素级验证（真的创建 wgpu 上下文）",
+        || {
+            pollster::block_on(GpuContext::headless(
+                W,
+                H,
+                GpuOptions {
+                    msaa_samples: 1,
+                    ..Default::default()
+                },
+            ))
         },
-    )) {
+    )?;
+    let ctx = match ctx {
         Ok(ctx) => ctx,
         Err(e) => {
             eprintln!("跳过：没有可用的 GPU（{e}）");

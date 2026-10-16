@@ -5,23 +5,34 @@
 //! （位置漂移、地面下沉、物体改名、丢物体）。这里把默认场景存成 JSON、
 //! 用 CLI 的解析器与校验器读回来、再装回引擎，逐项对账。
 //!
-//! 没有可用 GPU 时跳过（CI 机器通常没有软件光栅驱动）。
+//! **显式 opt-in**：要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1` 才执行
+//! （见 `with_gpu_tests`），否则整条测试体不跑并打印跳过原因 —— 在没有 GPU 的 Windows
+//! runner 上建上下文是**原生崩溃**（`0xc0000005`），`Result::Err` 接不住。
 //! 整个文件只编译原生目标：wasm 上没有文件系统与 `pollster`，这条链在浏览器里
 //! 由 `web_client` 导出的 `scene_roundtrip_probe()` 覆盖（纯 CPU 那半条）。
 #![cfg(not(target_arch = "wasm32"))]
 
 use quench3d::prelude::*;
+use quench3d::render::context::with_gpu_tests;
 use quench3d_cli::scene_doc::{SceneDoc, ShapeKind};
 use quench3d_editor::doc::Doc;
 use quench3d_editor::scene_io;
 
-/// 无窗口引擎；没有 GPU 时返回 `None`。
+/// 无窗口引擎；没显式打开开关、或本机确实没有 GPU 时返回 `None`。
+///
+/// **创建上下文那一步在闭包里面**：没设 `QUENCH3D_GPU_TESTS=1` 时它一次都不会被调用。
 fn headless_engine() -> Option<Engine> {
-    let gpu = match pollster::block_on(quench3d::render::GpuContext::headless(
-        64,
-        64,
-        Default::default(),
-    )) {
+    let gpu = with_gpu_tests(
+        "编辑器场景存 / 读往返（真的创建 wgpu 上下文）",
+        || {
+            pollster::block_on(quench3d::render::GpuContext::headless(
+                64,
+                64,
+                Default::default(),
+            ))
+        },
+    )?;
+    let gpu = match gpu {
         Ok(gpu) => gpu,
         Err(e) => {
             eprintln!("跳过：没有可用的 GPU（{e}）");

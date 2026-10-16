@@ -5,20 +5,31 @@
 //! "物体跑到别的地方去了" —— 而且只在有父物体的时候才出现，很容易漏。
 //! 这里把"子物体跟着父物体走""改父不跳位""删父不跳位""存盘往返一致"各钉一条。
 //!
-//! 没有可用 GPU 时跳过（CI 机器通常没有软件光栅驱动）。
+//! **显式 opt-in**：要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1` 才执行
+//! （见 `with_gpu_tests`），否则整条测试体不跑并打印跳过原因 —— 在没有 GPU 的 Windows
+//! runner 上建上下文是**原生崩溃**（`0xc0000005`），`Result::Err` 接不住。
 #![cfg(not(target_arch = "wasm32"))]
 
 use quench3d::prelude::*;
+use quench3d::render::context::with_gpu_tests;
 use quench3d_editor::doc::Doc;
 use quench3d_editor::scene_io;
 
-/// 无窗口引擎；没有 GPU 时返回 `None`。
+/// 无窗口引擎；没显式打开开关、或本机确实没有 GPU 时返回 `None`。
+///
+/// **创建上下文那一步在闭包里面**：没设 `QUENCH3D_GPU_TESTS=1` 时它一次都不会被调用。
 fn headless_engine() -> Option<Engine> {
-    let gpu = match pollster::block_on(quench3d::render::GpuContext::headless(
-        64,
-        64,
-        Default::default(),
-    )) {
+    let gpu = with_gpu_tests(
+        "场景层级（父子变换）的往返（真的创建 wgpu 上下文）",
+        || {
+            pollster::block_on(quench3d::render::GpuContext::headless(
+                64,
+                64,
+                Default::default(),
+            ))
+        },
+    )?;
+    let gpu = match gpu {
         Ok(gpu) => gpu,
         Err(e) => {
             eprintln!("跳过：没有可用的 GPU（{e}）");

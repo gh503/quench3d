@@ -12,9 +12,12 @@
 //! 实测单级 0 个、4 级 5 个以上。数量小是因为那个投影在屏幕上本来就小（0.03% 像素），
 //! 这也解释了为什么第 42 轮用"整幅图统计"完全看不出差别。
 //!
-//! 没有可用 GPU 时直接跳过（CI 机器通常没有软件光栅驱动）。
+//! **显式 opt-in**：这个二进制要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1`
+//! 才执行（见 `with_gpu_tests`），否则整条测试体不跑并打印跳过原因 —— 在没有 GPU 的
+//! Windows runner 上建上下文是**原生崩溃**（`0xc0000005`），`Result::Err` 接不住。
 
 use quench3d_math::*;
+use quench3d_render::context::with_gpu_tests;
 use quench3d_render::prelude::*;
 use quench3d_render::RendererOptions;
 
@@ -27,14 +30,21 @@ struct Scene {
 
 impl Scene {
     fn new() -> Option<Self> {
-        let ctx = match pollster::block_on(GpuContext::headless(
-            W,
-            H,
-            GpuOptions {
-                msaa_samples: 1,
-                ..Default::default()
+        // **创建上下文那一步在闭包里面**：没设 `QUENCH3D_GPU_TESTS=1` 时它一次都不会被调用。
+        let ctx = with_gpu_tests(
+            "级联阴影能力的像素级验证（真的创建 wgpu 上下文）",
+            || {
+                pollster::block_on(GpuContext::headless(
+                    W,
+                    H,
+                    GpuOptions {
+                        msaa_samples: 1,
+                        ..Default::default()
+                    },
+                ))
             },
-        )) {
+        )?;
+        let ctx = match ctx {
             Ok(ctx) => ctx,
             Err(e) => {
                 eprintln!("跳过：没有可用的 GPU（{e}）");
