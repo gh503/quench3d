@@ -571,6 +571,55 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .changed();
                 changed |= ui.checkbox(&mut light.sky.enabled, "天空").changed();
                 changed |= ui.checkbox(&mut light.sky.show_grid, "参考网格").changed();
+                if light.sky.enabled {
+                    // 天空/雾的颜色都是**线性空间**（引擎内部就是线性），所以用
+                    // `color_edit_button_rgb`（egui 的 `Rgb` 就是线性）而不是 `_srgb`。
+                    // 注意：颜色控件改的是**传进去的数组**，所以要像材质颜色那样
+                    // 先拷进局部数组、改完再写回引擎（否则改了不生效还留下一笔历史）。
+                    let mut zenith = light.sky.zenith.to_array();
+                    let mut horizon = light.sky.horizon.to_array();
+                    ui.horizontal(|ui| {
+                        ui.label("天顶 / 地平线");
+                        changed |= ui.color_edit_button_rgb(&mut zenith).changed();
+                        changed |= ui.color_edit_button_rgb(&mut horizon).changed();
+                    });
+                    light.sky.zenith = Vec3::new(zenith[0], zenith[1], zenith[2]);
+                    light.sky.horizon = Vec3::new(horizon[0], horizon[1], horizon[2]);
+                }
+                if let Some(sun) = light.sun.as_mut() {
+                    ui.horizontal(|ui| {
+                        ui.label("阴影强度/覆盖半径");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut light.shadow_strength)
+                                    .speed(0.02)
+                                    .range(0.0..=1.0),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut sun.shadow_radius)
+                                    .speed(0.5)
+                                    .range(2.0..=4000.0),
+                            )
+                            .changed();
+                    });
+                }
+                // 雾：密度 0 = 关（与场景格式的 `lighting.fog` 同一语义）
+                let mut fog_color = light.fog.color.to_array();
+                ui.horizontal(|ui| {
+                    ui.label("雾");
+                    changed |= ui.color_edit_button_rgb(&mut fog_color).changed();
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut light.fog.density)
+                                .speed(0.002)
+                                .range(0.0..=1.0)
+                                .prefix("密度 "),
+                        )
+                        .changed();
+                });
+                light.fog.color = Vec3::new(fog_color[0], fog_color[1], fog_color[2]);
                 if changed {
                     // 方向按原样写回（**不**在这里归一化：归一化不是逐位幂等的，
                     // 会让"存一次读一次再存一次字节相同"这条性质失效）。

@@ -193,7 +193,10 @@ fn export_preserves_sections_the_editor_does_not_model() {
       "name": "preserve",
       "gravity": [0, -9.81, 0],
       "ground": { "size": 24, "friction": 0.7 },
-      "lighting": { "preset": "studio", "sun_direction": [-0.4, -1, -0.35], "sun_intensity": 3.5, "ambient": 0.25, "exposure": 1.4, "shadows": true, "sky": true },
+      "lighting": { "preset": "studio", "sun_direction": [-0.4, -1, -0.35], "sun_intensity": 3.5, "ambient": 0.25, "exposure": 1.4, "shadows": true, "sky": true,
+                    "fog": { "color": [0.18, 0.22, 0.3], "density": 0.04 },
+                    "shadow_quality": { "strength": 0.65, "radius": 45 },
+                    "sky_colors": { "zenith": [0.1, 0.2, 0.6] } },
       "simulate": { "steps": 240, "dt": 0.004 },
       "render": { "output": "out.png", "width": 800, "height": 600, "msaa": 8 },
       "probes": [ { "name": "probe-a", "position": [0, 1, 0], "radius": 2.5 } ],
@@ -221,6 +224,10 @@ fn export_preserves_sections_the_editor_does_not_model() {
         // 留着预设会在载入时把它们再覆盖一遍（"存了但不算数"）。
         "\"sun_intensity\": 3.5",
         "\"exposure\": 1.4",
+        // 雾 / 阴影质量 / 天空颜色：编辑器能改，导出必须带上（不然"改了存不下来"）
+        "\"fog\"",
+        "\"shadow_quality\"",
+        "\"sky_colors\"",
         "\"simulate\"",
         "\"steps\": 240",
         "\"render\"",
@@ -250,10 +257,30 @@ fn export_preserves_sections_the_editor_does_not_model() {
     // 物体本身还在。
     assert!(saved.json.contains("\"box\"") && saved.json.contains("\"peg\""));
 
+    // 数值按类型核对（字符串匹配会随着格式化方式变化而假失败/假通过）：
+    // 把导出结果交给 CLI 的解析器读回来，逐项对账。
+    let reread = SceneDoc::from_json(&saved.json).expect("导出必须能被读回来");
+    let fog = reread.lighting.fog.expect("雾被丢了");
+    assert!((fog.density.unwrap() - 0.04).abs() < 1e-6, "{fog:?}");
+    assert!((fog.color.unwrap()[2] - 0.3).abs() < 1e-6, "{fog:?}");
+    let quality = reread.lighting.shadow_quality.expect("阴影质量被丢了");
+    assert!(
+        (quality.strength.unwrap() - 0.65).abs() < 1e-6,
+        "{quality:?}"
+    );
+    assert!((quality.radius.unwrap() - 45.0).abs() < 1e-6, "{quality:?}");
+    let sky = reread.lighting.sky_colors.expect("天空颜色被丢了");
+    assert_eq!(sky.zenith, Some([0.1, 0.2, 0.6]), "{sky:?}");
+
     // 光照**编辑**必须能存下去（这是"能改光照"这件事的行为证据，不只是"不丢"）。
     engine.scene.lighting.exposure = 2.25;
+    engine.scene.lighting.fog.density = 0.09;
+    engine.scene.lighting.fog.color = vec3(0.5, 0.25, 0.125);
+    engine.scene.lighting.shadow_strength = 0.4;
+    engine.scene.lighting.sky.horizon = vec3(0.9, 0.8, 0.7);
     if let Some(sun) = engine.scene.lighting.sun.as_mut() {
         sun.intensity = 7.5;
+        sun.shadow_radius = 60.0;
     }
     let edited = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
     assert!(
@@ -266,6 +293,30 @@ fn export_preserves_sections_the_editor_does_not_model() {
         "改了太阳强度却没写进文件：\n{}",
         edited.json
     );
+    let edited_reread = SceneDoc::from_json(&edited.json).expect("导出必须能被读回来");
+    let edit_fog = edited_reread.lighting.fog.expect("雾被丢了");
+    assert!(
+        (edit_fog.density.unwrap() - 0.09).abs() < 1e-6,
+        "{edit_fog:?}"
+    );
+    assert!(
+        (edit_fog.color.unwrap()[0] - 0.5).abs() < 1e-6,
+        "{edit_fog:?}"
+    );
+    let edit_quality = edited_reread
+        .lighting
+        .shadow_quality
+        .expect("阴影质量被丢了");
+    assert!(
+        (edit_quality.strength.unwrap() - 0.4).abs() < 1e-6,
+        "{edit_quality:?}"
+    );
+    assert!(
+        (edit_quality.radius.unwrap() - 60.0).abs() < 1e-6,
+        "{edit_quality:?}"
+    );
+    let edit_sky = edited_reread.lighting.sky_colors.expect("天空颜色被丢了");
+    assert_eq!(edit_sky.horizon, Some([0.9, 0.8, 0.7]), "{edit_sky:?}");
 
     // 存储必须是固定点：存 → 读 → 再存，字节相同。
     let Some(mut engine2) = headless_engine() else {

@@ -457,6 +457,30 @@
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
 
+### 8.6 「光照补全：雾 / 阴影质量 / 天空颜色」怎么落的（第 20 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-cli --lib -- fog_shadow_quality`、
+> `cargo test -p quench3d-cli --test cli_e2e -- fog_and_shadow_quality`、
+> `cargo test -p quench3d-render --test fog_and_shadow_quality`（像素级，本机有 GPU 真跑）、
+> `cargo test -p quench3d-editor --test scene_roundtrip -- export_preserves`。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 场景格式 | `lighting.fog` / `lighting.shadow_quality` / `lighting.sky_colors` | 三节都按"**不写 = 保持原样**"设计：fog 不写 = 关闭（逐位相同），shadow_quality 不写 = 引擎缺省，sky_colors 只覆盖写了的那几个通道（缺省跟随 preset） |
+| 颜色空间 | fog / sky_colors 用**线性**（与 `point_lights.color` 一致） | 只有 `materials.*.color` 是 sRGB；同一个文件里两种约定，所以在 schema、README、字段注释三处都写明，并给"颜色 > 4 就警告"的兜底 |
+| 校验 | 负颜色/负密度/强度越界/半径非正/天空颜色为负 = error；密度 > 1、半径 > 400、颜色 > 4 = warning | 路径指向具体字段（`lighting.fog.density`），NaN/inf 也挡（JSON 里没有 NaN，但代码路径能构造出来，校验不能指望 serde） |
+| CLI | `apply_lighting` 应用三节；`schema --json` 的字段表与语法摘要同步 | `--dry-run` 不需要额外处理：这些字段只影响像素，不影响"会不会写盘" |
+| 编辑器 | 光照面板加"天顶/地平线颜色、阴影强度/覆盖半径、雾色 + 密度"；导出从引擎写回三节 | 颜色控件改的是**传进去的数组**，必须像材质颜色那样"拷进局部数组 → 改 → 写回"，否则改了不生效还留一笔历史（第一版就踩了） |
+| 阴影分辨率 | **故意不进格式** | 它是渲染器构造参数（纹理 + 绑定组在 `Renderer::new` 里建），运行时改需要重建。写进格式只能做一个"看起来能配、其实不生效"的字段——不如不写，把边界说清楚 |
+
+**踩过的坑**：① 颜色控件写回（见上）；② 端到端测试里 `render.output` 是相对路径，`--out` 必须给绝对路径，
+否则 PNG 会被写到 crate 目录里（第一次跑真的污染了仓库目录）；③ 阴影像素测试第一版的太阳几乎正上方，
+影子被遮挡物自己挡住 → 只测到 65 个变化像素；把遮挡物放大 + 太阳斜射才稳定（说明"像素测试"失败的
+原因经常是**取景**而不是功能）。
+
+**没做（诚实边界）**：阴影贴图分辨率不在场景文件（改它要重建纹理与绑定组）；没有线性雾的起止距离
+（引擎只有指数雾）；没有 IBL/环境贴图（#26）、没有聚光灯与点光阴影（#24）、没有基于日期的天光（#24/#26）。
+
 ### 8.5 「查询补全 + 查询加速结构」怎么落的（第 19 轮，已跑门禁）
 
 > **状态：已实施**。验证：`cargo test -p quench3d-physics --lib`（6 个新用例，不需要显卡）、

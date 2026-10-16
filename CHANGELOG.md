@@ -10,6 +10,32 @@
 
 ### 新增
 
+- **光照补全：雾、阴影质量、天空颜色**。引擎里早就有这三样，场景文件里却配不到
+  （只能选 `preset` 和开关 `sky` / `shadows`），于是"夜景为什么没有雾""阴影边缘为什么
+  糊/为什么没有影子"这类问题只能改引擎代码。现在都能从场景文件配：
+  * `lighting.fog`（**不写 = 关闭**，像素与关闭时逐位相同）：`color`（**线性空间**，
+    与 `point_lights.color` 同一约定，不是 `materials.*.color` 的 sRGB）+ `density`
+    （每米指数衰减，缺省 0.02；0 = 关）。天空与参考网格也会跟着雾一起淡出。
+  * `lighting.shadow_quality`（**不写 = 引擎缺省** 0.85 / 28 米）：`strength`（0~1；
+    0 = 阴影不压暗，1 = 全黑——真实场景 0.6~0.9 更自然）+ `radius`（阴影相机覆盖半径，
+    米；这是"覆盖范围 ↔ 精度"的旋钮，给大远处也能投上阴影但边缘更糊）。
+    与开关 `lighting.shadows` 分开：开关管"投不投"，这一节管"投得好不好"。
+  * `lighting.sky_colors`（只覆盖写了的那几个通道，缺省跟随 `preset`）：
+    `zenith` / `horizon` / `ground`（**线性空间**）。
+  * 校验：负颜色/负密度/强度越界/半径非正/天空颜色为负都是 error（带 JSON 路径）；
+    明显不合常理的值（密度 > 1、覆盖半径 > 400、颜色 > 4）是 warning —— 能出画面但要提醒。
+  * 编辑器：光照面板多了雾（颜色 + 密度滑块）、阴影强度/覆盖半径、天空天顶/地平线颜色，
+    改完能撤销、能存盘（导出写回引擎值）。
+  验证：`cargo test -p quench3d-cli --lib -- fog_shadow_quality`（格式与校验：合法值往返、
+  五个非法路径各给 error、超范围给 warning、NaN/inf 也挡、拼错字段报错）、
+  `cargo test -p quench3d-cli --test cli_e2e -- fog_and_shadow_quality`（端到端：合法场景
+  校验通过、非法场景在打开 GPU 之前退出码 2、`render` 的像素证明「雾密度 0 与不写逐位相同」
+  且浓雾把画面推向雾色、阴影强度 0→1 让画面变暗、自定义天空颜色改变画面）、
+  `cargo test -p quench3d-render --test fog_and_shadow_quality`（**像素级**，本机有显卡真跑：
+  浓红雾把远处像素染红、密度 0 与不开逐位相同、阴影强度只暗在影子里且 0.5 落在 0 与 1 之间）、
+  `cargo test -p quench3d-editor --test scene_roundtrip -- export_preserves`
+  （存盘往返：雾/阴影质量/天空颜色都不丢，编辑器里改完能写进文件）。
+
 - **查询补全 + 查询加速结构**。以前只有"最近一条射线"和"球形重叠"，而且都是 O(N) 线性扫描。
   * 引擎：`raycast_all` / `raycast_all_filtered`（返回最远距离内的**所有**命中，按距离升序、
     平局按槽位下标，输出确定）、`overlap_shape` / `overlap_shape_filtered`（**任意形状**探针：

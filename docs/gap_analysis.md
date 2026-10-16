@@ -54,7 +54,8 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
   而本机当时是 1.94 —— 1.99 新增的 `clippy::chunks_exact_to_as_chunks` / `drain_collect`
   让四个 crate 直接红。**本机工具链已升到 1.99 与 CI 对齐**，这类"本地绿、CI 红"的漂移随之消失。
 * 剩余大件（都在 §4 P1/P2，不是本轮范围）：
-  复合形状、关节锚点/限位补全、渲染大件（CSM/IBL/动画蒙皮/点光与雾）、物理材质 combine mode。
+  复合形状、关节锚点/限位补全、渲染大件（CSM 级联阴影/IBL/动画蒙皮/点光与聚光阴影/景深与 TAA）、
+  物理材质 combine mode、事件总线。
   （~~查询补全 + 加速结构~~ ✅ 2026-10-17 已做，见 §4。）
   （~~父层级~~ ✅ 2026-10-17 第 16 轮已做，见 §3.2 与 §4。）
 
@@ -427,7 +428,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 关节 | `kind` | `fixed\|ball\|hinge\|distance\|slider` | — | :357-370 |
 | | `a`/`b`（按名字引用）/`axis`/`limits`/`rest_length`/`stiffness`/`damping`/`motor_velocity`/`motor_max_impulse` | — | — | :373-401 |
 | 相机 | `position`/`look_at`/`fov_deg`/`distance`/`yaw_deg`/`pitch_deg`/`frame_scene` | — | — | :407-428 |
-| 光照 | `preset`/`sun_direction`/`sun_intensity`/`ambient`/`exposure`/`sky`/`grid`/`shadows` | — | — | :434-459 |
+| 光照 | `preset`/`sun_direction`/`sun_intensity`/`ambient`/`exposure`/`sky`/`grid`/`shadows`/**`point_lights`**/**`fog`**/**`shadow_quality`**/**`sky_colors`**/`bloom`/`fxaa`/`ssao` | — | — | `scene_doc.rs` 的 `LightingDoc` |
 
 做得好的地方（不是缺点的部分）：全层级 `deny_unknown_fields` + 未知字段诊断会**列出全部合法顶层字段**
 （:595-604），版本不匹配会明确报「不支持的版本 X，当前支持 1」（:871）；单位与轴向约定写在 README:430
@@ -440,8 +441,8 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 1 | ✅ | **任何贴图** | 引擎 `MaterialDesc` 有 `base_color_texture` / `normal_texture` / `metallic_roughness_texture` / `emissive_texture` / `uv_scale` / `normal_scale`（material.rs:55-65）；`MaterialDoc` 一个都没有 | 「地板贴瓷砖」「箱子贴木纹」这种最基本需求在 JSON 里做不到，只能把物体做成 glTF 带贴图进来 |
 | 2 | ✅ | **半透明 / alpha** | 引擎 `base_color: Vec4`（含 alpha）+ `alpha_cutoff`（material.rs:45, :67）；格式是 `color: [f32;3]`（:199） | 玻璃、水、淡出效果无法表达 |
 | 3 | ✅ | **自发光颜色** | 引擎 `emissive: Vec3` + `emissive_strength`（material.rs:51-53）；格式只有 `emissive: f32`（:208） | 只能做"白光发光"，做不了霓虹/指示灯颜色 |
-| 4 | ✅ | **点光源 / 聚光灯** | 引擎有 `PointLight`（light.rs:79）、`MAX_POINT_LIGHTS = 8`（light.rs:103）；`LightingDoc` 只有太阳 + 环境光 | 室内场景、灯光布置做不了 |
-| 5 | ✅ | **天空与雾参数** | 引擎有 `SkyParams`（light.rs:107）/ `FogParams`（light.rs:137）；格式只有 `sky: bool` | 做不了"黄昏""雾天"这类氛围 |
+| 4 | ✅ 2026-10-17 | ~~**点光源 / 聚光灯**~~ **点光源已接线**（`lighting.point_lights`，最多 8 盏，超出给警告）；**聚光灯仍然没有**（引擎里也没有，见 §4 #24） | `PointLight`（light.rs:79）、`MAX_POINT_LIGHTS = 8`（light.rs:103）；`spot` 全仓 0 命中 | 室内布光可以了；手电/舞台灯还做不了 |
+| 5 | ✅ 2026-10-17 | ~~**天空与雾参数**~~ 已接线：`lighting.sky_colors`（天顶/地平线/地面，线性色）+ `lighting.fog`（颜色 + 密度，不写 = 关闭）+ `lighting.shadow_quality`（强度/覆盖半径）。**没做**：线性雾的起止距离（引擎只有指数雾）、阴影贴图分辨率、天空盒贴图/IBL | 黄昏、雾天、自定义天空都能配了 |
 | 6 | ✅ | **阴影质量 / 范围** | 引擎 `DirectionalLight` 有 `shadow_radius`（light.rs:17）/ `shadow_map_size`（light.rs:19，缺省 28.0 / 2048 见 :30-31）；格式只有 `shadows: bool` | 大场景阴影糊、小场景阴影浪费 |
 | 7 | ✅ | **层级 / 父子变换** | ~~`SceneObject` 只有 `transform`，无 parent~~ **已做**（2026-10-17 第 16 轮）：`objects[].parent`（按名字引用）+ 局部/世界变换 + 格式 v2；校验器拦悬空/成环/带刚体挂父物体 | 机械臂、车辆、角色挂点这类"组合体"现在能直接摆（仍缺：空物体、Prefab/实例、场景树内拖放改父） |
 | 8 | ✅ | **实例 / 模板复用** | 渲染器支持实例化（`InstanceDesc`，renderer.rs:87；绘制入口 renderer.rs:992） | 堆 1000 个箱子 = JSON 里 1000 份重复描述；agent 生成大场景时 token 直接爆 |
@@ -623,7 +624,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 14 | 实例化 / `templates` / 外部场景引用 | 格式 |
 | 15 | `actions[]` + `probes[]`（行为与探针，让实验在一个文件里说清） | 格式 |
 | 16 | 相机完整参数 + 多相机（正交 / near·far / 多输出） | 格式 |
-| 17 | 光照透出：点光源 / 天空 / 雾 / 阴影质量参数 | 格式 |
+| 17 | ~~光照透出：点光源 / 天空 / 雾 / 阴影质量参数~~ ✅ 2026-10-17：点光源（本来就有）、雾（`lighting.fog`，不写 = 关闭）、阴影质量（`strength`/`radius`）、天空颜色（`sky_colors`）。**没做**：阴影贴图分辨率（渲染器构造参数）、点光/聚光阴影（#24）、线性雾的起止距离（引擎只有指数雾） | 格式 |
 | 18 | 物理参数透出：角速度 / 阻尼 / gravity_scale / mass / sleep | 格式 |
 | 19 | 机器可读 JSON Schema（`--json-schema`）+ 版本迁移策略 | 格式 |
 | 20 | 接触特征 ID + 持久流形 + 接触余量 | 引擎 |

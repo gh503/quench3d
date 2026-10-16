@@ -2390,6 +2390,36 @@ fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
             sun.cast_shadows = shadows;
         }
     }
+    // 阴影质量：strength 是光照级的，radius 是太阳级的（没有太阳就没有阴影相机）
+    if let Some(q) = &l.shadow_quality {
+        if let Some(strength) = q.strength {
+            lighting.shadow_strength = strength;
+        }
+        if let Some(radius) = q.radius {
+            if let Some(sun) = lighting.sun.as_mut() {
+                sun.shadow_radius = radius;
+            }
+        }
+    }
+    // 天空颜色：只覆盖写了的那几个通道（没写 = 跟随预设）
+    if let Some(sky) = &l.sky_colors {
+        if let Some(z) = sky.zenith {
+            lighting.sky.zenith = v3(z);
+        }
+        if let Some(h) = sky.horizon {
+            lighting.sky.horizon = v3(h);
+        }
+        if let Some(g) = sky.ground {
+            lighting.sky.ground = v3(g);
+        }
+    }
+    // 雾：写了这一节才开（`density` 缺省 0.02；给 0 就是关掉）
+    if let Some(fog) = &l.fog {
+        if let Some(color) = fog.color {
+            lighting.fog.color = v3(color);
+        }
+        lighting.fog.density = fog.density.unwrap_or(0.02).max(0.0);
+    }
     // 点光源：预设会整体替换 lighting，所以放在最后覆盖。
     // 注意"没写"与"写了空数组"是两种意思：前者保留预设的补光，后者才是显式清空。
     if let Some(lights) = &l.point_lights {

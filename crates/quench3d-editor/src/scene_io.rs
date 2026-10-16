@@ -90,6 +90,24 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     lighting.exposure = Some(light.exposure);
     lighting.sky = Some(light.sky.enabled);
     lighting.grid = Some(light.sky.show_grid);
+    // 编辑器能改的雾 / 阴影质量 / 天空颜色也从引擎写回；不能改的（点光、bloom…）沿用底稿。
+    lighting.fog = Some(quench3d_cli::scene_doc::FogDoc {
+        color: Some([light.fog.color.x, light.fog.color.y, light.fog.color.z]),
+        density: Some(light.fog.density),
+    });
+    lighting.shadow_quality = Some(quench3d_cli::scene_doc::ShadowQualityDoc {
+        strength: Some(light.shadow_strength),
+        radius: light.sun.as_ref().map(|s| s.shadow_radius),
+    });
+    lighting.sky_colors = Some(quench3d_cli::scene_doc::SkyColorsDoc {
+        zenith: Some([light.sky.zenith.x, light.sky.zenith.y, light.sky.zenith.z]),
+        horizon: Some([
+            light.sky.horizon.x,
+            light.sky.horizon.y,
+            light.sky.horizon.z,
+        ]),
+        ground: Some([light.sky.ground.x, light.sky.ground.y, light.sky.ground.z]),
+    });
     out.lighting = lighting;
 
     let mut skipped = Vec::new();

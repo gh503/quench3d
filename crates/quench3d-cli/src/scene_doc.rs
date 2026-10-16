@@ -815,6 +815,26 @@ pub struct LightingDoc {
     /// 是否投射阴影，缺省 true。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadows: Option<bool>,
+    /// 雾（指数距离雾）。
+    ///
+    /// **不写 = 关闭**（密度 0，像素与加这个功能之前逐位相同）；写了这一节就是打开。
+    /// 颜色是**线性空间**（与 `point_lights.color` 一致，不是 `materials.*.color` 的
+    /// sRGB 约定）；`density` 是每米的指数衰减系数，0.02~0.1 是常见区间
+    /// （0.05 大约在 20 米外看不清）。天空与参考网格也会跟着雾一起淡出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fog: Option<FogDoc>,
+    /// 阴影质量（覆盖范围 / 强度）。
+    ///
+    /// 与 `shadows`（开关）分开：`shadows: false` 是"完全不投影"，这一节调的是
+    /// **投影时的质量**。**不写 = 用引擎缺省**（strength 0.85、radius 28 米）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_quality: Option<ShadowQualityDoc>,
+    /// 天空渐变的三个颜色。
+    ///
+    /// 不写就跟随 `preset`（`day`/`night` 各有自己的天空）；写了的通道覆盖预设。
+    /// 颜色是**线性空间**。天空关掉（`sky: false`）时这一节没有任何视觉效果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky_colors: Option<SkyColorsDoc>,
     /// 点光源列表。
     ///
     /// **不写这个字段 = 保留预设自带的灯**（`studio` 预设有两盏补光）；写 `[]` 才是
@@ -847,6 +867,50 @@ pub struct LightingDoc {
     /// 结果乘在整幅 HDR 颜色上（不区分直接光/间接光）——这是后处理式 SSAO 的固有简化。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssao: Option<SsaoDoc>,
+}
+
+/// 指数距离雾配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FogDoc {
+    /// 雾颜色（**线性空间**），缺省跟随预设/引擎缺省 `[0.36, 0.46, 0.63]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
+    /// 密度（每米），缺省 0.02（写了这一节就是想看见雾；给 0 等于关掉）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<f32>,
+}
+
+/// 阴影质量配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowQualityDoc {
+    /// 阴影强度 0~1：0 = 阴影不压暗（等于没有阴影），1 = 全黑。缺省 0.85。
+    ///
+    /// 真实场景里阴影不会全黑（还有环境光），所以 0.6~0.9 通常比 1.0 好看。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f32>,
+    /// 阴影相机覆盖半径（米），缺省 28。
+    ///
+    /// **这是"覆盖范围 ↔ 精度"的旋钮**：给得越大，远处物体也能投上阴影，
+    /// 但同样的贴图分辨率摊在更大面积上 → 阴影边缘更糊、锯齿更明显。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+}
+
+/// 天空渐变的三个颜色（**线性空间**）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SkyColorsDoc {
+    /// 天顶颜色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zenith: Option<[f32; 3]>,
+    /// 地平线颜色（雾也会往这个颜色上靠）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizon: Option<[f32; 3]>,
+    /// 地平线以下的颜色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ground: Option<[f32; 3]>,
 }
 
 /// SSAO（屏幕空间环境光遮蔽）配置。
@@ -1579,6 +1643,93 @@ impl SceneDoc {
                 )
                 .with_hint("把远处的灯删掉，或把它们烘进自发光材质里"),
             );
+        }
+
+        // 雾：颜色有限且非负、密度非负有限
+        if let Some(fog) = &self.lighting.fog {
+            if let Some(c) = fog.color {
+                if !finite3(&c) {
+                    out.push(Diagnostic::error(
+                        "lighting.fog.color",
+                        "雾颜色必须是有限数",
+                    ));
+                } else if c.iter().any(|v| *v < 0.0) {
+                    out.push(Diagnostic::error(
+                        "lighting.fog.color",
+                        "雾颜色不能是负数（线性空间的辐射值没有负的）",
+                    ));
+                } else if c.iter().any(|v| *v > 4.0) {
+                    out.push(
+                        Diagnostic::warn(
+                            "lighting.fog.color",
+                            format!("雾颜色 {c:?} 明显超过 1（线性空间），画面会很怪"),
+                        )
+                        .with_hint("雾颜色是线性值不是 sRGB：常见区间 0~1"),
+                    );
+                }
+            }
+            match fog.density {
+                Some(d) if !d.is_finite() || d < 0.0 => out.push(Diagnostic::error(
+                    "lighting.fog.density",
+                    "雾密度必须是非负有限数",
+                )),
+                Some(d) if d > 1.0 => out.push(
+                    Diagnostic::warn(
+                        "lighting.fog.density",
+                        format!("雾密度 {d} 太大（每米衰减），几米之外就全是雾了"),
+                    )
+                    .with_hint("常见区间 0.02~0.1：0.05 大约 20 米外看不清"),
+                ),
+                _ => {}
+            }
+        }
+        // 阴影质量：强度 0~1、覆盖半径为正
+        if let Some(q) = &self.lighting.shadow_quality {
+            match q.strength {
+                Some(v) if !v.is_finite() || !(0.0..=1.0).contains(&v) => out.push(
+                    Diagnostic::error(
+                        "lighting.shadow_quality.strength",
+                        "阴影强度必须在 0~1 之间",
+                    )
+                    .with_hint("0 = 阴影不压暗（等于没有），1 = 全黑；真实场景 0.6~0.9 更自然"),
+                ),
+                _ => {}
+            }
+            match q.radius {
+                Some(v) if !v.is_finite() || v <= 0.0 => out.push(Diagnostic::error(
+                    "lighting.shadow_quality.radius",
+                    "阴影覆盖半径必须是正有限数（米）",
+                )),
+                Some(v) if v > 400.0 => out.push(
+                    Diagnostic::warn(
+                        "lighting.shadow_quality.radius",
+                        format!("阴影覆盖半径 {v} 米太大：分辨率摊得太薄，阴影会糊成一片"),
+                    )
+                    .with_hint("引擎会在 2~4000 米之间钳制；常规模拟给 10~60"),
+                ),
+                _ => {}
+            }
+        }
+        // 天空颜色：三个通道都要有限非负
+        if let Some(sky) = &self.lighting.sky_colors {
+            for (name, c) in [
+                ("zenith", sky.zenith),
+                ("horizon", sky.horizon),
+                ("ground", sky.ground),
+            ] {
+                let Some(c) = c else { continue };
+                if !finite3(&c) {
+                    out.push(Diagnostic::error(
+                        format!("lighting.sky_colors.{name}"),
+                        "天空颜色必须是有限数",
+                    ));
+                } else if c.iter().any(|v| *v < 0.0) {
+                    out.push(Diagnostic::error(
+                        format!("lighting.sky_colors.{name}"),
+                        "天空颜色不能是负数",
+                    ));
+                }
+            }
         }
 
         if let Some(g) = &self.ground {
@@ -3870,6 +4021,89 @@ mod tests {
         )
         .unwrap();
         assert!(!SceneDoc::has_errors(&ok.validate()));
+    }
+
+    #[test]
+    fn fog_shadow_quality_and_sky_colors_parse_validate_and_round_trip() {
+        // 合法：三节都写
+        let doc = SceneDoc::from_json(
+            r#"{ "lighting": {
+                  "fog": { "color": [0.2, 0.3, 0.4], "density": 0.05 },
+                  "shadow_quality": { "strength": 0.7, "radius": 40 },
+                  "sky_colors": { "zenith": [0.1, 0.2, 0.5], "horizon": [0.6, 0.7, 0.8],
+                                  "ground": [0.05, 0.05, 0.06] } } }"#,
+        )
+        .unwrap();
+        assert!(
+            !SceneDoc::has_errors(&doc.validate()),
+            "{:?}",
+            doc.validate()
+        );
+        // JSON 往返：字段一个不丢（`skip_serializing_if` 只对没写的通道生效）
+        let json = serde_json::to_value(&doc).unwrap();
+        let back = SceneDoc::from_value(json.clone()).unwrap();
+        assert_eq!(back.lighting.fog.and_then(|f| f.density), Some(0.05));
+        assert_eq!(
+            back.lighting.shadow_quality.and_then(|q| q.radius),
+            Some(40.0)
+        );
+        assert_eq!(
+            back.lighting.sky_colors.and_then(|s| s.zenith),
+            Some([0.1, 0.2, 0.5])
+        );
+        // 浮点是 f32：序列化出来是 0.30000001192092896 而不是 0.3
+        assert!((json["lighting"]["fog"]["color"][1].as_f64().unwrap() - 0.3).abs() < 1e-6);
+
+        // 负密度 / 负颜色 / 强度越界 / 半径非正 / 天空颜色为负：全是 error
+        let bad = SceneDoc::from_json(
+            r#"{ "lighting": {
+                  "fog": { "color": [-1.0, 0.3, 0.4], "density": -0.1 },
+                  "shadow_quality": { "strength": 1.5, "radius": 0.0 },
+                  "sky_colors": { "horizon": [0.6, -0.2, 0.8] } } }"#,
+        )
+        .unwrap();
+        let diags = bad.validate();
+        for path in [
+            "lighting.fog.color",
+            "lighting.fog.density",
+            "lighting.shadow_quality.strength",
+            "lighting.shadow_quality.radius",
+            "lighting.sky_colors.horizon",
+        ] {
+            let d = diag_at(&diags, path).unwrap_or_else(|| panic!("{path} 必须报错：{diags:?}"));
+            assert_eq!(d.severity, Severity::Error, "{path}: {d:?}");
+        }
+        // NaN / inf 也算非法。JSON 里没有 NaN（`json!` 会把它变成 null），
+        // 所以这条只能从**代码路径**构造 —— 校验必须自己挡住，不能指望 serde。
+        let mut nan = SceneDoc::from_value(json!({ "lighting": { "fog": {} } })).unwrap();
+        nan.lighting.fog.as_mut().unwrap().density = Some(f32::NAN);
+        assert!(diag_at(&nan.validate(), "lighting.fog.density").is_some());
+        nan.lighting.fog.as_mut().unwrap().density = Some(f32::INFINITY);
+        assert!(diag_at(&nan.validate(), "lighting.fog.density").is_some());
+
+        // 大到不合常理：warning 而不是 error（能算出画面，只是难看）
+        let odd = SceneDoc::from_json(
+            r#"{ "lighting": {
+                  "fog": { "color": [9.0, 0.3, 0.4], "density": 2.0 },
+                  "shadow_quality": { "radius": 900.0 } } }"#,
+        )
+        .unwrap();
+        let diags = odd.validate();
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+        for path in [
+            "lighting.fog.color",
+            "lighting.fog.density",
+            "lighting.shadow_quality.radius",
+        ] {
+            let d = diag_at(&diags, path).unwrap_or_else(|| panic!("{path} 该给警告：{diags:?}"));
+            assert_eq!(d.severity, Severity::Warning, "{path}: {d:?}");
+        }
+        // 没写这三节 = 全是 None（不改变默认观感），且不吃未知字段
+        let plain = SceneDoc::from_json(r#"{ "objects": [] }"#).unwrap();
+        assert!(plain.lighting.fog.is_none());
+        assert!(plain.lighting.shadow_quality.is_none());
+        assert!(plain.lighting.sky_colors.is_none());
+        assert!(SceneDoc::from_json(r#"{ "lighting": { "fog": { "densty": 0.1 } } }"#).is_err());
     }
 
     #[test]

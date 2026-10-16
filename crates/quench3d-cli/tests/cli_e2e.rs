@@ -852,6 +852,239 @@ fn absurd_scene_sizes_are_rejected_with_clear_diagnostics() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// 光照补全（`lighting.fog` / `lighting.shadow_quality` / `lighting.sky_colors`）接线：
+/// 三节都能校验、能渲染、**不写 = 关闭**（逐位相同），而且真的改变画面。
+///
+/// 为什么值得端到端测：这些字段引擎里本来就有，只是格式没暴露 —— 接错了最典型的失败
+/// 是"字段能写、校验能过、像素一点没变"（静默失效），本地单测抓不到这一层。
+#[test]
+fn fog_and_shadow_quality_are_wired_to_the_renderer() {
+    let dir = temp_dir("lighting_extras");
+    let scene = |out: &str, extra: serde_json::Value| {
+        // 地板 + 悬空遮挡物：遮挡物的影子会落在地板上（否则"阴影强度"无从观察）
+        serde_json::json!({
+            "objects": [
+                { "name": "地板", "shape": { "type": "box", "size": [24, 0.5, 24] },
+                  "position": [0, -0.25, 0], "material": "grey" },
+                { "name": "浮箱", "shape": { "type": "box", "size": [2, 1.6, 2] },
+                  "position": [0, 0.8, 0], "material": "warm" }
+            ],
+            "materials": {
+                "grey": { "color": [0.85, 0.85, 0.85], "roughness": 0.9 },
+                "warm": { "color": [0.9, 0.6, 0.3], "roughness": 0.7 }
+            },
+            "camera": { "position": [0, 5, 8], "look_at": [0, 0, 0] },
+            "render": { "output": out, "width": 192, "height": 128, "msaa": 1 },
+            "lighting": extra
+        })
+    };
+
+    let plain = write_scene(
+        &dir,
+        "plain.json",
+        scene(
+            "plain.png",
+            serde_json::json!({ "sky": false, "grid": false }),
+        ),
+    );
+    let fog_off = write_scene(
+        &dir,
+        "fog-off.json",
+        scene(
+            "fog-off.png",
+            serde_json::json!({ "sky": false, "grid": false,
+                                "fog": { "color": [1.0, 0.0, 0.0], "density": 0.0 } }),
+        ),
+    );
+    let fog_on = write_scene(
+        &dir,
+        "fog-on.json",
+        scene(
+            "fog-on.png",
+            serde_json::json!({ "sky": false, "grid": false,
+                                "fog": { "color": [1.0, 0.0, 0.0], "density": 0.35 } }),
+        ),
+    );
+    let shadow_none = write_scene(
+        &dir,
+        "shadow-none.json",
+        scene(
+            "shadow-none.png",
+            serde_json::json!({ "sky": false, "grid": false, "shadows": true,
+                                "shadow_quality": { "strength": 0.0, "radius": 20 } }),
+        ),
+    );
+    let shadow_full = write_scene(
+        &dir,
+        "shadow-full.json",
+        scene(
+            "shadow-full.png",
+            serde_json::json!({ "sky": false, "grid": false, "shadows": true,
+                                "shadow_quality": { "strength": 1.0, "radius": 20 } }),
+        ),
+    );
+    let sky_colors = write_scene(
+        &dir,
+        "sky-colors.json",
+        scene(
+            "sky-colors.png",
+            serde_json::json!({ "sky": true, "grid": false,
+                                "sky_colors": { "zenith": [0.9, 0.1, 0.1], "horizon": [1.0, 0.5, 0.0] } }),
+        ),
+    );
+
+    // 1. 校验：这几节都要能过（不需要 GPU）
+    for path in [
+        &plain,
+        &fog_off,
+        &fog_on,
+        &shadow_none,
+        &shadow_full,
+        &sky_colors,
+    ] {
+        let v = run(&["validate", path.to_str().unwrap(), "--json"]).json();
+        assert_eq!(v["data"]["valid"], true, "场景应当合法：{v}");
+    }
+
+    // 2. 非法数值必须在**打开 GPU 之前**被拦下，并且路径指向具体字段
+    let bad = write_scene(
+        &dir,
+        "bad.json",
+        scene(
+            "bad.png",
+            serde_json::json!({ "fog": { "color": [-1.0, 0.2, 0.2], "density": -0.5 },
+                                "shadow_quality": { "strength": 3.0, "radius": 0.0 },
+                                "sky_colors": { "horizon": [0.5, -0.1, 0.5] } }),
+        ),
+    );
+    let v = run(&["validate", bad.to_str().unwrap(), "--json"]).json();
+    assert_eq!(v["data"]["valid"], false, "非法光照必须判为不合法：{v}");
+    let paths: Vec<&str> = v["data"]["diagnostics"]
+        .as_array()
+        .expect("要有诊断")
+        .iter()
+        .map(|d| d["path"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "lighting.fog.color",
+        "lighting.fog.density",
+        "lighting.shadow_quality.strength",
+        "lighting.shadow_quality.radius",
+        "lighting.sky_colors.horizon",
+    ] {
+        assert!(paths.contains(&expected), "缺少 {expected} 诊断：{paths:?}");
+    }
+    let rr = run(&["render", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(rr.code, 2, "非法场景不该打开 GPU：{}", rr.stdout);
+
+    // 3. 拼错的字段要报未知字段（不被静默忽略）
+    let typo = write_scene(
+        &dir,
+        "typo.json",
+        scene("typo.png", serde_json::json!({ "fog": { "densty": 0.1 } })),
+    );
+    let v = run(&["validate", typo.to_str().unwrap(), "--json"]).json();
+    assert_eq!(v["ok"], false, "拼错的字段必须报错：{v}");
+
+    // 4. 像素：不写 = 关闭（逐位相同），写了就真的变
+    let doctor = run(&["doctor", "--json"]).json();
+    if !doctor["data"]["gpu_available"].as_bool().unwrap() {
+        eprintln!("跳过渲染断言：没有可用 GPU");
+        return;
+    }
+    // 输出走 `--out`（绝对路径）：场景里的 `render.output` 是相对量，别写到仓库目录里。
+    for (path, out) in [
+        (&plain, "plain.png"),
+        (&fog_off, "fog-off.png"),
+        (&fog_on, "fog-on.png"),
+        (&shadow_none, "shadow-none.png"),
+        (&shadow_full, "shadow-full.png"),
+        (&sky_colors, "sky-colors.png"),
+    ] {
+        let out = dir.join(out);
+        let r = run(&[
+            "render",
+            path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(r.code, 0, "渲染失败：{}", r.stderr);
+    }
+
+    let (w, h, plain_px) = decode_rgba(&dir.join("plain.png"));
+    let (_, _, fog_off_px) = decode_rgba(&dir.join("fog-off.png"));
+    let (_, _, fog_on_px) = decode_rgba(&dir.join("fog-on.png"));
+    let (_, _, shadow_none_px) = decode_rgba(&dir.join("shadow-none.png"));
+    let (_, _, shadow_full_px) = decode_rgba(&dir.join("shadow-full.png"));
+    let (_, _, sky_px) = decode_rgba(&dir.join("sky-colors.png"));
+
+    assert_eq!(
+        plain_px, fog_off_px,
+        "雾密度 0 与不写 `lighting.fog` 必须逐位相同（「不写 = 关闭」不能是句空话）"
+    );
+    assert_ne!(fog_on_px, plain_px, "开了雾必须改变画面");
+    assert_ne!(shadow_full_px, shadow_none_px, "阴影强度必须改变画面");
+    assert_ne!(sky_px, plain_px, "自定义天空颜色必须改变画面");
+
+    // 统计工具：整幅图的均值、明显不同的像素数、亮度总和
+    let mean_rgb = |img: &[u8]| -> (f64, f64, f64) {
+        let (mut r, mut g, mut b) = (0.0f64, 0.0f64, 0.0f64);
+        let n = (img.len() / 4) as f64;
+        for px in img.as_chunks::<4>().0 {
+            r += px[0] as f64;
+            g += px[1] as f64;
+            b += px[2] as f64;
+        }
+        (r / n, g / n, b / n)
+    };
+    let diff_count = |a: &[u8], b: &[u8]| -> usize {
+        a.as_chunks::<4>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<4>().0)
+            .filter(|(pa, pb)| (0..3).any(|c| pa[c].abs_diff(pb[c]) > 8))
+            .count()
+    };
+    let lum_sum = |img: &[u8]| -> i64 {
+        img.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[0] as i64 + px[1] as i64 + px[2] as i64)
+            .sum()
+    };
+
+    // 红色浓雾：画面整体应当更红（R 相对 B 的差增大），而且变化面积不小
+    let (pr, _, pb) = mean_rgb(&plain_px);
+    let (fr, _, fb) = mean_rgb(&fog_on_px);
+    assert!(
+        (fr - fb) > (pr - pb) + 5.0,
+        "红色雾应当把画面推向红色：不写时 R-B={:.1}，开雾后 R-B={:.1}",
+        pr - pb,
+        fr - fb
+    );
+    let fog_changed = diff_count(&plain_px, &fog_on_px);
+    assert!(
+        fog_changed > (w * h / 20) as usize,
+        "雾只改了 {fog_changed} 个像素（共 {}），像是没接上",
+        w * h
+    );
+
+    // 阴影强度：拉满之后整体更暗，且暗化只发生在被遮住的那块地上
+    assert!(
+        lum_sum(&shadow_full_px) < lum_sum(&shadow_none_px),
+        "阴影强度拉满应当让画面更暗"
+    );
+    let shadow_changed = diff_count(&shadow_none_px, &shadow_full_px);
+    assert!(
+        shadow_changed > 24,
+        "阴影强度只改了 {shadow_changed} 个像素：影子没画上？"
+    );
+
+    // 像素级细节（"只暗在影子里"）由 `quench3d-render/tests/fog_and_shadow_quality.rs` 覆盖，
+    // 这里只保证"从场景文件一路传到渲染器"这条链是通的。
+}
+
 #[test]
 fn malformed_overrides_are_rejected_instead_of_silently_doing_nothing() {
     let scene = std::env::temp_dir().join("quench3d_override_guard.json");
