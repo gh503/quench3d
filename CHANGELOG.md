@@ -10,6 +10,40 @@
 
 ### 新增
 
+- **关节的局部轴可以按端指定（`joints[].axis_a` / `axis_b`）** —— gap #15 的第二段。
+  以前格式里只有一根 `axis`，装配时被**同时**喂给 `local_axis_a` 与 `local_axis_b`。这只在
+  "两端刚体初始朝向相同"时才等于"同一个世界轴"：门框平放、门板转了 90° 时，世界 Y 在门框
+  局部是 Y、在门板局部却是 Z。两端共用一根局部轴，求解器的角度约束会先把门板**扭平**
+  再当铰链用（现象是"门装上去自己弹回原位"），而且没有任何诊断。
+  - 格式：`JointDoc.axis_a` / `axis_b`（`Option<[f32;3]>`，**不写 = 用 `axis`**，所以老场景
+    逐位不变）。只写一端也合法：另一端回落到 `axis`。
+  - 校验（都用**已有**的稳定码，不新增码表条目）：`axis_a`/`axis_b` 非有限或零向量 →
+    `out_of_range`（报在自己的 `path` 上）；写在 `fixed`/`ball`/`distance` 上（这三种没有轴）
+    → `ineffective` 提醒；**两端初始朝向相差 >10° 却只写 `axis`** → `suspicious_value`
+    警告并指路 `axis_a`/`axis_b`。最后一条是这一轮的守门人：它把"静默装错"变成一条可 grep 的诊断。
+  - CLI / 编辑器**共用同一份映射**：`runner::build_world` 里按端取轴（`axis_a.unwrap_or(axis)`），
+    编辑器预览走的就是这个函数，不会与 `quench3d render` 分叉；编辑器存盘不许丢这两个字段。
+  - agent 自描述三处同步：`scene_grammar()["joint"]` 的字段说明、JSON Schema 的
+    `$defs.joint.properties`、系统提示词里的关节行（漏一处 `json_schema_matches_the_source_structs` 就红）。
+  - 测试（全部无显卡，真跑二进制）：
+    * `scene_doc::tests::joint_local_axes_are_per_side_and_diagnosed`：解析 / 往返 /
+      **缺省不落盘** / 零向量按端报错 / 给错关节类型提醒 / 朝向不同提醒 / 朝向相同**不**提醒。
+    * e2e `hinge_local_axes_can_differ_per_side`：门板（`rotation_deg:[90,0,0]`、铰链边在原点、
+      初始状态正好在约束流形上 = 绕世界 Y 90°/s 的圆周运动）。按端给
+      `axis_a=[0,1,0]` / `axis_b=[0,0,1]` → 1 秒后转过 **80.4°**、门板薄轴与世界 Y 的夹角
+      `|n·Y| = 0.0002`（门还是立着的门）；两端共用一根局部轴 → `|n·Y| = 1.0000`（门板被扭平），
+      两种写法相差**三个数量级**。同一条用例还断言**只写 `axis`** 与"把 `axis` 显式抄到
+      `axis_a`/`axis_b`"的 `states` **逐字节相同** —— "不写 = 老行为"的直接证据。
+    * 编辑器 `scene_roundtrip::export_preserves_sections_the_editor_does_not_model`：
+      `axis_a`/`axis_b` 经"载入 → 存盘 → 读回"仍在（编辑器没有关节面板，但更不许丢字段）。
+  - **变异验证**（改坏 → 红 → 改回 → 绿，三条独立）：
+    ① 铰链 B 端改回用 A 端的轴 → e2e 红（门板薄轴断言失败）；
+    ② `$defs.joint` 删掉 `axis_a` → `json_schema_matches_the_source_structs` 红
+    （"JSON Schema 的 joint 少了字段 `axis_a`"）；
+    ③ 把朝向差阈值抬到 100000°（等于摘掉这条诊断）→ 单元测试红（"朝向不同必须提醒"）。
+  - **没做**：`local_frame_a/b`（固定关节的"参考姿态"）引擎仍只保存不生效 —— 那要动
+    `crates/quench3d-physics` 的角约束，不在本轮的接线范围；关节可视化（轴/锚点 gizmo）也没有。
+
 - **校验诊断的稳定机器可读错误码（`diagnostics[].code`）**。以前
   `quench3d validate` 只给 `severity` + `path` + 中文 `message`，agent 想区分
   「模型路径不存在」和「字段非法」只能正则匹配中文文案 —— 文案一改，分支就烂。

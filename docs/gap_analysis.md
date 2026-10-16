@@ -54,8 +54,9 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
   而本机当时是 1.94 —— 1.99 新增的 `clippy::chunks_exact_to_as_chunks` / `drain_collect`
   让四个 crate 直接红。**本机工具链已升到 1.99 与 CI 对齐**，这类"本地绿、CI 红"的漂移随之消失。
 * 剩余大件（都在 §4 P1/P2，不是本轮范围）：
-  复合形状、关节锚点/限位补全、渲染大件（CSM 级联阴影/IBL/动画蒙皮/点光源阴影/景深与 TAA）、
-  事件总线、脚本/动画。
+  渲染大件（IBL/动画蒙皮/点光源阴影/景深与 TAA）、脚本层、音频。
+  （~~复合形状~~ ✅ 第 25 轮；~~关节限位 / 马达 / 锥限位 / 断裂~~ ✅ 第 23 轮；
+  ~~关节锚点 + **按端给的局部轴**~~ ✅ 第 29 / 56 轮；~~事件总线~~ ✅ 第 24 轮 —— 见 §4 P0 #10~#12 与 #29。）
   （~~查询补全 + 加速结构~~ ✅ 2026-10-17 已做，见 §4。）
   （~~父层级~~ ✅ 2026-10-17 第 16 轮已做，见 §3.2 与 §4。）
 
@@ -246,7 +247,7 @@ MSRV 由 1.82 改为 **1.90**（依据依赖声明的 `rust-version`，未实编
 | 材质贴图 / alpha / 双面 / AO | `MaterialDesc` **18 个字段**（含 4 个贴图槽位：base_color/normal/metallic_roughness/emissive） | ✅ **已接线**（2026-10-15）：`alpha`、`emissive_color`、`uv_scale`、4 个贴图路径、`normal_scale`、`alpha_cutoff`、`alpha_blend`、`unlit`、`double_sided`。贴图路径相对**场景文件**解析（回退 assets 搜索路径），按路径+色彩空间缓存。AO **仍未接**——不是接线问题：`MaterialDesc` 里根本没有 AO 贴图槽（着色器 `params2.z` 预留了强度但无贴图寄存器），属 P2 需先加渲染能力 |
 | 点光源与光照细节 | 8 个点光 + 平滑衰减（`light.rs:103`） | ✅ **已接线**（2026-10-15），且**顺带修掉一个真 bug**：`FrameUniforms` 把点光源写成两个并列数组（SoA），WGSL 的 `array<PointLight, 8>` 是结构体数组（AoS），布局错位 → **只给一盏灯完全不亮**、多盏灯时"颜色/强度"读到的是下一盏灯的位置。修复后 studio 预设两盏补光颜色才对，**示例场景画面因此变化（是修复，不是回归）**。回归防线：`frame_uniform_layout_matches_wgsl`（偏移量钉死）+ `tests/point_lights.rs`（单盏红灯必须照亮且变红） | 
 | 相机 near/far/正交 | `Camera.near/far/projection`，含 `Projection::Orthographic`（`camera.rs:7-33`） | ✅ **已接线**：`near`/`far`/`orthographic_height`（缺省 `None` → 与以往逐位一致的透视）。**仍未做**：多相机/多视口（`set_viewport` 0 命中） |
-| 关节锚点与局部轴 | `local_anchor_a/b`、`local_axis_a/b`（`joints.rs:40-110`） | ✅ **已接线**：`anchor_a`/`anchor_b`（局部坐标）；`axis` 的"世界轴"错误注释已改成局部轴，零轴报错 |
+| 关节锚点与局部轴 | `local_anchor_a/b`、`local_axis_a/b`（`joints.rs:40-110`） | ✅ **已接线**：`anchor_a`/`anchor_b`（局部坐标，第 29 轮）+ `axis_a`/`axis_b`（**按端**的局部轴，不写 = 回落 `axis`，第 56 轮）；`axis` 的"世界轴"错误注释已改成局部轴，零轴报错 |
 | 物理参数 | `BodyBuilder` 的 damping/gravity_scale/mass/allow_sleep/angular_velocity | ✅ **已接线**：`linear_damping`/`angular_damping`/`gravity_scale`/`mass`/`allow_sleep`/`angular_velocity`。非 `dynamic` 刚体写这些字段会**警告"会被忽略"**（静默忽略是最难查的坑）。顺带给 `simulate` 报告加了 `rotation`（四元数 xyzw）——否则"原地转起来"在报告里和静止完全一样 |
 | 行为与探针 | `contacts()` 轮询 + 轨迹 `trace` | ✅ **已接线**：`actions[]`（impulse / impulse_at_point / torque_impulse / velocity / angular_velocity / force / teleport / wake，按 `at_step` 或 `at_time` 触发）+ `probes[]`（球形/盒形区域，报告谁在第几步进入、第几步离开、区内最高速度与进入次数）。探针**只读**：同一场景多挂探针，刚体状态逐字节不变（有回归测试钉着） | 无需宿主代码即可表达"第 2 秒推一下""碰到就记录" |
 
@@ -260,6 +261,7 @@ MSRV 由 1.82 改为 **1.90**（依据依赖声明的 `rust-version`，未实编
 | 相机 | 透视下箱子 324 px；`far: 3`（箱子在 6 米外）→ **0 px**；`orthographic_height: 1` → **14400 px**（正好占满 120px 高 × 120px 宽） |
 | 刚体参数 | `gravity_scale: 0` → y 停在 5.000；缺省 → y=-14.783。`linear_damping: 3` → x=3.32；无阻尼 → x=20.00。`allow_sleep: false` → sleeping=0；缺省 → sleeping=1。质量 1 → B 被推出 4.16 米；质量 50 → 8.15 米。`angular_velocity: [0,0,8]` 转 1 秒 → 四元数 `(0,0,-0.753,-0.658)`（= cos/sin(4 rad)，与 8 rad/s 吻合） |
 | 关节锚点 | 球关节 `anchor_b=[1,0,0]` → B 的质心离 A 原点 **1.009 米**；不给锚点 → 0.009 米 |
+| 关节局部轴（第 56 轮） | 门板（`rotation_deg:[90,0,0]`）绕世界 Y 的铰链：按端写 `axis_a=[0,1,0]`/`axis_b=[0,0,1]` → 1 秒后转过 **80.4°**、门板薄轴 `\|n·Y\|=0.0002`（还是立着的门）；两端共用同一根局部轴 → `\|n·Y\|=1.0000`（门板被扭平）；两种写法的薄轴相差三个数量级。另：只写 `axis` 与"把 axis 显式抄到 `axis_a`/`axis_b`"的 `states` **逐字节相同**（不写 = 老行为） |
 | 定时动作 | 5 kg 的球静止后在第 100 步给 30 N·s 冲量 → 末态 y=1.92（基线 0.495）、速度 2.73（基线 0）；设速度后横向飞出 x=2.90；瞬移 → x=3.000 且四元数 `(0,0,0.383,0.924)`（正好 45°）；角速度 3 rad/s 跑 1 秒 → 转角 **171.9°**（=3 rad，误差 <0.1°）；`impulse_at_point` 打在盒子边缘 → 同时平移 1.000 m 与自转（力臂算对了）；**`at_time: 1.0` 与 `at_step: 60` 的输出逐字节相同** |
 | 区域探针 | 5 米落下的球：落点探针 `enter_step=46`、区内最高速 9.32 m/s、74 步在内；途中 1³ 盒探针 `enter=32 / exit=50 / steps_inside=18`；瞬移场景里"落点"的 `exit_step=60`、新位置探针的 `enter_step=60`（正好是瞬移那一步）；**加探针与不加探针的 `states` 逐字节相同** |
 
@@ -456,7 +458,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 12 | ✅ **机器可读 schema** | `quench3d schema` 输出的是手写示例 + 文字（schema.rs:16-42） | ~~agent 拿不到 JSON Schema~~ **已修**（第 27 轮）：`schema --json-schema`（draft 2020-12，见 P1 #19 与 readiness §8.13）。**第 55 轮补上配套的那半**：schema 表达不了的范围/互斥/交叉引用仍以 `validate` 为准，而 `validate` 的每条诊断现在都有稳定 `code`（见 §1 的 agent 向缺口），所以"schema 校验过了但跑不了"这件事至少能被程序分支处理 |
 | 13 | **多文件组合（include / prefab / variant）** | 无（全仓无命中） | 大场景不能拆分复用 |
 | 14 | **单位与轴向写进文件** | 约定在 README:430 与 schema 文字里，文件本身没有 | 与外部工具交换时需要口头约定 |
-| 15 | **关节锚点与参考姿态** | 引擎 `Joint` 有 `local_anchor_a/b`、`local_frame_a/b`、`local_axis_a/b`（joints.rs:34-118）；`runner.rs:452-474` 把锚点硬编码为 `Vec3::ZERO`、`local_axis_a/b` 赋**同一个向量** | 文档说 `axis` 是"世界轴"，但只有两刚体都没旋转时才成立；门上装合页（锚点在门边缘）、摆锤挂杆子末端——做不到 |
+| 15 | 🟡 部分（第 29 轮锚点 + **第 56 轮按端局部轴**） | 引擎 `Joint` 有 `local_anchor_a/b`、`local_frame_a/b`、`local_axis_a/b`（joints.rs:34-118）。**已接线**：`anchor_a`/`anchor_b`（局部坐标，第 29 轮）、`axis_a`/`axis_b`（**按端**的局部轴，不写 = 回落 `axis`，第 56 轮），配套三条诊断（零向量 `out_of_range`；写在 `fixed`/`ball`/`distance` 上 `ineffective`；**两端初始朝向相差 >10° 却只写 `axis`** 时 `suspicious_value` 并指路 `axis_a`/`axis_b`）。**仍缺**：`local_frame_a/b`（固定关节的"参考姿态"）引擎只保存不生效——"把 B 扭到指定相对姿态"做不到（要先改引擎的角约束）；关节没有可视化（轴/锚点 gizmo） | 门上装合页（锚点在门边缘 + 两端朝向不同）、摆锤挂杆子末端——**现在能做了**；只剩"固定关节指定参考姿态"与可视化 |
 | 16 | 🟡 部分（第 31/34/35 轮）：**正交 / near·far / fov / 距离 / 偏航俯仰 / 自动取景已落地**（`render/camera.rs:58/275/310`，e2e `cli_e2e.rs:2015`）；**命名相机 `cameras` 已落地**（校验空名/保留名 `default`，预检白名单+schema+系统提示同步）；**`--camera <名字>` 已落地**（`render`/`simulate`/`movie` 通用；未知名 → 退出码 2 + `unknown_camera` + 可用名单；单测 + 无显卡 e2e）。**没做**：报告里的 `camera_name` 字段、`render.outputs[]` 多输出（一次渲多张）与 `outputs[]`/`--no-clobber` 语义 | 格式 |
 | 17 | **地面全局唯一** | `ground` 是单个 `Option`；物理面无限大、摩擦**硬编码 0.85**（runner.rs:374-376），`size` 只管视觉 | 冰面 + 草地共存、可调摩擦——做不到 |
 | 18 | **形状集合固定 6 种** | 引擎有 `TriMesh`（仅能靠 `models[].collide` 间接用）；无 Compound / HeightField / Cone / 圆角盒 | 地形高度场、L 形刚体只能拆成多个物体用 fixed 关节凑 |
@@ -498,7 +500,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 给箱子贴个木纹贴图 | ❌（引擎能，格式不能） |
 | 一块玻璃/水面 | ❌ |
 | 一盏台灯（点光源） | ❌ |
-| 一辆车（车身 + 四个轮子 + 悬挂） | 🟡（有层级了：轮子挂在车身下，整体移动直接拖车身；仍缺复合形状与关节锚点/限位） |
+| 一辆车（车身 + 四个轮子 + 悬挂） | 🟡（层级、复合形状、关节锚点/限位/马达、按端局部轴都有了；仍缺悬挂的"沿轴弹簧"（6DOF/万向节）、部件级材质与关节可视化） |
 | 地上撒 500 个箱子 | 🟡（能，但 JSON 巨大） |
 | 「球进洞就停」「第 2 秒推一下」 | ❌ |
 
@@ -578,8 +580,9 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
    `limits` 单位拆成 `limits_deg`（hinge）/`limits_m`（slider）或统一成度 + 明确文档。
 2. **`validate` 改用 `assets::resolve_path`**，消除模型路径假阴性；重复物体名报错。
 3. **材质 1:1 对齐引擎**（① ② ③）——引擎已有 15 个参数/槽位，格式只有 4 个。
-4. **关节锚点与局部轴**：`anchor_a`/`anchor_b`（局部坐标）、`local_axis_a`/`local_axis_b` 分开，
-   并把 `axis` 的"世界轴"说法改成实际语义（或先明确"仅当两刚体未旋转时等于世界轴"）。
+4. ~~**关节锚点与局部轴**~~ ✅ 2026-10-19（第 29 / 56 轮）：`anchor_a`/`anchor_b`（局部坐标）+
+   `axis_a`/`axis_b`（**按端**的局部轴，不写 = 回落 `axis`，所以老场景逐位不变）；
+   `axis` 的"世界轴"说法已改成实际语义，并加了"两端朝向不同却只写 `axis`"的警告。
 5. **物理参数透出**：`angular_velocity` / `linear_damping` / `angular_damping` / `gravity_scale` / `mass`
    （引擎 body.rs:66-80,416-498 全都有，纯漏接）。
 6. ~~**`quench3d schema --json-schema`**~~ ✅ 2026-10-18 第 27 轮：手写 + `include_str!` 源码对账测试（不引依赖），
@@ -616,7 +619,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 7 | 材质贴图槽位 + 透明 + 发光颜色 | 格式 | 引擎已有 15 个参数/槽位，格式只暴露 4 个 → 视觉上限被格式锁死 |
 | 8 | ~~无头"推进 N 帧"API~~ + 渲染 golden 回归 | 引擎 | ✅ API 已补（`render_sequence`/`render_sequence_with_game`，2026-10-15）；**帧序列已经有像素摘要断言**（`movie` 的 `digest`），但单帧 `render` 仍无 golden |
 | 9 | ~~修 kinematic 唤醒 bug + `wake_up_all`/公开 `sleep()`~~ ✅ 2026-10-17：`PhysicsWorld::wake_up_all() -> usize`（返回唤醒个数）、`RigidBody::sleep()` 公开（立即入睡 + 清零速度）、`allow_sleep = false` 变成硬承诺（手动 sleep 也睡不住）、`wake` 动作支持 `target: "*"`、编辑器工具栏有「唤醒全部」 | 引擎 |
-| 10 | 关节锚点与局部轴（`anchor_a/b`、`local_axis_a/b`） | 格式 | 门的合页、摆锤挂点做不到；`axis` 文档说"世界轴"但实现是局部轴 |
+| 10 | ~~关节锚点与局部轴~~ ✅ 部分 2026-10-19（第 29 / 56 轮）：锚点 `anchor_a`/`anchor_b`（局部坐标）与**按端的局部轴** `axis_a`/`axis_b`（不写 = 回落 `axis` = 老行为）已接线，并有"两端朝向不同却共用一根局部轴"的 `suspicious_value` 警告。**仍缺**：固定关节的参考姿态（`local_frame_a/b` 引擎只存不用）、关节可视化 | 格式 | 门框平放 + 门板转 90° 的合页以前会被求解器**扭平**（无诊断），现在能装；只剩"固定关节指定参考姿态" |
 | 11 | ~~关节补全：Ball 锥限位、位置/伺服马达、break force~~ ✅ 2026-10-18：`joints[].cone_limit`（球窝锥形限位，半角 0~180°）、`joints[].motor_target_deg / motor_stiffness / motor_damping`（铰链位置伺服；引擎 `HingeMotor::servo(..).gains(..)`）、`joints[].break_force / break_torque`（超阈值即移除，报告 `joints_broken`，`PhysicsWorld::broken_joints()`）、`joints[].collide_connected`（缺省 `false`，与 Bullet/PhysX 一致：关节两端不互相碰撞）；顺带修掉"马达驱动的刚体会睡着、停在没到位的角度"这个 bug | 引擎 |
 | 12 | ~~复合形状（一刚体多 Shape）~~ ✅ 2026-10-18：格式 `objects[].shapes = [{shape, position?, rotation_deg?}]`（与 `shape` 二选一）；引擎 `BodyBuilder::part/part_at` + `RigidBody::parts()`；质量/质心/惯量按部件合成（单形状逐位不变）；碰撞/AABB/查询/角色逐部件；每对刚体最多 8 个接触点。**仍缺**：部件级材质（摩擦/恢复仍在刚体级）、部件可视化编辑面板、部件不能是三角网 | 引擎 |
 

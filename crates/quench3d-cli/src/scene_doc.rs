@@ -1306,6 +1306,17 @@ pub struct JointDoc {
     /// 想要"世界某方向"的铰链，要么别转物体，要么自己把方向乘上物体旋转的逆。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis: Option<[f32; 3]>,
+    /// A 端的局部轴（铰链转轴 / 滑块滑轴）；**不写 = 用 `axis`**。
+    ///
+    /// 只有两端刚体朝向一致时，`axis` 那一份局部轴才能同时描述两端的轴。门框平放、
+    /// 门板转了 90° 时，同一个世界方向在两端分别是"局部 Y"和"局部 Z"——这时必须
+    /// 分别写 `axis_a` / `axis_b`，否则求解器会先把 B 扭到与 A 对齐（表现成"门装上去
+    /// 自己弹回原位"）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_a: Option<[f32; 3]>,
+    /// B 端的局部轴；**不写 = 用 `axis`**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_b: Option<[f32; 3]>,
     /// 关节在刚体 a 上的连接点（**a 的局部坐标**，米），缺省原点。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_a: Option<[f32; 3]>,
@@ -2262,6 +2273,8 @@ fn check_joint(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     check_field::<String>(map, "a", path, out);
     check_field::<String>(map, "b", path, out);
     check_field::<[f32; 3]>(map, "axis", path, out);
+    check_field::<[f32; 3]>(map, "axis_a", path, out);
+    check_field::<[f32; 3]>(map, "axis_b", path, out);
     check_field::<[f32; 3]>(map, "anchor_a", path, out);
     check_field::<[f32; 3]>(map, "anchor_b", path, out);
     check_field::<[f32; 2]>(map, "limits", path, out);
@@ -3900,25 +3913,94 @@ impl SceneDoc {
                 }
             }
             // 零向量/非有限轴会被 `normalize_or_zero` 静默变成零轴，关节行为不可预期
-            if let Some(axis) = &j.axis {
+            for (key, given) in [
+                ("axis", &j.axis),
+                ("axis_a", &j.axis_a),
+                ("axis_b", &j.axis_b),
+            ] {
+                let Some(axis) = given else { continue };
                 let bad = axis.iter().any(|v| !v.is_finite());
                 let zero =
                     !bad && (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]) < 1e-12;
                 if bad {
                     out.push(Diagnostic::error_code(
                         ErrorCode::OutOfRange,
-                        format!("{p}.axis"),
+                        format!("{p}.{key}"),
                         "轴向必须是有限数",
                     ));
                 } else if zero {
                     out.push(
                         Diagnostic::error_code(
                             ErrorCode::OutOfRange,
-                            format!("{p}.axis"),
+                            format!("{p}.{key}"),
                             "轴向不能是零向量",
                         )
                         .with_hint("铰链/滑块的轴必须是某个方向，例如 [0, 1, 0]"),
                     );
+                }
+            }
+            // `axis_a`/`axis_b` 只有铰链与滑块读；写在别的关节上等于没写（静默忽略是最难查的坑）
+            if !matches!(j.kind, JointKind::Hinge | JointKind::Slider) {
+                for (key, given) in [
+                    ("axis_a", j.axis_a.is_some()),
+                    ("axis_b", j.axis_b.is_some()),
+                ] {
+                    if given {
+                        let d = Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
+                            format!("{p}.{key}"),
+                            "只有铰链/滑块有转轴/滑轴，这个字段会被忽略",
+                        );
+                        out.push(if j.kind == JointKind::Ball {
+                            d.with_hint(
+                                "球窝的锥形限位轴请写进 cone_limit.axis_a / cone_limit.axis_b",
+                            )
+                        } else {
+                            d
+                        });
+                    }
+                }
+            }
+            // 同一个**局部**轴写在两端 ≠ 同一个世界轴：两端初始朝向不同时，求解器会先
+            // 把 B 扭到与 A 对齐（"门装上去自己弹回原位"）。这正是 `axis_a`/`axis_b`
+            // 存在的理由，所以这里必须吵一声，而不是等用户看画面猜。
+            if matches!(j.kind, JointKind::Hinge | JointKind::Slider)
+                && j.axis_a.is_none()
+                && j.axis_b.is_none()
+            {
+                let axis = v3(j.axis.unwrap_or([0.0, 1.0, 0.0]));
+                if axis.length_squared() > 1e-12 {
+                    let world_rot = |name: &str| -> Quat {
+                        // 关节两端必须有刚体，而"带刚体的物体不能挂 parent"（见 objects[].parent
+                        // 的校验），所以这里的 `rotation_deg` 就是世界朝向，不用沿父链累乘。
+                        self.objects
+                            .iter()
+                            .find(|o| o.name.as_deref() == Some(name))
+                            .map(|o| {
+                                let d = o.rotation_deg.unwrap_or([0.0, 0.0, 0.0]);
+                                let r = d.map(f32::to_radians);
+                                Quat::from_euler_xyz(r[0], r[1], r[2])
+                            })
+                            .unwrap_or(Quat::IDENTITY)
+                    };
+                    let wa = world_rot(&j.a).mul_vec3(axis).normalize_or_zero();
+                    let wb = world_rot(&j.b).mul_vec3(axis).normalize_or_zero();
+                    let deg = wa.dot(wb).clamp(-1.0, 1.0).acos().to_degrees();
+                    if deg > 10.0 {
+                        out.push(
+                            Diagnostic::warn_code(
+                                ErrorCode::SuspiciousValue,
+                                format!("{p}.axis"),
+                                format!(
+                                    "两端物体朝向相差 {deg:.0}°：同一个局部轴在两端指向不同的世界方向，\
+                                     铰链/滑块会先把 B 扭到与 A 对齐（门/摆锤装不上）"
+                                ),
+                            )
+                            .with_hint(
+                                "把世界轴按各端朝向拆开写：`axis_a`（A 的局部轴）与 `axis_b`（B 的局部轴）",
+                            ),
+                        );
+                    }
                 }
             }
             for (key, anchor) in [("anchor_a", &j.anchor_a), ("anchor_b", &j.anchor_b)] {
@@ -6594,6 +6676,94 @@ mod tests {
         assert!(
             !SceneDoc::has_errors(&diags),
             "提醒不该升级成错误：{diags:?}"
+        );
+    }
+
+    /// 关节局部轴按端拆分（`axis_a` / `axis_b`）：解析、往返、默认不落盘、诊断。
+    ///
+    /// 这三件事各有各的失败方式：少了往返 → 编辑器存盘丢字段；缺省落盘 → 老场景存盘
+    /// 后不再逐字节相同；少了诊断 → 用户在 `fixed` 上写 `axis_a` 时以为生效了。
+    #[test]
+    fn joint_local_axes_are_per_side_and_diagnosed() {
+        // ① 按端给轴：解析 + 往返，且不报错
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "框", "body": "static" },
+                              { "name": "门", "body": "dynamic", "rotation_deg": [90, 0, 0] } ],
+                 "joints": [ { "type": "hinge", "a": "框", "b": "门",
+                               "axis_a": [0, 1, 0], "axis_b": [0, 0, 1] } ] }"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity == Severity::Warning && d.path == "joints[0].axis"),
+            "按端给轴之后不该再有「同一个局部轴」的提醒：{diags:?}"
+        );
+        assert_eq!(doc.joints[0].axis_a, Some([0.0, 1.0, 0.0]));
+        assert_eq!(doc.joints[0].axis_b, Some([0.0, 0.0, 1.0]));
+        let text = doc.to_json_pretty();
+        let back = SceneDoc::from_json(&text).unwrap();
+        assert_eq!(back.joints[0].axis_a, Some([0.0, 1.0, 0.0]));
+        assert_eq!(back.joints[0].axis_b, Some([0.0, 0.0, 1.0]));
+
+        // ② 不写 = 不落盘（老场景存盘仍然逐字节不变）
+        let plain = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "hinge", "a": "a", "b": "b", "axis": [0, 1, 0] } ] }"#,
+        )
+        .unwrap();
+        assert!(plain.joints[0].axis_a.is_none() && plain.joints[0].axis_b.is_none());
+        let plain_text = plain.to_json_pretty();
+        assert!(
+            !plain_text.contains("axis_a") && !plain_text.contains("axis_b"),
+            "没写就不许落盘：{plain_text}"
+        );
+
+        // ③ 零向量轴：报在自己的路径上（不能只查 `axis`）
+        let bad = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "hinge", "a": "a", "b": "b", "axis_b": [0, 0, 0] } ] }"#,
+        )
+        .unwrap();
+        let diags = bad.validate();
+        let d = diag_at(&diags, "joints[0].axis_b").expect("零向量轴必须报错");
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.code, ErrorCode::OutOfRange);
+
+        // ④ 给没有轴的关节（fixed/ball/distance）写 axis_a → `ineffective` 提醒，不是静默忽略
+        let wrong_kind = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "fixed", "a": "a", "b": "b", "axis_a": [0, 1, 0] } ] }"#,
+        )
+        .unwrap();
+        let diags = wrong_kind.validate();
+        let d = diag_at(&diags, "joints[0].axis_a").expect("必须提醒会被忽略");
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(d.code, ErrorCode::Ineffective);
+
+        // ⑤ 两端朝向不同却只给一根局部轴 → `suspicious_value`：这正是 axis_a/axis_b 的理由
+        let trap = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "框", "body": "static" },
+                              { "name": "门", "body": "dynamic", "rotation_deg": [90, 0, 0] } ],
+                 "joints": [ { "type": "hinge", "a": "框", "b": "门", "axis": [0, 1, 0] } ] }"#,
+        )
+        .unwrap();
+        let diags = trap.validate();
+        let d = diag_at(&diags, "joints[0].axis").expect("朝向不同必须提醒");
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(d.code, ErrorCode::SuspiciousValue);
+
+        // ⑥ 两端朝向相同：同样的写法不该报（否则老场景全被吵醒）
+        let same = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "hinge", "a": "a", "b": "b", "axis": [0, 1, 0] } ] }"#,
+        )
+        .unwrap();
+        assert!(
+            !same.validate().iter().any(|d| d.path == "joints[0].axis"),
+            "两端朝向相同不该报轴不同轴"
         );
     }
 

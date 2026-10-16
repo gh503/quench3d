@@ -215,6 +215,7 @@ fn export_preserves_sections_the_editor_does_not_model() {
       ],
       "joints": [
         { "type": "hinge", "a": "box", "b": "peg", "axis": [0, 1, 0],
+          "axis_a": [0, 1, 0], "axis_b": [0, 0, 1],
           "motor_target_deg": 30.0, "motor_stiffness": 10.0, "motor_damping": 2.0,
           "break_force": 500.0, "break_torque": 12.0 },
         { "type": "ball", "a": "box", "b": "peg",
@@ -256,6 +257,8 @@ fn export_preserves_sections_the_editor_does_not_model() {
         "\"break_force\": 500.0",
         "\"cone_limit\"",
         "\"collide_connected\": true",
+        // 局部轴按端拆分（第 56 轮）：编辑器没有关节面板，但**更不许丢**
+        "\"axis_b\"",
     ] {
         assert!(
             saved.json.contains(needle),
@@ -299,6 +302,18 @@ fn export_preserves_sections_the_editor_does_not_model() {
         reread.physics
     );
     assert_eq!(reread.physics.static_friction_speed, Some(0.03));
+    assert_eq!(
+        reread.joints[0].axis_a,
+        Some([0.0, 1.0, 0.0]),
+        "axis_a 被丢了：{:?}",
+        reread.joints
+    );
+    assert_eq!(
+        reread.joints[0].axis_b,
+        Some([0.0, 0.0, 1.0]),
+        "按端给的 axis_b 被丢了（这正是「编辑器不做面板就顺手清掉」那类静默损坏）：{:?}",
+        reread.joints
+    );
     let box_obj = reread
         .objects
         .iter()

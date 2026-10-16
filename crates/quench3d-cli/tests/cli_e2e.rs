@@ -2435,6 +2435,152 @@ fn joint_anchors_change_the_constraint() {
     );
 }
 
+/// #15 的第二半：**局部轴按端拆分**（`axis_a` / `axis_b`）。
+///
+/// 锚点接线之后还剩一个坑：格式里只有一根 `axis`，装配时被同时喂给 `local_axis_a`
+/// 和 `local_axis_b`。这只在"两端初始朝向相同"时才等于"同一个世界轴"——门板转了
+/// 90°，世界 Y 在门板局部是 Z。此时两端共用一根局部轴，求解器会先把门板扭平
+/// （表现成"门装上去自己弹回原位"），而且**没有任何诊断**。
+///
+/// 判据（纯物理报告，无显卡）：门板薄轴（局部 Y）在世界的指向。
+/// * 按端给轴：1 秒后门绕世界 Y 转到 90°，薄轴始终**垂直**于铰链轴（还是块立着的门）；
+/// * 两端共用 `axis`：薄轴被扭到与铰链轴**平行**（门被拧成了平躺的板）。
+#[test]
+fn hinge_local_axes_can_differ_per_side() {
+    let dir = temp_dir("joint_axis_per_side");
+    // 门板 size [2, 0.1, 1]：局部薄轴是 Y；rotation_deg [90,0,0] 后立在 XY 平面里，
+    // 铰链边取局部 [-1,0,0]（正好落在静止的"框"原点上）。零重力；初始状态**正好在
+    // 铰链的约束流形上**——绕世界 Y 以 90°/s 转，质心速度就是该圆周运动的速度
+    // （`velocity` = ω × (质心 − 锚点) = [0,0,-1.5708]），所以理想铰链不该改变它。
+    let scene = |joint: serde_json::Value| {
+        serde_json::json!({
+            "gravity": [0, 0, 0],
+            "objects": [
+                { "name": "框", "shape": { "type": "box", "size": [0.2, 0.2, 0.2] },
+                  "body": "static", "material": "m" },
+                { "name": "门", "shape": { "type": "box", "size": [2, 0.1, 1] },
+                  "body": "dynamic", "material": "m", "position": [1, 0, 0],
+                  // 90°/s：写 FRAC_PI_2 而不是字面量（clippy::approx_constant 会拒绝近似值）
+                  "rotation_deg": [90, 0, 0],
+                  "angular_velocity": [0, std::f64::consts::FRAC_PI_2, 0],
+                  "velocity": [0, 0, -std::f64::consts::FRAC_PI_2], "density": 500 }
+            ],
+            "joints": [joint],
+            "materials": { "m": { "color": [1, 1, 1] } },
+            "camera": { "position": [0, 0, 10], "look_at": [0, 0, 0] },
+            "simulate": { "steps": 60, "dt": 0.016666667 },
+            "render": { "output": "ignored.png", "width": 32, "height": 32, "msaa": 1 }
+        })
+    };
+    // 把报告的旋转（四元数 xyzw）作用在向量上：不引引擎的数学库，独立算一遍更可信。
+    fn rotate(q: &[f64], v: [f64; 3]) -> [f64; 3] {
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let qv = [q[0], q[1], q[2]];
+        let t = cross(qv, v);
+        let t = [2.0 * t[0], 2.0 * t[1], 2.0 * t[2]];
+        let u = cross(qv, t);
+        [
+            v[0] + q[3] * t[0] + u[0],
+            v[1] + q[3] * t[1] + u[1],
+            v[2] + q[3] * t[2] + u[2],
+        ]
+    }
+    let report = |path: &std::path::Path| -> serde_json::Value {
+        let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+        assert_eq!(r.code, 0, "仿真失败：{}", r.stderr);
+        r.json()
+    };
+    let door = |d: &serde_json::Value| -> (Vec<f64>, Vec<f64>) {
+        let st = d["data"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "门")
+            .unwrap_or_else(|| panic!("报告里应有「门」：{d}"))
+            .clone();
+        let nums = |v: &serde_json::Value| -> Vec<f64> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect()
+        };
+        (nums(&st["position"]), nums(&st["rotation"]))
+    };
+
+    // 三份场景只差关节那一行：按端给轴 / 两端显式同轴 / 老写法（只有 axis）。
+    let per_side = |axis_b: [f64; 3]| {
+        serde_json::json!({ "type": "hinge", "a": "框", "b": "门",
+                            "axis_a": [0, 1, 0], "axis_b": axis_b,
+                            "anchor_a": [0, 0, 0], "anchor_b": [-1, 0, 0] })
+    };
+    // 正确：门板局部 Z 就是世界 -Y，所以铰链轴两端在世界里是同一根 Y 轴。
+    let good = write_scene(&dir, "good.json", scene(per_side([0.0, 0.0, 1.0])));
+    let (pos, rot) = door(&report(&good));
+    let thin = rotate(&rot, [0.0, 1.0, 0.0]);
+    assert!(
+        thin[1].abs() < 0.05,
+        "门板的薄轴必须始终垂直于铰链轴（世界 Y），实测 |n·Y|={:.3}（四元数 {rot:?}）",
+        thin[1].abs()
+    );
+    let radius = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt();
+    let swept = (-pos[2]).atan2(pos[0]).to_degrees();
+    assert!(
+        (radius - 1.0).abs() < 0.02 && pos[1].abs() < 0.02,
+        "铰链必须把锚点按住：质心到锚点的距离应恒为 1 米、不上下漂，实测 {pos:?}"
+    );
+    assert!(
+        (swept - 90.0).abs() < 15.0,
+        "初始状态就在约束流形上（90°/s），1 秒后应绕世界 Y 转过 ≈90°，实测 {swept:.1}°（质心 {pos:?}）"
+    );
+
+    // 装错：两端共用同一根局部轴（= 旧格式唯一能写出来的东西），门板被扭平。
+    let explicit = scene(per_side([0.0, 1.0, 0.0]));
+    let bad = write_scene(&dir, "same_local_axis.json", explicit.clone());
+    let (pos_bad, rot_bad) = door(&report(&bad));
+    let thin_bad = rotate(&rot_bad, [0.0, 1.0, 0.0]);
+    assert!(
+        thin_bad[1].abs() > 0.9,
+        "两端共用局部轴时求解器会把门板扭平（薄轴转到世界 Y），实测 |n·Y|={:.3}（四元数 {rot_bad:?}）",
+        thin_bad[1].abs()
+    );
+    // 扭平之后仍受点约束（锚点按住）——说明差别确实只出在"轴"上，不是求解器崩了。
+    let radius_bad =
+        (pos_bad[0] * pos_bad[0] + pos_bad[1] * pos_bad[1] + pos_bad[2] * pos_bad[2]).sqrt();
+    assert!(
+        (radius_bad - 1.0).abs() < 0.02,
+        "点约束与轴无关，被扭平的门板仍应被按在半径 1 米上，实测 {pos_bad:?}"
+    );
+    // 对照：0.0002（正确）对 1.000（共用局部轴）——两个数相差三个数量级，判据不靠边。
+    assert!(
+        thin[1].abs() + 0.5 < thin_bad[1].abs(),
+        "两种写法必须给出明显不同的门板朝向：正确 |n·Y|={:.4} vs 共用局部轴 |n·Y|={:.4}",
+        thin[1].abs(),
+        thin_bad[1].abs()
+    );
+
+    // **老场景逐位不变**：只写 `axis`（旧格式）与"把 axis 分别抄到 axis_a/axis_b"
+    // 必须给出逐字节相同的刚体状态——这正是 `unwrap_or(axis)` 那条回落路径。
+    // （两份场景里唯一的差别是关节字段的写法，物理输入完全同构。）
+    let mut legacy = explicit;
+    let j = legacy["joints"][0].as_object_mut().unwrap();
+    j.remove("axis_a");
+    j.remove("axis_b");
+    j.insert("axis".into(), serde_json::json!([0, 1, 0]));
+    let legacy = write_scene(&dir, "legacy_axis.json", legacy);
+    assert_eq!(
+        report(&bad)["data"]["states"],
+        report(&legacy)["data"]["states"],
+        "只写 axis 必须与两端显式写同一个轴逐字节一致（不写 = 老行为）"
+    );
+}
+
 /// 定时动作：真的会改变仿真结果，而且 `at_time` 与等价的 `at_step` **逐位一致**。
 ///
 /// 这条链路以前完全不存在——场景只能给初始速度，"第 2 秒推一下"只能靠宿主代码。

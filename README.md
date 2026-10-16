@@ -849,7 +849,11 @@ NaN 刚体  : 0
   子物体继承父物体的**位置与朝向，不继承缩放**（`scale` 是"这个物体自己多大"，不是"这一组多大"）；
   **带刚体的物体不能有父物体**（位姿由物理决定，写了会被校验器拦下，不会静默失效）。
 * `joints[].anchor_a`/`anchor_b` 是**两端各自的局部坐标**，错开它们才能表达门轴、悬臂、偏心摆；
-  `axis` 同样是局部轴（物体一旦 `rotation_deg` 非零，世界轴向会跟着转）。
+  `axis` 同样是局部轴（物体一旦 `rotation_deg` 非零，世界轴向会跟着转）——**两端朝向不同时
+  必须按端写** `axis_a` / `axis_b`（各自刚体的局部轴；**不写 = 回落 `axis`**，所以老场景逐位不变）。
+  例：门框不转、门板 `rotation_deg: [90,0,0]` 时，世界 Y 在门板局部是 Z，于是
+  `"axis_a": [0,1,0], "axis_b": [0,0,1]`。两端朝向相差 >10° 却只写 `axis` 会得到
+  `suspicious_value` 警告——那种写法的求解器会先把门板**扭平**（现象是"门装上去自己弹回原位"）。
 * **关节的单位有两套，别混**：`limits` 是**弧度**（铰链）/ 米（滑块），`motor_velocity` 是
   **弧度/秒**；而 `motor_target_deg`、`cone_limit.half_angle_deg` 是**度**（名字里带 `_deg`）。
   校验器会对"限位 > 6.5 弧度""伺服目标 > 3600 度"这类明显写错单位的地方报警告。
@@ -1084,7 +1088,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 498 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 509 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1147,16 +1151,18 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 **152** 个测试（`cargo test -p quench3d-cli`：lib 73 + 5 个集成测试二进制 + 2 个 doctest），按目的分这几块：
+命令行工具的 **163** 个测试（`cargo test -p quench3d-cli`：lib 82 + bin 6 + 6 个集成测试二进制共 74 + 1 个 doctest），按目的分这几块：
 
-* **契约测试**（`tests/cli_e2e.rs`，52 个）真的去 spawn `quench3d` 子进程，断言
+* **契约测试**（`tests/cli_e2e.rs`，54 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；
   其中 4 条是「能力真的接线了」的像素/数值证据：**材质贴图**（同一箱子带/不带贴图的
   中心色差）、**点光源**（一盏红灯必须把箱子照红，且显式清空预设补光必须改变画面）、
   **相机**（`far` 把 6 米外的箱子裁成 0 像素；`orthographic_height` 让它占满 14400 像素）、
   **刚体参数**（`gravity_scale=0` 悬停、阻尼减速、`allow_sleep=false` 不睡、
   `mass` 改变碰撞结果、`angular_velocity` 真的改朝向）、**关节锚点**（球关节带偏置锚点时
-  质心被约束在 1 米外）、**定时动作**（第 100 步的冲量把静止的球重新打上天；
+  质心被约束在 1 米外）、**关节按端局部轴**（门板转 90° 时两端共用一根局部轴会被扭平：
+  薄轴与世界 Y 的夹角 `|n·Y|` 从 0.0002 变成 1.0000；只写 `axis` 与两端显式同轴的 `states`
+  逐字节相同）、**定时动作**（第 100 步的冲量把静止的球重新打上天；
   `at_time: 1.0` 与 `at_step: 60` 的输出逐字节相同）、**区域探针**
   （`enter_step`/`exit_step`/区内最高速符合自由落体，且加探针不改变物理）、
   **三条路径一致**（simulate / render / movie 都要认动作与探针）、
@@ -1172,10 +1178,10 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
   HTTP 4xx 报错、连接被拒时的建议、环境变量优先级——不需要真的模型。
   还有一个**假 `curl`**：它抄下自己的 argv，断言 `https` 路径的 API key 不在命令行参数里、
   且配置文件权限是 `-rw-------`（把 key 塞回 argv，这条测试会真的变红）。
-* **agent 循环测试**（`tests/agent_tools.rs`，6 个）用假模型发出真实的 `tool_calls`，
+* **agent 循环测试**（`tests/agent_tools.rs`，5 个）用假模型发出真实的 `tool_calls`，
   验证「调用 → 执行 → 结果回喂 → 收尾」全链路、同一回复里的多个工具、
   工具失败时把诊断回喂、以及往返上限不会死循环。
-* **零分配回归**（`tests/steady_state_allocations.rs`，2 个）：计数分配器断言物理稳态
+* **零分配回归**（`tests/steady_state_allocations.rs`，1 个）：计数分配器断言物理稳态
   每步堆分配为 0、活动内存不增长。
 * **并行 == 串行（逐位）**（`api_tests.rs`，3 个）：无关节快速路径、有关节交错路径、
   以及**换线程数**（2/3/4 线程）结果不变；每个测试都先断言「并行真的启用了」，
@@ -1194,7 +1200,7 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
   「预计算世界逆惯量」与原来的两次四元数旋转数学等价（最大相对偏差 1.03e-6）。
 * **自动修复测试**（`tests/ask_repair.rs`，3 个）验证「模型第一次给错 → 诊断回喂 →
   第二次修好」这条闭环，以及修不好时按 `--repair-rounds` 停下。
-* **单元测试**（`src/`，73 个）覆盖场景解析与校验、规模上限诊断、结构诊断路径、生成与修复提示、
+* **单元测试**（`src/`，82 个）覆盖场景解析与校验、规模上限诊断、结构诊断路径、生成与修复提示、
   信封与退出码映射、MCP 协议形状与轨迹、agent 工具定义、base64、参数解析
   （含「schema 里每个带取值的参数都必须登记进 VALUE_FLAGS」这条守卫）。
 

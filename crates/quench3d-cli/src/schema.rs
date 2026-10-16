@@ -417,7 +417,9 @@ pub fn scene_grammar() -> Value {
             "type": ["fixed", "ball", "hinge", "distance", "slider"],
             "a": "物体名（必须有刚体）",
             "b": "物体名（必须有刚体）",
-            "axis": "铰链/滑块的轴（**各自刚体的局部轴**），缺省 [0,1,0]",
+            "axis": "铰链/滑块的轴（**各自刚体的局部轴**），缺省 [0,1,0]；两端朝向不同时必须改用 axis_a/axis_b",
+            "axis_a": "A 端的局部轴（铰链转轴 / 滑块滑轴）；不写 = 用 axis",
+            "axis_b": "B 端的局部轴；不写 = 用 axis。把想要的世界轴乘上 B 初始朝向的逆就是它（门板转了 90° 时，世界 Y 往往是 B 的局部 Z）",
             "anchor_a": "关节在 a 上的连接点（a 的局部坐标，米），缺省原点",
             "anchor_b": "关节在 b 上的连接点（b 的局部坐标，米），缺省原点",
             "limits": "铰链为 [最小, 最大] 弧度；滑块为 [最小, 最大] 米",
@@ -657,6 +659,8 @@ pub fn json_schema() -> Value {
                 "a",
                 "b",
                 "axis",
+                "axis_a",
+                "axis_b",
                 "anchor_a",
                 "anchor_b",
                 "limits",
@@ -890,7 +894,10 @@ pub fn system_prompt() -> String {
            cone_limit: { half_angle_deg, axis_a, axis_b }（仅 ball）,
            motor_target_deg / motor_stiffness / motor_damping（铰链伺服）,
            break_force / break_torque（超过就断）,
-           axis: [x,y,z]（**各自刚体的局部轴**，缺省 [0,1,0]）, limits: [min,max]（铰链弧度 / 滑块米）,
+           axis: [x,y,z]（**各自刚体的局部轴**，缺省 [0,1,0]）,
+           axis_a / axis_b: [x,y,z]（**按端**给的局部轴；两端初始朝向不同时必须用它俩——
+             同一个局部轴在两端会指向不同的世界方向，求解器会先把 B 扭到与 A 对齐。不写 = 用 axis）,
+           limits: [min,max]（铰链弧度 / 滑块米）,
            anchor_a / anchor_b: [x,y,z]（关节在两端的**局部**连接点，做门轴/悬臂时错开它们）,
            rest_length, stiffness, damping, motor_velocity }
 - actions: 数组，每项：{ type: "impulse"|"impulse_at_point"|"torque_impulse"|"velocity"|

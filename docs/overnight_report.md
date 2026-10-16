@@ -1206,3 +1206,86 @@ Windows 上 FXC 直接编译失败，于是整个不透明管线建不出来 —
 2. **五条腿里 windows 不是形式**。门禁（Linux）与本地 GPU 探针都抓不到这一类问题：
    门禁跑的是 Vulkan，wasm 腿只编 wasm32、不编译 D3D。**WGSL 一改，必须去看 windows 腿**；
    这也是为什么"推上去并确认五条腿全绿"是闭环的一部分，而不是可选项。
+
+## 48. 房门装不上：一根轴在两端指向两个方向（第 56 轮）
+
+**这一轮选的是 gap #15「关节锚点与局部轴」的第二段**（不是 #18 的形状集合）。依据：#15 在
+§4 里是 **P0**（`docs/gap_analysis.md:619`），#18 只剩 Cone / 圆角盒 / HeightField，属 §4 的
+P2 且要动物理内核（新 `Shape` 变体 → 支撑函数/惯量/窄相/渲染网格），本轮闭不了环；
+#15 的引擎侧**早就齐了**（`Joint::Hinge { local_axis_a, local_axis_b }` 是两根独立的轴，
+`hinge_angle` 也已经各用各的），缺的只是"格式没把它透出来"——典型的接线活。
+
+### 48.1 现象：不是"缺能力"，是"格式逼你写错"
+
+锚点（`anchor_a`/`anchor_b`）第 29 轮就接线了。剩下的坑是**轴只有一根**：装配时
+`local_axis_a` 与 `local_axis_b` 都被赋成同一个 `axis`。这只在两端刚体**初始朝向相同**时
+才等于"同一个世界轴"。门框平放、门板 `rotation_deg: [90,0,0]` 时，世界 Y 在门框局部是 Y、
+在门板局部却是 Z —— 求解器的角度约束（`err = axis_a × axis_b`，增益 `0.2/dt` 夹到 60）
+于是**先把门板扭平**再当铰链用。现象是"门装上去自己弹回原位"，而校验器一句话都不说。
+
+### 48.2 做了什么（`axis_a` / `axis_b`）
+
+* 格式：`joints[].axis_a` / `axis_b`（`Option<[f32;3]>`）。**不写 = 回落 `axis`**，
+  所以老场景连"存盘后的字节"都不变（`skip_serializing_if`）。只写一端也合法。
+* 校验三条（**复用**已有码，不新增码表条目）：零向量/非有限 → `out_of_range`（报在自己的
+  `path` 上）；写在 `fixed`/`ball`/`distance` 上 → `ineffective`（球窝还额外指路
+  `cone_limit.axis_a/b`）；**两端朝向相差 >10° 却只写 `axis`** → `suspicious_value` + 修法提示。
+  最后这条是这轮的守门人：它把"静默装错"变成一条能 grep 的诊断。
+* 三处 agent 自描述同步：`scene_grammar()["joint"]`、`$defs.joint.properties`、系统提示词。
+* 编辑器**不用改代码**就跟着对了：`install_doc` 走 `runner::build_world`，预览与
+  `quench3d render` 是同一份映射；存盘路径本来就会保留关节，这轮把 `axis_a/axis_b`
+  也钉进 `scene_roundtrip` 的"编辑器不建模的段不许丢"清单里。
+
+### 48.3 判据（怎么量出来的，而不是"看起来对了"）
+
+`hinge_local_axes_can_differ_per_side`（无显卡，纯物理报告）：门板 `size [2,0.1,1]`、
+`rotation_deg [90,0,0]`、铰链边在原点、初始状态**正好在约束流形上**（绕世界 Y 90°/s 的
+圆周运动：`angular_velocity = [0,π/2,0]` 且 `velocity = [0,0,-π/2]`）：
+
+| 写法 | 1 秒后质心 | 门板薄轴与世界 Y 的夹角 `\|n·Y\|` |
+|---|---|---|
+| `axis_a=[0,1,0]` + `axis_b=[0,0,1]`（按端） | 转过 **80.4°**、半径 1.000 m、y 漂移 <0.02 | **0.0002**（还是立着的门） |
+| `axis_a=[0,1,0]` + `axis_b=[0,1,0]`（= 旧格式唯一能写的） | 半径仍 1.000 m | **1.0000**（门板被扭平） |
+
+两者相差**三个数量级**，而且点约束在两种写法下都成立（半径都是 1.000 m）——
+说明差别确实只出在"轴"上。同一条用例还断言：**只写 `axis`** 与"把 `axis` 显式抄到
+`axis_a`/`axis_b`"的 `states` **逐字节相同**（"不写 = 老行为"的直接证据）。
+
+### 48.4 变异验证（改坏 → 红 → 改回 → 绿）
+
+| 变异 | 变红的测试 | 原文 |
+|---|---|---|
+| 铰链 B 端改回用 A 端的轴（回到"两端共用"） | e2e `hinge_local_axes_can_differ_per_side` | `panicked at cli_e2e.rs:2525`（门板薄轴断言） |
+| `$defs.joint` 里删掉 `axis_a` | `json_schema_matches_the_source_structs` | `JSON Schema 的 joint 少了字段 axis_a（结构体改了要同步改 schema）` |
+| 把朝向差阈值抬到 100000°（等于摘掉这条诊断） | `joint_local_axes_are_per_side_and_diagnosed` | `panicked at scene_doc.rs:6747: 朝向不同必须提醒` |
+
+### 48.5 门禁与计数
+
+**门禁**：`tools/gate.sh` **七段全绿**，**509 个测试（0 失败）**，wasm 11,920,909 字节。
+本轮新增 **2** 条测试（`scene_doc` 单元 1 + e2e 1；编辑器那条是**并进已有用例**的断言，
+不计入新增），所以改动前的总数应当是 507 —— 这个数没有直接量过，是从增量倒推的。
+本会话新增的计数块：README 的 workspace 总数 498 → 509、CLI 152 → 163（lib 73 → 82、
+`cli_e2e` 52 → 54、`agent_tools` 6 → 5、`steady_state_allocations` 2 → 1 —— 后两个是
+**旧数字过期**，不是本轮改动的）；**没有重算**的 README 计数块：`api_tests.rs` 3 个、
+`island.rs` 6 个、`digest_tests` 4 个、`ask_repair.rs` 3 个、`llm_mock.rs` 9 个、
+以及物理/渲染/编辑器那几段的数字。
+
+### 48.6 一个真实教训：`1.5707963` 过不了 clippy
+
+第一次跑门禁时 `clippy -D warnings` 在**两条腿上都红**：
+`error: approximate value of f{32,64}::consts::FRAC_PI_2 found`（`cli_e2e.rs:2463,2464`）。
+测试直接 `cargo test` 是绿的 —— `approx_constant` 只在 clippy 下 deny。改成
+`std::f64::consts::FRAC_PI_2` 后绿。**"测试跑过了"不等于"门禁会过"**，
+这也再次说明为什么必须跑完整七段而不是只跑 `cargo test`。
+
+### 48.7 诚实边界（没做的）
+
+* `local_frame_a/b`（固定关节的"参考姿态"）**仍只存不用**：引擎的固定关节是速度级角约束、
+  锁定创建时的相对姿态，要"把 B 扭到指定姿态"必须先改 `crates/quench3d-physics` 的角约束
+  —— 不在本轮允许改动的接线范围内（写进了 `docs/gap_analysis.md` §3.2 #15 与
+  `docs/production_readiness.md` §10.4）。
+* 关节可视化（轴/锚点 gizmo）没有；编辑器里仍然只能靠数字调。
+* 球窝的 `cone_limit.axis_a/b` 是另一套字段（第 23 轮就有），这轮只在"写错地方"时给了指路提示。
+* 顺带发现但**没动**：README §6.3 那个大 JSON 例子的 `joints` 引用了 objects 里不存在的
+  `门`/`框`/`闸门`/`躯干`/`手臂`（那段带 `//` 注释、本来就不是可校验的 JSON）；这是既有的
+  文档漂移，改它要重写整段例子，不在本轮范围。

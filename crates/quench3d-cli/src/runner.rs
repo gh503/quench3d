@@ -1503,7 +1503,11 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         let b = *handles
             .get(&j.b)
             .ok_or_else(|| RunError::scene(format!("joints[{i}].b 找不到刚体 {}", j.b)))?;
-        let axis = v3(j.axis.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero();
+        // 局部轴按端取：`axis_a`/`axis_b` 不写就回落到 `axis`（再缺省 [0,1,0]）= 老行为，
+        // 所以老场景逐位不变；写了就按端用各自刚体的局部轴。
+        let axis = j.axis.unwrap_or([0.0, 1.0, 0.0]);
+        let axis_a = v3(j.axis_a.unwrap_or(axis)).normalize_or_zero();
+        let axis_b = v3(j.axis_b.unwrap_or(axis)).normalize_or_zero();
         let anchor_a = v3(j.anchor_a.unwrap_or([0.0, 0.0, 0.0]));
         let anchor_b = v3(j.anchor_b.unwrap_or([0.0, 0.0, 0.0]));
         let joint = match j.kind {
@@ -1532,8 +1536,8 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 b,
                 local_anchor_a: anchor_a,
                 local_anchor_b: anchor_b,
-                local_axis_a: axis,
-                local_axis_b: axis,
+                local_axis_a: axis_a,
+                local_axis_b: axis_b,
                 limits: j.limits.map(|l| (l[0], l[1])),
                 motor: build_hinge_motor(j)?,
             },
@@ -1551,8 +1555,8 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 b,
                 local_anchor_a: anchor_a,
                 local_anchor_b: anchor_b,
-                local_axis_a: axis,
-                local_axis_b: axis,
+                local_axis_a: axis_a,
+                local_axis_b: axis_b,
                 limits: j.limits.map(|l| (l[0], l[1])),
             },
         };
