@@ -5276,7 +5276,7 @@ mod tests {
         )
         .unwrap();
         let mut doc = SceneDoc::from_file(&scene).unwrap();
-        doc.extra_asset_paths = vec![PathBuf::from("from_cli"), PathBuf::from("/abs/dir")];
+        doc.extra_asset_paths = vec![PathBuf::from("from_cli"), dir.join("abs_dir")];
         let c = doc.model_candidates(std::path::Path::new("robot.obj"));
         assert_eq!(c[0], dir.join("robot.obj"), "场景目录优先：{c:?}");
         assert_eq!(c[1], dir.join("from_scene").join("robot.obj"), "{c:?}");
@@ -5287,8 +5287,8 @@ mod tests {
         );
         assert_eq!(
             c[3],
-            PathBuf::from("/abs/dir").join("robot.obj"),
-            "绝对路径原样：{c:?}"
+            dir.join("abs_dir").join("robot.obj"),
+            "绝对路径原样（用真正绝对的真实目录：Windows 上 \"/abs\" 不是绝对路径）：{c:?}"
         );
         // 不写 --asset-path 时这一个键不会被序列化出来（老场景逐字节不变）
         let plain = SceneDoc::from_file(&scene).unwrap();

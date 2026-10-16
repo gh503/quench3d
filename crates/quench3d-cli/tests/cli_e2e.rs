@@ -4647,7 +4647,8 @@ fn cli_asset_path_flag_resolves_assets_without_touching_the_scene() {
 
     // 多个目录用 `:` 分隔；不存在的那些只是多试一次，不影响结果
     let bogus = dir.join("nope");
-    let list = format!("{}:{}", bogus.display(), lib.display());
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let list = format!("{}{sep}{}", bogus.display(), lib.display());
     let r = run(&[
         "simulate",
         scene.to_str().unwrap(),
