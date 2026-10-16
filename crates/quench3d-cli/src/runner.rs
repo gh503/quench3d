@@ -923,6 +923,15 @@ impl Script {
             if pos.is_some() && dt > 0.0 {
                 body.set_linear_velocity((want_pos - cur.position) / dt);
             }
+            if rot.is_some() && dt > 0.0 {
+                // 角速度同理：不补的话，被动画转起来的球在接触点没有切向速度，
+                // 摩擦使不上劲——它会原地空转，而不是滚起来。
+                body.set_angular_velocity(quench3d::animation::angular_velocity_between(
+                    cur.rotation,
+                    want_rot,
+                    dt,
+                ));
+            }
             body.wake_up();
         }
     }

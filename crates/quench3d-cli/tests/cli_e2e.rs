@@ -4149,3 +4149,74 @@ fn keyframe_animations_move_bodies_on_a_schedule() {
         "要指出是严格递增的问题：{v}"
     );
 }
+
+/// 角速度推算 + "关键帧存姿态"的语义边界。
+///
+/// 两件事都用无显卡的路径观测：
+/// 1. 被动画转起来的球，靠**摩擦**滚起来（如果只设姿态不补角速度，接触点没有切向速度，
+///    球会原地空转、位移恒为 0——这正是本轮要修的）；
+/// 2. 旋转关键帧一段最多转 180°（slerp 走最短弧），跨度超了要给**警告**而不是让人干瞪眼。
+#[test]
+fn animated_rotation_rolls_through_friction_and_warns_about_half_turn_segments() {
+    let dir = temp_dir("rolling");
+    let scene = |values: &str| -> String {
+        format!(
+            r#"{{
+                "format": "quench3d.scene", "version": 2, "name": "滚动",
+                "ground": {{ "size": 20 }},
+                "objects": [{{
+                    "name": "球", "shape": {{ "type": "sphere", "radius": 0.5 }},
+                    "position": [0, 0.5, 0], "body": "dynamic", "mass": 1.0,
+                    "friction": 0.8, "restitution": 0.0
+                }}],
+                "simulate": {{ "steps": 60, "dt": 0.01666667 }},
+                "animations": [{{ "target": "球", "rotation": {{
+                    "times": [0.0, 1.0], "values": {values} }} }}]
+            }}"#
+        )
+    };
+    let path = dir.join("roll.json");
+    std::fs::write(&path, scene("[[0,0,0], [0,0,90]]")).unwrap();
+    let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    let st = d["data"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "球")
+        .unwrap()
+        .clone();
+    let x = st["position"][0].as_f64().unwrap();
+    let disp = st["displacement"].as_f64().unwrap();
+    // 绕 +Z 转 → 接触点切向朝 -X → 摩擦把球推向 -X（数值见 CHANGELOG：60 步约 -0.38 m）
+    assert!(x < -0.25, "球应当被摩擦推向 -X，实测 x={x}（报告 {d}）");
+    assert!(disp > 0.25, "位移应当可观，实测 {disp}");
+    assert!(
+        st["touching"].as_bool().unwrap_or(false),
+        "它得真的贴在地上才会被摩擦推动"
+    );
+
+    // 720° 一段：slerp 走最短弧 → 实际退化（这里 0° 与 720° 是同一个姿态，等于完全不动），
+    // 校验必须给出**警告**（不是错误：场景还是合法的），并提示补中间关键帧。
+    let path = dir.join("cap.json");
+    std::fs::write(&path, scene("[[0,0,0], [0,0,720]]")).unwrap();
+    let r = run(&["validate", path.to_str().unwrap(), "--json"]);
+    let v = r.json();
+    assert_eq!(v["data"]["valid"], true, "只是语义警告，不该判不合法：{v}");
+    assert_eq!(v["data"]["errors"], 0, "{v}");
+    assert!(
+        v["data"]["warnings"].as_u64().unwrap_or(0) >= 1,
+        "要有警告：{v}"
+    );
+    assert!(
+        v["data"]["diagnostics"]
+            .as_array()
+            .map(|d| d.iter().any(|x| {
+                x["severity"] == "warning"
+                    && x["message"].as_str().unwrap_or_default().contains("180")
+            }))
+            .unwrap_or(false),
+        "警告要说清 180° 这件事：{v}"
+    );
+}

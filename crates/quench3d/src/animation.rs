@@ -133,6 +133,28 @@ impl RotationTrack {
     }
 }
 
+/// 两帧之间"等效的"角速度（弧度/秒）：`dq = to * from⁻¹` 取轴角再除以 `dt`。
+///
+/// 为什么要它：动画每步直接设姿态，如果不动角速度，物理世界看到的就是"瞬移的姿态"——
+/// 接触点没有切向速度，摩擦/滚动全都失效（球被动画转起来却不会滚）。补上角速度之后，
+/// 摩擦才拿得到正确的切向速度。
+///
+/// 取**最短弧**：四元数 `q` 与 `-q` 表示同一姿态，所以先按 `w ≥ 0` 归一符号；
+/// 否则从 350° 转到 0° 会被理解成"再转 350°"，而不是"回退 10°"。
+pub fn angular_velocity_between(from: Quat, to: Quat, dt: f32) -> Vec3 {
+    if dt <= 0.0 || !dt.is_finite() {
+        return Vec3::ZERO;
+    }
+    let rel = to * from.inverse();
+    let rel = if rel.w < 0.0 {
+        Quat::new(-rel.x, -rel.y, -rel.z, -rel.w)
+    } else {
+        rel
+    };
+    let (axis, angle) = rel.to_axis_angle();
+    axis * (angle / dt)
+}
+
 /// 欧拉角 XYZ（度）→ 四元数。
 fn euler_deg_to_quat(v: Vec3) -> Quat {
     Quat::from_euler_xyz(v.x.to_radians(), v.y.to_radians(), v.z.to_radians())
@@ -281,6 +303,65 @@ mod tests {
                 .dot(euler_deg_to_quat(v(10.0, 0.0, 0.0)))
                 .abs()
                 > 0.9999
+        );
+    }
+
+    #[test]
+    fn angular_velocity_is_the_shortest_arc_divided_by_dt() {
+        let q = |deg: f32| euler_deg_to_quat(v(0.0, deg, 0.0));
+        // 90° / 0.1 秒 = π/2/0.1 ≈ 15.708 弧度/秒，绕 +Y
+        let w = angular_velocity_between(q(0.0), q(90.0), 0.1);
+        assert!(
+            (w.y - std::f32::consts::FRAC_PI_2 / 0.1).abs() < 1e-3,
+            "{w:?}"
+        );
+        assert!(w.x.abs() < 1e-4 && w.z.abs() < 1e-4, "只该有 Y 分量：{w:?}");
+
+        // 最短弧：0° 到 350° 是"回退 10°"，不是"再往前转 350°"
+        let back = angular_velocity_between(q(0.0), q(350.0), 1.0);
+        assert!(back.y < 0.0, "应当往负方向回退：{back:?}");
+        assert!((back.y + 10.0f32.to_radians()).abs() < 1e-3, "{back:?}");
+        // 反过来 350° → 0° 就是继续往前 10°（这也是最短弧）
+        let fwd = angular_velocity_between(q(350.0), q(0.0), 1.0);
+        assert!(fwd.y > 0.0, "{fwd:?}");
+        assert!((fwd.y - 10.0f32.to_radians()).abs() < 1e-3, "{fwd:?}");
+
+        // 姿态没变 / dt 非法 → 零
+        assert_eq!(angular_velocity_between(q(30.0), q(30.0), 0.5), Vec3::ZERO);
+        assert_eq!(angular_velocity_between(q(0.0), q(90.0), 0.0), Vec3::ZERO);
+        assert_eq!(
+            angular_velocity_between(q(0.0), q(90.0), f32::NAN),
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn rotation_segments_cannot_exceed_half_a_turn() {
+        // 0° 与 360° 是同一个姿态：slerp 出来是一条常量，动画看起来"完全没动"。
+        // 这不是实现缺陷，而是"关键帧存姿态"的固有语义；场景校验会给警告，
+        // 文档也写明：要转更多圈就多插几个关键帧（每段 ≤ 180°）。
+        let rt =
+            RotationTrack::new(vec![0.0, 1.0], vec![v(0.0, 0.0, 0.0), v(0.0, 0.0, 360.0)]).unwrap();
+        let q = rt.sample(0.5, false);
+        assert!(q.dot(Quat::IDENTITY).abs() > 0.9999, "半程仍是恒等：{q:?}");
+        // 180° 是可表达的极限；但恰好 180° 时"往哪边转"是歧义的（q 与 -q 是同一姿态），
+        // 所以中点可能是 +90° 也可能是 -90°——两种解读都合法，测试两种都接受。
+        let half =
+            RotationTrack::new(vec![0.0, 1.0], vec![v(0.0, 0.0, 0.0), v(0.0, 0.0, 180.0)]).unwrap();
+        let mid = half.sample(0.5, false);
+        let plus = mid.dot(euler_deg_to_quat(v(0.0, 0.0, 90.0))).abs();
+        let minus = mid.dot(euler_deg_to_quat(v(0.0, 0.0, -90.0))).abs();
+        assert!(
+            plus > 0.9999 || minus > 0.9999,
+            "180° 段的中点应当是 ±90°：{mid:?}"
+        );
+        // 170° 段没有歧义：中点是 85°
+        let lt =
+            RotationTrack::new(vec![0.0, 1.0], vec![v(0.0, 0.0, 0.0), v(0.0, 0.0, 170.0)]).unwrap();
+        let mid = lt.sample(0.5, false);
+        assert!(
+            mid.dot(euler_deg_to_quat(v(0.0, 0.0, 85.0))).abs() > 0.9999,
+            "170° 段的中点是 85°：{mid:?}"
         );
     }
 
