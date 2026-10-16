@@ -133,6 +133,16 @@ impl RotationTrack {
     }
 }
 
+/// 位置混合：`w = 0` 取 `from`，`w = 1` 取 `to`，中间线性（`w` 会被夹到 \[0,1\]）。
+pub fn blend_position(from: Vec3, to: Vec3, w: f32) -> Vec3 {
+    from.lerp(to, w.clamp(0.0, 1.0))
+}
+
+/// 朝向混合：`w = 0` 取 `from`，`w = 1` 取 `to`，中间走 slerp（最短弧）。
+pub fn blend_rotation(from: Quat, to: Quat, w: f32) -> Quat {
+    from.slerp(to, w.clamp(0.0, 1.0))
+}
+
 /// 两帧之间"等效的"角速度（弧度/秒）：`dq = to * from⁻¹` 取轴角再除以 `dt`。
 ///
 /// 为什么要它：动画每步直接设姿态，如果不动角速度，物理世界看到的就是"瞬移的姿态"——
@@ -332,6 +342,31 @@ mod tests {
         assert_eq!(
             angular_velocity_between(q(0.0), q(90.0), f32::NAN),
             Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn blending_hits_both_ends_and_the_midpoint() {
+        let a = v(0.0, 1.0, 0.0);
+        let b = v(0.0, 5.0, 0.0);
+        assert_eq!(blend_position(a, b, 0.0), a, "权重 0 = 起点");
+        assert_eq!(blend_position(a, b, 1.0), b, "权重 1 = 终点");
+        assert_eq!(
+            blend_position(a, b, 0.5),
+            v(0.0, 3.0, 0.0),
+            "权重 0.5 = 中点"
+        );
+        assert_eq!(blend_position(a, b, -1.0), a, "权重夹到 [0,1]");
+        assert_eq!(blend_position(a, b, 2.0), b, "权重夹到 [0,1]");
+
+        let qa = euler_deg_to_quat(v(0.0, 0.0, 0.0));
+        let qb = euler_deg_to_quat(v(0.0, 0.0, 90.0));
+        assert!(blend_rotation(qa, qb, 0.0).dot(qa).abs() > 0.9999);
+        assert!(blend_rotation(qa, qb, 1.0).dot(qb).abs() > 0.9999);
+        let mid = blend_rotation(qa, qb, 0.5);
+        assert!(
+            mid.dot(euler_deg_to_quat(v(0.0, 0.0, 45.0))).abs() > 0.9999,
+            "半程是 45°：{mid:?}"
         );
     }
 

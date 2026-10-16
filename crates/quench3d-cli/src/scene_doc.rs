@@ -318,6 +318,13 @@ pub struct AnimationDoc {
     /// 是否循环（缺省 false：播完停在最后一帧）。
     #[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
     pub looping: Option<bool>,
+    /// 混合权重（0~1，缺省 1）。
+    ///
+    /// 语义是"从**当前姿态**朝这条动画的姿态走多远"（`0` = 完全不生效，`1` = 完全生效）。
+    /// 同一个人物挂两条动画时，后一条的权重就是两条 clip 之间的混合比例：
+    /// 前一条（权重 1）定下姿态，后一条权重 `w` 给出 `lerp(前, 后, w)`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
     /// 位置轨道（米）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<TrackDoc>,
@@ -2185,6 +2192,14 @@ impl SceneDoc {
                         "动画 `{label}` 至少要有一条 position 或 rotation 轨道（否则它什么都不做）"
                     ),
                 ));
+            }
+            if let Some(w) = a.weight {
+                if !w.is_finite() || !(0.0..=1.0).contains(&w) {
+                    cam_diags.push(Diagnostic::error(
+                        "animations",
+                        "weight 必须在 0~1 之间（0 = 不生效，1 = 完全生效）",
+                    ));
+                }
             }
             if let Some(sp) = a.speed {
                 if !(sp.is_finite() && sp > 0.0) {

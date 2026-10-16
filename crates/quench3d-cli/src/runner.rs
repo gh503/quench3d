@@ -636,6 +636,8 @@ struct PreparedAction {
 struct PreparedAnimation {
     anim: quench3d::animation::Animation,
     handle: BodyHandle,
+    /// 混合权重：0 = 完全不生效，1 = 完全生效（缺省）。
+    weight: f32,
 }
 /// 场景里的"行为与探针"：定时动作 + 只读区域探针。
 ///
@@ -792,7 +794,11 @@ impl Script {
                 rotation,
             )
             .map_err(RunError::scene)?;
-            animations.push(PreparedAnimation { anim, handle });
+            animations.push(PreparedAnimation {
+                anim,
+                handle,
+                weight: a.weight.unwrap_or(1.0),
+            });
         }
 
         Ok(Self {
@@ -908,24 +914,47 @@ impl Script {
             return;
         }
         let time = self.time;
+        // 先在**内存里**把同一个刚体的多条动画按顺序叠起来，最后只写一次世界。
+        // 为什么不能边算边写：`body.transform()` 读到的是上一步结束时的姿态，
+        // 同一帧里刚 `set_transform` 过的值读不回来——那样 B 混合时会拿 A 之前的姿态做起点
+        // （实测：A 走 5、B 权重 0.5 应当得 3，却得到 B 的 1）。
+        let mut acc: Vec<(BodyHandle, Vec3, Quat, bool, bool)> = Vec::new();
         for pa in &self.animations {
             let (pos, rot) = pa.anim.sample(time);
             if pos.is_none() && rot.is_none() {
                 continue;
             }
-            let Some(body) = world.body_mut(pa.handle) else {
+            let idx = match acc.iter().position(|e| e.0 == pa.handle) {
+                Some(i) => i,
+                None => {
+                    let Some(body) = world.body(pa.handle) else {
+                        continue;
+                    };
+                    let t = body.transform();
+                    acc.push((pa.handle, t.position, t.rotation, false, false));
+                    acc.len() - 1
+                }
+            };
+            let e = &mut acc[idx];
+            if let Some(p) = pos {
+                e.1 = quench3d::animation::blend_position(e.1, p, pa.weight);
+                e.3 = true;
+            }
+            if let Some(r) = rot {
+                e.2 = quench3d::animation::blend_rotation(e.2, r, pa.weight);
+                e.4 = true;
+            }
+        }
+        for (handle, want_pos, want_rot, had_pos, had_rot) in acc {
+            let Some(body) = world.body_mut(handle) else {
                 continue;
             };
             let cur = body.transform();
-            let want_pos = pos.unwrap_or(cur.position);
-            let want_rot = rot.unwrap_or(cur.rotation);
             body.set_transform(Transform::new(want_pos, want_rot, Vec3::ONE));
-            if pos.is_some() && dt > 0.0 {
+            if had_pos && dt > 0.0 {
                 body.set_linear_velocity((want_pos - cur.position) / dt);
             }
-            if rot.is_some() && dt > 0.0 {
-                // 角速度同理：不补的话，被动画转起来的球在接触点没有切向速度，
-                // 摩擦使不上劲——它会原地空转，而不是滚起来。
+            if had_rot && dt > 0.0 {
                 body.set_angular_velocity(quench3d::animation::angular_velocity_between(
                     cur.rotation,
                     want_rot,

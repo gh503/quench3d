@@ -4220,3 +4220,86 @@ fn animated_rotation_rolls_through_friction_and_warns_about_half_turn_segments()
         "警告要说清 180° 这件事：{v}"
     );
 }
+
+/// 关键帧动画的**混合权重**：一条动画的 `weight` 是"从当前姿态朝它走多远"，
+/// 所以同一个物体挂两条动画时，后一条的权重就是两条 clip 的混合比例。
+///
+/// 观测口径还是 `simulate` 报告的 `states`（无显卡）。
+#[test]
+fn animation_weights_blend_two_clips_and_zero_means_no_effect() {
+    let dir = temp_dir("blend");
+    // 箱子的 y：clip A 让它 0.5 秒时到 5；clip B 让它一直停在 1。
+    // A 权重 1、B 权重 0.5 → 最终应当在 3（lerp(5, 1, 0.5)）。
+    let scene = |weights: &str| -> String {
+        format!(
+            r#"{{
+                "format": "quench3d.scene", "version": 2, "name": "混合",
+                "ground": {{ "size": 20 }},
+                "objects": [{{
+                    "name": "箱", "shape": {{ "type": "box" }},
+                    "position": [0, 1, 0], "body": "kinematic"
+                }}],
+                "simulate": {{ "steps": 30, "dt": 0.01666667 }},
+                "animations": [{weights}]
+            }}"#
+        )
+    };
+    let y_of = |path: &std::path::Path| -> f64 {
+        let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+        r.json()["data"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "箱")
+            .unwrap()["position"][1]
+            .as_f64()
+            .unwrap()
+    };
+
+    let path = dir.join("two.json");
+    std::fs::write(
+        &path,
+        scene(
+            r#"{ "target": "箱", "weight": 1.0, "position": { "times": [0.0, 1.0], "values": [[0,1,0], [0,9,0]] } },
+               { "target": "箱", "weight": 0.5, "position": { "times": [0.0, 1.0], "values": [[0,1,0], [0,1,0]] } }"#,
+        ),
+    )
+    .unwrap();
+    // 0.5 秒时 clip A 在 y=5、clip B 恒为 1 → lerp(5, 1, 0.5) = 3
+    let y = y_of(&path);
+    assert!(
+        (y - 3.0).abs() < 0.4,
+        "两条 clip 的混合应当落在中点 3，实测 {y}"
+    );
+
+    // 权重 0：这条动画完全不参与（姿态保持出生点）
+    let path = dir.join("zero.json");
+    std::fs::write(
+        &path,
+        scene(r#"{ "target": "箱", "weight": 0.0, "position": { "times": [0.0, 1.0], "values": [[0,1,0], [0,9,0]] } }"#),
+    )
+    .unwrap();
+    let y = y_of(&path);
+    assert!((y - 1.0).abs() < 0.05, "权重 0 = 不生效，实测 {y}");
+
+    // 校验：权重必须在 0~1
+    let path = dir.join("bad.json");
+    std::fs::write(
+        &path,
+        scene(r#"{ "target": "箱", "weight": 1.5, "position": { "times": [0.0], "values": [[0,1,0]] } }"#),
+    )
+    .unwrap();
+    let r = run(&["validate", path.to_str().unwrap(), "--json"]);
+    let v = r.json();
+    assert_eq!(v["data"]["valid"], false, "权重超范围要判不合法：{v}");
+    assert!(
+        v["data"]["diagnostics"]
+            .as_array()
+            .map(|d| d
+                .iter()
+                .any(|x| x["message"].as_str().unwrap_or_default().contains("0~1")))
+            .unwrap_or(false),
+        "要指出权重范围：{v}"
+    );
+}
