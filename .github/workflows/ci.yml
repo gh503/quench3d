@@ -139,7 +139,7 @@ jobs:
           rm -f ci_dry.png clobber.json dry.json ci_clobber.png
 
           echo "--- 定时动作 + 区域探针（不需要 GPU） ---"
-          printf '%s' '{"format":"quench3d.scene","version":1,"ground":{"size":20},"objects":[{"name":"球","shape":{"type":"sphere","radius":0.5},"position":[0,5,0],"body":"dynamic","mass":5.0},{"name":"台","shape":{"type":"box","size":[2,0.2,2]},"position":[0,0.1,0],"body":"static"}],"probes":[{"name":"落点","shape":"sphere","position":[0,0.6,0],"radius":1.0}],"actions":[],"simulate":{"steps":120,"dt":0.01666667}}' > action.json
+          printf '%s' '{"format":"quench3d.scene","version":2,"ground":{"size":20},"objects":[{"name":"球","shape":{"type":"sphere","radius":0.5},"position":[0,5,0],"body":"dynamic","mass":5.0},{"name":"台","shape":{"type":"box","size":[2,0.2,2]},"position":[0,0.1,0],"body":"static"}],"probes":[{"name":"落点","shape":"sphere","position":[0,0.6,0],"radius":1.0}],"actions":[],"simulate":{"steps":120,"dt":0.01666667}}' > action.json
           "$BIN" simulate action.json --json > action_plain.json
           "$PY" - <<'PY2'
           import json

@@ -591,7 +591,15 @@ mod tests {
         );
         // 缩放是子物体自己的：父物体的 (2,0.5,3) **不**乘进来。
         assert_eq!(world.scale, Vec3::new(1.0, 2.0, 1.0));
-        assert_eq!(world.rotation.to_euler_yxz().0.to_degrees().abs(), 90.0);
+        // 朝向被子物体继承（父物体绕 Y 转了 90°）。比四元数而不是欧拉角：
+        // 欧拉角反解在轴附近有 1e-5 量级的抖动，写 `== 90.0` 会在别的平台上红
+        // （macOS 上就真红过一次：90.00001 != 90.0）。
+        let expected = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        assert!(
+            world.rotation.dot(expected).abs() > 0.9999,
+            "子物体没有继承父物体的朝向：{:?}",
+            world.rotation
+        );
         // 根物体的世界变换就是局部变换。
         let parent = scene.find("父").unwrap();
         assert_eq!(

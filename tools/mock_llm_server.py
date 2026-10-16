@@ -22,7 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCENE = {
     "format": "quench3d.scene",
-    "version": 1,
+    # 格式版本：假模型也得跟上真格式，否则 `ask` 拿到的场景会被校验器拒绝
+    "version": 2,
     "name": "假模型生成的场景",
     "gravity": [0, -9.81, 0],
     "ground": {"size": 30, "material": "floor"},

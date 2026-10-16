@@ -38,6 +38,12 @@
   在没有层级之前这个 bug 表现为导出前后自身朝向不一致。现在改用矩阵第 2 行求解，
   并加了穷举角度的回归测试（`euler_extraction_round_trips_every_axis`，覆盖 ±90° 与 ±89.999°）。
   是"给层级写集成测试"时顺出来的——父物体的旋转错一点，子物体的位置就错一大截。
+- **假模型服务与 CI 冒烟测试里的场景夹具升到格式版本 2**（`tools/mock_llm_server.py`、
+  `.github/workflows/ci.yml`）—— 否则 `quench3d ask` 从假服务拿到的场景会被校验器
+  按"不支持的版本"拒掉（本机实测：升级后 `ask` → `validate` 全绿）。
+  这次漂移本地门禁看不出来（它们在任何 crate 的测试路径之外），所以补了一条守卫：
+  `cargo test -p quench3d-cli --test scene_fixtures` 断言这两份外部夹具的版本号等于
+  `scene_doc::VERSION`（故意改回 v1 会立刻变红，已实测）。
 
 ### 新增
 

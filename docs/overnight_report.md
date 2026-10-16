@@ -332,9 +332,17 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 
 **验证**：`cargo test -p quench3d --lib`（5 个，纯逻辑）/ `cargo test -p quench3d-cli --lib`（7 个）/
 `cargo test -p quench3d-editor --test hierarchy`（7 个，无 GPU 自动跳过）/
+`cargo test -p quench3d-cli --test scene_fixtures`（2 个：外部夹具版本对齐）/
 `cargo test -p quench3d-math`（`child_of` 与 `mul_transform` 互为逆）。
-**当前测试总数 383（0 失败）**；`tools/gate.sh` 全绿（fmt / clippy 原生 / clippy wasm32 /
-383 测试 / wasm 构建 **11,459,738 字节**（比上一轮 +44 KB）/ `check_web.mjs`）。
+**当前测试总数 385（0 失败）**；`tools/gate.sh` 全绿（fmt / clippy 原生 / clippy wasm32 /
+385 测试 / wasm 构建 **11,459,738 字节**（比上一轮 +44 KB）/ `check_web.mjs`）。
 
 **没有做（别误以为有）**：场景树里拖放改父（只有下拉框）；多选成组变换；空物体（没有网格的节点）；
 Prefab / 实例（同一个模型引用两次会展开成两批互不相干的物体）；版本 1 的迁移器（**刻意不做**）。
+
+**这一轮的一个反面教材（已变成机制）**：格式升到 v2 时，仓库里两份**写在代码之外**的场景夹具
+（`.github/workflows/ci.yml` 的冒烟测试、`tools/mock_llm_server.py` 的假场景）还是 v1 ——
+本地门禁全绿，CI 的 ubuntu 与 macOS 直接红。Rust 里的夹具会当场被本机测试抓出来，
+这两份不在任何 crate 的测试路径里。补救不是"下次记得改"，而是加了一条测试
+（`cargo test -p quench3d-cli --test scene_fixtures`）：把这类外部夹具列进名单，
+断言它们的版本号等于 `scene_doc::VERSION` —— 故意改回 v1 会立刻变红（已实测）。
