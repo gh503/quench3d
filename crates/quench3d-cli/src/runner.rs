@@ -2768,7 +2768,11 @@ pub fn shadow_split_lambda(doc: &SceneDoc) -> f32 {
         .clamp(0.0, 1.0)
 }
 
-fn bloom_options(doc: &SceneDoc) -> quench3d::render::BloomOptions {
+/// 把场景里的 bloom 配置翻成渲染器选项（缺省关闭）。
+///
+/// 与 [`shadow_cascades`] 同理：**编辑器共用这一份**，否则"编辑器预览里的泛光"
+/// 与"CLI 渲出来的泛光"会各按各的默认值走，而这种分叉没有任何测试会红。
+pub fn bloom_options(doc: &SceneDoc) -> quench3d::render::BloomOptions {
     let Some(b) = &doc.lighting.bloom else {
         return quench3d::render::BloomOptions::default();
     };
@@ -2780,7 +2784,8 @@ fn bloom_options(doc: &SceneDoc) -> quench3d::render::BloomOptions {
 }
 
 /// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。
-fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
+/// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。编辑器共用，理由见 [`bloom_options`]。
+pub fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
     let Some(f) = &doc.lighting.fxaa else {
         return quench3d::render::FxaaOptions::default();
     };
@@ -2793,7 +2798,8 @@ fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
 }
 
 /// 把场景里的 SSAO 配置翻成渲染器选项（缺省关闭）。
-fn ssao_options(doc: &SceneDoc) -> quench3d::render::SsaoOptions {
+/// 把场景里的 SSAO 配置翻成渲染器选项（缺省关闭）。编辑器共用，理由见 [`bloom_options`]。
+pub fn ssao_options(doc: &SceneDoc) -> quench3d::render::SsaoOptions {
     let Some(a) = &doc.lighting.ssao else {
         return quench3d::render::SsaoOptions::default();
     };

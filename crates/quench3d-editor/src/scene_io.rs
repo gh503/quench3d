@@ -105,6 +105,26 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         cascades: Some(engine.renderer.options.shadow_cascades),
         split_lambda: Some(engine.renderer.options.shadow_split_lambda),
     });
+    // 后处理：编辑器现在能改（UI 直接改 `engine.renderer.options`），所以从引擎写回。
+    // 以前这三项是"沿用底稿"——在编辑器里勾掉 FXAA，存盘却还是开着的。
+    let opts = &engine.renderer.options;
+    lighting.bloom = Some(quench3d_cli::scene_doc::BloomDoc {
+        enabled: Some(opts.bloom.enabled),
+        intensity: Some(opts.bloom.intensity),
+        threshold: Some(opts.bloom.threshold),
+    });
+    lighting.fxaa = Some(quench3d_cli::scene_doc::FxaaDoc {
+        enabled: Some(opts.fxaa.enabled),
+        edge_threshold: Some(opts.fxaa.edge_threshold),
+        edge_threshold_min: Some(opts.fxaa.edge_threshold_min),
+    });
+    lighting.ssao = Some(quench3d_cli::scene_doc::SsaoDoc {
+        enabled: Some(opts.ssao.enabled),
+        radius: Some(opts.ssao.radius),
+        bias: Some(opts.ssao.bias),
+        strength: Some(opts.ssao.strength),
+        samples: Some(opts.ssao.samples),
+    });
     lighting.sky_colors = Some(quench3d_cli::scene_doc::SkyColorsDoc {
         zenith: Some([light.sky.zenith.x, light.sky.zenith.y, light.sky.zenith.z]),
         horizon: Some([
@@ -524,6 +544,11 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     // （以前这里什么也没设：载入一个 `cascades: 4` 的场景，编辑器预览仍是引擎默认的单级。）
     engine.renderer.options.shadow_cascades = runner::shadow_cascades(&doc);
     engine.renderer.options.shadow_split_lambda = runner::shadow_split_lambda(&doc);
+    // 后处理三项也走同一份映射：以前编辑器**完全不应用**它们——载入一个开了 bloom 与 SSAO
+    // 的场景，预览里这两样都不在，而 CLI 渲出来是有的。
+    engine.renderer.options.bloom = runner::bloom_options(&doc);
+    engine.renderer.options.fxaa = runner::fxaa_options(&doc);
+    engine.renderer.options.ssao = runner::ssao_options(&doc);
     let name = doc.name.clone().unwrap_or_else(|| "scene".to_string());
     Ok(Installed {
         objects: engine.scene.len(),

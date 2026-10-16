@@ -5437,6 +5437,63 @@ mod tests {
     }
 
     #[test]
+    fn post_processing_survives_the_round_trip_through_renderer_options() {
+        // 与级联那条同理：编辑器载入时用 runner 的映射写进 RendererOptions，存盘时从
+        // RendererOptions 写回。少了这条，"编辑器里勾掉 FXAA、存盘却还开着"只能靠肉眼发现。
+        use crate::runner::{bloom_options, fxaa_options, ssao_options};
+        let doc = SceneDoc::from_value(json!({ "lighting": {
+            "bloom": { "enabled": false, "intensity": 1.25, "threshold": 2.5 },
+            "fxaa": { "enabled": true, "edge_threshold": 0.08, "edge_threshold_min": 0.02 },
+            "ssao": { "enabled": true, "radius": 1.5, "bias": 0.05, "strength": 0.9, "samples": 24 }
+        }}))
+        .unwrap();
+        let (b, f, a) = (bloom_options(&doc), fxaa_options(&doc), ssao_options(&doc));
+        assert!(
+            !b.enabled && (b.intensity - 1.25).abs() < 1e-6 && (b.threshold - 2.5).abs() < 1e-6
+        );
+        assert!(f.enabled && (f.edge_threshold - 0.08).abs() < 1e-6);
+        assert!((f.edge_threshold_min - 0.02).abs() < 1e-6);
+        assert!(a.enabled && (a.radius - 1.5).abs() < 1e-6 && (a.bias - 0.05).abs() < 1e-6);
+        assert!((a.strength - 0.9).abs() < 1e-6 && a.samples == 24);
+        // 写回（编辑器就是这么干的）：值从渲染器选项回到文档，一个不丢
+        let written = (
+            BloomDoc {
+                enabled: Some(b.enabled),
+                intensity: Some(b.intensity),
+                threshold: Some(b.threshold),
+            },
+            FxaaDoc {
+                enabled: Some(f.enabled),
+                edge_threshold: Some(f.edge_threshold),
+                edge_threshold_min: Some(f.edge_threshold_min),
+            },
+            SsaoDoc {
+                enabled: Some(a.enabled),
+                radius: Some(a.radius),
+                bias: Some(a.bias),
+                strength: Some(a.strength),
+                samples: Some(a.samples),
+            },
+        );
+        assert_eq!(written.0.intensity, Some(1.25));
+        assert_eq!(written.1.edge_threshold, Some(0.08));
+        assert_eq!(written.2.samples, Some(24));
+        // 不写 = 三项都关（老场景逐像素不变）
+        let plain = SceneDoc::from_value(json!({})).unwrap();
+        assert!(!bloom_options(&plain).enabled);
+        assert!(!fxaa_options(&plain).enabled);
+        assert!(!ssao_options(&plain).enabled);
+        // 写了 `{}` 空节 = "就是想开"，其余字段取缺省（文档里写明的语义）
+        let bare =
+            SceneDoc::from_value(json!({ "lighting": { "bloom": {}, "fxaa": {}, "ssao": {} } }))
+                .unwrap();
+        assert!(bloom_options(&bare).enabled);
+        assert!(fxaa_options(&bare).enabled);
+        assert!(ssao_options(&bare).enabled);
+        assert!((bloom_options(&bare).intensity - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
     fn shadow_quality_survives_the_round_trip_through_renderer_options() {
         // 编辑器从 `engine.renderer.options` 写回级联数与切分系数，而载入时用的是
         // `runner` 的同一份映射。这条测试钉住那个往返：场景写多少 → 渲染器用多少 →

@@ -981,9 +981,13 @@ cargo test -p quench3d-cli --lib -- shadow_quality_survives
 cargo check -p quench3d-editor            # 编辑器是 wasm+桌面双目标，门禁里两个 clippy 都会过
 ```
 
-**顺带发现的边界（诚实记录）**：这条链路目前只通了"阴影级联"，
-`lighting.bloom` / `fxaa` / `ssao` **仍然不被编辑器应用**——编辑器里的预览与 CLI
-渲出来的图在这些后处理上会不一致。已写进 gap 列表，是下一项。
+**第 52 轮补齐**：`lighting.bloom` / `fxaa` / `ssao` 当时**也**不被编辑器应用（预览里没有泛光
+与 SSAO，勾掉 FXAA 存盘却还开着）。现在同样走"共用映射 + 载入应用 + 从渲染器选项写回"，
+并给泛光加了 开/强度/阈值 三个控件。
+
+**仍然没接的（诚实边界）**：`render` 节里与输出有关的字段（分辨率、输出路径）在编辑器里
+本来就是窗口/导出概念，不走 `RendererOptions`；`lighting.preset` 由 CLI 装配代码在**载入时**
+应用、编辑器存盘时清掉（见 `scene_io` 的注释：留着 preset 等于"存了但不算数"）。
 
 ### 12.3 聚光灯（第 49 轮）：角度、余弦与"验证脚本自己也要被验证"
 

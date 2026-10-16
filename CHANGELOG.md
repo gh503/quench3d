@@ -10,6 +10,19 @@
 
 ### 新增
 
+- **编辑器接上后处理三项：`lighting.bloom` / `fxaa` / `ssao`**。以前编辑器**完全不应用**
+  它们——载入一个开了泛光与 SSAO 的场景，预览里两样都没有，而 `quench3d render` 渲出来是有的；
+  在编辑器里勾掉 FXAA 存盘，文件里却还开着（三项都是"沿用底稿"）。
+  现在载入时用 `runner::bloom_options / fxaa_options / ssao_options`（改成 `pub`）写进
+  `RendererOptions`，UI 直接改这份选项（泛光新增 开/强度/阈值 三个控件），存盘从渲染器选项写回。
+  **预览与 CLI 渲染因此共用同一份映射**，不会在"默认值"上悄悄分叉。
+- 往返测试 `post_processing_survives_the_round_trip_through_renderer_options`（CPU）：
+  显式值的往返守恒、不写 = 三项都关、写了空节 `{}` = "就是想开"且其余取缺省。
+- 已知副作用（沿用既有约定）：编辑器存盘会把 `bloom/fxaa/ssao` 三节显式写进文件，
+  即使作者从未调过它们。语义不变（`enabled: false` 是显式的），但文件会变长一点。
+
+### 新增
+
 - **编辑器：阴影级联有了 UI（级联数 1..=4、切分系数 0..=1）**，并且载入场景时把
   `lighting.shadow_quality` **应用进** `RendererOptions`（以前编辑器完全没应用：
   载入 `cascades: 4` 的场景，预览仍是引擎默认的单级），存盘时从渲染器选项写回

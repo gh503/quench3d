@@ -238,6 +238,26 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                 )
                 .on_hover_text("级联切分系数：0 = 按距离均匀，1 = 对数分布（近处更细）");
             });
+            ui.checkbox(&mut engine.renderer.options.bloom.enabled, "泛光（bloom）")
+                .on_hover_text(
+                    "让比阈值更亮的部分外溢（太阳、自发光、高光）。\n                     阈值越高越只有真正亮的东西会发光。与 quench3d render 用同一份映射。",
+                );
+            ui.add_enabled_ui(engine.renderer.options.bloom.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("强度");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.bloom.intensity)
+                            .speed(0.01)
+                            .range(0.0..=4.0),
+                    );
+                    ui.label("阈值");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.bloom.threshold)
+                            .speed(0.01)
+                            .range(0.0..=16.0),
+                    );
+                });
+            });
             ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）")
                 .on_hover_text(
                     "后处理抗锯齿：在 tonemap 之后的画面上找边缘做定向模糊。\n                     关掉时画面与不开这个功能完全一致；MSAA 与它互不替代，可以同时开。",
