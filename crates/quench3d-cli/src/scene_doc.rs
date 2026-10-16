@@ -2010,6 +2010,33 @@ impl SceneDoc {
         self.asset_candidates(rel).into_iter().find(|p| p.exists())
     }
 
+    /// 按 `--camera <名字>` 选一台命名相机：把 `camera` 段换成它。
+    ///
+    /// `default` 是 `camera` 段本身的别名（不做改动）。未知名返回 `Err`，消息里列出
+    /// 可用名字——CLI 把它包成 `unknown_camera`（退出码 2，属于"输入有问题，改参数再跑"）。
+    pub fn select_camera(&mut self, name: &str) -> Result<(), String> {
+        if name == "default" {
+            return Ok(());
+        }
+        match self.cameras.get(name) {
+            Some(c) => {
+                self.camera = c.clone();
+                Ok(())
+            }
+            None => {
+                let names: Vec<&str> = self.cameras.keys().map(|k| k.as_str()).collect();
+                Err(if names.is_empty() {
+                    format!("场景里没有 `cameras` 段，`--camera {name}` 无从选择")
+                } else {
+                    format!(
+                        "场景里没有名为 `{name}` 的相机（可用：{}）",
+                        names.join("、")
+                    )
+                })
+            }
+        }
+    }
+
     /// 语义校验；返回全部诊断（含警告），调用方自行判断是否有 `Error`。
     pub fn validate(&self) -> Vec<Diagnostic> {
         // 命名相机（`cameras`）：格式与校验先落地；`--camera <名字>` 的选择留到下一步。
@@ -5407,5 +5434,53 @@ mod camera_tests {
             let d = SceneDoc::from_json(bad).expect("要能解析");
             assert!(SceneDoc::has_errors(&d.validate()), "坏名字必须报错：{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_select_tests {
+    use super::*;
+
+    fn scene() -> SceneDoc {
+        SceneDoc::from_json(
+            r#"{
+                "format": "quench3d.scene", "version": 2,
+                "camera": { "position": [7, 4.5, 8], "look_at": [0, 1.2, 0], "fov_deg": 50 },
+                "cameras": {
+                    "正面": { "position": [0, 1, 8], "look_at": [0, 1, 0] },
+                    "俯视": { "position": [0, 9, 0.1], "look_at": [0, 1, 0], "fov_deg": 35 }
+                }
+            }"#,
+        )
+        .expect("解析")
+    }
+
+    /// `--camera <名字>`：选中的相机参数要真的搬过来；未知名要报出可用名单。
+    #[test]
+    fn select_camera_swaps_the_camera_and_reports_unknown_names() {
+        let mut doc = scene();
+        assert_eq!(doc.camera.fov_deg, Some(50.0), "选之前是 camera 段那台");
+        doc.select_camera("俯视").expect("选得到");
+        assert_eq!(doc.camera.fov_deg, Some(35.0), "选之后是命名相机的参数");
+        assert_eq!(doc.camera.position, Some([0.0, 9.0, 0.1]));
+        doc.select_camera("default")
+            .expect("default 是 camera 段别名");
+        assert_eq!(
+            doc.camera.fov_deg,
+            Some(35.0),
+            "default 不该把已选中的相机换回去"
+        );
+
+        let err = doc.select_camera("斜后方").expect_err("未知名必须报错");
+        assert!(
+            err.contains("俯视") && err.contains("正面"),
+            "要列出可用名字：{err}"
+        );
+
+        let mut plain = SceneDoc::from_json(r#"{"format":"quench3d.scene","version":2}"#).unwrap();
+        let err = plain
+            .select_camera("任何")
+            .expect_err("没有 cameras 段也要报错");
+        assert!(err.contains("没有 `cameras` 段"), "{err}");
     }
 }

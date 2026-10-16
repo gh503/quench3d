@@ -10,6 +10,14 @@
 
 ### 新增
 
+- **`--camera <名字>`（gap #16 第二步）**：`render` / `simulate` / `movie` 都能用命名相机，
+  `default` 保留给 `camera` 段那台；未知名 → 退出码 **2**、`error.kind = unknown_camera`、
+  消息里带那个名字并列出可用相机（`report.rs::exit_code` 把 `unknown_camera` 归到
+  「输入有问题，改参数再跑」这一类）。实现上只在**一处**换相机（`SceneDoc::select_camera`
+  被 `load_scene` 调用），下游 `apply_camera`/报告只看 `camera` 段，不必改渲染路径。
+  测试：单测覆盖选择与错误消息，e2e `camera_flag_reports_unknown_names_without_touching_the_gpu`
+  用 `--dry-run` 钉住"取相机阶段就失败、不该碰 GPU"（CI 无显卡）。
+  **没做**：报告里的 `camera_name` 字段、`render.outputs[]` 多输出。
 - **命名相机 `cameras`（gap #16 第一步）**：`cameras: { 名字 → 相机对象 }`，缺省空 = 行为与
   今天完全一致（只渲 `camera` 段那台）。校验只拦两种真会出事的名字：空名（没法被引用）与保留名
   `default`（它是 `camera` 段的别名）；手写 JSON 预检的白名单、`schema()` 语法表、系统提示、

@@ -89,7 +89,7 @@ impl ErrorInfo {
     pub fn exit_code(&self) -> i32 {
         match self.kind.as_str() {
             // 输出已存在（--no-clobber）与场景不合法同属"输入有问题，改参数再跑"，都是 2
-            "invalid" | "scene" | "output_exists" => EXIT_INVALID,
+            "invalid" | "scene" | "output_exists" | "unknown_camera" => EXIT_INVALID,
             "environment" => EXIT_ENVIRONMENT,
             "network" | "config" | "http" | "parse" => EXIT_NETWORK,
             "io" | "runtime" => EXIT_RUNTIME,

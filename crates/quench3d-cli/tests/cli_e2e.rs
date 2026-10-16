@@ -3859,3 +3859,53 @@ fn json_schema_is_machine_readable() {
         g["data"]
     );
 }
+
+/// `--camera <名字>`：未知名属于"输入有问题，改参数再跑"——退出码 2、
+/// `error.kind = unknown_camera`、消息里有那个名字、hint 指路。
+///
+/// 用 `--dry-run`：这条路径在**取相机**时就失败了，根本不该初始化 GPU
+/// （CI 上没有显卡，能跑到这里本身就是一条约束）。
+#[test]
+fn camera_flag_reports_unknown_names_without_touching_the_gpu() {
+    let dir = temp_dir("camera_flag");
+    let path = dir.join("s.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "format": "quench3d.scene", "version": 2,
+            "name": "相机选择",
+            "ground": { "size": 10 },
+            "camera": { "position": [7, 4.5, 8], "look_at": [0, 1, 0] },
+            "cameras": { "正面": { "position": [0, 1, 8], "look_at": [0, 1, 0] } }
+        }"#,
+    )
+    .unwrap();
+    let r = run(&[
+        "render",
+        path.to_str().unwrap(),
+        "--dry-run",
+        "--camera",
+        "斜后方",
+        "--json",
+    ]);
+    assert_eq!(r.code, 2, "未知名应当是退出码 2：{}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["error"]["kind"], "unknown_camera");
+    let msg = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("斜后方"), "消息里要有那个名字：{msg}");
+    assert!(msg.contains("正面"), "消息里要列出可用名字：{msg}");
+    let hint = v["error"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("cameras"), "hint 要指到 cameras 段：{hint}");
+
+    // `default` 是 camera 段的别名：不该被当成未知名
+    let ok = run(&[
+        "render",
+        path.to_str().unwrap(),
+        "--dry-run",
+        "--camera",
+        "default",
+        "--json",
+    ]);
+    assert_ne!(ok.code, 2, "default 不该报 unknown_camera：{}", ok.stdout);
+}

@@ -784,3 +784,14 @@ Prefab / 实例（同一模型引用两次会展开成两批物体，不共享�
 往返测试 `named_cameras_parse_validate_and_round_trip`）。**第 2 步未做**：`--camera <名字>`
 选择（含 `unknown_camera` 退出码 2 与 hint）；**第 3、4 步未做**：`render.outputs[]` 多输出与
 `outputs[]`/`--no-clobber` 语义。下一步从第 2 步开始。
+
+### 9.2 进度（第 35 轮）
+
+**第 2 步已完成**：`--camera <名字>`（`render`/`simulate`/`movie`），未知名 → 退出码 2 +
+`error.kind = unknown_camera` + 可用名单；`default` 是 `camera` 段别名。实现取巧但正确的地方：
+**只在 `load_scene` 里换一次 `doc.camera`**，下游 `apply_camera` 与渲染报告一个字都不用改。
+测试：`camera_select_tests::select_camera_swaps_the_camera_and_reports_unknown_names`（单测）+
+`camera_flag_reports_unknown_names_without_touching_the_gpu`（e2e，用 `--dry-run` 证明它不碰 GPU）。
+
+**还没做**：报告里的 `camera_name`；**第 3、4 步**（`render.outputs[]` 多输出、
+`outputs[]` 报告与 `--no-clobber` 的"先查全部目标再写"）。下一步从第 3 步开始。

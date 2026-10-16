@@ -31,6 +31,7 @@ const MAX_MOVIE_WARMUP: u32 = 10_000;
 const MAX_FIXED_DT: f32 = 1.0;
 
 const VALUE_FLAGS: &[&str] = &[
+    "--camera",
     "--out",
     "--width",
     "--height",
@@ -808,6 +809,21 @@ fn load_scene(args: &Args, path: &str, started: Instant) -> Result<SceneDoc, i32
                 .cloned()
                 .collect();
             if errors.is_empty() {
+                // `--camera <名字>`：把命名相机搬到 `camera` 段上——下游（apply_camera、
+                // 渲染报告）只看 `camera`，所以这里换一次就够，不必改渲染路径。
+                let mut doc = doc;
+                if let Some(name) = args.flag_str("--camera") {
+                    if let Err(message) = doc.select_camera(name) {
+                        return Err(fail(
+                            args,
+                            &args.command,
+                            ErrorInfo::new("unknown_camera", message).hint(
+                                "名字见场景的 `cameras` 段；不写 `--camera` 就用 `camera` 段那台",
+                            ),
+                            started,
+                        ));
+                    }
+                }
                 Ok(doc)
             } else {
                 Err(fail(
