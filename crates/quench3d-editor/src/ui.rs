@@ -221,6 +221,23 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
 
             ui.checkbox(&mut engine.renderer.options.grid, "网格");
             ui.checkbox(&mut engine.renderer.options.shadows, "阴影");
+            ui.horizontal(|ui| {
+                ui.label("级联");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.shadow_cascades)
+                        .speed(0.05)
+                        .range(1..=4),
+                )
+                .on_hover_text(
+                    "阴影级联数：1 = 单级（近处最清晰，远处可能没阴影）；\n                     2~4 = 远处也有阴影，但近处的阴影会糊一些。\n                     与 quench3d render 用同一个值。",
+                );
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.shadow_split_lambda)
+                        .speed(0.01)
+                        .range(0.0..=1.0),
+                )
+                .on_hover_text("级联切分系数：0 = 按距离均匀，1 = 对数分布（近处更细）");
+            });
             ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）")
                 .on_hover_text(
                     "后处理抗锯齿：在 tonemap 之后的画面上找边缘做定向模糊。\n                     关掉时画面与不开这个功能完全一致；MSAA 与它互不替代，可以同时开。",

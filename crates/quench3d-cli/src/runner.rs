@@ -2743,7 +2743,12 @@ fn texture_from_doc(
 ///
 /// 文档里的 `cascades` 直接决定"画几遍阴影 pass"；这里再夹一次范围，
 /// 免得手改的 JSON 绕过校验（校验是给作者看的，这里是给渲染器兜底的）。
-fn shadow_cascades(doc: &SceneDoc) -> u32 {
+/// 阴影级联数（缺省 1 = 单级）。
+///
+/// **编辑器也用这一份**（`quench3d-editor` 载入场景时把它写进 `RendererOptions`），
+/// 这样"编辑器里看到的阴影"与"`quench3d render` 渲出来的阴影"用的是同一个数——
+/// 两份各自解析的话，预览和成品会在级联数上悄悄分叉。
+pub fn shadow_cascades(doc: &SceneDoc) -> u32 {
     doc.lighting
         .shadow_quality
         .as_ref()
@@ -2753,7 +2758,8 @@ fn shadow_cascades(doc: &SceneDoc) -> u32 {
 }
 
 /// 级联切分系数（缺省 0.5；同样再夹一次范围）。
-fn shadow_split_lambda(doc: &SceneDoc) -> f32 {
+/// 级联切分系数（缺省 0.5；编辑器与 CLI 共用，理由见 [`shadow_cascades`]）。
+pub fn shadow_split_lambda(doc: &SceneDoc) -> f32 {
     doc.lighting
         .shadow_quality
         .as_ref()

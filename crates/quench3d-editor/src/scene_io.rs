@@ -95,15 +95,15 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         color: Some([light.fog.color.x, light.fog.color.y, light.fog.color.z]),
         density: Some(light.fog.density),
     });
-    // 编辑器还没有级联的 UI：`cascades` / `split_lambda` **沿用底稿**。
-    // 不能写 `None`——否则"载入 cascades: 4 的场景 → 随手存一下"就把它悄悄变回单级，
-    // 画面变了而用户什么都没改过，这种丢失最难查。
-    let draft_quality = lighting.shadow_quality;
+    // 级联数与切分系数现在由编辑器自己管（UI 直接改 `engine.renderer.options`，载入时
+    // 也把场景里的值应用进去），所以从**引擎**写回而不是"沿用底稿"。
+    // 关键不变式：载入 `cascades: 4` → 随手存一下仍然是 4（往返测试在 CLI 的 runner 里：
+    // `shadow_quality_survives_the_round_trip_through_renderer_options`）。
     lighting.shadow_quality = Some(quench3d_cli::scene_doc::ShadowQualityDoc {
         strength: Some(light.shadow_strength),
         radius: light.sun.as_ref().map(|s| s.shadow_radius),
-        cascades: draft_quality.as_ref().and_then(|q| q.cascades),
-        split_lambda: draft_quality.as_ref().and_then(|q| q.split_lambda),
+        cascades: Some(engine.renderer.options.shadow_cascades),
+        split_lambda: Some(engine.renderer.options.shadow_split_lambda),
     });
     lighting.sky_colors = Some(quench3d_cli::scene_doc::SkyColorsDoc {
         zenith: Some([light.sky.zenith.x, light.sky.zenith.y, light.sky.zenith.z]),
@@ -520,6 +520,10 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     let instances =
         runner::setup_visuals(engine, &doc, &build.handles).map_err(|e| e.to_string())?;
     apply_camera(engine, &doc.camera);
+    // 阴影级联：用 CLI 的同一份映射函数，保证编辑器预览与 `quench3d render` 是同一种阴影。
+    // （以前这里什么也没设：载入一个 `cascades: 4` 的场景，编辑器预览仍是引擎默认的单级。）
+    engine.renderer.options.shadow_cascades = runner::shadow_cascades(&doc);
+    engine.renderer.options.shadow_split_lambda = runner::shadow_split_lambda(&doc);
     let name = doc.name.clone().unwrap_or_else(|| "scene".to_string());
     Ok(Installed {
         objects: engine.scene.len(),

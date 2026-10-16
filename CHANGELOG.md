@@ -8,6 +8,20 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **编辑器：阴影级联有了 UI（级联数 1..=4、切分系数 0..=1）**，并且载入场景时把
+  `lighting.shadow_quality` **应用进** `RendererOptions`（以前编辑器完全没应用：
+  载入 `cascades: 4` 的场景，预览仍是引擎默认的单级），存盘时从渲染器选项写回
+  （不再"沿用底稿"）。级联映射函数 `runner::shadow_cascades` / `shadow_split_lambda`
+  改成 `pub`，编辑器与 CLI **共用同一份** —— 预览与 `quench3d render` 因此不会在级联数上分叉。
+- 往返测试 `shadow_quality_survives_the_round_trip_through_renderer_options`（CPU）：
+  1..=4 × 4 个 λ 的"场景 → 渲染器 → 存回"守恒；不写 = 单级 + 0.5；手改 JSON 越界时
+  映射函数自己再夹一次范围。
+- **新发现的边界**：编辑器目前只有"阴影级联"这条链路通到渲染器选项，
+  **`lighting.bloom` / `fxaa` / `ssao` 仍然不被编辑器应用**（预览与 CLI 渲染会不一致）。
+  已记入 gap 列表，是下一项。
+
 ### 变更
 
 - **删掉两个从未被读取的旗标：`--scene`、`--device`**。全仓搜索只有 `VALUE_FLAGS` 与

@@ -5436,6 +5436,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shadow_quality_survives_the_round_trip_through_renderer_options() {
+        // 编辑器从 `engine.renderer.options` 写回级联数与切分系数，而载入时用的是
+        // `runner` 的同一份映射。这条测试钉住那个往返：场景写多少 → 渲染器用多少 →
+        // 存回去还是多少。少了它，"编辑器把 cascades: 4 悄悄存回 1"这种丢失只能靠肉眼发现。
+        use crate::runner::{shadow_cascades, shadow_split_lambda};
+        for n in 1..=4u32 {
+            for lambda in [0.0f32, 0.35, 0.5, 1.0] {
+                let doc = SceneDoc::from_value(json!({ "lighting": { "shadow_quality": {
+                    "cascades": n, "split_lambda": lambda } } }))
+                .unwrap();
+                assert_eq!(shadow_cascades(&doc), n);
+                assert_eq!(shadow_split_lambda(&doc), lambda);
+                let written = ShadowQualityDoc {
+                    strength: Some(1.0),
+                    radius: None,
+                    cascades: Some(shadow_cascades(&doc)),
+                    split_lambda: Some(shadow_split_lambda(&doc)),
+                };
+                assert_eq!(written.cascades, Some(n));
+                assert_eq!(written.split_lambda, Some(lambda));
+            }
+        }
+        // 不写 = 单级 + 0.5（老场景逐像素不变）
+        let plain = SceneDoc::from_value(json!({})).unwrap();
+        assert_eq!(shadow_cascades(&plain), 1);
+        assert_eq!(shadow_split_lambda(&plain), 0.5);
+        // 手改 JSON 绕过校验时的兜底：映射函数自己再夹一次范围
+        let wild = SceneDoc::from_value(json!({ "lighting": { "shadow_quality": {
+            "cascades": 99, "split_lambda": 5.0 } } }))
+        .unwrap();
+        assert_eq!(shadow_cascades(&wild), 4);
+        assert_eq!(shadow_split_lambda(&wild), 1.0);
+    }
+
     // --- 层级（格式版本 2 的 objects[].parent）------------------------------
 
     /// 取"第一条提到某个字段"的诊断，方便断言"确实报了这个错"。

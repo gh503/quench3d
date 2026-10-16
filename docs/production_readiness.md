@@ -961,6 +961,30 @@ CLI → 绝对路径原样；不写旗标时序列化里不出现该键）+ e2e
 或字母数字就不算独立出现）。**守卫测试自己也会写错**，而它写错的方向通常是"过松"或"过严"：
 过松等于没有，过严会在无关的改动上乱叫——两种都得靠立刻跑一遍才知道。
 
+### 12.4 编辑器可达性：级联 UI 与"预览 == 渲染"（第 51 轮）
+
+到第 50 轮为止，`lighting.shadow_quality.cascades` 与 `split_lambda` 是**只有 CLI 能用**的
+字段：编辑器既不显示也不应用它们，只会在存盘时"沿用底稿"，连载入 `cascades: 4` 的场景
+预览出来的也是引擎默认的单级阴影。这轮补上：
+
+| 环节 | 以前 | 现在 |
+|---|---|---|
+| 载入 | 不应用（预览 ≠ 渲染） | `install_doc` 把 `shadow_quality` 写进 `RendererOptions` |
+| 编辑 | 没有 UI | 阴影一行两个控件（1..=4 / 0..=1），带说明 |
+| 存盘 | 沿用底稿（值对但没人知道为什么） | 从 `engine.renderer.options` 写回 |
+
+关键做法是**共用同一份映射**：`runner::shadow_cascades` / `shadow_split_lambda` 改成 `pub`，
+编辑器直接调用。两份各自解析是"预览和成品悄悄分叉"的经典来源，而这种分叉没有任何测试会红。
+
+```bash
+cargo test -p quench3d-cli --lib -- shadow_quality_survives
+cargo check -p quench3d-editor            # 编辑器是 wasm+桌面双目标，门禁里两个 clippy 都会过
+```
+
+**顺带发现的边界（诚实记录）**：这条链路目前只通了"阴影级联"，
+`lighting.bloom` / `fxaa` / `ssao` **仍然不被编辑器应用**——编辑器里的预览与 CLI
+渲出来的图在这些后处理上会不一致。已写进 gap 列表，是下一项。
+
 ### 12.3 聚光灯（第 49 轮）：角度、余弦与"验证脚本自己也要被验证"
 
 `lighting.spot_lights` 是引擎里第一类**有方向**的局部光。实现上做得最省的一件事是
