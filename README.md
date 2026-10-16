@@ -416,6 +416,13 @@ world.add_builder(
 for e in world.sensor_events() {  // 只在进入/离开的那一子步有内容
     println!("{} {:?} {:?}", if e.started { "进入" } else { "离开" }, e.sensor, e.other);
 }
+
+// 睡眠：自动（静止 0.5 秒后整岛一起睡）之外，也能手动控制
+world.wake_up_all();                  // 一趟唤醒全部，返回"叫醒了几个"
+if let Some(b) = world.body_mut(handle) {
+    b.sleep();                        // 立即入睡，**速度清零**
+    b.set_can_sleep(false);           // 硬承诺：这辈子都不睡（睡下去下一步也会醒）
+}
 ```
 
 关节（5 种）：`Fixed`（焊接）、`Ball`（球窝）、`Hinge`（铰链，带限位与马达）、
@@ -670,7 +677,8 @@ NaN 刚体  : 0
   "actions": [
     { "type": "impulse", "target": "箱子", "at_time": 2.0, "value": [0, 800, 0] },
     { "type": "force", "target": "气球", "at_step": 30, "steps": 30, "value": [0, 0.5, 0] },
-    { "type": "teleport", "target": "箱子", "at_step": 120, "position": [0, 4, 0] }
+    { "type": "teleport", "target": "箱子", "at_step": 120, "position": [0, 4, 0] },
+    { "type": "wake", "target": "*", "at_step": 150 }
   ],
   "probes": [
     { "name": "落点", "shape": "sphere", "position": [0, 0.5, 0], "radius": 1.2 },
@@ -734,6 +742,9 @@ NaN 刚体  : 0
 * **质量缺省是 density×体积**（边长 1 的箱子 = 1000 kg），所以"6 N·s 的冲量"通常什么也推不动——
   推不动就显式给 `mass`，或把冲量/力给大一点。
 * 往静态刚体（含地面、`collide: true` 的模型）上打冲量不会有任何效果，校验会**警告**你。
+* `wake` 动作的 `target` 可以写 `"*"`：一步唤醒**所有**睡着的刚体（别的动作写 `"*"` 会报错）——
+  搬动过一批物体、或从快照恢复之后，用它保证没有东西以睡着的姿态停在半空。
+  `allow_sleep: false` 的刚体是"永远清醒"（手动 `sleep()` 也睡不住），适合等外力/等关节推动的物体。
 * 动作写在已睡眠的刚体上也有效（引擎内部会先唤醒）；`probes[]` 是**只读**的——
   同一场景多挂一个探针，物理结果逐位不变（有回归测试钉着）。
 * 探针判定用刚体的**世界包围盒**与区域求交；地面是半空间、没有有限包围盒，

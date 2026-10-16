@@ -588,7 +588,8 @@ struct ProbeRuntime {
 #[derive(Debug, Clone)]
 struct PreparedAction {
     kind: ActionKind,
-    handle: BodyHandle,
+    /// 目标刚体；`None` = 全部（只有 `wake` 的 `target: "*"`，校验器保证）。
+    handle: Option<BodyHandle>,
     /// 第几步开始前施加。
     step: u32,
     /// 持续步数（只有 force 用）。
@@ -632,9 +633,15 @@ impl Script {
     ) -> Result<Self, RunError> {
         let mut actions = Vec::new();
         for (index, a) in doc.actions.iter().enumerate() {
-            let handle = *handles
-                .get(&a.target)
-                .ok_or_else(|| RunError::scene(format!("动作目标 \"{}\" 不存在", a.target)))?;
+            // `target: "*"` = 全部（只有 wake 允许，校验器已经拦过别的组合）
+            let handle =
+                if a.target == "*" {
+                    None
+                } else {
+                    Some(*handles.get(&a.target).ok_or_else(|| {
+                        RunError::scene(format!("动作目标 \"{}\" 不存在", a.target))
+                    })?)
+                };
             let step = match (a.at_step, a.at_time) {
                 (Some(s), _) => s,
                 (None, Some(t)) => (t / doc.simulate.dt).round().max(0.0) as u32,
@@ -781,7 +788,12 @@ impl Script {
             if self.step < a.step || self.step >= a.step.saturating_add(a.steps) {
                 continue;
             }
-            let Some(body) = world.body_mut(a.handle) else {
+            // `target: "*"`：一次唤醒全部（此时没有单个 handle）
+            let Some(handle) = a.handle else {
+                world.wake_up_all();
+                continue;
+            };
+            let Some(body) = world.body_mut(handle) else {
                 continue;
             };
             match a.kind {

@@ -739,6 +739,16 @@ pub(crate) fn update_sleeping<S: BodyStore>(
         if b.body_type != BodyType::Dynamic {
             continue;
         }
+        // `allow_sleep == false` 是**硬承诺**：永远清醒。
+        //
+        // 少了这一段，"我明确说了不许睡"会被一次手动 `RigidBody::sleep()` 悄悄推翻
+        // （它把自己置为睡眠，而这一遍只看速度、不看 `allow_sleep`，于是它就一直睡着）。
+        // 反过来这里醒来是有代价的（每一步都要参与求解），但那正是调用方要的语义。
+        if !b.allow_sleep {
+            b.sleeping = false;
+            b.sleep_timer = 0.0;
+            continue;
+        }
         let slow = b.linear_velocity.length() < SLEEP_LINEAR_TOL
             && b.angular_velocity.length() < SLEEP_ANGULAR_TOL;
         if slow {

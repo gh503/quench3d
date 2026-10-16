@@ -1796,3 +1796,61 @@ fn query_index_handles_multi_cell_bodies_and_masks() {
         w.raycast_all_filtered(origin, down, 100.0, QueryFilter::default().mask(1 << 3))
     );
 }
+
+#[test]
+fn wake_up_all_wakes_every_sleeper_and_manual_sleep_clears_velocity() {
+    // **零重力** + 静止：不碰任何东西，30 步（0.5 秒）后就该睡着。
+    let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+    let a = add_box(&mut w, 0.5, vec3(0.0, 0.0, 0.0), 0.5, 0.0);
+    let b = add_box(&mut w, 0.5, vec3(4.0, 0.0, 0.0), 0.5, 0.0);
+    for _ in 0..60 {
+        w.step(DT);
+    }
+    assert!(w.body(a).unwrap().is_sleeping(), "前提：a 先睡着");
+    assert!(w.body(b).unwrap().is_sleeping(), "前提：b 先睡着");
+
+    // 全醒：返回"唤醒了几个"，而不是默默什么都不做
+    let woken = w.wake_up_all();
+    assert_eq!(woken, 2, "两个都睡着，就该报 2");
+    assert!(!w.body(a).unwrap().is_sleeping());
+    assert!(!w.body(b).unwrap().is_sleeping());
+    // 已经醒着的再唤一次：0（幂等，可观测）
+    assert_eq!(w.wake_up_all(), 0, "没人睡着时应当返回 0");
+
+    // 公开的 sleep()：立即入睡 + **速度清零**
+    for _ in 0..60 {
+        w.step(DT);
+    }
+    let handle = a;
+    let body = w.body_mut(handle).unwrap();
+    body.set_linear_velocity(vec3(3.0, 0.0, 0.0));
+    body.set_angular_velocity(vec3(0.0, 2.0, 0.0));
+    body.sleep();
+    let body = w.body(handle).unwrap();
+    assert!(body.is_sleeping());
+    assert_eq!(body.linear_velocity(), Vec3::ZERO, "入睡会清零线速度");
+    assert_eq!(body.angular_velocity(), Vec3::ZERO, "入睡会清零角速度");
+
+    // 睡着之后不被积分：位置不会漂
+    let before = w.body(handle).unwrap().position();
+    for _ in 0..30 {
+        w.step(DT);
+    }
+    let after = w.body(handle).unwrap().position();
+    assert!(
+        (after - before).length() < 1e-5,
+        "睡着的刚体不该被积分：{before:?} → {after:?}"
+    );
+    assert_all_finite(&w, "唤醒全部");
+
+    // allow_sleep = false 的刚体：手动 sleep 之后下一步就会被自动睡眠逻辑纠正回来
+    let awake = add_box(&mut w, 0.5, vec3(0.0, 8.0, 0.0), 0.5, 0.0);
+    w.body_mut(awake).unwrap().set_can_sleep(false);
+    w.body_mut(awake).unwrap().sleep();
+    assert!(w.body(awake).unwrap().is_sleeping(), "sleep() 是立即的");
+    w.step(DT);
+    assert!(
+        !w.body(awake).unwrap().is_sleeping(),
+        "allow_sleep = false 的刚体不该停在睡眠状态"
+    );
+}

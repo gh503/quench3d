@@ -611,7 +611,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 6 | ~~父层级变换（`parent` + 局部变换）~~ | 引擎+格式 | ✅ **已做**（2026-10-17 第 16 轮）：格式 v2（`parent` 按名字引用）+ `Scene::{world_transform, set_parent, remove}` + 编辑器层级树/改父下拉 |
 | 7 | 材质贴图槽位 + 透明 + 发光颜色 | 格式 | 引擎已有 15 个参数/槽位，格式只暴露 4 个 → 视觉上限被格式锁死 |
 | 8 | ~~无头"推进 N 帧"API~~ + 渲染 golden 回归 | 引擎 | ✅ API 已补（`render_sequence`/`render_sequence_with_game`，2026-10-15）；**帧序列已经有像素摘要断言**（`movie` 的 `digest`），但单帧 `render` 仍无 golden |
-| 9 | 修 kinematic 唤醒 bug + `wake_up_all`/公开 `sleep()` | 引擎 | 🟡 **bug 已修 + 回归用例**；`wake_up_all`/`sleep()` API 仍未做 |
+| 9 | ~~修 kinematic 唤醒 bug + `wake_up_all`/公开 `sleep()`~~ ✅ 2026-10-17：`PhysicsWorld::wake_up_all() -> usize`（返回唤醒个数）、`RigidBody::sleep()` 公开（立即入睡 + 清零速度）、`allow_sleep = false` 变成硬承诺（手动 sleep 也睡不住）、`wake` 动作支持 `target: "*"`、编辑器工具栏有「唤醒全部」 | 引擎 |
 | 10 | 关节锚点与局部轴（`anchor_a/b`、`local_axis_a/b`） | 格式 | 门的合页、摆锤挂点做不到；`axis` 文档说"世界轴"但实现是局部轴 |
 | 11 | 关节补全：Ball 锥限位、位置/伺服马达、break force | 引擎 | 布娃娃、悬挂载具、机械臂、可破坏门 |
 | 12 | 复合形状（一刚体多 Shape） | 引擎 | 桌子/载具/角色碰撞体不再需要关节硬拼 |

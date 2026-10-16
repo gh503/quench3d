@@ -457,6 +457,24 @@
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
 
+### 8.7 「睡眠 API 补全」怎么落的（第 21 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-physics --lib -- wake_up_all`、
+> `cargo test -p quench3d-cli --test cli_e2e -- wake_action_with_star`。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 引擎 | `PhysicsWorld::wake_up_all() -> usize` | 返回"唤醒几个"是**可观测性**的一部分：调用方（报告/状态栏/测试）能确认它真干了事，而不是"调用了一个 void 函数然后假设它生效" |
+| 引擎 | `RigidBody::sleep()` 由 `pub(crate)` 改为 `pub` | 文档里写清与**自动睡眠**的差别：手动是立即的、且**清零速度**；自动要看整岛计时器（逐体入睡会让堆叠渗下去） |
+| 引擎（行为修正） | `update_sleeping` 第一遍加 `if !allow_sleep { sleeping = false; ... }` | 这是一个真 bug：`allow_sleep = false` 的刚体一旦被手动 `sleep()` 就永远醒不过来（那一遍只看速度）。在 `sleep()` 公开之前这个状态从 crate 外**无法构造**，所以修正它不会影响任何已有场景 |
+| 场景格式 | `actions[]` 的 `wake` 接受 `target: "*"` | 别的动作写 `"*"` 报错（`actions[i].target`）：一个"看起来作用于全部、其实只作用于一个"的动作是最难查的静默失效 |
+| CLI / 报告 | `PreparedAction.handle` 改成 `Option<BodyHandle>`（`None` = 全部） | 用类型表达"没有单个目标"，而不是拿一个假的 `BodyHandle{0,0}` 当哨兵 |
+| 编辑器 | 工具栏「☀ 唤醒全部」+ 状态栏报数 | 场景级操作放工具栏（不属于任何物体）；不写历史——它不改场景内容，只改运行时状态 |
+
+**没做（诚实边界）**：没有"睡着的物体列表"查询 API（要统计就自己遍历 `bodies()` / 报告里的
+`sleeping` 计数）；`wake_up_all` 不重置 `sleep_timer` 之外的任何东西、也不 bump `version`
+（位置没变，查询索引不受影响）；没有"按区域唤醒"（用 `probes` + 自己遍历即可）。
+
 ### 8.6 「光照补全：雾 / 阴影质量 / 天空颜色」怎么落的（第 20 轮，已跑门禁）
 
 > **状态：已实施**。验证：`cargo test -p quench3d-cli --lib -- fog_shadow_quality`、

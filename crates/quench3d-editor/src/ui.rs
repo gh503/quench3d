@@ -107,6 +107,16 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                 engine.paused = true;
                 doc.record_edit(engine);
             }
+            if ui
+                .button("☀ 唤醒全部")
+                .on_hover_text(
+                    "把所有睡着的刚体叫醒（速度保持为零）：\n                     搬动过一批物体、或从快照恢复之后，\n                     免得有东西以睡着的姿态停在半空",
+                )
+                .clicked()
+            {
+                let woken = engine.world.wake_up_all();
+                doc.status = format!("已唤醒 {woken} 个睡着的刚体");
+            }
 
             ui.separator();
 

@@ -852,6 +852,90 @@ fn absurd_scene_sizes_are_rejected_with_clear_diagnostics() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// `wake` 动作的 `target: "*"`：一次唤醒**所有**睡着的刚体（引擎 `wake_up_all`）。
+///
+/// 为什么用"整场景都睡着的零重力场景"：它把睡眠这件事变成**确定**的
+/// （静止 0.5 秒即入睡），于是"报告里 sleeping 从 2 变成 0"就是一条干净的行为证据。
+/// 顺带钉住"`*` 只对 wake 有效"：别的动作写 `*` 必须报错，不能悄悄只作用在一个物体上。
+#[test]
+fn wake_action_with_star_wakes_every_sleeper() {
+    let dir = temp_dir("wake_all");
+    let scene = |actions: serde_json::Value| {
+        serde_json::json!({
+            "gravity": [0.0, 0.0, 0.0],
+            "objects": [
+                { "name": "a", "shape": { "type": "box", "size": [1, 1, 1] },
+                  "body": "dynamic", "position": [0, 0, 0] },
+                { "name": "b", "shape": { "type": "box", "size": [1, 1, 1] },
+                  "body": "dynamic", "position": [4, 0, 0] }
+            ],
+            "actions": actions,
+            "simulate": { "steps": 120 }
+        })
+    };
+
+    // 1. 没有动作：两个盒子一直静止 → 都睡着
+    let plain = write_scene(&dir, "plain.json", scene(serde_json::json!([])));
+    let v = run(&["simulate", plain.to_str().unwrap(), "--json"]).json();
+    assert_eq!(v["data"]["sleeping"], 2, "前提：两个都该睡着：{v}");
+
+    // 2. 第 119 步唤醒全部：最后一步跑完时它们刚醒，来不及再睡
+    let woken = write_scene(
+        &dir,
+        "woken.json",
+        scene(serde_json::json!([
+            { "type": "wake", "target": "*", "at_step": 119 }
+        ])),
+    );
+    let v = run(&["simulate", woken.to_str().unwrap(), "--json"]).json();
+    assert_eq!(
+        v["data"]["sleeping"], 0,
+        "`target: \"*\"` 应当唤醒全部：{v}"
+    );
+    for st in v["data"]["states"].as_array().expect("要有 states") {
+        assert_eq!(st["asleep"], false, "每个都该是醒的：{st}");
+    }
+
+    // 3. 只唤醒其中一个：另一个仍然是睡着的（证明 `*` 是"全部"而不是"碰巧动了谁"）
+    let one = write_scene(
+        &dir,
+        "one.json",
+        scene(serde_json::json!([
+            { "type": "wake", "target": "a", "at_step": 119 }
+        ])),
+    );
+    let v = run(&["simulate", one.to_str().unwrap(), "--json"]).json();
+    assert_eq!(v["data"]["sleeping"], 1, "只唤醒 a：{v}");
+    let states = v["data"]["states"].as_array().unwrap();
+    let a = states.iter().find(|s| s["name"] == "a").unwrap();
+    let b = states.iter().find(|s| s["name"] == "b").unwrap();
+    assert_eq!(a["asleep"], false, "a 应当被唤醒");
+    assert_eq!(b["asleep"], true, "b 不该受影响");
+
+    // 4. `*` 只对 wake 有效：别的动作写 `*` 要报错（不能悄悄只作用于一个物体）
+    let bad = write_scene(
+        &dir,
+        "bad.json",
+        scene(serde_json::json!([
+            { "type": "impulse", "target": "*", "value": [0.0, 1.0, 0.0], "at_step": 1 }
+        ])),
+    );
+    let v = run(&["validate", bad.to_str().unwrap(), "--json"]).json();
+    assert_eq!(v["data"]["valid"], false, "impulse 配 `*` 必须不合法：{v}");
+    let paths: Vec<&str> = v["data"]["diagnostics"]
+        .as_array()
+        .expect("要有诊断")
+        .iter()
+        .map(|d| d["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        paths.contains(&"actions[0].target"),
+        "诊断要指向 target：{paths:?}"
+    );
+    let rr = run(&["simulate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(rr.code, 2, "非法场景不该跑仿真：{}", rr.stdout);
+}
+
 /// 光照补全（`lighting.fog` / `lighting.shadow_quality` / `lighting.sky_colors`）接线：
 /// 三节都能校验、能渲染、**不写 = 关闭**（逐位相同），而且真的改变画面。
 ///

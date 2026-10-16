@@ -590,6 +590,10 @@ pub enum ActionKind {
     /// 瞬移到 `position`（可带 `rotation_deg` 朝向）。
     Teleport,
     /// 唤醒睡眠中的刚体（不施加任何作用力，只让它重新参与求解）。
+    ///
+    /// `target` 可以是具体刚体名，也可以是 `"*"`（唤醒全部，等价于
+    /// [`PhysicsWorld::wake_up_all`]）。用法：搬动了一批物体、或从快照恢复之后，
+    /// 让"以睡着姿态停在半空"的物体重新落下来。
     Wake,
 }
 
@@ -645,6 +649,10 @@ pub struct ActionDoc {
     #[serde(rename = "type")]
     pub kind: ActionKind,
     /// 目标刚体名（`objects[].name` 或 `$ground` / `$model[i]`）。
+    ///
+    /// 只有 `wake` 动作接受特殊值 `"*"`：唤醒**所有**刚体（不需要挨个点名）。
+    /// 别的动作给 `"*"` 会报错——否则"我写了 `*` 但它其实只作用在一个物体上"
+    /// 就成了最难查的那类静默失效。
     pub target: String,
     /// 第几步开始前施加。与 `at_time` 二选一；两个都不给时是第 0 步。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2429,36 +2437,49 @@ impl SceneDoc {
                 ));
             }
 
-            // 目标必须是能动的刚体
-            match bodies.get(a.target.as_str()) {
-                None => out.push(
-                    Diagnostic::error(
-                        format!("{p}.target"),
-                        format!("找不到名为 \"{}\" 的刚体", a.target),
-                    )
-                    .with_hint(body_name_hint),
-                ),
-                Some(BodyKind::None) => out.push(
-                    Diagnostic::error(
-                        format!("{p}.target"),
-                        format!(
-                            "物体 \"{}\" 没有刚体（body = none），动作不会生效",
-                            a.target
-                        ),
-                    )
-                    .with_hint("把它的 body 改成 dynamic"),
-                ),
-                Some(BodyKind::Static) if a.kind.pushes() => out.push(
-                    Diagnostic::warn(
-                        &p,
-                        format!(
-                            "\"{}\" 是静态刚体（无限质量），{kind} 打上去不会有任何效果",
-                            a.target
-                        ),
-                    )
-                    .with_hint("要推动它就先把它改成 dynamic；只想记录位置可以用 probes"),
-                ),
-                Some(_) => {}
+            // `target: "*"` 是 `wake` 专用的特殊值：唤醒全部刚体
+            if a.target == "*" {
+                if a.kind != ActionKind::Wake {
+                    out.push(
+                        Diagnostic::error(
+                            format!("{p}.target"),
+                            format!("target \"*\" 只有 wake 动作支持，{kind} 需要一个具体刚体名"),
+                        )
+                        .with_hint("把它换成一个物体名，或把 type 改成 wake"),
+                    );
+                }
+            } else {
+                // 目标必须是能动的刚体
+                match bodies.get(a.target.as_str()) {
+                    None => out.push(
+                        Diagnostic::error(
+                            format!("{p}.target"),
+                            format!("找不到名为 \"{}\" 的刚体", a.target),
+                        )
+                        .with_hint(body_name_hint),
+                    ),
+                    Some(BodyKind::None) => out.push(
+                        Diagnostic::error(
+                            format!("{p}.target"),
+                            format!(
+                                "物体 \"{}\" 没有刚体（body = none），动作不会生效",
+                                a.target
+                            ),
+                        )
+                        .with_hint("把它的 body 改成 dynamic"),
+                    ),
+                    Some(BodyKind::Static) if a.kind.pushes() => out.push(
+                        Diagnostic::warn(
+                            &p,
+                            format!(
+                                "\"{}\" 是静态刚体（无限质量），{kind} 打上去不会有任何效果",
+                                a.target
+                            ),
+                        )
+                        .with_hint("要推动它就先把它改成 dynamic；只想记录位置可以用 probes"),
+                    ),
+                    Some(_) => {}
+                }
             }
         }
 

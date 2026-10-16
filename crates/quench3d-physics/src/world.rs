@@ -460,6 +460,27 @@ impl PhysicsWorld {
         slot.body.as_ref()
     }
 
+    /// 唤醒**所有**刚体，返回其中原本睡着的个数。
+    ///
+    /// 用途：整场景被搬动过（批量设置位姿 / 从快照恢复 / 编辑器里拖了一批物体）之后，
+    /// 保证没有物体以"睡着的姿态"停在半空。逐个 `body_mut(h).wake_up()` 也行，
+    /// 但那是一次一次借用世界；这里一趟走完，顺带把"醒了几个"报出来（可观测）。
+    ///
+    /// 注意它**只**负责唤醒：`allow_sleep == false` 的刚体本来就醒着，
+    /// 下一次 `step` 也仍然醒着；被唤醒的刚体会重新参与求解。
+    pub fn wake_up_all(&mut self) -> usize {
+        let mut woken = 0;
+        for slot in self.bodies.iter_mut() {
+            if let Some(body) = slot.body.as_mut() {
+                if body.is_sleeping() {
+                    woken += 1;
+                }
+                body.wake_up();
+            }
+        }
+        woken
+    }
+
     /// 可变访问刚体。
     ///
     /// 会让 [`PhysicsWorld::version`] +1：拿到 `&mut` 之后刚体可能被搬到任何地方，

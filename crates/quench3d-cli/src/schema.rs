@@ -381,7 +381,7 @@ pub fn scene_grammar() -> Value {
         "action": {
             "type": ["impulse", "impulse_at_point", "torque_impulse", "velocity",
                      "angular_velocity", "force", "teleport", "wake"],
-            "target": "刚体名（objects[].name / $ground / $model[i]）",
+            "target": "刚体名（objects[].name / $ground / $model[i]）；`wake` 还接受 \"*\" = 唤醒全部睡着的刚体（别的动作写 \"*\" 会报错）",
             "at_step": "第几步开始前施加，缺省 0（第 1 步是第一次物理步进）",
             "at_time": "第几秒开始施加（与 at_step 互斥，按 round(t/dt) 折算成步）",
             "value": "[x,y,z]：冲量 N·s / 力 N / 速度 m/s / 角速度 rad/s / 角冲量 N·m·s",
@@ -389,7 +389,7 @@ pub fn scene_grammar() -> Value {
             "position": "目标位置，仅 teleport",
             "rotation_deg": "目标朝向（欧拉角 XYZ，度），仅 teleport，缺省保持当前朝向",
             "steps": "force 持续多少步，缺省 1",
-            "note": "写在静态刚体上的冲量/力不会有任何效果（校验会警告）；冲量会自动唤醒睡眠刚体"
+            "note": "写在静态刚体上的冲量/力不会有任何效果（校验会警告）；冲量会自动唤醒睡眠刚体；manual sleep 后 allow_sleep=false 的刚体会在下一步自动醒来"
         },
         "probe": {
             "name": "探针名（报告里用它，必须唯一）",
@@ -480,7 +480,7 @@ pub fn system_prompt() -> String {
            anchor_a / anchor_b: [x,y,z]（关节在两端的**局部**连接点，做门轴/悬臂时错开它们）,
            rest_length, stiffness, damping, motor_velocity }
 - actions: 数组，每项：{ type: "impulse"|"impulse_at_point"|"torque_impulse"|"velocity"|
-           "angular_velocity"|"force"|"teleport"|"wake", target: 刚体名,
+           "angular_velocity"|"force"|"teleport"|"wake", target: 刚体名（wake 可以写 "*" = 全部）,
            at_step: 60（或 at_time: 1.0 秒，二选一）, value: [x,y,z], point, position,
            rotation_deg, steps }
   （冲量 N·s / 力 N / 速度 m/s；用来表达"第 2 秒推一下""到点了就松手"这类剧本。

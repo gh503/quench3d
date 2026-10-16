@@ -10,6 +10,26 @@
 
 ### 新增
 
+- **睡眠 API 补全：`RigidBody::sleep()` 公开 + `PhysicsWorld::wake_up_all()`**。
+  以前只能 `wake_up()`（叫醒一个），想让"体检式"地批量唤醒或手动让某个物体入睡，
+  得自己遍历（而且 `sleep()` 是 crate 私有）。现在：
+  * `RigidBody::sleep()`：**立即**入睡并清零线速度/角速度（与"自动睡眠"不同：自动睡眠
+    要求整岛都慢够 0.5 秒，手动入睡不等）；`is_sleeping()` / `can_sleep()` 随时可查。
+  * `PhysicsWorld::wake_up_all() -> usize`：一趟唤醒所有睡着的刚体，返回**唤醒了几个**
+    （可观测，而不是"默默干了点什么"）。
+  * `allow_sleep = false` 变成了**硬承诺**：以前它是"不主动入睡"，但一个被手动 `sleep()`
+    的刚体会一直睡着（`update_sleeping` 只看速度）；现在这类刚体下一次 `step` 一定被
+    置回清醒——"我说了不许睡"不该被一次 `sleep()` 推翻。
+  * 场景格式：`actions[]` 的 `wake` 动作接受 `target: "*"`（唤醒全部），
+    别的动作写 `"*"` 会**报错**（带 `actions[i].target` 路径）而不是悄悄只作用在一个物体上。
+  * 编辑器：工具栏新增「☀ 唤醒全部」（状态栏报"已唤醒 N 个"）——搬动过一批物体、
+    或从快照恢复之后，免得有东西以睡着的姿态停在半空。
+  验证：`cargo test -p quench3d-physics --lib -- wake_up_all`（**不需要显卡**：零重力静止
+  场景两个盒子入睡 → `wake_up_all()` 返回 2 且都醒；再唤返回 0（幂等）；`sleep()` 清零速度、
+  睡着后位置不漂；`allow_sleep = false` 的刚体睡不住）、
+  `cargo test -p quench3d-cli --test cli_e2e -- wake_action_with_star`（端到端：
+  报告里 `sleeping` 2 → 0；只唤 `a` 时 `b` 仍然睡着；`impulse` 配 `"*"` 退出码 2）。
+
 - **光照补全：雾、阴影质量、天空颜色**。引擎里早就有这三样，场景文件里却配不到
   （只能选 `preset` 和开关 `sky` / `shadows`），于是"夜景为什么没有雾""阴影边缘为什么
   糊/为什么没有影子"这类问题只能改引擎代码。现在都能从场景文件配：

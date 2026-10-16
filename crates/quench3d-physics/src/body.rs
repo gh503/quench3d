@@ -351,8 +351,17 @@ impl RigidBody {
         self.sleep_timer = 0.0;
     }
 
-    /// 立即进入睡眠（速度清零）。
-    pub(crate) fn sleep(&mut self) {
+    /// 立即进入睡眠（**速度清零**）。
+    ///
+    /// 语义与"自动睡眠"略有不同，写清楚免得踩：
+    /// * 它是**立即**的，不看 `sleep_timer`、也不看同岛的其他刚体——而自动睡眠
+    ///   要求"整岛都慢够时间"（逐体入睡会让堆叠慢慢渗进去，见 `solver::update_sleeping`）；
+    /// * 它把线速度与角速度**清零**：一个正在飞的物体被叫去睡觉，醒来时是停着的。
+    ///   只想"别再算了"但保留速度，请用 [`Self::set_linear_velocity`] 先记下来；
+    /// * `allow_sleep == false` 的刚体**睡不住**：下一次 `step` 就会被 `update_sleeping`
+    ///   重新置为清醒（"不允许睡眠"是硬承诺，手动 `sleep()` 也推翻不了它）；
+    /// * 别人撞上来（或 [`PhysicsWorld::wake_up_all`]）会把它唤醒。
+    pub fn sleep(&mut self) {
         self.sleeping = true;
         self.sleep_timer = 0.0;
         self.linear_velocity = Vec3::ZERO;
