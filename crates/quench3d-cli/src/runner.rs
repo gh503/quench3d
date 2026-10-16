@@ -1310,7 +1310,13 @@ pub fn object_name(doc: &SceneDoc, index: usize) -> String {
     doc.object_name_at(index)
 }
 
-fn euler_quat(deg: Option<[f32; 3]>) -> Quat {
+/// 场景格式里的**欧拉角（度，XYZ 顺序）→ 四元数**，缺省单位旋转。
+///
+/// 这是**唯一**一份换算：物体/部件的 `rotation_deg`、关节参考姿态 `frame_a`/`frame_b`
+/// 都走它，编辑器与校验层也调它（`pub` 的理由）。顺序（先 X 再 Y 再 Z）与
+/// `quench3d_math::Quat::from_euler_xyz` 一致；哪个调用点自己抄一份，就会在多轴旋转上
+/// 差出十几度，而且只在复合旋转的场景里露头。
+pub fn euler_quat(deg: Option<[f32; 3]>) -> Quat {
     match deg {
         None => Quat::IDENTITY,
         Some(d) => {
@@ -1318,6 +1324,15 @@ fn euler_quat(deg: Option<[f32; 3]>) -> Quat {
             Quat::from_euler_xyz(d[0] * r, d[1] * r, d[2] * r)
         }
     }
+}
+
+/// 固定关节的参考姿态（`frame_a` / `frame_b`，欧拉角**度**）→ 四元数。
+///
+/// 语义上就是 [`euler_quat`]，单独起个名字是为了让"参考姿态走的是同一份换算"在调用点
+/// 一眼可见（`None` 与 `Some([0,0,0])` 都是单位旋转 —— 求解器据此判断"这一端给没给
+/// 参考姿态"，见 `Joint::fixed_uses_reference_frames`）。
+pub fn joint_frame_quat(deg: Option<[f32; 3]>) -> Quat {
+    euler_quat(deg)
 }
 
 /// 把文档里的物理内容建成一个独立世界（不需要 GPU）。
@@ -1516,8 +1531,10 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 b,
                 local_anchor_a: anchor_a,
                 local_anchor_b: anchor_b,
-                local_frame_a: Quat::IDENTITY,
-                local_frame_b: Quat::IDENTITY,
+                // 参考姿态：不写 = 单位四元数 = **老行为**（锁定创建时的相对姿态）；
+                // 只要有一端不是单位旋转，求解器就把两端扭到参考姿态重合。
+                local_frame_a: joint_frame_quat(j.frame_a),
+                local_frame_b: joint_frame_quat(j.frame_b),
             },
             JointKind::Ball => Joint::Ball {
                 a,

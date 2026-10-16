@@ -422,11 +422,14 @@ pub fn scene_grammar() -> Value {
             "axis_b": "B 端的局部轴；不写 = 用 axis。把想要的世界轴乘上 B 初始朝向的逆就是它（门板转了 90° 时，世界 Y 往往是 B 的局部 Z）",
             "anchor_a": "关节在 a 上的连接点（a 的局部坐标，米），缺省原点",
             "anchor_b": "关节在 b 上的连接点（b 的局部坐标，米），缺省原点",
+            "frame_a": "**固定关节**（type = fixed）的 A 端参考姿态（欧拉角 XYZ，度）；求解器把两端扭到“参考姿态在世界中重合”（q_a⊗frame_a == q_b⊗frame_b）。不写或两端都写 0 = 老行为：锁定创建那一刻的相对姿态",
+            "frame_b": "B 端参考姿态（欧拉角 XYZ，度）；与 frame_a 配套。**只要有一端不是 0** 就切到“扭到参考姿态”那一支；只有 fixed 读它",
             "limits": "铰链为 [最小, 最大] 弧度；滑块为 [最小, 最大] 米",
             "rest_length": "distance 关节的静止长度",
             "stiffness": "distance 关节刚度",
             "damping": "distance 关节阻尼",
             "motor_velocity": "铰链马达目标角速度（弧度/秒）——速度模式",
+            "motor_max_impulse": "铰链马达单步最大冲量（N·m·s），缺省不限",
             "motor_target_deg": "铰链马达的**伺服目标角**（度）：给了它就转到这个角度停住（伺服模式，优先于 motor_velocity）",
             "motor_stiffness": "伺服比例增益（1/s），缺省 8",
             "motor_damping": "伺服阻尼增益，缺省 1",
@@ -663,6 +666,8 @@ pub fn json_schema() -> Value {
                 "axis_b",
                 "anchor_a",
                 "anchor_b",
+                "frame_a",
+                "frame_b",
                 "limits",
                 "rest_length",
                 "stiffness",
@@ -899,6 +904,9 @@ pub fn system_prompt() -> String {
              同一个局部轴在两端会指向不同的世界方向，求解器会先把 B 扭到与 A 对齐。不写 = 用 axis）,
            limits: [min,max]（铰链弧度 / 滑块米）,
            anchor_a / anchor_b: [x,y,z]（关节在两端的**局部**连接点，做门轴/悬臂时错开它们）,
+           frame_a / frame_b: [x,y,z]（欧拉角度；**只有 fixed 读**，是两端的参考姿态：
+              求解器把两端扭到参考姿态在世界中重合，即让 B 的 frame_b 转到与 A 的 frame_a 同朝向。
+              不写、或两端都写 0 = 老行为：锁定创建那一刻的相对姿态，参考姿态不参与求解）,
            rest_length, stiffness, damping, motor_velocity }
 - actions: 数组，每项：{ type: "impulse"|"impulse_at_point"|"torque_impulse"|"velocity"|
            "angular_velocity"|"force"|"teleport"|"wake", target: 刚体名（wake 可以写 "*" = 全部）,
@@ -1307,6 +1315,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 关节的**人读字段表**（`scene_grammar()["joint"]`）必须与 `JointDoc` 的字段一一对应。
+    ///
+    /// 盯关节是因为这一节字段最多（22 个），而且"写了不生效"的坑（`axis_a`/`axis_b` 只有
+    /// 铰链/滑块读、`frame_a`/`frame_b` 只有 `fixed` 读）就靠这张表告诉 agent：
+    /// 少一行，agent 只能从 JSON Schema 的字段名去猜语义（猜错的那一半不会报错，只会不生效）。
+    #[test]
+    fn joint_field_table_covers_every_joint_field() {
+        let src = include_str!("scene_doc.rs");
+        let mut fields: Vec<String> = struct_fields(src, "JointDoc")
+            .into_iter()
+            .filter(|(_, skip)| !skip)
+            .map(|(n, _)| n)
+            .collect();
+        fields.sort();
+        let g = scene_grammar();
+        let table = g["joint"].as_object().expect("joint 要有字段表");
+        let mut listed: Vec<String> = table.keys().cloned().collect();
+        listed.sort();
+        assert_eq!(
+            listed, fields,
+            "scene_grammar() 的 joint 字段表与 JointDoc 对不上：少写 = agent 猜不到语义，\
+             多写 = 文档骗人（`quench3d schema` 是 agent 唯一的字段说明来源）"
+        );
     }
 
     #[test]

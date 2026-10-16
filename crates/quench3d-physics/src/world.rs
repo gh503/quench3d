@@ -1267,12 +1267,12 @@ impl PhysicsWorld {
         self.scratch_views = views;
         self.scratch_materials = materials;
         self.scratch_joint_impulses = impulses;
-        // 13. 睡眠（被马达驱动的刚体这一步不睡，见 `update_sleeping` 的说明）
+        // 13. 睡眠（被马达/参考姿态驱动的刚体这一步不睡，见 `update_sleeping` 的说明）
         let mut actuated = std::mem::take(&mut self.scratch_actuated);
         actuated.clear();
         actuated.resize(self.bodies.len(), false);
         for slot in self.joints.iter() {
-            let driven = slot.joint.as_ref().is_some_and(|j| j.has_active_motor());
+            let driven = slot.joint.as_ref().is_some_and(|j| j.drives_bodies());
             if driven {
                 let (ha, hb) = slot.joint.as_ref().unwrap().bodies();
                 for h in [ha, hb] {

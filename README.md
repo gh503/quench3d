@@ -190,7 +190,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 11961808 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 11968465 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -866,6 +866,7 @@ NaN 刚体  : 0
   例：门框不转、门板 `rotation_deg: [90,0,0]` 时，世界 Y 在门板局部是 Z，于是
   `"axis_a": [0,1,0], "axis_b": [0,0,1]`。两端朝向相差 >10° 却只写 `axis` 会得到
   `suspicious_value` 警告——那种写法的求解器会先把门板**扭平**（现象是"门装上去自己弹回原位"）。
+* `joints[].frame_a`/`frame_b`（**只有 `fixed` 关节读**）是两端的**参考姿态**（欧拉角 XYZ，**度**）：求解器把两端扭到「参考姿态在世界中重合」（`q_a⊗frame_a == q_b⊗frame_b`），用来表达「让 B 的某个特征朝向跟 A 的特征朝向对齐」——两端各自还有朝向时，靠初始 `rotation_deg` 手算世界朝向是算不准的。**不写、或两端都写 0 = 老行为**：锁定创建那一刻的相对姿态（逐位不变）；两端都写 0 会得到 `ineffective` 提醒（「等于没写」）；写在非 `fixed` 关节上同样提醒。
 * **关节的单位有两套，别混**：`limits` 是**弧度**（铰链）/ 米（滑块），`motor_velocity` 是
   **弧度/秒**；而 `motor_target_deg`、`cone_limit.half_angle_deg` 是**度**（名字里带 `_deg`）。
   校验器会对"限位 > 6.5 弧度""伺服目标 > 3600 度"这类明显写错单位的地方报警告。
@@ -1100,7 +1101,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 533 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 553 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1171,7 +1172,7 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（"要真建 GP
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 **165** 个测试（`cargo test -p quench3d-cli`：lib 84 + bin 6 + 6 个集成测试二进制共 74 + 1 个 doctest），按目的分这几块：
+命令行工具的 **172** 个测试（`cargo test -p quench3d-cli`：lib 86 + bin 6 + 7 个集成测试二进制共 79 + 1 个 doctest），按目的分这几块：
 
 * **契约测试**（`tests/cli_e2e.rs`，54 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；

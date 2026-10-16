@@ -1317,6 +1317,20 @@ pub struct JointDoc {
     /// B 端的局部轴；**不写 = 用 `axis`**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis_b: Option<[f32; 3]>,
+    /// A 端的**参考姿态**（欧拉角，度，与物体 `rotation_deg` 同一套 XYZ 顺序）。
+    ///
+    /// 只有 `fixed` 关节读它。求解器会驱动两端扭到**参考姿态在世界中重合**，即
+    /// `q_a ⊗ frame_a == q_b ⊗ frame_b`（`q_*` 是刚体世界朝向）。典型用法：两块板各自的
+    /// "正面"是局部 +X 与 +Z，写 `frame_a` / `frame_b` 把两个正面转到一起，就不必手算
+    /// 世界朝向。
+    ///
+    /// **不写（或两端都写 0）= 老行为**：固定关节锁定**创建那一刻**的相对姿态，
+    /// 参考姿态不参与求解。只要有一端不是 0 就切到"扭到参考姿态"那一支。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_a: Option<[f32; 3]>,
+    /// B 端的参考姿态（欧拉角，度）；与 `frame_a` 配套，见那里的说明。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_b: Option<[f32; 3]>,
     /// 关节在刚体 a 上的连接点（**a 的局部坐标**，米），缺省原点。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_a: Option<[f32; 3]>,
@@ -2290,6 +2304,8 @@ fn check_joint(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     check_field::<[f32; 3]>(map, "axis_b", path, out);
     check_field::<[f32; 3]>(map, "anchor_a", path, out);
     check_field::<[f32; 3]>(map, "anchor_b", path, out);
+    check_field::<[f32; 3]>(map, "frame_a", path, out);
+    check_field::<[f32; 3]>(map, "frame_b", path, out);
     check_field::<[f32; 2]>(map, "limits", path, out);
     check_field::<f32>(map, "rest_length", path, out);
     check_field::<f32>(map, "stiffness", path, out);
@@ -4069,6 +4085,63 @@ impl SceneDoc {
                     format!("{p}.motor_velocity"),
                     "只有铰链关节支持马达",
                 ));
+            }
+            // 参考姿态（`frame_a`/`frame_b`）：只有 fixed 读它，而且**生效判据与求解器
+            // 完全同一份**（`crate::runner::joint_frame_quat` + `Joint::fixed_uses_reference_frames`）
+            // —— 否则诊断和实跑会各说一套。
+            for (key, given) in [("frame_a", &j.frame_a), ("frame_b", &j.frame_b)] {
+                if let Some(v) = given {
+                    if !finite3(v) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.{key}"),
+                            "参考姿态必须是有限数（欧拉角，度）",
+                        ));
+                    }
+                }
+            }
+            let frames_given = j.frame_a.is_some() || j.frame_b.is_some();
+            if frames_given && j.kind != JointKind::Fixed {
+                for (key, is_some) in [
+                    ("frame_a", j.frame_a.is_some()),
+                    ("frame_b", j.frame_b.is_some()),
+                ] {
+                    if is_some {
+                        out.push(
+                            Diagnostic::warn_code(
+                                ErrorCode::Ineffective,
+                                format!("{p}.{key}"),
+                                "只有固定关节（type = fixed）有参考姿态，这个字段会被忽略",
+                            )
+                            .with_hint(
+                                "铰链/滑块/球窝的方向请用 axis_a / axis_b（或球窝的 cone_limit）",
+                            ),
+                        );
+                    }
+                }
+            } else if frames_given
+                && crate::runner::joint_frame_quat(j.frame_a) == Quat::IDENTITY
+                && crate::runner::joint_frame_quat(j.frame_b) == Quat::IDENTITY
+            {
+                // 两端参考姿态都是单位旋转（不写或全 0）：与完全不写**逐位等价**，
+                // 求解器仍然锁定创建时的相对姿态。写了却不生效是最难查的坑。
+                let key = if j.frame_a.is_some() {
+                    "frame_a"
+                } else {
+                    "frame_b"
+                };
+                out.push(
+                    Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        format!("{p}.{key}"),
+                        "两端参考姿态都是 0（单位旋转）：固定关节仍然锁定创建时的相对姿态，\
+                         这两个字段等于没写",
+                    )
+                    .with_hint(
+                        "想让求解器把 B 扭到某个参考姿态，至少给一端一个非零角度；\
+                         想要老行为就直接删掉 frame_a / frame_b",
+                    ),
+                );
             }
             // 单位陷阱：铰链的角度量都是弧度，而物体的 rotation_deg 是角度
             if j.kind == JointKind::Hinge {
@@ -6893,6 +6966,94 @@ mod tests {
         assert!(
             !same.validate().iter().any(|d| d.path == "joints[0].axis"),
             "两端朝向相同不该报轴不同轴"
+        );
+    }
+
+    /// 固定关节的**参考姿态**（`frame_a` / `frame_b`）：解析、往返、默认不落盘、诊断。
+    ///
+    /// 与 `axis_a`/`axis_b` 一样的三件事，外加这一节独有的第二条：**写了却等于没写**
+    /// （两端都是 0）必须吵一声 —— 那种写法读起来像"生效了"，实际走的是老行为。
+    #[test]
+    fn joint_reference_frames_parse_round_trip_and_diagnose() {
+        // ① fixed 上给参考姿态：解析 + 往返，且不报错
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "fixed", "a": "a", "b": "b",
+                               "frame_a": [0, 90, 0], "frame_b": [0, 0, 0] } ] }"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+        assert!(
+            !diags.iter().any(|d| d.path.starts_with("joints[0].frame")),
+            "有意义的参考姿态不该被警告：{diags:?}"
+        );
+        assert_eq!(doc.joints[0].frame_a, Some([0.0, 90.0, 0.0]));
+        assert_eq!(doc.joints[0].frame_b, Some([0.0, 0.0, 0.0]));
+        let text = doc.to_json_pretty();
+        let back = SceneDoc::from_json(&text).unwrap();
+        assert_eq!(back.joints[0].frame_a, Some([0.0, 90.0, 0.0]));
+        assert_eq!(back.joints[0].frame_b, Some([0.0, 0.0, 0.0]));
+
+        // ② 不写 = 不落盘（老场景存盘仍然逐字节不变）
+        let plain = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "fixed", "a": "a", "b": "b" } ] }"#,
+        )
+        .unwrap();
+        assert!(plain.joints[0].frame_a.is_none() && plain.joints[0].frame_b.is_none());
+        let plain_text = plain.to_json_pretty();
+        assert!(
+            !plain_text.contains("frame_a") && !plain_text.contains("frame_b"),
+            "没写就不许落盘：{plain_text}"
+        );
+
+        // ③ 非有限数：报在自己的路径上（结构解析进不来的值走语义校验）
+        let mut nan = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "fixed", "a": "a", "b": "b", "frame_b": [0, 0, 0] } ] }"#,
+        )
+        .unwrap();
+        nan.joints[0].frame_a = Some([f32::NAN, 0.0, 0.0]);
+        let diags = nan.validate();
+        let d = diag_at(&diags, "joints[0].frame_a").expect("非有限参考姿态必须报错");
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.code, ErrorCode::OutOfRange);
+
+        // ④ 写在非 fixed 关节上 → `ineffective`（字段会被忽略，不是静默失效）
+        let wrong_kind = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "hinge", "a": "a", "b": "b", "frame_a": [0, 90, 0] } ] }"#,
+        )
+        .unwrap();
+        let diags = wrong_kind.validate();
+        let d = diag_at(&diags, "joints[0].frame_a").expect("只有 fixed 读它，必须提醒");
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(d.code, ErrorCode::Ineffective);
+
+        // ⑤ **两端都是 0** = 与不写逐位等价 → 也是 `ineffective`（最难查的那种"写了没用"）
+        let zero = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "fixed", "a": "a", "b": "b", "frame_a": [0, 0, 0] } ] }"#,
+        )
+        .unwrap();
+        let diags = zero.validate();
+        let d = diag_at(&diags, "joints[0].frame_a").expect("全 0 的参考姿态等于没写，必须提醒");
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(d.code, ErrorCode::Ineffective);
+        assert!(
+            d.message.contains("没写") || d.message.contains("锁定"),
+            "要说清它等于老行为：{}",
+            d.message
+        );
+
+        // ⑥ 老场景（完全不给 frame_*）不许被这条新警告吵醒
+        assert!(
+            !plain
+                .validate()
+                .iter()
+                .any(|d| d.path.starts_with("joints[0].frame")),
+            "不给参考姿态的老场景不该有任何新诊断"
         );
     }
 

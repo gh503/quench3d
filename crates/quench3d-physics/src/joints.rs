@@ -154,9 +154,13 @@ pub struct BallConeLimit {
 pub enum Joint {
     /// 固定关节：两刚体完全刚性连接（点约束 + 3 自由度角速度约束）。
     ///
-    /// 注意：`local_frame_a` / `local_frame_b` 仅作为参考姿态保存，当前实现
-    /// 的角约束是**速度级**的（锁定创建时的相对姿态），不会把两刚体强行
-    /// 扭转对齐到参考姿态；需要指定目标相对姿态时应自行设置初始朝向。
+    /// 角约束有两种模式，由 `local_frame_a` / `local_frame_b` **是否都是单位四元数**决定：
+    ///
+    /// * 都是 `Quat::IDENTITY`（缺省）：**历史行为** —— 速度级角约束锁定**创建那一刻**的
+    ///   相对姿态，求解器不看参考姿态。老场景因此逐位不变。
+    /// * 至少一个不是单位四元数：求解器把两端扭到**参考姿态重合**，即驱动
+    ///   `q_a ⊗ local_frame_a == q_b ⊗ local_frame_b`（见 [`fixed_frame_error`]）。
+    ///   用它表达"让 B 的某个特征朝向跟 A 的某个特征朝向对齐"，不必先手算世界朝向。
     Fixed {
         /// 刚体 A。
         a: BodyHandle,
@@ -281,6 +285,68 @@ impl Joint {
             | Joint::Slider { local_anchor_b, .. } => *local_anchor_b,
         }
     }
+
+    /// 固定关节的**参考姿态是否被显式给出**（即至少一个不是单位四元数）。
+    ///
+    /// 这就是求解器选哪条角约束模式的开关：`false` = 锁定创建时的相对姿态（历史行为，
+    /// 逐位不变），`true` = 把两端扭到参考姿态重合。写成纯函数是为了让校验层、编辑器和
+    /// 求解器**用同一份判据**（少一份就多一处"预览和实跑不一致"）。
+    pub fn fixed_uses_reference_frames(&self) -> bool {
+        match self {
+            Joint::Fixed {
+                local_frame_a,
+                local_frame_b,
+                ..
+            } => *local_frame_a != Quat::IDENTITY || *local_frame_b != Quat::IDENTITY,
+            _ => false,
+        }
+    }
+
+    /// 这个关节是否**每一步都在主动施加修正**：马达，或固定关节的参考姿态对齐。
+    ///
+    /// 与 [`Joint::has_active_motor`] 是两件事：那个只说"有马达"。世界用本方法（而不是
+    /// `has_active_motor`）决定"被驱动的刚体这一步不许睡"。理由：睡眠体在求解器里是
+    /// **完全冻结**的（`BodyView::from_body` 把 `inv_m` / `inv_I` 清零），一旦睡着，
+    /// 参考姿态修正会停在半路，而刚体再被推歪也不会被拉回来。
+    /// 缺省（两端参考姿态都是单位四元数）的固定关节不在其列 —— 老场景的睡眠行为不变。
+    pub fn drives_bodies(&self) -> bool {
+        self.has_active_motor() || self.fixed_uses_reference_frames()
+    }
+}
+
+/// 固定关节的**参考姿态误差**（世界系旋转向量，弧度；长度 ≤ π）。
+///
+/// 两端参考姿态在世界中的朝向分别是 `q_a ⊗ local_frame_a` 与 `q_b ⊗ local_frame_b`
+/// （`q_*` 是刚体世界朝向，`⊗` 是 [`Quat`] 的 Hamilton 积）。返回值是"把 B 端参考姿态
+/// 转到 A 端参考姿态所需的那次旋转"（轴 × 角）：长度 0 = 已经重合。
+///
+/// 两个细节值得写下来：
+/// * `-q` 与 `q` 是同一个旋转，这里取 `w ≥ 0` 的那一支，所以返回的是**最短**的那次旋转
+///   （不翻转的话，`w < 0` 时 `to_axis_angle` 会给出去 191° 而不是 -169° 的"绕远路"解）。
+/// * 参考姿态都是单位四元数时，本函数**不**等于"把两个刚体扭到同朝向"：那一支走的是
+///   历史行为（锁定创建时的相对姿态），求解器根本不算它（见
+///   [`Joint::fixed_uses_reference_frames`]）。
+pub fn fixed_frame_error(q_a: Quat, local_frame_a: Quat, q_b: Quat, local_frame_b: Quat) -> Vec3 {
+    let mut e = q_b * local_frame_b * (q_a * local_frame_a).inverse();
+    if e.w < 0.0 {
+        e = e * -1.0;
+    }
+    let (axis, angle) = e.to_axis_angle();
+    axis * angle
+}
+
+/// 固定关节参考姿态误差的**夹角**（度，0~180）。
+///
+/// 给校验与编辑器用：`> 0` 就是"这一段会真的扭过去"，数值本身可以直接进人话诊断。
+pub fn fixed_frame_error_deg(
+    q_a: Quat,
+    local_frame_a: Quat,
+    q_b: Quat,
+    local_frame_b: Quat,
+) -> f32 {
+    fixed_frame_error(q_a, local_frame_a, q_b, local_frame_b)
+        .length()
+        .to_degrees()
 }
 
 /// 关节句柄（带代数，删除后旧句柄失效）。
@@ -363,6 +429,9 @@ pub(crate) struct JointState {
     pub ang3: Option<Mat3>,
     /// 3 自由度角度累积冲量。
     pub ang3_impulse: Vec3,
+    /// 固定关节的参考姿态误差（世界系旋转向量，弧度；`Vec3::ZERO` = 走历史行为那支，
+    /// 求解器不做任何偏置，老场景逐位不变）。
+    pub ang3_error: Vec3,
     /// 2 自由度有效质量（u/v 基：铰链角度 或 滑块平移）。
     pub uv2: Option<[[f32; 2]; 2]>,
     /// 2 自由度累积冲量。
@@ -493,6 +562,7 @@ impl JointSolver {
                 point_pseudo: Vec3::ZERO,
                 ang3: None,
                 ang3_impulse: e.impulses.ang3,
+                ang3_error: Vec3::ZERO,
                 uv2: None,
                 uv_impulse: e.impulses.uv,
                 uv_ang: None,
@@ -554,7 +624,11 @@ impl JointSolver {
                         }
                     }
                 }
-                Joint::Fixed { .. } => {
+                Joint::Fixed {
+                    local_frame_a,
+                    local_frame_b,
+                    ..
+                } => {
                     st.kind = JointKind::Fixed;
                     let k = Mat3::from_cols(
                         ang_vec(&va, &vb, Vec3::X),
@@ -563,6 +637,14 @@ impl JointSolver {
                     );
                     if usable(&k) && k.determinant().abs() > 1e-14 {
                         st.ang3 = Some(k);
+                    }
+                    // 参考姿态：两端都是单位四元数 = 老行为（误差保持 ZERO，下面的速度
+                    // 迭代走原来那条"锁相对角速度"的路径，逐位不变）；只要有一端给了
+                    // 参考姿态，就把误差算出来当这一步的目标相对角速度（见
+                    // `frame_target_velocity`）。
+                    if *local_frame_a != Quat::IDENTITY || *local_frame_b != Quat::IDENTITY {
+                        st.ang3_error =
+                            fixed_frame_error(va.rot, *local_frame_a, vb.rot, *local_frame_b);
                     }
                 }
                 Joint::Hinge {
@@ -803,7 +885,15 @@ impl JointSolver {
                     let va = views[st.a];
                     let vb = views[st.b];
                     let wrel = vb.ang - va.ang;
-                    let lambda = inv.mul_vec3(-wrel);
+                    // 固定关节给了参考姿态时，这一步的目标不是"相对角速度 = 0"，而是
+                    // "能把参考姿态误差拉回 0 的那个相对角速度"；误差为 ZERO（缺省 /
+                    // 两端参考姿态都是单位四元数）时走**原来那条表达式**，老场景逐位不变。
+                    let rhs = if st.ang3_error.length_squared() > 0.0 {
+                        frame_target_velocity(st.ang3_error, dt) - wrel
+                    } else {
+                        -wrel
+                    };
+                    let lambda = inv.mul_vec3(rhs);
                     if lambda.is_finite() {
                         st.ang3_impulse += lambda;
                         angular_impulse(views, st.a, st.b, lambda);
@@ -1066,6 +1156,27 @@ fn angular_rhs(
     ]
 }
 
+/// 固定关节参考姿态的修正增益（无量纲）：与铰链/滑块的轴对齐偏置同源（`0.2/dt`），
+/// 每步把误差收掉约 20%。
+const FRAME_GAIN: f32 = 0.2;
+
+/// 参考姿态修正的目标角速度上限（rad/s）：误差很大（例如差 180°）时也不一步甩过去。
+const MAX_FRAME_SPEED: f32 = 20.0;
+
+/// 把固定关节的参考姿态误差（世界系旋转向量，弧度）转成"这一步想让 B 相对 A
+/// 达到的角速度（世界系）"。
+///
+/// 为什么带负号：误差是"把 B 端参考姿态转到 A 端参考姿态的那次旋转"，要让误差变小
+/// 就得反着转，所以目标相对角速度 = `-增益 × 误差`。增益写成 `0.2/dt`（与
+/// [`angular_rhs`] 的轴对齐偏置一致）：一步只收 20%，是**一阶**收敛，不振荡。
+///
+/// 速度上限用 `clamp_length` 而不是逐分量夹紧：夹紧后的方向必须还是误差的反方向，
+/// 否则关节会朝错误的方向扭。
+fn frame_target_velocity(error: Vec3, dt: f32) -> Vec3 {
+    let gain = clamp(FRAME_GAIN / dt.max(1e-4), 0.0, 60.0);
+    (-error * gain).clamp_length(MAX_FRAME_SPEED)
+}
+
 /// 滑块垂直平移约束右端项。
 fn slider_rhs(st: &JointState, views: &[BodyView]) -> [f32; 2] {
     let va = views[st.a];
@@ -1126,5 +1237,93 @@ mod tests {
         };
         assert_eq!(j.bodies(), (a, b));
         assert_eq!(j.local_anchor_b(), vec3(0.0, -1.0, 0.0));
+    }
+
+    /// 参考姿态误差：`q_a ⊗ f_a == q_b ⊗ f_b` 时必须是零向量（不管两端刚体各自转了多少）。
+    #[test]
+    fn fixed_frame_error_is_zero_when_frames_coincide() {
+        let q_a = Quat::from_rotation_z(0.7);
+        let q_b = Quat::from_rotation_x(-1.3);
+        // 先随便给一个参考姿态，然后让 B 的参考姿态正好落在同一个世界朝向上。
+        let f_a = Quat::from_rotation_y(0.4);
+        let f_b = q_b.inverse() * q_a * f_a;
+        let e = fixed_frame_error(q_a, f_a, q_b, f_b);
+        assert!(e.length() < 1e-5, "参考姿态已重合，误差应为 0，实际 {e:?}");
+        assert!(fixed_frame_error_deg(q_a, f_a, q_b, f_b) < 1e-3);
+    }
+
+    /// A 给了 90° 参考姿态、B 没给：误差应该正好是"把 B 反向转 90°"（轴 = -Z，长度 = π/2）。
+    #[test]
+    fn fixed_frame_error_points_from_b_back_to_a() {
+        let f_a = Quat::from_rotation_z(core::f32::consts::FRAC_PI_2);
+        let e = fixed_frame_error(Quat::IDENTITY, f_a, Quat::IDENTITY, Quat::IDENTITY);
+        assert!(
+            (e.length() - core::f32::consts::FRAC_PI_2).abs() < 1e-4,
+            "{e:?}"
+        );
+        assert!(e.z < -1.5, "修正方向应该是 -Z，实际 {e:?}");
+        assert!(e.x.abs() < 1e-4 && e.y.abs() < 1e-4, "{e:?}");
+    }
+
+    /// **最短路径**不变式：`-q` 与 `q` 是同一个旋转，误差长度永远 ≤ 180°。
+    /// 少了 `w < 0` 那一支的翻转，190° 会被报成 190°（绕远路），这里就红了。
+    #[test]
+    fn fixed_frame_error_never_exceeds_half_turn() {
+        let pi = core::f32::consts::PI;
+        for deg in [10.0f32, 90.0, 179.0, 181.0, 190.0, 270.0, 350.0] {
+            let f_a = Quat::from_rotation_z(deg.to_radians());
+            let e = fixed_frame_error(Quat::IDENTITY, f_a, Quat::IDENTITY, Quat::IDENTITY);
+            assert!(
+                e.length() <= pi + 1e-4,
+                "{deg}° 的误差长度 {} 超过半圈（没走最短路径）",
+                e.length()
+            );
+            // 误差的方向 × 长度必须还原成"把 B 转到 A 参考姿态"那次旋转。
+            let want = f_a.to_axis_angle();
+            let got_axis = e.normalize_or_zero();
+            let axis_ok = got_axis.dot(want.0).abs() > 0.999 || want.1 < 1e-3;
+            assert!(axis_ok, "{deg}° 的误差轴不对：{e:?} vs {:?}", want.0);
+        }
+    }
+
+    /// 模式开关：两端参考姿态都是单位四元数 = 老行为（求解器不看参考姿态）。
+    #[test]
+    fn fixed_uses_reference_frames_only_when_a_frame_is_given() {
+        let a = BodyHandle {
+            index: 0,
+            generation: 0,
+        };
+        let b = BodyHandle {
+            index: 1,
+            generation: 0,
+        };
+        let mk = |fa: Quat, fb: Quat| Joint::Fixed {
+            a,
+            b,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: Vec3::ZERO,
+            local_frame_a: fa,
+            local_frame_b: fb,
+        };
+        assert!(!mk(Quat::IDENTITY, Quat::IDENTITY).fixed_uses_reference_frames());
+        assert!(mk(Quat::from_rotation_x(0.1), Quat::IDENTITY).fixed_uses_reference_frames());
+        assert!(mk(Quat::IDENTITY, Quat::from_rotation_y(0.1)).fixed_uses_reference_frames());
+        // 老固定关节不该因为"参考姿态"被算成每步驱动（否则睡眠行为会变）。
+        assert!(!mk(Quat::IDENTITY, Quat::IDENTITY).drives_bodies());
+        assert!(mk(Quat::from_rotation_x(0.1), Quat::IDENTITY).drives_bodies());
+    }
+
+    /// 修正速度：方向必须是误差的反方向，长度受 `MAX_FRAME_SPEED` 限制。
+    #[test]
+    fn frame_target_velocity_opposes_the_error_and_is_bounded() {
+        let v = frame_target_velocity(vec3(0.0, 0.0, -0.5), 1.0 / 60.0);
+        assert!(v.z > 0.0, "误差在 -Z 上，修正速度应该朝 +Z：{v:?}");
+        assert!((v.length() - 0.5 * 12.0).abs() < 1e-3, "{v:?}");
+        // 180° 的误差按增益算要 37.7 rad/s，必须被夹到上限以内（且方向不变）。
+        let big = frame_target_velocity(vec3(0.0, 0.0, -core::f32::consts::PI), 1.0 / 60.0);
+        assert!((big.length() - MAX_FRAME_SPEED).abs() < 1e-3, "{big:?}");
+        assert!(big.z > 0.0, "{big:?}");
+        // 零误差 → 零速度（也就是"老路径"那个 `-wrel`）。
+        assert_eq!(frame_target_velocity(Vec3::ZERO, 1.0 / 60.0), Vec3::ZERO);
     }
 }
