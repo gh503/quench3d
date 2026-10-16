@@ -56,8 +56,9 @@
     把缺省物体当成同类）。
   * 编辑器：没有编辑界面，但**导出不会吃掉这些字段**（从物理刚体读回来，有往返用例钉住）；
     F5 接触点里传感器接触画成**青色**，与真实碰撞区分。
-  验证：`cargo test -p quench3d-physics --lib`（6 个新用例：分组对称匹配与穿透、
-  传感器进入/离开且零冲量、传感器不唤醒睡眠体、CCD 停住高速球、CCD 遵守分组）、
+  验证：`cargo test -p quench3d-physics --lib`（**不需要显卡**，8 个新用例：分组对称匹配与
+  不匹配穿透、宽相在窄相之前就把不配对的对滤掉、传感器进入/离开且零冲量、传感器不唤醒睡眠体、
+  CCD 停住 600 m/s 的小球、CCD 遵守分组、贴着地面滑行的 CCD 子弹仍被薄墙拦住）、
   `cargo test -p quench3d-cli --lib collision_filter`（格式与校验：层号越界/重复/空掩码、
   传感器缺刚体是 error、CCD 非 dynamic 是 warning）、
   `cargo test -p quench3d-cli --test cli_e2e simulate_reports_sensors`（端到端：报告里有
