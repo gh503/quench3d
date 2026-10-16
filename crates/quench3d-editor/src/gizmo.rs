@@ -201,7 +201,10 @@ impl Gizmo {
         // Esc：取消整段拖拽，还原到按下前的变换，且不留历史。
         if escape && self.drag.is_some() {
             let drag = self.drag.take().expect("刚判断过");
-            engine.scene.objects[index].transform = drag.start_transform;
+            // `start_transform` 是**世界**变换：写回时层级里要换算成局部（有父物体时）。
+            engine
+                .scene
+                .set_world_transform(index, drag.start_transform);
             // 拖的是模型成员时，整组一起还原（连同写回 `models[i]` 的那一份）。
             doc.apply_transform_to_model_group(engine, index, drag.start_transform);
             doc.push_transform_to_physics(engine);
@@ -300,7 +303,9 @@ impl Gizmo {
                     }
                 }
             };
-            engine.scene.objects[index].transform = transform;
+            // 拖拽算出来的是**世界**变换，写回时按层级换算成局部（没有父物体时就是它自己）。
+            // 有父物体时这是必须的：把世界位移直接加到局部位置上，父物体一转就会走错方向。
+            engine.scene.set_world_transform(index, transform);
             // 模型（glTF/OBJ 引用）展开出来的物体：**整组一起动**，并把新变换写回
             // `models[i]` —— 这就是"视口里实时拖动模型"，存盘后位置也保得住。
             // 普通物体这一步什么都不做（返回 false）。
@@ -360,7 +365,8 @@ impl Gizmo {
         handle: Handle,
         pointer: EVec2,
     ) -> Drag {
-        let start_transform = engine.scene.objects[index].transform;
+        // 拖拽的参照是物体的**世界**变换（有父物体时 `transform` 是局部的）。
+        let start_transform = engine.scene.world_transform(index);
         // 旋转方向：轴指向相机时，屏幕上的顺时针才是绕轴正方向。
         let i = axis_of(handle);
         let sign = if screen.axes[i].normalize().dot(screen.forward) > 0.0 {
@@ -626,9 +632,10 @@ struct Screen {
 impl Screen {
     /// 把轴心、三根轴、旋转圆全部投影到屏幕。
     fn project(gizmo: &Gizmo, engine: &Engine, rect: Rect, index: usize) -> Screen {
-        let object = &engine.scene.objects[index];
-        let pivot = object.transform.position;
-        let q = object.transform.rotation;
+        // 手柄画在物体的**世界**位置（有父物体时 `transform` 是局部的）。
+        let world = engine.scene.world_transform(index);
+        let pivot = world.position;
+        let q = world.rotation;
         let camera = engine
             .orbit
             .camera(rect.width().max(1.0) / rect.height().max(1.0));

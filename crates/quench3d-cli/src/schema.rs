@@ -14,7 +14,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 一个可以直接跑起来的最小场景（也被 `quench3d example` 用来生成模板）。
 pub const EXAMPLE_SCENE: &str = r#"{
   "format": "quench3d.scene",
-  "version": 1,
+  "version": 2,
   "name": "示例：斜坡上的塔",
   "gravity": [0, -9.81, 0],
   "ground": { "size": 40, "material": "floor" },
@@ -263,11 +263,11 @@ pub fn schema() -> Value {
 pub fn scene_grammar() -> Value {
     json!({
         "format": "quench3d.scene",
-        "version": 1,
+        "version": crate::scene_doc::VERSION,
         "note": "所有字段都有缺省值，`{}` 就是合法场景",
         "top_level": {
             "format": "字符串，缺省 quench3d.scene",
-            "version": "整数，当前 1",
+            "version": "整数，当前 2（版本 2 起 parent 生效；不兼容版本 1）",
             "name": "场景名（可选）",
             "gravity": "[x, y, z]，缺省 [0, -9.81, 0]",
             "ground": { "size": "f32 边长，缺省 40", "material": "材质名（可选）", "y": "f32 高度，缺省 0" },
@@ -312,9 +312,10 @@ pub fn scene_grammar() -> Value {
         "object": {
             "name": "名称（关节引用与报告都用它；缺省 objects[i]）",
             "shape": "形状对象，缺省 1×1×1 立方体",
-            "position": "[x, y, z]，缺省原点",
+            "parent": "父物体名（objects[].name）；给了之后 position/rotation_deg 变成**相对父物体**的局部量（继承位置与朝向，**不继承缩放**）。带刚体的物体不能有父物体",
+            "position": "[x, y, z]，缺省原点；有 parent 时是局部的",
             "rotation_deg": "欧拉角 XYZ，单位度",
-            "scale": "显示缩放（只影响渲染，不影响碰撞）",
+            "scale": "显示缩放（只影响渲染，不影响碰撞）；不受父物体缩放影响",
             "material": "材质名（缺省灰色）",
             "body": ["none（纯显示，缺省）", "static", "dynamic", "kinematic"],
             "density": "kg/m³，缺省 1000",
@@ -413,7 +414,7 @@ pub fn scene_grammar() -> Value {
 /// 给大模型看的系统提示：把场景语法讲清楚，并要求只输出 JSON。
 pub fn system_prompt() -> String {
     r#"你是 Quench3D 引擎的场景生成器。用户会用自然语言描述一个 3D 场景或物理实验，
-你只输出一个 JSON 对象（不要解释、不要 Markdown 代码块以外的文字），格式是 quench3d.scene v1。
+你只输出一个 JSON 对象（不要解释、不要 Markdown 代码块以外的文字），格式是 quench3d.scene v2。
 
 顶层字段（全部可选）：
 - name: 字符串
@@ -428,7 +429,10 @@ pub fn system_prompt() -> String {
   - name: 字符串（关节引用与报告用它）
   - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"plane"|"convex",
              size: [x,y,z]（box 的**边长**）, radius, half_height, normal, points }
-  - position: [x,y,z]（米）, rotation_deg: [x,y,z]（度）
+  - parent: 父物体的 name（可选）。给了之后 position/rotation_deg 是**相对父物体**的
+            （父物体动，子物体跟着动；只继承位置与朝向，不继承缩放；
+             带刚体的物体不能有父物体）。父物体必须显式写 name
+  - position: [x,y,z]（米，有 parent 时是相对父物体的）, rotation_deg: [x,y,z]（度）
   - material: 材质名
   - body: "none"|"static"|"dynamic"|"kinematic"（缺省 none 表示纯显示，不参与物理）
   - density: kg/m³（缺省 1000）, restitution: 0~1（缺省 0.2）, friction:（缺省 0.5）

@@ -257,8 +257,9 @@ impl Doc {
         };
         let mut moved = 0;
         for index in objects {
-            if let Some(object) = engine.scene.objects.get_mut(index) {
-                object.transform = transform;
+            if engine.scene.objects.get(index).is_some() {
+                // 世界变换写回（模型网格一般没有父物体，但有了也不会写错）。
+                engine.scene.set_world_transform(index, transform);
                 moved += 1;
             }
         }
@@ -291,8 +292,8 @@ impl Doc {
             Vec3::splat(transform.scale.x),
         );
         for index in objects {
-            if let Some(target) = engine.scene.objects.get_mut(index) {
-                target.transform = uniform;
+            if engine.scene.objects.get(index).is_some() {
+                engine.scene.set_world_transform(index, uniform);
             }
         }
         self.write_model_transform(model, uniform);
@@ -662,8 +663,39 @@ impl Doc {
         engine.scene.objects[index].metallic = object.metallic;
         engine.scene.objects[index].roughness = object.roughness;
         engine.scene.objects[index].emissive_strength = object.emissive_strength;
+        // 复制体跟原物体**同一个父物体**（同在父坐标系里，偏移量也在这个坐标系里；
+        // 父物体带旋转时偏移方向会跟着转，这是"同级复制"该有的行为）。
+        engine.scene.objects[index].parent = object.parent;
         self.selected = Some(index);
         self.status = format!("已复制 {name}");
+    }
+
+    /// 给物体换父物体（`parent` 为 `None` 就是提成根物体）。
+    ///
+    /// **保持世界位姿不变**：先记下世界变换，改完父子关系再写回去 —— 否则物体
+    /// 一换父就会"跳"到父坐标系里去（改层级时位置突然变了，是最容易被当成 bug 的行为）。
+    pub fn set_parent(&mut self, engine: &mut Engine, child: usize, parent: Option<usize>) -> bool {
+        if child >= engine.scene.objects.len() {
+            return false;
+        }
+        let world = engine.scene.world_transform(child);
+        match engine.scene.set_parent(child, parent) {
+            Ok(()) => {
+                engine.scene.set_world_transform(child, world);
+                let child_name = engine.scene.objects[child].name.clone();
+                self.status = match parent {
+                    Some(p) => {
+                        format!("已把 {child_name} 挂到 {} 下", engine.scene.objects[p].name)
+                    }
+                    None => format!("已把 {child_name} 提为根物体"),
+                };
+                true
+            }
+            Err(e) => {
+                self.status = format!("改父物体失败：{e}");
+                false
+            }
+        }
     }
 
     /// 删掉选中的物体（连同它的刚体）。
@@ -677,7 +709,12 @@ impl Doc {
         }
         // 删的是模型展开出来的网格吗？删之前先问清楚（删完下标就变了）。
         let was_model_mesh = self.model_of_object(index).is_some();
-        let object = engine.scene.objects.remove(index);
+        // 子物体数也要在删之前数（删完它们的父下标已经变了）。
+        let children = engine.scene.children_of(index).len();
+        // 用 `scene.remove`：它会把子物体提到祖父、并把后面所有物体的父下标前移。
+        let Some(object) = engine.scene.remove(index) else {
+            return;
+        };
         if let Some(handle) = object.body {
             engine.world.remove_body(handle);
         }
@@ -689,6 +726,10 @@ impl Doc {
             Some(index.min(engine.scene.objects.len() - 1))
         };
         self.status = format!("已删除 {}", object.name);
+        if children > 0 {
+            self.status
+                .push_str(&format!("（{children} 个子物体提到了上一级）"));
+        }
         if was_model_mesh {
             self.status
                 .push_str("（模型引用还在文件里；这个网格存盘后重开会随模型回来）");

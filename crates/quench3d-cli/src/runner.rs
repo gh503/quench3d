@@ -1438,6 +1438,8 @@ pub fn setup_visuals(
     }
 
     let plane_size = doc.ground.as_ref().map(|g| g.size).unwrap_or(40.0);
+    // 文档下标 → 场景物体下标：地面在场景里排在最前面，两者并不相等。
+    let mut doc_to_scene: Vec<usize> = Vec::with_capacity(doc.objects.len());
 
     // 图元
     for (i, o) in doc.objects.iter().enumerate() {
@@ -1495,6 +1497,35 @@ pub fn setup_visuals(
             obj.visible = o.visible;
             // 刚体的位姿来自物理，缩放只影响渲染
             obj.transform.scale = scale;
+        }
+        doc_to_scene.push(index);
+    }
+
+    // 父子：文件里用**名字**写（父物体可以排在子物体后面，顺序不该成为限制），
+    // 引擎里用**下标**。校验器已经查过悬空/自环/成环/带刚体，这里再挡一次是因为
+    // 引擎侧的规则可能比校验器更严 —— 真挡下来了就报错，不要静默丢掉父物体。
+    let doc_index_of_name: BTreeMap<String, usize> = doc
+        .objects
+        .iter()
+        .enumerate()
+        .map(|(i, _)| (object_name(doc, i), i))
+        .collect();
+    for (i, o) in doc.objects.iter().enumerate() {
+        let Some(parent) = o.parent.as_deref() else {
+            continue;
+        };
+        let (Some(&child), Some(&parent_doc)) = (
+            doc_to_scene.get(i),
+            doc_index_of_name
+                .get(parent)
+                .and_then(|j| doc_to_scene.get(*j)),
+        ) else {
+            continue; // 校验器已报过"找不到父物体"，这里不重复报
+        };
+        if let Err(e) = engine.scene.set_parent(child, Some(parent_doc)) {
+            let mut err = RunError::io(format!("应用父子关系失败: {e}"));
+            err.path = Some(format!("objects[{i}].parent"));
+            return Err(err);
         }
     }
 

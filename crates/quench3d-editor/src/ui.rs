@@ -290,9 +290,12 @@ fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Opti
 
 /// 左侧场景树。
 ///
-/// 导入的模型在引擎里是"一个子网格一个物体"，散在列表里看不出它们是一伙的：
-/// 这里按 [`Doc::model_instances`] 把它们收进 `模型 #i · 路径` 分组里，
-/// 成员照旧可点选、可 `⌖` 聚焦；分组标题上还有"整组聚焦"。
+/// 两种"成组"都要在这里表达出来：
+///
+/// * **父子层级**：子物体缩进画在父物体下面（拖动父物体时子物体跟着走，见 `Scene::world_transform`）。
+/// * **导入的模型**：在引擎里它是"一个子网格一个物体"，散在列表里看不出它们是一伙的 ——
+///   按 [`Doc::model_instances`] 收进 `模型 #i · 路径` 分组，成员照旧可点选、可 `⌖` 聚焦，
+///   分组标题上还有"整组聚焦"。
 fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     egui::Panel::left("quench3d-outliner")
         .default_size(190.0)
@@ -302,59 +305,52 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let count = engine.scene.objects.len();
-                // 物体 → 它属于哪个模型实例；以及"分组标题该画在哪个下标上"。
-                let mut owner: Vec<Option<usize>> = vec![None; count];
+                // "分组标题该画在哪个下标上"：模型实例的第一个成员所在的行。
                 let mut header_at: Vec<Option<usize>> = vec![None; count];
                 for (mi, instance) in doc.model_instances.iter().enumerate() {
-                    for &object in &instance.objects {
-                        if let Some(slot) = owner.get_mut(object) {
-                            *slot = Some(mi);
-                        }
-                    }
                     if let Some(&first) = instance.objects.first() {
                         if let Some(slot) = header_at.get_mut(first) {
                             *slot = Some(mi);
                         }
                     }
                 }
+                // 父 → 子列表（顺序按场景顺序）。
+                let mut children: Vec<Vec<usize>> = vec![Vec::new(); count];
+                let mut roots: Vec<usize> = Vec::new();
+                for (index, object) in engine.scene.objects.iter().enumerate() {
+                    match object.parent.filter(|p| *p < count) {
+                        Some(p) => children[p].push(index),
+                        None => roots.push(index),
+                    }
+                }
 
                 let mut focus_request: Option<Vec<usize>> = None;
+                let mut drawn = vec![false; count];
+                for index in roots {
+                    draw_subtree(
+                        ui,
+                        engine,
+                        doc,
+                        index,
+                        &children,
+                        &header_at,
+                        &mut drawn,
+                        &mut focus_request,
+                    );
+                }
+                // 兜底：父链成环或引用越界的物体不会被上面的遍历碰到，
+                // 但它们确实还在场景里 —— 照样画出来，藏起来的物体比画错更难查。
                 for index in 0..count {
-                    if let Some(mi) = header_at[index] {
-                        // 标题用 `models` 数组里的下标（`instance.model`），不是实例在表里的位置。
-                        let model = doc.model_instances[mi].model;
-                        let path = doc.model_instances[mi].path.display().to_string();
-                        let members = doc.model_instances[mi].objects.clone();
-                        egui::CollapsingHeader::new(
-                            RichText::new(format!("模型 #{model} · {path}"))
-                                .small()
-                                .strong(),
-                        )
-                        .id_salt(("quench3d-model-group", mi))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            if ui
-                                .small_button("⌖ 整组聚焦")
-                                .on_hover_text("把相机对准这个模型的全部子网格")
-                                .clicked()
-                            {
-                                focus_request = Some(members.clone());
-                            }
-                            for &object in &members {
-                                if let Some(focus) = object_row(ui, engine, doc, object) {
-                                    focus_request = Some(vec![focus]);
-                                }
-                            }
-                        });
-                        continue;
-                    }
-                    // 已经在上面的分组里画过的成员：跳过，别再列一遍。
-                    if owner[index].is_some() {
-                        continue;
-                    }
-                    if let Some(focus) = object_row(ui, engine, doc, index) {
-                        focus_request = Some(vec![focus]);
-                    }
+                    draw_subtree(
+                        ui,
+                        engine,
+                        doc,
+                        index,
+                        &children,
+                        &header_at,
+                        &mut drawn,
+                        &mut focus_request,
+                    );
                 }
                 if let Some(indices) = focus_request {
                     if let Some(bounds) = engine.scene.bounds_of(&engine.renderer, &indices) {
@@ -364,6 +360,147 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 }
             });
         });
+}
+
+/// 画一棵子树（父物体 + 缩进的子物体），并在模型实例的第一个成员处插入分组标题。
+///
+/// `drawn` 保证每个物体只画一次：模型分组的成员会在这里被"提前画掉"，
+/// 父链成环时递归也要能停下来（场景树是每帧都跑的，不能死循环）。
+#[allow(clippy::too_many_arguments)]
+fn draw_subtree(
+    ui: &mut Ui,
+    engine: &Engine,
+    doc: &mut Doc,
+    index: usize,
+    children: &[Vec<usize>],
+    header_at: &[Option<usize>],
+    drawn: &mut [bool],
+    focus_request: &mut Option<Vec<usize>>,
+) {
+    if drawn.get(index).copied().unwrap_or(true) {
+        return;
+    }
+    drawn[index] = true;
+
+    if let Some(mi) = header_at.get(index).copied().flatten() {
+        // 标题用 `models` 数组里的下标（`instance.model`），不是实例在表里的位置。
+        let model = doc.model_instances[mi].model;
+        let path = doc.model_instances[mi].path.display().to_string();
+        let members = doc.model_instances[mi].objects.clone();
+        egui::CollapsingHeader::new(
+            RichText::new(format!("模型 #{model} · {path}"))
+                .small()
+                .strong(),
+        )
+        .id_salt(("quench3d-model-group", mi))
+        .default_open(true)
+        .show(ui, |ui| {
+            if ui
+                .small_button("⌖ 整组聚焦")
+                .on_hover_text("把相机对准这个模型的全部子网格")
+                .clicked()
+            {
+                *focus_request = Some(members.clone());
+            }
+            for &object in &members {
+                draw_subtree(
+                    ui,
+                    engine,
+                    doc,
+                    object,
+                    children,
+                    header_at,
+                    drawn,
+                    focus_request,
+                );
+            }
+        });
+        return;
+    }
+
+    if let Some(focus) = object_row(ui, engine, doc, index) {
+        *focus_request = Some(vec![focus]);
+    }
+    let kids = children.get(index).cloned().unwrap_or_default();
+    if kids.is_empty() {
+        return;
+    }
+    ui.indent(("quench3d-children", index), |ui| {
+        for child in kids {
+            draw_subtree(
+                ui,
+                engine,
+                doc,
+                child,
+                children,
+                header_at,
+                drawn,
+                focus_request,
+            );
+        }
+    });
+}
+
+/// 画"父物体"选择器。
+///
+/// 只发请求、不动场景：调用方要同时改两个物体（子物体的 `parent` 和它的局部变换），
+/// 而这里正处在只读借用物体的位置。请求交给调用方在借用结束后统一执行。
+///
+/// 列表里**不出现自己的子孙**：选中它们必然成环（引擎也会拒绝），
+/// 与其让人点一下再看到一条错误，不如干脆不给这个选项。
+fn draw_parent_picker(
+    ui: &mut Ui,
+    engine: &Engine,
+    index: usize,
+    request: &mut Option<Option<usize>>,
+) {
+    let Some(object) = engine.scene.objects.get(index) else {
+        return;
+    };
+    let current = object.parent.filter(|p| *p < engine.scene.objects.len());
+    if object.body.is_some() {
+        ui.label(
+            RichText::new("父物体：（带刚体的物体不能有父物体：位姿由物理决定）")
+                .small()
+                .weak(),
+        );
+        return;
+    }
+    let world = engine.scene.world_transform(index);
+    ui.horizontal(|ui| {
+        ui.label("父物体");
+        let current_label = current
+            .map(|p| engine.scene.objects[p].name.clone())
+            .unwrap_or_else(|| "（无）".to_string());
+        egui::ComboBox::from_id_salt("quench3d-parent-picker")
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "（无）").clicked() {
+                    *request = Some(None);
+                }
+                for (i, candidate) in engine.scene.objects.iter().enumerate() {
+                    if i == index || engine.scene.is_ancestor(index, i) {
+                        continue;
+                    }
+                    let selected = current == Some(i);
+                    if ui.selectable_label(selected, &candidate.name).clicked() && !selected {
+                        *request = Some(Some(i));
+                    }
+                }
+            });
+    });
+    if current.is_some() {
+        // 有父物体时输入框里的数字是**局部**量：不写清楚的话，
+        // "改了位置但物体会跑到别处"会被当成 bug（父物体带旋转时尤其明显）。
+        ui.label(
+            RichText::new(format!(
+                "变换是相对父物体的；世界位置 ({:.2}, {:.2}, {:.2})",
+                world.position.x, world.position.y, world.position.z
+            ))
+            .small()
+            .weak(),
+        );
+    }
 }
 
 /// 右侧属性面板。
@@ -794,6 +931,10 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
 
             material_section(ui, engine, doc);
             ui.separator();
+            // 改父物体要在拿到 `objects[index]` 的可变借用之前发出请求，
+            // 因为它要同时改场景里的两个物体（还得保持世界位姿）。
+            let mut parent_request: Option<Option<usize>> = None;
+            draw_parent_picker(ui, engine, index, &mut parent_request);
             let mut changed = false;
             // 变换是否真的被改过（与 `changed` 分开：改名字/颜色不该触发整组联动）。
             let transform_changed;
@@ -1001,9 +1142,16 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                 doc.set_body_kind(engine, kind);
                 changed = true;
             }
+            // 改父物体：`Doc::set_parent` 会保持世界位姿不变，并自己写状态栏。
+            if let Some(parent) = parent_request {
+                if doc.set_parent(engine, index, parent) {
+                    doc.record_edit(engine);
+                }
+            }
             // 属性面板里改的也是模型成员时，跟视口拖动走同一条路：整组一起动 + 写回 `models`。
+            // 模型变换是**世界**变换（模型网格挂在层级里也是按世界写的）。
             if transform_changed {
-                let transform = engine.scene.objects[index].transform;
+                let transform = engine.scene.world_transform(index);
                 if doc.apply_transform_to_model_group(engine, index, transform) {
                     doc.status = "模型实例：整组一起变换（已写回 models，存盘生效）".to_string();
                 }

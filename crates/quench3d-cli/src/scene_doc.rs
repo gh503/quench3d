@@ -51,7 +51,12 @@ pub const MAX_PROBES: usize = 256;
 /// 场景文件格式标识。
 pub const FORMAT: &str = "quench3d.scene";
 /// 当前支持的格式版本。
-pub const VERSION: u32 = 1;
+///
+/// 版本 2 起 `objects[].parent` 生效：`position` / `rotation_deg` / `scale` 的含义从
+/// "世界"变成"相对父物体"（没有父物体时仍是世界）。**不做版本 1 的兼容** —— 这个格式
+/// 还没有外部使用者，与其维护一个迁移器，不如让版本 1 的文件拿到一条明确的诊断，
+/// 而不是被静默按新语义解释、摆出一堆位置错误的物体。
+pub const VERSION: u32 = 2;
 
 /// 诊断级别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,13 +393,22 @@ pub struct ObjectDoc {
     /// 形状，缺省 1×1×1 立方体。
     #[serde(default)]
     pub shape: ShapeDoc,
-    /// 世界位置（米），缺省原点。
+    /// 父物体的**名字**（`objects[].name`），缺省为根物体。
+    ///
+    /// 给了父物体之后，`position` / `rotation_deg` 都变成**相对父物体**的局部量：
+    /// 父物体一动，子物体跟着走。子物体继承父物体的**位置与朝向，但不继承缩放** ——
+    /// 这个格式里 `scale` 就是图元尺寸（`shape.size` 折算而来），乘法继承会让
+    /// "挂在大地板下的树"被压成一块饼。
+    /// 带刚体的物体不能有父物体 —— 它的位姿由物理决定，父物体只会被静默忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// 位置（米），缺省原点；有 `parent` 时是相对父物体的局部位置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f32; 3]>,
-    /// 欧拉角（**度**，XYZ 顺序），缺省 0。
+    /// 欧拉角（**度**，XYZ 顺序），缺省 0；有 `parent` 时是相对父物体的局部朝向。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_deg: Option<[f32; 3]>,
-    /// 显示缩放倍率（只影响渲染，不影响碰撞），缺省 `[1, 1, 1]`。
+    /// 显示缩放倍率（只影响渲染，不影响碰撞），缺省 `[1, 1, 1]`；**不受父物体缩放影响**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<[f32; 3]>,
     /// 材质名（引用 `materials`）。
@@ -1681,6 +1695,81 @@ impl SceneDoc {
                         )
                         .with_hint("名字用于关节两端、--trace 与报告索引，必须唯一"),
                     );
+                }
+            }
+        }
+
+        // 父子：名字解析 → 成环 → 与刚体的冲突。
+        // 这三条都在构建场景**之前**查出来：悬空的名字在构建时找不到，环会让"世界变换"
+        // 只能在运行时截断，而带刚体的物体挂父物体则是静默失效 —— 三种都不该留到运行时。
+        for (i, o) in self.objects.iter().enumerate() {
+            let p = format!("objects[{i}].parent");
+            let Some(parent) = o.parent.as_deref() else {
+                continue;
+            };
+            if parent.trim().is_empty() {
+                out.push(Diagnostic::error(p, "父物体名不能为空"));
+                continue;
+            }
+            if o.name.as_deref() == Some(parent) {
+                out.push(
+                    Diagnostic::error(&p, "物体不能以自己为父")
+                        .with_hint("删掉 parent 字段，或用另一个物体的名字"),
+                );
+                continue;
+            }
+            if !seen_names.contains_key(parent) {
+                out.push(
+                    Diagnostic::error(
+                        &p,
+                        format!("找不到名为 \"{parent}\" 的父物体（父物体必须写在 objects 里并显式命名）"),
+                    )
+                    .with_hint("给父物体补一个 name，或把 parent 改成它的名字"),
+                );
+                continue;
+            }
+            if o.body != BodyKind::None {
+                out.push(
+                    Diagnostic::error(
+                        &p,
+                        format!(
+                            "objects[{i}] 是 {:?} 刚体，位姿由物理决定，不能再挂父物体",
+                            o.body
+                        ),
+                    )
+                    .with_hint("要么去掉 parent，要么把 body 改成 none"),
+                );
+            }
+        }
+        // 成环：沿父链走，走不动之前又回到自己就是环。
+        // 解析不了的父名当成"链到此为止"，这样一条悬空引用不会把成环检查也一起关掉。
+        if self.objects.len() <= MAX_OBJECTS {
+            let index_of = |name: &str| seen_names.get(name).copied();
+            for (i, o) in self.objects.iter().enumerate() {
+                let mut cursor = o.parent.as_deref().and_then(index_of);
+                let mut walked: Vec<usize> = Vec::new();
+                while let Some(j) = cursor {
+                    if j == i {
+                        // 环上的每个物体沿父链都会走回自己，只让下标最小的那个报一次，
+                        // 否则一个三物体的环会刷出三条一模一样的诊断。
+                        if walked.iter().all(|&w| w > i) {
+                            out.push(
+                                Diagnostic::error(
+                                    format!("objects[{i}].parent"),
+                                    format!(
+                                        "父子链成环（从 objects[{i}] 出发沿 parent 又回到自己）"
+                                    ),
+                                )
+                                .with_hint("层级必须是一棵树：去掉环上的某一条 parent"),
+                            );
+                        }
+                        break;
+                    }
+                    walked.push(j);
+                    cursor = self.objects[j].parent.as_deref().and_then(index_of);
+                    if walked.len() > self.objects.len() {
+                        break;
+                    }
                 }
             }
         }
@@ -3203,6 +3292,7 @@ mod tests {
     #[test]
     fn model_path_is_checked_with_the_loader_search_path() {
         // 真的不存在 → 错误（并给出尝试过的路径）
+
         let doc = SceneDoc::from_value(
             json!({ "models": [ { "path": "definitely_missing_3d7f.glb" } ] }),
         )
@@ -3217,5 +3307,118 @@ mod tests {
             "错误里应当列出候选搜索路径: {}",
             hit.message
         );
+    }
+
+    // --- 层级（格式版本 2 的 objects[].parent）------------------------------
+
+    /// 取"第一条提到某个字段"的诊断，方便断言"确实报了这个错"。
+    fn diag_at<'a>(diags: &'a [Diagnostic], path: &str) -> Option<&'a Diagnostic> {
+        diags.iter().find(|d| d.path == path)
+    }
+
+    #[test]
+    fn parent_edge_survives_a_json_round_trip() {
+        let doc = SceneDoc::from_json(
+            r#"{
+              "objects": [
+                { "name": "底座", "shape": { "type": "box", "size": [2, 0.2, 2] } },
+                { "name": "球", "shape": { "type": "sphere", "radius": 0.5 },
+                  "parent": "底座", "position": [0, 1.5, 0] }
+              ]
+            }"#,
+        )
+        .unwrap();
+        assert!(!SceneDoc::has_errors(&doc.validate()));
+        let text = doc.to_json_pretty();
+        let back = SceneDoc::from_json(&text).unwrap();
+        assert_eq!(back.objects[1].parent.as_deref(), Some("底座"));
+        // 没有父物体的那条不该被写出 `parent` 字段（`skip_serializing_if`）。
+        assert!(back.objects[0].parent.is_none());
+        assert!(!text.contains("\"parent\": null"), "{text}");
+    }
+
+    #[test]
+    fn dangling_parent_is_an_error() {
+        let doc =
+            SceneDoc::from_json(r#"{ "objects": [ { "name": "球", "parent": "不存在的东西" } ] }"#)
+                .unwrap();
+        let diags = doc.validate();
+        let d = diag_at(&diags, "objects[0].parent").expect("必须报悬空父物体");
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("不存在的东西"), "{}", d.message);
+    }
+
+    #[test]
+    fn unnamed_parent_cannot_be_referenced() {
+        // 父物体必须**显式命名**：缺省名 objects[i] 只是给人看的编号，不是可引用的名字。
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [ { "shape": { "type": "box" } },
+                              { "name": "球", "parent": "objects[0]" } ] }"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(
+            diag_at(&diags, "objects[1].parent").is_some_and(|d| d.severity == Severity::Error),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn self_parent_is_an_error() {
+        let doc =
+            SceneDoc::from_json(r#"{ "objects": [ { "name": "球", "parent": "球" } ] }"#).unwrap();
+        let diags = doc.validate();
+        let d = diag_at(&diags, "objects[0].parent").expect("必须报自环");
+        assert!(d.message.contains("自己"), "{}", d.message);
+    }
+
+    #[test]
+    fn parent_cycle_is_reported_once() {
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [
+                  { "name": "a", "parent": "c" },
+                  { "name": "b", "parent": "a" },
+                  { "name": "c", "parent": "b" } ] }"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        let cycles: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.path.ends_with(".parent") && d.message.contains("成环"))
+            .collect();
+        // 环上每个物体沿父链都会走回自己 —— 但只报一条，否则一个环会刷出一屏。
+        assert_eq!(cycles.len(), 1, "{diags:?}");
+        assert_eq!(cycles[0].path, "objects[0].parent");
+    }
+
+    #[test]
+    fn a_body_cannot_hang_under_a_parent() {
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [
+                  { "name": "支架", "shape": { "type": "box" } },
+                  { "name": "箱子", "parent": "支架", "body": "dynamic" } ] }"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        let d = diag_at(&diags, "objects[1].parent").expect("带刚体不能有父物体");
+        assert!(d.message.contains("刚体"), "{}", d.message);
+        // 反过来（刚体当父物体）是允许的：子物体跟着刚体走。
+        let ok = SceneDoc::from_json(
+            r#"{ "objects": [
+                  { "name": "平台", "body": "static" },
+                  { "name": "装饰", "parent": "平台" } ] }"#,
+        )
+        .unwrap();
+        assert!(!SceneDoc::has_errors(&ok.validate()));
+    }
+
+    #[test]
+    fn version_one_is_rejected_with_a_clear_message() {
+        let doc =
+            SceneDoc::from_json(r#"{ "format": "quench3d.scene", "version": 1, "objects": [] }"#)
+                .unwrap();
+        let diags = doc.validate();
+        let d = diag_at(&diags, "version").expect("版本 1 必须报错");
+        assert!(d.message.contains("当前支持 2"), "{}", d.message);
     }
 }

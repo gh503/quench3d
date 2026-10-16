@@ -164,12 +164,41 @@ impl Transform {
     }
 
     /// 以 `self` 为父、把 `child` 拼接到 `self` 空间。
+    ///
+    /// **约定**：这里是**分量（TRS）组合** —— 位置走 `transform_point`、旋转相乘、缩放相乘，
+    /// 不做矩阵相乘。好处是结果永远是一个合法的 TRS（不会出现 TRS 表达不了的剪切），
+    /// 且与 [`Transform::child_of`] 互为精确逆运算。
+    ///
+    /// 注意两个边界：父物体**非均匀缩放**且子物体**带旋转**时，分量组合与"严格的矩阵层次"
+    /// 不同（点映射不再满足结合律）；而且"缩放要不要传给子物体"本身是个设计选择 ——
+    /// 场景层级（`quench3d::scene`）就**不**用缩放相乘，因为它那里的 `scale` 是图元尺寸。
     #[inline]
     pub fn mul_transform(&self, child: &Transform) -> Transform {
         Transform::new(
             self.transform_point(child.position),
             self.rotation * child.rotation,
             self.scale * child.scale,
+        )
+    }
+
+    /// [`Transform::mul_transform`] 的逆：把**世界**变换 `world` 化成"挂在 `self` 下"的局部变换。
+    ///
+    /// 满足 `parent.mul_transform(&parent.child_of(&world)) == world`（父尺度为 0 的分量除外 ——
+    /// 那是个不可逆的退化情形，按 0 处理而不是除出 `inf`）。
+    ///
+    /// 与 [`Transform::mul_transform`] 用的是同一套分量（TRS）约定，所以两者互为精确逆：
+    /// 不会产生剪切，代价是"父物体非均匀缩放 + 子物体带旋转"时与矩阵层次不同。
+    /// （场景层级会先利用 [`Transform::from_trs`] 把父物体的缩放去掉再用它，见 `quench3d::scene`。）
+    #[inline]
+    pub fn child_of(&self, world: &Transform) -> Transform {
+        Transform::new(
+            self.inverse_transform_point(world.position),
+            self.rotation.inverse() * world.rotation,
+            Vec3::new(
+                divide_if_invertible(world.scale.x, self.scale.x),
+                divide_if_invertible(world.scale.y, self.scale.y),
+                divide_if_invertible(world.scale.z, self.scale.z),
+            ),
         )
     }
 
@@ -229,6 +258,16 @@ impl Mul for Transform {
     }
 }
 
+/// `a / b`，但 `b` 退化到 0 时返回 0（层级里"父缩放为 0"是不可逆的，别制造 `inf`/`NaN`）。
+#[inline]
+fn divide_if_invertible(a: f32, b: f32) -> f32 {
+    if b.abs() > 1e-8 {
+        a / b
+    } else {
+        0.0
+    }
+}
+
 impl From<Transform> for Mat4 {
     #[inline]
     fn from(t: Transform) -> Self {
@@ -279,6 +318,64 @@ mod tests {
             world.position
         );
         assert!((world.forward() - vec3(-1.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn child_of_inverts_mul_transform() {
+        let parent = Transform::from_trs(
+            vec3(2.0, -1.0, 0.5),
+            Quat::from_axis_angle(vec3(0.3, 1.0, -0.2).normalize_or_zero(), 0.9),
+            vec3(2.0, 0.5, 1.25),
+        );
+        let local = Transform::from_trs(
+            vec3(-0.4, 1.5, 0.2),
+            Quat::from_rotation_z(0.4),
+            vec3(0.5, 2.0, 1.0),
+        );
+        let world = parent.mul_transform(&local);
+        let back = parent.child_of(&world);
+        assert!(
+            (back.position - local.position).length() < 1e-4,
+            "位置：{:?} != {:?}",
+            back.position,
+            local.position
+        );
+        assert!(
+            (back.scale - local.scale).length() < 1e-4,
+            "缩放：{:?} != {:?}",
+            back.scale,
+            local.scale
+        );
+        // 四元数 q 与 -q 是同一个旋转，比较时取其一。
+        let dot = back.rotation.x * local.rotation.x
+            + back.rotation.y * local.rotation.y
+            + back.rotation.z * local.rotation.z
+            + back.rotation.w * local.rotation.w;
+        assert!(dot.abs() > 0.9999, "旋转对不上：{dot}");
+    }
+
+    /// 父缩放是**均匀**的时，分量组合与"点映射逐级套用"完全一致（结合律成立）。
+    /// 非均匀父缩放 + 子旋转时不再成立 —— 那正是 TRS 约定的边界，写在这里当文档用。
+    #[test]
+    fn hierarchy_point_mapping_is_exact_for_uniform_parent_scale() {
+        let parent = Transform::from_trs(
+            vec3(1.0, 2.0, -1.0),
+            Quat::from_rotation_y(0.7),
+            Vec3::splat(2.5),
+        );
+        let child = Transform::from_trs(
+            vec3(0.5, -0.25, 1.0),
+            Quat::from_rotation_x(-0.3),
+            vec3(0.5, 1.5, 0.75),
+        );
+        let world = parent.mul_transform(&child);
+        let p = vec3(0.2, 0.4, -0.6);
+        let stepwise = parent.transform_point(child.transform_point(p));
+        let flat = world.transform_point(p);
+        assert!(
+            (stepwise - flat).length() < 1e-4,
+            "{stepwise:?} vs {flat:?}"
+        );
     }
 
     #[test]

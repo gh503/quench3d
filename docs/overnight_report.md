@@ -252,8 +252,8 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 **一个流程教训（已修）**：`tools/gate.sh | tail` 会让管道吞掉退出码 —— 我第一次就这么推了一个 fmt 没过的提交，
 下一提交修好；看门禁请 `tools/gate.sh > log 2>&1; echo $?`，别接管道。
 
-**② 剩余的三组半 → 第 15 轮之后剩三组**：① ~~模型引用接进场景树 + 视口实时拖动~~（第 15 轮完成，见 §12）；
-② 场景层级/父子与格式 v2；③ 后处理 FXAA/SSAO；④ 物理碰撞过滤/传感器事件/CCD。
+**剩余清单 → 第 16 轮之后剩两组**：① ~~模型引用接进场景树 + 视口实时拖动~~（第 15 轮，§12）；
+② ~~场景层级/父子与格式 v2~~（第 16 轮，§13）；③ 后处理 FXAA/SSAO；④ 物理碰撞过滤/传感器事件/CCD。
 
 ---
 
@@ -308,3 +308,33 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 
 **没有做（别误以为有）**：多选还没做，"成组"目前只有"模型实例"这一个来源；
 不能单独挪模型的某个子网格；非均匀缩放写不回格式（`models[i].scale` 是一个数）。
+
+---
+
+## 13. 第 16 轮：场景层级（父子变换）+ 场景格式 v2
+
+这一轮把"组合体"的地基放进去：物体可以有**父物体**，于是 `position` / `rotation_deg`
+变成相对父物体的**局部**量，拖动父物体时子物体自动跟着走。格式版本升到 2。
+
+| # | 内容 | 落点 / 证据 |
+|---|---|---|
+| 1 | 引擎：`SceneObject::parent` + 世界变换现算（`world_transform` / `set_world_transform` / `set_parent` / `is_ancestor` / `children_of` / `remove`）；绘制、包围盒、拾取、物理同步全走世界变换 | `crates/quench3d/src/scene.rs`；5 个纯逻辑用例（**不需要显卡**，CI 上也会真跑） |
+| 2 | 格式：`objects[].parent`（用**名字**引用）+ `VERSION = 2`；校验器拦悬空父名、自为空、成环、带刚体挂父物体 | `crates/quench3d-cli/src/scene_doc.rs`；7 个格式用例（含"一个环只报一条诊断"） |
+| 3 | CLI 装载：两趟连线（先建物体，再按"文档下标 → 场景物体下标"接父链） | `crates/quench3d-cli/src/runner.rs`；父物体可以排在子物体后面 |
+| 4 | 编辑器：场景树缩进显示层级；属性面板"父物体"下拉改父（**保世界位姿**）；gizmo 在世界空间算、写回时换算成局部 | `ui.rs` / `doc.rs`（`Doc::set_parent`）/ `gizmo.rs`；7 个集成用例 |
+| 5 | 导出：写局部变换 + `parent` 名字；父物体没被写成物体（地面、模型网格）就丢掉关系并**上报** | `scene_io.rs`；悬空 `parent` 会让整个文件读不回来 |
+| 6 | 缩放语义：子物体**只继承位置与朝向，不继承缩放** | `scene::rigid_only`；格式文档 / schema / 系统提示都写明了理由 |
+
+**顺带修掉一个真 bug**：`to_euler_xyz_deg` 在万向锁（绕 Y ±90°）时用错了矩阵行，
+把旋转反解成"另一个 90°"。单看该物体看不出来（都是转了 90°），但子物体会跑到别处 ——
+这正是给层级写集成测试时顺出来的（父物体错一点，子物体错一大截）。
+已加穷举角度的回归测试 `euler_extraction_round_trips_every_axis`。
+
+**验证**：`cargo test -p quench3d --lib`（5 个，纯逻辑）/ `cargo test -p quench3d-cli --lib`（7 个）/
+`cargo test -p quench3d-editor --test hierarchy`（7 个，无 GPU 自动跳过）/
+`cargo test -p quench3d-math`（`child_of` 与 `mul_transform` 互为逆）。
+**当前测试总数 383（0 失败）**；`tools/gate.sh` 全绿（fmt / clippy 原生 / clippy wasm32 /
+383 测试 / wasm 构建 **11,459,738 字节**（比上一轮 +44 KB）/ `check_web.mjs`）。
+
+**没有做（别误以为有）**：场景树里拖放改父（只有下拉框）；多选成组变换；空物体（没有网格的节点）；
+Prefab / 实例（同一个模型引用两次会展开成两批互不相干的物体）；版本 1 的迁移器（**刻意不做**）。

@@ -189,7 +189,7 @@ fn export_preserves_sections_the_editor_does_not_model() {
     // 手写一份"CLI 生成"的场景：带光照、仿真与渲染设置、探针、贴图材质、关节。
     let source = r#"{
       "format": "quench3d.scene",
-      "version": 1,
+      "version": 2,
       "name": "preserve",
       "gravity": [0, -9.81, 0],
       "ground": { "size": 24, "friction": 0.7 },
@@ -289,7 +289,7 @@ fn export_drops_joints_that_reference_deleted_objects() {
     let mut doc = Doc::new();
     let source = r#"{
       "format": "quench3d.scene",
-      "version": 1,
+      "version": 2,
       "name": "dangling",
       "objects": [
         { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
@@ -344,7 +344,7 @@ fn explicit_material_textures_are_exported() {
     let mut doc = Doc::new();
     let source = r#"{
       "format": "quench3d.scene",
-      "version": 1,
+      "version": 2,
       "name": "tex",
       "objects": [
         { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
@@ -426,7 +426,7 @@ fn update_material_changes_the_engine_material() {
     };
     let mut doc = Doc::new();
     let source = r#"{
-      "format": "quench3d.scene", "version": 1, "name": "mat",
+      "format": "quench3d.scene", "version": 2, "name": "mat",
       "objects": [ { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
                      "position": [0, 2, 0], "body": "dynamic" } ]
     }"#;
@@ -466,7 +466,7 @@ fn set_material_texture_swaps_and_rejects_bad_ids() {
     };
     let mut doc = Doc::new();
     let source = r#"{
-      "format": "quench3d.scene", "version": 1, "name": "texapi",
+      "format": "quench3d.scene", "version": 2, "name": "texapi",
       "objects": [ { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
                      "position": [0, 2, 0], "body": "dynamic" } ]
     }"#;
@@ -552,7 +552,7 @@ fn model_transform_edits_are_exported() {
     let obj_json = obj_path.to_string_lossy().replace('\\', "\\\\");
     let source = format!(
         r#"{{
-          "format": "quench3d.scene", "version": 1, "name": "model-panel",
+          "format": "quench3d.scene", "version": 2, "name": "model-panel",
           "models": [
             {{ "path": "{obj_json}", "position": [0.0, 0.0, 0.0], "scale": 1.0, "collide": false }}
           ],

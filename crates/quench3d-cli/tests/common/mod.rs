@@ -217,7 +217,7 @@ pub fn mock_scene_reply() -> String {
         "好的，这是一个塔：\n```json\n{}\n```\n希望有帮助！",
         r#"{
   "format": "quench3d.scene",
-  "version": 1,
+  "version": 2,
   "name": "模型生成的塔",
   "gravity": [0, -9.81, 0],
   "ground": { "size": 20 },

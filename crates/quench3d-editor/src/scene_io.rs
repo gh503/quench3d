@@ -93,6 +93,8 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     out.lighting = lighting;
 
     let mut skipped = Vec::new();
+    // 场景物体下标 → 导出后 `objects` 里的下标（父子关系要靠它对上）。
+    let mut exported: Vec<(usize, usize)> = Vec::new();
     for (index, object) in engine.scene.objects.iter().enumerate() {
         let name = if object.name.trim().is_empty() {
             format!("物体 {}", index + 1)
@@ -218,6 +220,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         out.objects.push(ObjectDoc {
             name: Some(name),
             shape,
+            parent: None, // 循环之后再补：那时才知道父物体有没有被导出
             position: Some([position.x, position.y, position.z]),
             rotation_deg: Some(rotation_deg),
             scale: Some([
@@ -245,6 +248,31 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             allow_sleep: body.map(|b| b.can_sleep()),
             visible: object.visible,
         });
+        exported.push((index, out.objects.len() - 1));
+    }
+
+    // 父子关系：**循环之后**再补，因为"父物体有没有被导出"要看形状反推的结果 ——
+    // 地面写进了 `ground`、模型子网格根本不写成物体，这时父物体名在文件里不存在，
+    // 硬写出去就是一个悬空引用（整个文件会读不回来）。所以：丢掉这条关系，并上报。
+    let scene_to_exported: std::collections::BTreeMap<usize, usize> =
+        exported.iter().copied().collect();
+    let mut dropped_parents = 0usize;
+    for (scene_index, out_index) in &exported {
+        let Some(parent) = engine.scene.objects[*scene_index].parent else {
+            continue;
+        };
+        match scene_to_exported.get(&parent) {
+            Some(&pi) => {
+                let parent_name = out.objects[pi].name.clone();
+                out.objects[*out_index].parent = parent_name;
+            }
+            None => dropped_parents += 1,
+        }
+    }
+    if dropped_parents > 0 {
+        skipped.push(format!(
+            "{dropped_parents} 条父子关系（父物体没被写成物体：地面或模型展开出的网格）"
+        ));
     }
 
     // 关节与动作按**物体名**引用：编辑器删掉的物体不能留下悬空引用
@@ -578,8 +606,13 @@ pub(crate) fn to_euler_xyz_deg(q: Quat) -> [f32; 3] {
     let (x, z) = if sy.abs() < 0.999_999 {
         ((-m12).atan2(m22), (-m01).atan2(m00))
     } else {
-        // 万向锁：把自由度全给 X，Z 记 0。
-        ((-m.cols[2].x).atan2(m00), 0.0)
+        // 万向锁（y = ±90°）：绕 X 与绕 Z 的自由度塌缩成一个，约定 Z = 0、角度全给 X。
+        //
+        // 这里必须用矩阵**第 2 行**（m21 / m20）来解：`cy = 0` 时 m12、m22、m01、m00 全成了 0，
+        // 拿它们做 atan2 只会得到 ±90° 的符号，反解出来的旋转与原来**不是同一个**。
+        // 曾经的 bug：父物体绕 Y 转 90°，存盘重开后变成绕 X 转 -90°，
+        // 它自己看不出来（都是"转 90°"），但子物体会立刻跑到别的地方去。
+        (m.cols[1].z.atan2(-m.cols[0].z * sy), 0.0)
     };
     [x.to_degrees(), y.to_degrees(), z.to_degrees()]
 }
@@ -672,5 +705,50 @@ pub fn roundtrip_probe() -> String {
             doc.objects.len()
         ),
         Err(e) => format!("err 建世界: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 欧拉角提取必须是**真的**反解：抽出来再塞回去要得到同一个旋转。
+    ///
+    /// 重点是万向锁（y = ±90°）：那里 X/Z 两个自由度塌缩成一个，用错矩阵行就会
+    /// 反解成"另一个 90° 旋转"—— 单看这个物体(都是转 90°)看不出来，但它的子物体
+    /// 会立刻跑到别处（见下面的 `hierarchy` 集成测试）。这类"只在特定角度出现"
+    /// 的坑，只能靠穷举角度来钉。
+    #[test]
+    fn euler_extraction_round_trips_every_axis() {
+        let mut cases: Vec<Quat> = Vec::new();
+        for deg in [
+            -90.0f32, -89.999, -60.0, -45.0, 0.0, 30.0, 45.0, 89.999, 90.0, 135.0,
+        ] {
+            let r = deg.to_radians();
+            cases.push(Quat::from_rotation_x(r));
+            cases.push(Quat::from_rotation_y(r));
+            cases.push(Quat::from_rotation_z(r));
+        }
+        // 复合旋转（含 y 落在万向锁附近的那几组）
+        cases.push(Quat::from_euler_xyz(0.4, std::f32::consts::FRAC_PI_2, 0.9));
+        cases.push(Quat::from_euler_xyz(
+            -1.2,
+            -std::f32::consts::FRAC_PI_2,
+            0.3,
+        ));
+        cases.push(Quat::from_euler_xyz(0.2, 0.5, -0.7));
+        cases.push(Quat::from_axis_angle(
+            Vec3::new(1.0, 1.0, -1.0).normalize(),
+            2.0,
+        ));
+
+        for q in cases {
+            let deg = to_euler_xyz_deg(q);
+            let r = std::f32::consts::PI / 180.0;
+            let back = Quat::from_euler_xyz(deg[0] * r, deg[1] * r, deg[2] * r);
+            // 四元数 q 与 -q 表示同一个旋转。
+            let dot = (q.x * back.x + q.y * back.y + q.z * back.z + q.w * back.w).abs();
+            assert!(dot > 0.9999, "{q:?} → {deg:?} → {back:?}（dot={dot}）");
+        }
     }
 }

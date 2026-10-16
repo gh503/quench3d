@@ -46,7 +46,7 @@ fn two_mesh_scene(tag: &str) -> (String, std::path::PathBuf) {
     let path = obj_path.to_string_lossy().replace('\\', "\\\\");
     let json = format!(
         r#"{{
-          "format": "quench3d.scene", "version": 1, "name": "model-map",
+          "format": "quench3d.scene", "version": 2, "name": "model-map",
           "ground": {{ "size": 10 }},
           "objects": [
             {{ "name": "盒子", "shape": {{ "type": "box", "size": [1, 1, 1] }},

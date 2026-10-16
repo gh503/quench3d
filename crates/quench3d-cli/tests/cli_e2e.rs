@@ -1932,7 +1932,7 @@ fn scheduled_actions_reach_the_solver() {
     let dir = temp_dir("actions");
     let scene = |actions: Option<serde_json::Value>| {
         let mut v = serde_json::json!({
-            "format": "quench3d.scene", "version": 1,
+            "format": "quench3d.scene", "version": 2,
             "ground": { "size": 20 },
             "objects": [{
                 "name": "球", "shape": { "type": "sphere", "radius": 0.5 },
@@ -2034,7 +2034,7 @@ fn scheduled_actions_reach_the_solver() {
             &dir,
             &format!("spin_{kind}.json"),
             serde_json::json!({
-                "format": "quench3d.scene", "version": 1,
+                "format": "quench3d.scene", "version": 2,
                 "gravity": [0, 0, 0],
                 "objects": [{
                     "name": "盒", "shape": { "type": "box", "size": [1, 0.4, 2] },
@@ -2086,7 +2086,7 @@ fn scheduled_actions_reach_the_solver() {
 fn probes_observe_without_touching_physics() {
     let dir = temp_dir("probes");
     let mut scene = serde_json::json!({
-        "format": "quench3d.scene", "version": 1,
+        "format": "quench3d.scene", "version": 2,
         "ground": { "size": 20 },
         "objects": [{
             "name": "球", "shape": { "type": "sphere", "radius": 0.5 },
@@ -2164,7 +2164,7 @@ fn actions_and_probes_work_on_all_three_paths() {
     let dir = temp_dir("paths");
     let scene = |with_action: bool| {
         let mut v = serde_json::json!({
-            "format": "quench3d.scene", "version": 1,
+            "format": "quench3d.scene", "version": 2,
             "gravity": [0, 0, 0],
             "objects": [{
                 "name": "盒", "shape": { "type": "box", "size": [1, 1, 1] },
