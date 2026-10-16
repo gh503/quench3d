@@ -58,7 +58,11 @@ jobs:
       # `cargo doc -D warnings`：文档链到私有项、拼错路径这类腐烂在 CI 就该红。
       # 本地同样的一段在 tools/gate.sh（PASS doc）。
       - name: cargo doc
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --workspace
+        # 用 env: 而不是 `RUSTDOCFLAGS=... cargo doc` 内联赋值：矩阵里有 windows-latest，
+        # 那里的默认 shell 是 PowerShell，不认 bash 的内联赋值语法（第一版就栽在这里）。
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --workspace
 
       - name: 全部测试
         run: cargo test --locked --workspace
