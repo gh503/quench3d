@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`schema` 新增 `global_flags`**：`--json`、`--camera`、`--asset-path`、`--out`、`--width`、
+  `--height`、`--base-url`、`--model`。`commands[].args` 只描述"某个命令的参数"，
+  这些"对所有命令都生效"的旗标以前在 schema 里**完全不存在**——agent 只能靠 `--help` 或猜。
+  守卫测试 `schema_global_flags_are_registered_and_documented` 钉死三方一致：
+  `kind=value` 必须在 `VALUE_FLAGS`、每条都必须在 `--help` 里、并且 `--json/--camera/--asset-path`
+  必须留在表里（避免以后再被删掉）。
+
 ### 修复
 
 - **`--help` 补上 `--camera` 与 `--asset-path`**，并加守卫测试

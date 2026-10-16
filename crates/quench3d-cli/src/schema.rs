@@ -68,6 +68,20 @@ pub fn schema() -> Value {
                           "error": { "kind": "scene", "message": "…", "path": "objects[0].shape", "hint": "…",
                                      "diagnostics": [ { "severity": "error", "path": "objects[0].shape", "message": "…" } ] } }
         },
+        // 全局旗标：`commands[].args` 描述的是"某个命令的参数"，而 `--json`、`--camera`、
+        // `--asset-path` 这类对所有命令都生效的旗标以前在 schema 里**完全不存在**，
+        // agent 只能靠 --help 或者猜。这张表由测试钉住：每个条目都必须真的登记在
+        // VALUE_FLAGS（kind=value）里并且必须出现在 --help 里。
+        "global_flags": [
+            { "name": "--json", "kind": "boolean", "description": "输出单行 JSON 信封（agent 用）" },
+            { "name": "--camera", "kind": "value", "description": "渲染 cameras 段里的命名相机（缺省用 camera 段那台）" },
+            { "name": "--asset-path", "kind": "value", "description": "额外资源搜索路径：多个用 : 分隔（Windows ;）——只影响这一次运行" },
+            { "name": "--out", "kind": "value", "description": "覆盖 render.output / movie 输出文件" },
+            { "name": "--width", "kind": "value", "description": "覆盖渲染宽度" },
+            { "name": "--height", "kind": "value", "description": "覆盖渲染高度" },
+            { "name": "--base-url", "kind": "value", "description": "覆盖大模型服务地址" },
+            { "name": "--model", "kind": "value", "description": "覆盖大模型名" }
+        ],
         "commands": [
             {
                 "name": "schema",

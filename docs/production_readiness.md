@@ -884,6 +884,29 @@ e2e `scene_relative_model_paths_do_not_depend_on_the_working_directory` 全程**
 `validate` 会先拦下来——所以 `resolve_model_path` 的报错路径在 CLI 上是第二道防线，
 留着是为了让引擎 API 的调用方也拿到同样的信息。
 
+### 13.4 `schema.global_flags`（第 48 轮）
+
+`schema` 是 agent 的自描述入口，但它以前只描述"命令"和"命令的参数"。`--json`、`--camera`、
+`--asset-path` 这类**对所有命令都生效**的旗标在 schema 里一个字都没有——agent 想知道
+"能不能指定资源目录"只能读 `--help`（人写的散文）或者试。这轮补上 `global_flags`
+（8 条：`--json/--camera/--asset-path/--out/--width/--height/--base-url/--model`），
+并用一条守卫测试把**三方**绑在一起：
+
+| 说的 | 必须真的 |
+|---|---|
+| `kind=value` 的条目 | 在 `VALUE_FLAGS` 里（否则值会被当成位置参数） |
+| 每个条目 | 出现在 `--help` 里（人和 agent 的说明书不能不一致） |
+| `--json/--camera/--asset-path` | 必须留在表里（防止以后被顺手删掉） |
+| 每个条目 | 有非空 `description`（无可读描述等于没有这条） |
+
+```bash
+cargo test -p quench3d-cli --bin quench3d -- schema_global_flags
+```
+
+**边界**：`global_flags` 不是全部旗标的清单（命令专属旗标仍在 `commands[].args`），
+也不是从 `VALUE_FLAGS` 自动生成的——它是"给 agent 看的最小可用集"，多出来的部分靠
+`--help` 与 `commands[].args` 补。自动生成会把内部/调试旗标也暴露出去，反而更难用。
+
 ### 13.3 帮助文本与守卫测试（第 47 轮）
 
 `--help` 是人和 agent 唯一能看 CLI 旗标的地方（`schema` 只描述命令与场景字段，不描述旗标）。

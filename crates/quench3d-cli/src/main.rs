@@ -1803,6 +1803,52 @@ mod tests {
     }
 
     #[test]
+    fn schema_global_flags_are_registered_and_documented() {
+        // schema 是 agent 的自描述入口，它说的每一句都得是真的：
+        //  · 每个 kind=value 的条目必须在 VALUE_FLAGS 里（否则解析成布尔标志、值变位置参数）
+        //  · 每个条目都必须在 --help 里出现（否则人和 agent 看到的说明书不一致）
+        //  · 反向：VALUE_FLAGS 里的"面向所有人"的旗标必须进 schema，不然 agent 发现不了
+        const MUST_BE_IN_SCHEMA: &[&str] = &["--json", "--camera", "--asset-path"];
+        let schema = quench3d_cli::schema::schema();
+        let flags = schema["global_flags"]
+            .as_array()
+            .expect("schema.global_flags 必须存在（agent 靠它发现全局旗标）");
+        assert!(!flags.is_empty());
+        let help = help_text();
+        for f in flags {
+            let name = f["name"].as_str().unwrap_or_default();
+            let kind = f["kind"].as_str().unwrap_or_default();
+            assert!(
+                name.starts_with("--"),
+                "global_flags 里有非旗标条目：{name}"
+            );
+            assert!(
+                f["description"].as_str().is_some_and(|d| !d.is_empty()),
+                "{name} 缺少 description——schema 是给 agent 看的，没描述等于没有"
+            );
+            if kind == "value" {
+                assert!(
+                    VALUE_FLAGS.contains(&name),
+                    "{name} 标成 kind=value 但不在 VALUE_FLAGS 里"
+                );
+            } else {
+                assert_eq!(kind, "boolean", "{name} 的 kind 只能是 value/boolean");
+                assert!(
+                    !VALUE_FLAGS.contains(&name),
+                    "{name} 标成 boolean 却在 VALUE_FLAGS 里"
+                );
+            }
+            assert!(help.contains(name), "{name} 在 schema 里但没写进 --help");
+        }
+        for name in MUST_BE_IN_SCHEMA {
+            assert!(
+                flags.iter().any(|f| f["name"] == *name),
+                "{name} 必须在 schema.global_flags 里，否则 agent 发现不了它"
+            );
+        }
+    }
+
+    #[test]
     fn every_valued_flag_is_in_help_or_explicitly_deferred() {
         // 旗标加了、帮助里却没写 → 用户与 agent 只能靠猜（`schema` 目前不描述旗标）。
         // 钉死规则：要么在帮助里出现，要么写进下面的白名单。
