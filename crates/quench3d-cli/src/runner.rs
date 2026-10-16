@@ -151,6 +151,9 @@ pub struct SimReport {
     /// 非致命提示。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// 模型缓存统计（场景里没有模型时不出现）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_cache: Option<ModelCacheReport>,
 }
 
 /// 轨迹采样点。
@@ -227,6 +230,66 @@ pub struct OutputReport {
     pub height: u32,
     /// 字节数（`--dry-run` 时为 0）。
     pub bytes: u64,
+}
+
+/// 进程内的模型缓存。
+///
+/// 一次命令就是一个进程，所以"每次运行一份"既够用、又不会跨命令串味（同一个文件在一次
+/// 运行里被读好几遍才是要省的事：建碰撞体一遍、上屏一遍、`info` 再一遍）。
+/// 预算 256 MiB（估算值，见 `assets::approx_bytes`），超出按 LRU 淘汰。
+fn model_cache() -> &'static std::sync::Mutex<quench3d::assets::ModelCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<quench3d::assets::ModelCache>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| std::sync::Mutex::new(quench3d::assets::ModelCache::new(256 * 1024 * 1024)))
+}
+
+/// 走缓存地加载模型（解析失败的错误信息保持与原路径一致）。
+fn load_model_cached(
+    path: &std::path::Path,
+) -> Result<std::sync::Arc<quench3d::assets::LoadedModel>, RunError> {
+    let mut cache = model_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .load(path)
+        .map_err(|e| RunError::scene(format!("加载模型 {} 失败: {e}", path.display())))
+}
+
+/// 报告里的模型缓存统计（没有任何模型参与时**不出现**，老报告逐字节不变）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCacheReport {
+    /// 命中次数。
+    pub hits: u64,
+    /// 真正解析的次数。
+    pub misses: u64,
+    /// 因为预算被淘汰的次数。
+    pub evictions: u64,
+    /// 当前条目数。
+    pub entries: usize,
+    /// 当前占用（估算字节）。
+    pub bytes: usize,
+    /// 预算（估算字节）。
+    pub budget: usize,
+}
+
+/// 取一份缓存统计；没有任何模型参与时返回 `None`（这样"没模型的场景"报告保持不变）。
+fn model_cache_snapshot() -> Option<ModelCacheReport> {
+    let cache = model_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let st = cache.stats();
+    if st.misses == 0 && st.entries == 0 {
+        return None;
+    }
+    Some(ModelCacheReport {
+        hits: st.hits,
+        misses: st.misses,
+        evictions: st.evictions,
+        entries: st.entries,
+        bytes: st.bytes,
+        budget: st.budget,
+    })
 }
 
 /// 渲染报告。
@@ -1373,8 +1436,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if !m.collide {
             continue;
         }
-        let model = quench3d::assets::load_model(&m.path)
-            .map_err(|e| RunError::scene(format!("加载模型 {} 失败: {e}", m.path.display())))?;
+        let model = load_model_cached(&m.path)?;
         let s = m.scale.unwrap_or(1.0);
         let rot = euler_quat(m.rotation_deg);
         let origin = v3(m.position.unwrap_or([0.0, 0.0, 0.0]));
@@ -1653,6 +1715,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         max_speed,
         states,
         warnings,
+        model_cache: model_cache_snapshot(),
     }
 }
 
@@ -2517,7 +2580,7 @@ pub fn setup_visuals(
             euler_quat(m.rotation_deg),
             Vec3::splat(m.scale.unwrap_or(1.0)),
         );
-        match engine.load_model(&m.path, transform) {
+        match load_model_cached(&m.path).map(|model| engine.add_model(&model, transform)) {
             Ok(objects) => instances.push(ModelInstance {
                 model: i,
                 path: m.path.clone(),
@@ -3559,8 +3622,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
 
 /// 读取模型信息（不需要 GPU）。
 pub fn run_info(path: &std::path::Path) -> Result<ModelInfo, RunError> {
-    let model = quench3d::assets::load_model(path)
-        .map_err(|e| RunError::scene(format!("加载模型失败: {e}")))?;
+    let model = load_model_cached(path)?;
     let bounds = model.bounds();
     let format = path
         .extension()

@@ -4303,3 +4303,82 @@ fn animation_weights_blend_two_clips_and_zero_means_no_effect() {
         "要指出权重范围：{v}"
     );
 }
+
+/// 模型缓存（gap #27 的 CPU 侧）：同一次运行里同一个文件只解析一次。
+///
+/// 观测口径是 `simulate` 报告里的 `model_cache`（不需要显卡：`models[]` 的碰撞体
+/// 是 CPU 侧建出来的）。同一路径写两条 `models[]` 就是"两把相同的椅子"这种真实用法。
+#[test]
+fn model_cache_parses_each_file_once_per_run() {
+    let dir = temp_dir("model_cache");
+    let obj = dir.join("chair.obj");
+    std::fs::write(&obj, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+    let path = dir.join("scene.json");
+    let scene = |models: &str| -> String {
+        format!(
+            r#"{{
+                "format": "quench3d.scene", "version": 2, "name": "缓存",
+                "ground": {{ "size": 20 }},
+                "objects": [{{ "name": "球", "shape": {{ "type": "sphere", "radius": 0.5 }},
+                              "position": [0, 2, 0], "body": "dynamic" }}],
+                "models": [{models}],
+                "simulate": {{ "steps": 5, "dt": 0.01666667 }}
+            }}"#
+        )
+    };
+    let entry = |x: f32| {
+        format!(
+            r#"{{ "path": {:?}, "collide": true, "position": [{x}, 0, 0] }}"#,
+            obj.to_string_lossy()
+        )
+    };
+
+    // 同一个文件两条 → 1 次解析 + 1 次命中
+    std::fs::write(&path, scene(&format!("{}, {}", entry(0.0), entry(3.0)))).unwrap();
+    let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    let mc = d["data"]["model_cache"].clone();
+    assert_eq!(mc["misses"], 1, "同一个文件只该解析一次：{d}");
+    assert_eq!(mc["hits"], 1, "第二条引用应当命中缓存：{d}");
+    assert_eq!(mc["entries"], 1, "缓存里就该留一个条目：{d}");
+    assert!(mc["bytes"].as_u64().unwrap_or(0) > 0, "要报出占用：{d}");
+    // 预算存在且比占用大（免得有人把预算调成 0 还宣称有缓存）
+    assert!(
+        mc["budget"].as_u64().unwrap() > mc["bytes"].as_u64().unwrap(),
+        "{d}"
+    );
+
+    // 没有模型的场景：报告里**不出现** model_cache（老报告逐字节不变）
+    std::fs::write(&path, scene("")).unwrap();
+    let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    assert!(
+        d["data"].get("model_cache").is_none(),
+        "没模型就不该有缓存统计：{d}"
+    );
+
+    // 两个**不同**的文件 → 两次解析、零命中（不同的 key 不能互相顶替）
+    let obj2 = dir.join("table.obj");
+    std::fs::write(&obj2, "v 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3\n").unwrap();
+    std::fs::write(
+        &path,
+        scene(&format!(
+            "{}, {{ \"path\": {:?}, \"collide\": true }}",
+            entry(0.0),
+            obj2.to_string_lossy()
+        )),
+    )
+    .unwrap();
+    let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let mc = r.json()["data"]["model_cache"].clone();
+    assert_eq!(mc["misses"], 2, "两个不同文件要各解析一次：{mc}");
+    assert_eq!(mc["hits"], 0, "不同文件之间不该有命中：{mc}");
+    assert_eq!(mc["entries"], 2, "{mc}");
+
+    // 说明：**文件改动后失效**没法在这里观测——每个 `run()` 都是新进程，
+    // 缓存本来就是"每次运行一份"。那条行为由 `assets::cache_tests`
+    // 的进程内单测（`cache_hits_misses_and_invalidates_on_file_change`）钉住。
+}

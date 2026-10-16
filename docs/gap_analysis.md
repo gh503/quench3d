@@ -185,7 +185,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 `tools/check_web.mjs` 跑示例导出的两个探针，断言"按路径加载"的报错含 `load_model_from_bytes`、
 "从字节加载"解析出 `meshes=1 triangles=1`（`cargo check --target wasm32` 只能证明编译得过）。
 原生侧 4 条单测含**手搓的最小 GLB**（一个三角形，格式每个字节都在测试里可见）。
-**仍未做**：模型缓存与显存释放（反复 `load_model` 仍只增不减）。
+**仍未做**：显存释放（CPU 侧缓存已做，但 GPU 缓冲仍只增不减）。
 
 **可观测性**：物理 crate 连 `log` 依赖都没有（病态输入、数值夹紧全部静默）；无帧阶段/GPU 计时
 （`timestamp_writes: None`）；bench 的内存统计只支持 Linux；渲染/CLI **无 golden、无图像哈希**
@@ -634,7 +634,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 24 | CSM 级联阴影 + 点光/聚光阴影 + 聚光灯 | 引擎 |
 | 25 | 后处理链骨架（HDR 中间目标 + tonemap 移出物体着色器）✅ 2026-10-16 + Bloom ✅（`lighting.bloom`）+ FXAA ✅（`lighting.fxaa`）+ SSAO ✅（`lighting.ssao`，深度-only、无去噪）+ TAA/景深 ❌ | 引擎（大） |
 | 26 | IBL / 环境贴图 | 引擎 |
-| 27 | 资源管线：Web 端模型加载（bytes/fetch）✅ 2026-10-15（`load_model_from_bytes` + wasm 探针验证）+ 模型缓存 ❌ + 显存释放 ❌ | 引擎 |
+| 27 | 资源管线：Web 端模型加载（bytes/fetch）✅ 2026-10-15（`load_model_from_bytes` + wasm 探针验证）+ **CPU 侧模型缓存 ✅ 第 41 轮**（`assets::ModelCache`：进程内、规范化路径为 key、按 `(文件长度, mtime)` 失效、256 MiB 估算预算 + LRU 淘汰、`stats()`；`simulate` 报告的 `model_cache{...}` 是可达观测口径，e2e 钉住"同文件两条引用 = 1 次解析 + 1 次命中"、"不同文件 2 次解析"、"没模型的场景报告里不出现这个字段"）+ **显存释放仍 ❌**（GPU 缓冲还是只增不减，反复 `load_model` 必涨显存——这条本轮没动，见 readiness §11） | 引擎 |
 | 28 | agent 幂等与安全：`--out` 冲突保护 ✅、`--dry-run` ✅、**API key 不再走 argv** ✅、MCP annotations/outputSchema ✅（全部 2026-10-15） | 交付 |
 | 29 | 事件总线 ✅ 2026-10-18（`PhysicsWorld::events()/drain_events()/take_events()`，7 种事件：接触开始/结束、传感器进入/离开、睡眠/唤醒、关节断裂；队列有上限 4096 + `events_dropped()` 记账；`simulate` 报告里输出 `events[]`（物体名 + 步号）+ `events_dropped`；**仍缺**生命周期钩子与用户回调——没有脚本层，`on_scene_loaded`/`on_destroy` 只能由宿主轮询，编辑器只有状态栏只读显示） | 引擎 |
 | 30 | ✅ 已完成（第 32/33/37 轮）：测试数/示例数每轮随门禁更新；`--locked` 在 CI 每条 cargo 命令上；**`cargo doc -D warnings`** 进门禁第七段 + CI（修掉 16 处既有 rustdoc 告警，无 allow 掩盖）；**MSRV 已由 CI 验证**——`msrv (1.90)` 腿用 1.90.0 工具链对 `quench3d-math/physics/render` + `quench3d` + `quench3d-cli` 跑 `cargo check --locked --all-targets`（第 37 轮首次跑通，全绿），`Cargo.toml` 的注释同步改成"已验证"。**边界**：编辑器不在这一腿里（它单独声明 1.95，egui 0.37 要求），所以 MSRV 的适用范围是"工作区除编辑器"；`msrv` 腿只跑 ubuntu（Windows/macOS 由 stable 腿覆盖） | 文档/CI |

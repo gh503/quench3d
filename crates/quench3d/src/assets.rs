@@ -870,3 +870,246 @@ f 1/1/1 2/2/1 3/3/1 4/4/1
         assert!((m.desc.base_color.x - 1.0).abs() < 1e-6);
     }
 }
+
+/// 估算一个模型占多少字节（几何 + 贴图）。
+///
+/// 顶点按 32 字节/个估（位置 12 + 法线 12 + 贴图坐标 8），索引 4 字节/个，
+/// 贴图按 RGBA8 实际长度算。**这是估算**：它只用来决定缓存淘汰（[`ModelCache`]），
+/// 不用来报内存占用——要精确数字得问分配器。
+pub fn approx_bytes(model: &LoadedModel) -> usize {
+    let mut bytes = 0usize;
+    for m in &model.meshes {
+        bytes += m.data.vertices.len() * 32 + m.data.indices.len() * 4;
+    }
+    for img in &model.images {
+        bytes += img.rgba.len();
+    }
+    bytes
+}
+
+/// 模型缓存统计快照（给报告用；`entries`/`bytes` 是当前占用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModelCacheStats {
+    /// 命中次数。
+    pub hits: u64,
+    /// 未命中次数（真正解析的次数）。
+    pub misses: u64,
+    /// 因为预算淘汰的次数。
+    pub evictions: u64,
+    /// 当前缓存条目数。
+    pub entries: usize,
+    /// 当前占用（估算字节）。
+    pub bytes: usize,
+    /// 预算（估算字节）。
+    pub budget: usize,
+}
+
+struct CacheEntry {
+    model: std::sync::Arc<LoadedModel>,
+    bytes: usize,
+    tick: u64,
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+/// 进程内的模型缓存：同一个文件只解析一次。
+///
+/// **为什么需要它**：解析是最贵的一步（解压 / 解析 glTF / 解码贴图），而同一次运行里
+/// 同一个文件常被读好几遍——建碰撞体、上屏、`info` 各一遍；场景里同一个 `.glb` 被引用
+/// 两次（两把相同的椅子）时更是如此。
+///
+/// 失效判断用 `(文件长度, 修改时间)`：文件被改了就当没缓存，**不会拿旧几何骗人**。
+/// 预算按 [`approx_bytes`] 的估算值算，超出时按 LRU 淘汰；单个模型自己就超过预算时
+/// 仍然照常返回，只是不留在缓存里（宁可每次重解，也不让预算形同虚设）。
+#[derive(Default)]
+pub struct ModelCache {
+    budget: usize,
+    held: usize,
+    tick: u64,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    entries: std::collections::HashMap<String, CacheEntry>,
+}
+
+impl ModelCache {
+    /// 建一个缓存。`budget_bytes = 0` 表示"不缓存任何东西"（此时它只统计 miss）。
+    pub fn new(budget_bytes: usize) -> Self {
+        Self {
+            budget: budget_bytes,
+            ..Default::default()
+        }
+    }
+
+    /// 当前预算（估算字节）。
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// 改预算，并立即按 LRU 淘汰到预算以内。
+    pub fn set_budget(&mut self, budget_bytes: usize) {
+        self.budget = budget_bytes;
+        self.evict_to_budget();
+    }
+
+    /// 载入模型：命中则返回缓存里的共享引用，否则真正解析并（在预算允许时）留下。
+    pub fn load(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<std::sync::Arc<LoadedModel>, AssetError> {
+        let path = path.as_ref();
+        let key = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        let meta = std::fs::metadata(path).ok();
+        let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        self.tick += 1;
+        if let Some(e) = self.entries.get_mut(&key) {
+            if e.len == len && e.mtime == mtime {
+                e.tick = self.tick;
+                self.hits += 1;
+                return Ok(std::sync::Arc::clone(&e.model));
+            }
+        }
+        self.misses += 1;
+        let model = std::sync::Arc::new(load_model(path)?);
+        let bytes = approx_bytes(&model);
+        if self.budget > 0 && bytes <= self.budget {
+            self.held += bytes;
+            self.entries.insert(
+                key,
+                CacheEntry {
+                    model: std::sync::Arc::clone(&model),
+                    bytes,
+                    tick: self.tick,
+                    len,
+                    mtime,
+                },
+            );
+            self.evict_to_budget();
+        }
+        Ok(model)
+    }
+
+    /// 统计快照。
+    pub fn stats(&self) -> ModelCacheStats {
+        ModelCacheStats {
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
+            entries: self.entries.len(),
+            bytes: self.held,
+            budget: self.budget,
+        }
+    }
+
+    /// 清空缓存（渲染器重建、要腾地方时用）。
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.held = 0;
+    }
+
+    /// 按 LRU 淘汰到预算以内。
+    fn evict_to_budget(&mut self) {
+        while self.held > self.budget && !self.entries.is_empty() {
+            let Some(key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.tick)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(e) = self.entries.remove(&key) {
+                self.held = self.held.saturating_sub(e.bytes);
+                self.evictions += 1;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    /// 写一个最小的 OBJ（三个顶点一个面）到临时目录，返回路径。
+    fn write_obj(tag: &str, extra: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "quench3d_cache_{tag}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join(format!("{tag}.obj"));
+        std::fs::write(
+            &path,
+            format!("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n{extra}"),
+        )
+        .expect("写 obj");
+        path
+    }
+
+    #[test]
+    fn cache_hits_misses_and_invalidates_on_file_change() {
+        let path = write_obj("hit", "");
+        let mut cache = ModelCache::new(64 * 1024 * 1024);
+        let first = cache.load(&path).expect("第一次要能加载");
+        assert_eq!(first.vertex_count(), 3);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 0);
+        assert_eq!(cache.stats().entries, 1);
+
+        let second = cache.load(&path).expect("第二次要能加载");
+        assert_eq!(cache.stats().misses, 1, "第二次不该再解析");
+        assert_eq!(cache.stats().hits, 1);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "命中的应当是同一个共享对象"
+        );
+
+        // 文件变了（长度变了）→ 必须重新解析，不能拿旧几何骗人
+        std::fs::write(
+            &path,
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n",
+        )
+        .expect("改文件");
+        let third = cache.load(&path).expect("改完还要能加载");
+        assert_eq!(cache.stats().misses, 2, "文件变了要重新解析");
+        assert_eq!(third.vertex_count(), 4, "拿到的必须是新几何");
+    }
+
+    #[test]
+    fn cache_respects_budget_evicts_lru_and_can_be_cleared() {
+        let a = write_obj("a", "");
+        let b = write_obj("b", "");
+        // 预算 0：一个都不留（只统计 miss）
+        let mut cache = ModelCache::new(0);
+        cache.load(&a).expect("加载");
+        cache.load(&a).expect("加载");
+        assert_eq!(cache.stats().entries, 0, "预算 0 不该留东西");
+        assert_eq!(cache.stats().misses, 2);
+
+        // 预算只够一个模型：载入第二个应当淘汰第一个，且不会超预算
+        let one = ModelCache::new(usize::MAX);
+        let mut probe = one;
+        probe.set_budget(usize::MAX);
+        let size = {
+            let m = probe.load(&a).expect("加载");
+            let s = probe.stats().bytes;
+            assert_eq!(s, approx_bytes(&m));
+            s
+        };
+        let mut cache = ModelCache::new(size);
+        cache.load(&a).expect("加载 a");
+        cache.load(&b).expect("加载 b");
+        let st = cache.stats();
+        assert!(st.bytes <= size, "不该超预算：{st:?}");
+        assert_eq!(st.entries, 1, "预算只够一个 → 只剩一个：{st:?}");
+        assert_eq!(st.evictions, 1, "应当淘汰了一个：{st:?}");
+
+        cache.clear();
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().bytes, 0);
+    }
+}

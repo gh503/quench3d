@@ -278,7 +278,19 @@ impl Engine {
         transform: Transform,
     ) -> Result<Vec<usize>, crate::assets::AssetError> {
         let model = crate::assets::load_model(path)?;
-        Ok(model.spawn(&mut self.renderer, &self.gpu, &mut self.scene, transform))
+        Ok(self.add_model(&model, transform))
+    }
+
+    /// 把一个**已经加载好**的模型加进场景（渲染器 + 场景图），返回场景物体下标。
+    ///
+    /// 与 [`Engine::load_model`] 分开是为了让调用方先走模型缓存：解析（解压 / 解析 glTF /
+    /// 解码贴图）是最贵的一步，同一个文件在一次运行里可能被读好几遍。
+    pub fn add_model(
+        &mut self,
+        model: &crate::assets::LoadedModel,
+        transform: Transform,
+    ) -> Vec<usize> {
+        model.spawn(&mut self.renderer, &self.gpu, &mut self.scene, transform)
     }
 
     /// 加载模型，同时用**合并后的三角网格**创建一个静态刚体（关卡地形 / 建筑），
