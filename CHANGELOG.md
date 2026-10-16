@@ -10,6 +10,12 @@
 
 ### 新增
 
+- **MSRV 1.90 由 CI 验证（gap #30 收尾）**：新增 `msrv (1.90)` 腿，用 1.90.0 工具链对
+  `quench3d-math` / `-physics` / `-render` / `quench3d` / `quench3d-cli` 跑
+  `cargo check --locked --all-targets`（首次即全绿）。此前 `rust-version = "1.90"` 只是
+  "从依赖元数据推出的下界"，声明与事实之间没有防线——**声明没被验证就等于没有声明**。
+  范围有意排除 `quench3d-editor`（它单独声明 1.95，egui 0.37 要求），写进 CI 注释与 gap 行，
+  不含糊说成"整个工作区都过了"；`msrv` 腿只在 ubuntu 跑，Windows/macOS 由 stable 腿覆盖。
 - **`--camera <名字>`（gap #16 第二步）**：`render` / `simulate` / `movie` 都能用命名相机，
   `default` 保留给 `camera` 段那台；未知名 → 退出码 **2**、`error.kind = unknown_camera`、
   消息里带那个名字并列出可用相机（`report.rs::exit_code` 把 `unknown_camera` 归到

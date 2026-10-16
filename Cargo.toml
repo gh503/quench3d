@@ -8,8 +8,9 @@ edition = "2021"
 # MSRV（最低支持的 Rust 版本）。依据是整张依赖图里各 crate 自己声明的 rust-version：
 # wgpu 30.0.1 / naga / wgpu-core 要求 1.87，image 0.25.10 要求 1.88，
 # wgpu-hal 拉进来的 ordered-float 5.5.0 要求 1.90 —— 取其中最大者。
-# 注意：这是「依赖元数据推出的下界」，没有用 1.90 真的编译验证过（本机与 CI 都用
-# stable：2026-10-16 是 1.99.0）。升级依赖时这个数字要跟着复核。
+# 这个数字现在**由 CI 验证**：`.github/workflows/ci.yml` 的 `msrv (1.90)` 腿用 1.90.0
+# 工具链对工作区成员（编辑器除外，见下）跑 `cargo check --locked --all-targets`。
+# 本机与其余 CI 腿仍用 stable：2026-10-16 是 1.99.0。升级依赖时两条腿都要看。
 # 例外：`quench3d-editor` 单独声明 1.95 —— egui 0.37 要求它，而 egui 0.37 是
 # 唯一同时满足「MSRV 可用」与「依赖 wgpu 30」的版本（0.35 还在 wgpu 29 上）。
 rust-version = "1.90"
