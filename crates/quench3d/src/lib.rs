@@ -169,9 +169,9 @@ pub mod prelude {
         Transform, Vec2, Vec3, Vec4,
     };
     pub use quench3d_physics::{
-        BodyBuilder, BodyHandle, BodyType, CharacterController, CombineRule, ContactPair,
-        ContactPoint, HingeMotor, Joint, JointHandle, MassProperties, PhysicsWorld, RaycastHit,
-        RigidBody, Shape,
+        BallConeLimit, BodyBuilder, BodyHandle, BodyType, CharacterController, CombineRule,
+        ContactPair, ContactPoint, HingeMotor, Joint, JointHandle, MassProperties, PhysicsWorld,
+        RaycastHit, RigidBody, Shape,
     };
     pub use quench3d_render::{
         color, Camera, CameraInput, DebugLines, DirectionalLight, FlyCamera, FogParams, GpuContext,

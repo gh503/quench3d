@@ -648,6 +648,46 @@ pub struct JointDoc {
     /// 铰链马达最大冲量。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motor_max_impulse: Option<f32>,
+    /// 铰链马达的**伺服目标角**（度）。给了它就进伺服模式（转到这个角度停住），
+    /// 否则 `motor_velocity` 是速度模式。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor_target_deg: Option<f32>,
+    /// 伺服比例增益（1/s），缺省 8。越大越"急着到位"，配合 `motor_max_impulse` 限幅。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor_stiffness: Option<f32>,
+    /// 伺服阻尼增益，缺省 1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor_damping: Option<f32>,
+    /// 球窝关节的锥形限位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cone_limit: Option<ConeLimitDoc>,
+    /// 断裂力（N）：本步关节力超过它就断开。**不写 = 永不断**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub break_force: Option<f32>,
+    /// 断裂力矩（N·m）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub break_torque: Option<f32>,
+    /// 关节两端是否**互相碰撞**，缺省 `false` = 不碰（与 Bullet / PhysX 一致）。
+    ///
+    /// 铰链、球窝的两端在几何上就是重合的（锚点相同）：让它们参与碰撞等于让门和门轴
+    /// 互相挤，表现为"转到一半卡住""伺服停在没到位的角度上"。需要"用关节连起来但还要
+    /// 能互相弹开"（比如软绳两头拴着两个球）时，把它设成 `true`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collide_connected: Option<bool>,
+}
+
+/// 球窝关节的锥形限位：两轴夹角不超过 `half_angle_deg`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConeLimitDoc {
+    /// 允许的最大夹角（度，0~180）。
+    pub half_angle_deg: f32,
+    /// A 端局部轴，缺省 `[0,1,0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_a: Option<[f32; 3]>,
+    /// B 端局部轴，缺省 `[0,1,0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_b: Option<[f32; 3]>,
 }
 
 /// 定时动作的类型。
@@ -2395,6 +2435,119 @@ impl SceneDoc {
                             )
                             .with_hint("写的是角度/秒就除以 57.2958"),
                         );
+                    }
+                }
+                if j.motor_target_deg.is_some() && j.motor_velocity.is_some() {
+                    out.push(
+                        Diagnostic::warn(
+                            format!("{p}.motor_velocity"),
+                            "同时给了 motor_target_deg 与 motor_velocity：按伺服模式走，速度会被忽略",
+                        )
+                        .with_hint("伺服模式请只给 motor_target_deg（可选 motor_stiffness / motor_damping）"),
+                    );
+                }
+            } else {
+                for (key, given) in [
+                    ("motor_target_deg", j.motor_target_deg.is_some()),
+                    ("motor_stiffness", j.motor_stiffness.is_some()),
+                    ("motor_damping", j.motor_damping.is_some()),
+                ] {
+                    if given {
+                        out.push(Diagnostic::warn(
+                            format!("{p}.{key}"),
+                            "只有铰链关节支持马达",
+                        ));
+                    }
+                }
+            }
+            if let Some(deg) = j.motor_target_deg {
+                if !deg.is_finite() {
+                    out.push(Diagnostic::error(
+                        format!("{p}.motor_target_deg"),
+                        "伺服目标角必须是有限数",
+                    ));
+                } else if deg.abs() > 3600.0 {
+                    out.push(Diagnostic::warn(
+                        format!("{p}.motor_target_deg"),
+                        format!("伺服目标角 {deg}° 不太像个角度（单位是度）"),
+                    ));
+                }
+            }
+            for (key, v) in [
+                ("motor_stiffness", j.motor_stiffness),
+                ("motor_damping", j.motor_damping),
+            ] {
+                if let Some(v) = v {
+                    if !v.is_finite() || v < 0.0 {
+                        out.push(Diagnostic::error(
+                            format!("{p}.{key}"),
+                            "伺服增益必须是非负的有限数",
+                        ));
+                    }
+                }
+            }
+            // 锥形限位：只有球窝有
+            match (&j.cone_limit, j.kind) {
+                (Some(cone), JointKind::Ball) => {
+                    if !cone.half_angle_deg.is_finite()
+                        || cone.half_angle_deg < 0.0
+                        || cone.half_angle_deg > 180.0
+                    {
+                        out.push(Diagnostic::error(
+                            format!("{p}.cone_limit.half_angle_deg"),
+                            "锥形限位的半角必须在 0~180 度之间",
+                        ));
+                    } else if cone.half_angle_deg < 0.5 {
+                        out.push(
+                            Diagnostic::warn(
+                                format!("{p}.cone_limit.half_angle_deg"),
+                                "半角几乎是 0：这等于把球窝锁死，通常想要的是 fixed 关节",
+                            )
+                            .with_hint("想要完全固定就用 \"type\": \"fixed\""),
+                        );
+                    }
+                    for (key, axis) in [("axis_a", &cone.axis_a), ("axis_b", &cone.axis_b)] {
+                        if let Some(a) = axis {
+                            let zero = a.iter().all(|v| v.abs() < 1e-6);
+                            if !finite3(a) {
+                                out.push(Diagnostic::error(
+                                    format!("{p}.cone_limit.{key}"),
+                                    "锥形限位的轴必须是有限数",
+                                ));
+                            } else if zero {
+                                out.push(Diagnostic::error(
+                                    format!("{p}.cone_limit.{key}"),
+                                    "锥形限位的轴不能是零向量",
+                                ));
+                            }
+                        }
+                    }
+                }
+                (Some(_), _) => out.push(Diagnostic::error(
+                    format!("{p}.cone_limit"),
+                    "锥形限位只有球窝关节（type = ball）支持",
+                )),
+                (None, _) => {}
+            }
+            // 关节两端默认不互相碰撞；显式打开是"我知道会互相挤"的意思，
+            // 静态-静态这种组合本来就警告过，这里不再重复。
+            // 断裂阈值：> 0 才有意义（0/负值等于"立刻断"或"永远不断"，两种都是笔误）
+            for (key, v) in [
+                ("break_force", j.break_force),
+                ("break_torque", j.break_torque),
+            ] {
+                if let Some(v) = v {
+                    let unit = if key == "break_force" { "N" } else { "N·m" };
+                    if !v.is_finite() || v <= 0.0 {
+                        out.push(Diagnostic::error(
+                            format!("{p}.{key}"),
+                            format!("断裂阈值必须是正数（{unit}）；不想让它断就别写这个字段"),
+                        ));
+                    } else if v < 0.5 {
+                        out.push(Diagnostic::warn(
+                            format!("{p}.{key}"),
+                            format!("断裂阈值只有 {v} {unit}：几乎一上力就断"),
+                        ));
                     }
                 }
             }
@@ -4172,6 +4325,109 @@ mod tests {
         )
         .unwrap();
         assert!(!SceneDoc::has_errors(&ok.validate()));
+    }
+
+    #[test]
+    fn joint_completion_fields_parse_validate_and_round_trip() {
+        // 合法：球窝锥形限位 + 断裂阈值 + 铰链伺服（度 → 由 runner 换算成弧度）
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "锚", "body": "static" },
+                              { "name": "摆", "body": "dynamic" },
+                              { "name": "门", "body": "dynamic" } ],
+                 "joints": [
+                   { "type": "ball", "a": "锚", "b": "摆",
+                     "cone_limit": { "half_angle_deg": 25.0, "axis_a": [0, 1, 0], "axis_b": [0, 1, 0] },
+                     "break_force": 500.0, "break_torque": 12.0, "collide_connected": true },
+                   { "type": "hinge", "a": "锚", "b": "门", "axis": [0, 1, 0],
+                     "motor_target_deg": 30.0, "motor_stiffness": 10.0, "motor_damping": 2.0 } ] }"#,
+        )
+        .unwrap();
+        assert!(!SceneDoc::has_errors(&doc.validate()));
+        let cone = doc.joints[0].cone_limit.as_ref().unwrap();
+        assert_eq!(cone.half_angle_deg, 25.0);
+        assert_eq!(cone.axis_a, Some([0.0, 1.0, 0.0]));
+        assert_eq!(doc.joints[0].break_force, Some(500.0));
+        assert_eq!(doc.joints[0].break_torque, Some(12.0));
+        assert_eq!(doc.joints[0].collide_connected, Some(true));
+        assert_eq!(doc.joints[1].motor_target_deg, Some(30.0));
+        assert_eq!(doc.joints[1].motor_stiffness, Some(10.0));
+        assert_eq!(doc.joints[1].motor_damping, Some(2.0));
+
+        // JSON 往返：读回来按类型核对
+        let back = SceneDoc::from_json(&serde_json::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(
+            back.joints[0].cone_limit.as_ref().unwrap().half_angle_deg,
+            25.0
+        );
+        assert_eq!(back.joints[0].break_force, Some(500.0));
+        assert_eq!(back.joints[0].collide_connected, Some(true));
+        assert_eq!(back.joints[1].motor_target_deg, Some(30.0));
+
+        // 不写 = 全 None（老场景行为不变：不断、不限、缺省不互相碰撞）
+        let plain = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [ { "type": "ball", "a": "a", "b": "b" } ] }"#,
+        )
+        .unwrap();
+        let j = &plain.joints[0];
+        assert!(j.cone_limit.is_none() && j.break_force.is_none() && j.break_torque.is_none());
+        assert!(j.collide_connected.is_none() && j.motor_target_deg.is_none());
+
+        // 非法组合：锥形限位给铰链、半角越界、阈值非正、增益为负
+        let bad = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [
+                   { "type": "hinge", "a": "a", "b": "b", "cone_limit": { "half_angle_deg": 20.0 } },
+                   { "type": "ball", "a": "a", "b": "b",
+                     "cone_limit": { "half_angle_deg": 200.0 }, "break_force": 0.0,
+                     "break_torque": -3.0, "motor_stiffness": -1.0 } ] }"#,
+        )
+        .unwrap();
+        let diags = bad.validate();
+        for path in [
+            "joints[0].cone_limit",
+            "joints[1].cone_limit.half_angle_deg",
+            "joints[1].break_force",
+            "joints[1].break_torque",
+            "joints[1].motor_stiffness",
+        ] {
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.path == path && d.severity == Severity::Error),
+                "缺少对 {path} 的报错：{diags:?}"
+            );
+        }
+
+        // 提醒类：半角几乎为 0 / 阈值小得离谱 / 同时给伺服目标与速度 / 给错关节类型
+        let warn = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "a", "body": "static" }, { "name": "b", "body": "dynamic" } ],
+                 "joints": [
+                   { "type": "ball", "a": "a", "b": "b",
+                     "cone_limit": { "half_angle_deg": 0.2 }, "break_force": 0.1 },
+                   { "type": "hinge", "a": "a", "b": "b",
+                     "motor_target_deg": 30.0, "motor_velocity": 1.0 },
+                   { "type": "slider", "a": "a", "b": "b", "motor_damping": 2.0 } ] }"#,
+        )
+        .unwrap();
+        let diags = warn.validate();
+        for path in [
+            "joints[0].cone_limit.half_angle_deg",
+            "joints[0].break_force",
+            "joints[1].motor_velocity",
+            "joints[2].motor_damping",
+        ] {
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.path == path && d.severity == Severity::Warning),
+                "缺少对 {path} 的提醒：{diags:?}"
+            );
+        }
+        assert!(
+            !SceneDoc::has_errors(&diags),
+            "提醒不该升级成错误：{diags:?}"
+        );
     }
 
     #[test]

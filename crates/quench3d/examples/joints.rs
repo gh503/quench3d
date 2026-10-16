@@ -45,10 +45,7 @@ impl JointsDemo {
             local_axis_a: Vec3::Y,
             local_axis_b: Vec3::Y,
             limits: Some((-2.4, 2.4)),
-            motor: Some(HingeMotor {
-                target_velocity: self.motor_target,
-                max_impulse: 8.0,
-            }),
+            motor: Some(HingeMotor::velocity(self.motor_target, 8.0)),
         }));
     }
 }
@@ -309,6 +306,7 @@ impl Game for JointsDemo {
                     Vec3::new(0.0, -0.35, 0.0)
                 },
                 local_anchor_b: Vec3::new(0.0, 0.35, 0.0),
+                cone_limit: None,
             });
             if i == 2 {
                 // 给摆一个初始推力，避免完全静止看不出效果

@@ -7,7 +7,7 @@ use quench3d_math::*;
 
 use crate::body::{BodyBuilder, CombineRule, InteractionGroups};
 use crate::contact::ContactPair;
-use crate::joints::Joint;
+use crate::joints::{BallConeLimit, HingeMotor, Joint};
 use crate::query::QueryFilter;
 use crate::shape::Shape;
 use crate::world::PhysicsWorld;
@@ -365,10 +365,7 @@ fn hinge_motor_drives_rotation() {
         local_axis_a: Vec3::Y,
         local_axis_b: Vec3::Y,
         limits: None,
-        motor: Some(crate::joints::HingeMotor {
-            target_velocity: 2.0,
-            max_impulse: 100.0,
-        }),
+        motor: Some(crate::joints::HingeMotor::velocity(2.0, 100.0)),
     });
     for _ in 0..30 {
         w.step(DT);
@@ -855,6 +852,7 @@ fn ball_joint_keeps_anchor_points_together() {
         b: bob,
         local_anchor_a: Vec3::ZERO,
         local_anchor_b: vec3(0.0, length, 0.0),
+        cone_limit: None,
     });
     let mut max_gap = 0.0f32;
     for _ in 0..180 {
@@ -1961,4 +1959,404 @@ fn combine_rule_math_and_names() {
         .build();
     assert_eq!(c.friction, 0.4);
     assert_eq!(c.static_friction, 0.9);
+}
+
+// ---------------------------------------------------------------------------
+// 12. 关节补全：锥形限位 / 伺服马达 / 断裂
+// ---------------------------------------------------------------------------
+
+/// 摆杆局部 Y 轴与竖直方向的夹角（度）。
+fn swing_angle(world: &PhysicsWorld, handle: crate::BodyHandle) -> f32 {
+    let rot = world.body(handle).unwrap().rotation();
+    let axis = rot.mul_vec3(Vec3::Y);
+    axis.dot(Vec3::Y).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+#[test]
+fn ball_cone_limit_pulls_the_swing_back_into_the_cone() {
+    // 零重力 + 初始 60° 摆角：球窝本身不产生任何恢复力矩，所以
+    // * 没有锥形限位 → 一直停在 60°；
+    // * 有 25° 限位 → 被推回锥面内（25° 上下，允许求解器余量）。
+    fn setup(limit_deg: Option<f32>) -> (PhysicsWorld, crate::BodyHandle) {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let anchor = w.add_body(
+            BodyBuilder::r#static(Shape::Sphere { radius: 0.05 })
+                .position(vec3(0.0, 2.0, 0.0))
+                .build(),
+        );
+        let arm = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: vec3(0.05, 0.5, 0.05),
+            })
+            // 位置算好，让**初始状态就满足**锚点重合：旋转 60° 之后，本地锚点
+            // (0, 0.5, 0) 的世界位置是 0.5·(-sin60, cos60, 0)，把它从锚点位置减掉。
+            // 否则第一步的位置修正会顺手改掉初始摆角，测出来的"自由摆角"就不是 60°。
+            .position(vec3(0.4330127, 1.75, 0.0))
+            .rotation(Quat::from_axis_angle(Vec3::Z, 60f32.to_radians()))
+            .build(),
+        );
+        w.add_joint(Joint::Ball {
+            a: anchor,
+            b: arm,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: vec3(0.0, 0.5, 0.0),
+            cone_limit: limit_deg.map(|d| BallConeLimit {
+                half_angle: d.to_radians(),
+                local_axis_a: Vec3::Y,
+                local_axis_b: Vec3::Y,
+            }),
+        });
+        (w, arm)
+    }
+
+    let (mut free, free_arm) = setup(None);
+    let (mut limited, limited_arm) = setup(Some(25.0));
+    let mut free_max: f32 = 0.0;
+    let mut limited_max: f32 = 0.0;
+    let mut limited_at_half_second = 0.0;
+    for k in 0..240 {
+        free.step(DT);
+        limited.step(DT);
+        free_max = free_max.max(swing_angle(&free, free_arm));
+        limited_max = limited_max.max(swing_angle(&limited, limited_arm));
+        if k == 29 {
+            limited_at_half_second = swing_angle(&limited, limited_arm);
+        }
+    }
+    let free_end = swing_angle(&free, free_arm);
+    let limited_end = swing_angle(&limited, limited_arm);
+    assert!(
+        (free_max - 60.0).abs() < 1.0,
+        "没有限位时该停在 60°：max {free_max:.2}，末尾 {free_end:.2}"
+    );
+    // 限位是**速度级**约束（和铰链限位同一行），所以不是瞬间夹住：
+    // 第一两帧还会冲到 50° 上下，但半秒内必须被压回锥面附近。
+    assert!(
+        limited_max < 60.0,
+        "锥形限位至少不该让摆角超过初始的 60°：{limited_max:.2}°"
+    );
+    assert!(
+        limited_at_half_second < 32.0,
+        "半秒内该压回锥面附近（25° + 余量），实际 {limited_at_half_second:.2}°"
+    );
+    assert!(
+        limited_end < 32.0,
+        "锥形限位该把摆角压回锥面附近（25° + 余量）：{limited_end:.2}°"
+    );
+    assert_all_finite(&limited, "球窝锥形限位");
+}
+
+#[test]
+fn ball_cone_limit_allows_free_spin_about_the_axis() {
+    // 锥形限位约束的是"方向"，绕轴自转必须仍然自由：给一个绕 Y 的初始角速度，
+    // 轴方向不变（夹角恒 0），物体应当照转不误。
+    let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+    let anchor = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.05 }).build());
+    let spinner = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.2),
+        })
+        .build(),
+    );
+    w.add_joint(Joint::Ball {
+        a: anchor,
+        b: spinner,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: Vec3::ZERO,
+        cone_limit: Some(BallConeLimit {
+            half_angle: 5f32.to_radians(),
+            local_axis_a: Vec3::Y,
+            local_axis_b: Vec3::Y,
+        }),
+    });
+    w.body_mut(spinner)
+        .unwrap()
+        .set_angular_velocity(Vec3::Y * 4.0);
+    for _ in 0..120 {
+        w.step(DT);
+    }
+    let body = w.body(spinner).unwrap();
+    assert!(
+        body.angular_velocity().dot(Vec3::Y).abs() > 2.0,
+        "绕轴自转被限位拦住了：{:?}",
+        body.angular_velocity()
+    );
+    assert!(
+        swing_angle(&w, spinner) < 5.0,
+        "轴方向不该变：{:.2}°",
+        swing_angle(&w, spinner)
+    );
+}
+
+#[test]
+fn hinge_servo_motor_drives_to_the_target_angle_and_holds() {
+    fn build(target_deg: f32) -> (PhysicsWorld, crate::BodyHandle) {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let anchor = w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .build(),
+        );
+        let door = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: vec3(0.5, 0.5, 0.05),
+            })
+            .position(vec3(0.5, 0.0, 0.0))
+            .density(500.0)
+            .build(),
+        );
+        w.add_joint(Joint::Hinge {
+            a: anchor,
+            b: door,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: vec3(-0.5, 0.0, 0.0),
+            local_axis_a: Vec3::Y,
+            local_axis_b: Vec3::Y,
+            limits: None,
+            motor: Some(HingeMotor::servo(target_deg.to_radians(), 500.0)),
+        });
+        (w, door)
+    }
+
+    let angle = |w: &PhysicsWorld, h| {
+        let rot = w.body(h).unwrap().rotation();
+        rot.mul_vec3(Vec3::X)
+            .dot(Vec3::X)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    };
+
+    // 90°：转到并停住；再跑 5 秒不能抖出去（伺服是 PD，不是"到位就锁死"）
+    let (mut w, door) = build(90.0);
+    for _ in 0..300 {
+        w.step(DT);
+    }
+    let reached = angle(&w, door);
+    assert!(
+        (reached - 90.0).abs() < 3.0,
+        "伺服该转到 90°，实际 {reached:.2}°"
+    );
+    for _ in 0..300 {
+        w.step(DT);
+    }
+    let held = angle(&w, door);
+    assert!((held - 90.0).abs() < 3.0, "停住之后不该漂：{held:.2}°");
+
+    // -45°：反向也能到（符号不能写反）
+    let (mut w2, door2) = build(-45.0);
+    for _ in 0..300 {
+        w2.step(DT);
+    }
+    let back = angle(&w2, door2);
+    assert!(
+        (back - 45.0).abs() < 3.0,
+        "反向目标 -45° 应当转到 45°（角度取绝对值），实际 {back:.2}°"
+    );
+    assert_all_finite(&w, "伺服马达");
+}
+
+#[test]
+fn joint_breaks_when_the_constraint_force_exceeds_the_threshold() {
+    // 吊一个 64 kg 的箱子（重力 ≈ 628 N）：
+    // * 断裂力 500 N → 断，箱子掉下去；
+    // * 不设阈值 / 给 1e9 N → 不断，吊在原处。
+    fn drop_y(break_force: Option<f32>) -> (f32, usize, bool) {
+        let mut w = PhysicsWorld::new();
+        let anchor = w.add_body(
+            BodyBuilder::r#static(Shape::Sphere { radius: 0.05 })
+                .position(vec3(0.0, 3.0, 0.0))
+                .build(),
+        );
+        let load = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.2),
+            })
+            .position(vec3(0.0, 1.0, 0.0))
+            .build(),
+        );
+        let handle = w.add_joint(Joint::Distance {
+            a: anchor,
+            b: load,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: Vec3::ZERO,
+            rest_length: 2.0,
+            stiffness: 0.0,
+            damping: 0.0,
+        });
+        if let Some(f) = break_force {
+            assert!(w.set_joint_break(handle, Some(f), None), "设阈值必须成功");
+        }
+        for _ in 0..180 {
+            w.step(DT);
+        }
+        (
+            w.body(load).unwrap().position().y,
+            w.broken_joints().len(),
+            w.joint(handle).is_some(),
+        )
+    }
+
+    let (y_broken, broken, still_there) = drop_y(Some(500.0));
+    assert_eq!(broken, 1, "500 N 阈值下 628 N 的载荷该把关节拉断");
+    assert!(!still_there, "断掉的关节不该还能查到");
+    assert!(y_broken < 0.5, "断了就该掉下去，实际 y = {y_broken:.2}");
+
+    let (y_held, none_broken, held_there) = drop_y(None);
+    assert_eq!(none_broken, 0, "没设阈值就不该断");
+    assert!(held_there);
+    assert!((y_held - 1.0).abs() < 0.05, "该吊在原处：y = {y_held:.3}");
+
+    let (_, strong_broken, _) = drop_y(Some(1.0e9));
+    assert_eq!(strong_broken, 0, "阈值给得极大就不该断");
+
+    // 0 / 负 / NaN 阈值一律"等于没设"，而不是"立刻断"（静默的 NaN 阈值最难查）
+    let mut w = PhysicsWorld::new();
+    let a = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.05 }).build());
+    let b = w.add_body(BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 }).build());
+    let h = w.add_joint(Joint::Ball {
+        a,
+        b,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: Vec3::ZERO,
+        cone_limit: None,
+    });
+    assert!(w.set_joint_break(h, Some(0.0), Some(f32::NAN)));
+    assert_eq!(
+        w.joint_break(h),
+        Some((None, None)),
+        "非正/非有限阈值等于不设"
+    );
+    for _ in 0..120 {
+        w.step(DT);
+    }
+    assert_eq!(w.broken_joints().len(), 0);
+    assert!(w.joint(h).is_some());
+    assert_all_finite(&w, "关节断裂");
+}
+
+#[test]
+fn jointed_bodies_stop_colliding_but_can_be_told_to_collide() {
+    // 两个球叠在一起、用固定关节绑住：这是"门和门轴""球窝和球头"的典型几何。
+    //
+    // * 缺省（`collide_connected = false`，与 Bullet/PhysX 一致）：不产生接触，
+    //   关节说什么就是什么；
+    // * 打开之后：恢复"物理上确实叠在一起"的旧行为——会有接触、互相挤。
+    fn run(collide: bool) -> (usize, bool, f32) {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let a = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.5 }).build());
+        let b = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+                .position(vec3(0.2, 0.0, 0.0))
+                .build(),
+        );
+        // 锚点 A 偏 0.2：静止球（半径 0.5）与动态球（半径 0.5）的球心相距 0.2，
+        // 也就是说两个球**深叠**在一起——正是"门和门轴""球头和球窝"的几何。
+        let handle = w.add_joint(Joint::Fixed {
+            a,
+            b,
+            local_anchor_a: vec3(0.2, 0.0, 0.0),
+            local_anchor_b: Vec3::ZERO,
+            local_frame_a: Quat::IDENTITY,
+            local_frame_b: Quat::IDENTITY,
+        });
+        assert!(w.set_joint_collide_connected(handle, collide));
+        assert_eq!(w.joint_collide_connected(handle), Some(collide));
+        let mut max_contacts = 0usize;
+        for _ in 0..120 {
+            w.step(DT);
+            max_contacts = max_contacts.max(w.contacts().len());
+        }
+        let resting = w.body(b).unwrap().is_sleeping();
+        (max_contacts, resting, w.body(b).unwrap().position().x)
+    }
+
+    let (off_contacts, _, off_x) = run(false);
+    let (on_contacts, _, on_x) = run(true);
+    assert_eq!(off_contacts, 0, "缺省不该有接触（门和门轴不该互相挤）");
+    assert!(on_contacts > 0, "打开 collide_connected 后该有接触");
+    assert!(
+        (off_x - 0.2).abs() < 1e-3,
+        "关掉碰撞时固定关节该把球按在 0.2 m 处：{off_x}"
+    );
+    assert!(
+        (on_x - 0.2).abs() > (off_x - 0.2).abs(),
+        "打开碰撞后接触会把球挤歪：{on_x} vs {off_x}"
+    );
+
+    // 关节删掉之后阈值/开关都不该残留（槽位是复用的）
+    let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+    let a = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.5 }).build());
+    let b = w.add_body(BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 }).build());
+    let h = w.add_joint(Joint::Ball {
+        a,
+        b,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: Vec3::ZERO,
+        cone_limit: None,
+    });
+    assert!(w.set_joint_collide_connected(h, true));
+    assert!(w.remove_joint(h));
+    let reuse_a = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.1 }).build());
+    let reuse_b = w.add_body(BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 }).build());
+    let h2 = w.add_joint(Joint::Ball {
+        a: reuse_a,
+        b: reuse_b,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: Vec3::ZERO,
+        cone_limit: None,
+    });
+    assert_eq!(
+        w.joint_collide_connected(h2),
+        Some(false),
+        "复用的槽位不该继承上一个关节的碰撞开关"
+    );
+}
+
+#[test]
+fn servo_keeps_its_body_awake() {
+    // 伺服到位之后速度正好是 0：只看速度的睡眠判定会把它判成静止并冻结，
+    // 于是停在"还没到位"的角度上再也回不来。被马达驱动的刚体必须保持清醒。
+    let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+    let anchor = w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: Vec3::splat(0.05),
+        })
+        .build(),
+    );
+    let door = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: vec3(0.35, 0.5, 0.05),
+        })
+        .position(vec3(0.4, 0.0, 0.0))
+        .density(500.0)
+        .build(),
+    );
+    w.add_joint(Joint::Hinge {
+        a: anchor,
+        b: door,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: vec3(-0.4, 0.0, 0.0),
+        local_axis_a: Vec3::Y,
+        local_axis_b: Vec3::Y,
+        limits: None,
+        motor: Some(HingeMotor::servo(30f32.to_radians(), 20.0)),
+    });
+    for _ in 0..600 {
+        w.step(DT);
+    }
+    let body = w.body(door).unwrap();
+    assert!(!body.is_sleeping(), "被马达驱动的刚体不该睡着");
+    let angled = body
+        .rotation()
+        .mul_vec3(Vec3::X)
+        .dot(Vec3::X)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
+    assert!(
+        (angled - 30.0).abs() < 2.0,
+        "10 秒后仍该停在 30°：{angled:.2}°"
+    );
 }

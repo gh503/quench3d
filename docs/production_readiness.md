@@ -457,6 +457,37 @@
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
 
+### 8.9 「关节补全：锥形限位 / 位置伺服 / 断裂 / 两端不碰撞」怎么落的（第 23 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-physics --lib -- ball_cone_limit hinge_servo
+> servo_keeps joint_breaks jointed_bodies_stop`、
+> `cargo test -p quench3d-cli --lib -- joint_completion_fields`、
+> `cargo test -p quench3d-cli --test cli_e2e -- joint_servo_cone_limit_and_break_force`、
+> `cargo test -p quench3d-editor --test scene_roundtrip -- export_preserves`。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 引擎（锥形限位） | `BallConeLimit { half_angle, local_axis_a, local_axis_b }` + `Joint::Ball { cone_limit }` | **不新写约束行**：把"两轴夹角"当成铰链的限位坐标（`coord`）、把"两轴叉积"当成修正轴（`axis`），直接复用铰链限位那套已经测过的收敛行为 |
+| 引擎（锥形限位） | 叉积退化时跳过 | 两轴平行时没有确定的旋转平面（限位本来也没在限），硬算会得到 0/0；这与铰链在轴对齐时的处理一致 |
+| 引擎（伺服） | `HingeMotor { target_angle, stiffness, damping }` + `HingeMotor::servo(..).gains(kp, kd)` | 位置环 `ω = kp·wrap_pi(目标-当前角)`，**不做显式 `-kd·ω` 阻尼** |
+| 引擎（伺服） | `wrap_pi` 把误差绕回 `(-π, π]` | 少了它：从 179° 越过 180° 时坐标跳到 -179°，误差变成 +358° → 伺服"接着往前推"，门疯狂旋转 |
+| 引擎（伺服） | 目标速度夹在 `MAX_SERVO_SPEED`（150 rad/s） | 误差大时比例项会要求几百度/秒，配上大 `max_impulse` 就是一次猛冲 |
+| 引擎（伺服） | `damping` 语义改成"每次迭代吸收多少"（`1/(1+kd)`） | 原本的 `-kd·ω` 在序列冲量里会让 ω 在 0 和目标之间来回跳：迭代次数是偶数时原地不动、是奇数时猛冲（实测同样场景在 60 N·m·s 限幅下冲到 81° 停住）。改成松弛系数后收敛不过冲，且**不影响最终停在哪个角度** |
+| 引擎（断裂） | `JointSlot.break_force / break_torque` + `set_joint_break` + `broken_joints()` | 力/力矩按"本步累积冲量 ÷ dt"估量级（点/标量约束算力，角度约束/限位/马达算力矩）。阈值 0/负/NaN = 不设 |
+| 引擎（断裂） | 判定位置在 `self.joints = joints` **之后** | 求解期间槽位数组被 `mem::take` 借走了，那会儿 `self.joints` 是空的——第一版就是这样**静默失效**的（力算出来 627.84 N > 500 N，关节却不断） |
+| 引擎（碰撞） | 关节两端缺省**不互相碰撞**（`collide_connected = false`） | 与 Bullet / PhysX 一致。铰链/球窝两端几何上就重合，让它们碰撞等于门和门轴互挤：实测"伺服停在 116°，目标是 90°"。窄相里按关节表过滤（宽相不管关节） |
+| 引擎（睡眠，bug 修复） | 被马达驱动的刚体这一步不许睡（复用缓冲 `scratch_actuated`） | 伺服到位后 ω 正好是 0，只看速度的睡眠判定会冻结它，于是停在没到位的角度再也回不来。判据是"关节有马达"（含 `target_velocity = 0`） |
+| 格式 | `cone_limit` / `motor_target_deg` / `motor_stiffness` / `motor_damping` / `break_force` / `break_torque` / `collide_connected` | 单位陷阱：`half_angle_deg` / `motor_target_deg` 是**度**（引擎里是弧度），校验里对"限位 > 6.5 rad""目标角 > 3600°"另有警告 |
+| 校验 | 锥形限位给非球窝、半角越界、阈值非正、增益为负 = error；半角≈0、阈值 < 0.5、同时给伺服目标与速度、给错关节类型 = warning | "能跑但多半写错"的一律 warning，不升级成 error |
+| CLI / 报告 | `simulate` 报告新增 `joints_broken` | 断裂是**运行时事实**，只写进日志就没法断言；报告里给出来，端到端测试就能钉住 |
+| 编辑器 | 不做关节面板，但新字段必须原样留着 | 关节走 `base_doc` 直传；`scene_roundtrip` 里加了 needle 与类型化核对，防止"没界面就静默丢字段" |
+
+**没做（诚实边界）**：没有 6DOF / 万向节 / 滑柱关节；没有角度弹簧-阻尼（只有刚性限位与伺服）；
+断裂判定是**量级估计**（冲量 ÷ dt），不是精确约束力，也不是"累计损伤"（断了就断，没有疲劳）；
+断裂不会产生事件回调（只进 `broken_joints()` 与报告计数）；关节没有可视化与 gizmo（编辑器/视口里
+看不到关节，只能看效果）；`collide_connected` 只作用于"这一对"刚体，不递归到子物体；
+伺服只有 1 个自由度（铰链），球窝没有伺服；锥形限位是速度级约束（半秒内压回，不是硬夹住）。
+
 ### 8.8 「物理材质：静摩擦 + 合成规则」怎么落的（第 22 轮，已跑门禁）
 
 > **状态：已实施**。验证：`cargo test -p quench3d-physics --lib -- static_friction friction_combine`、

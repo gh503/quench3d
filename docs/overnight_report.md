@@ -478,6 +478,45 @@ CCD 只扫**中心线**（球擦着墙角过去、或细长物旋转扫过薄壁
 
 ---
 
+## 22. 第 23 轮：关节补全 —— 锥形限位 / 位置伺服 / 断裂 / 两端不碰撞（gap #11）
+
+**这一轮补的是"想做布娃娃、机械臂、可破坏门"缺的那几块零件**，四项一次做完（都是同一个
+`joints[]` 段，分开做反而要改四遍格式与文档）：
+
+1. **球窝锥形限位**（`cone_limit`）：两端各一根局部轴，夹角不超过 `half_angle_deg`。
+   实现上没有新写约束行——把"两轴夹角"塞进铰链限位的坐标位、把"两轴叉积"塞进修正轴，
+   直接复用那一行已经测过的收敛行为。
+2. **铰链位置伺服**（`motor_target_deg` + `motor_stiffness` / `motor_damping`）：
+   `ω = kp·wrap_pi(目标 − 当前角)`，限幅后交给原有的马达行。**不做** `-kd·ω` 显式阻尼：
+   那个写法在序列冲量求解器里会让 ω 在 0 与目标之间来回跳（迭代次数是偶数时原地不动）。
+3. **断裂阈值**（`break_force` / `break_torque`）：按"本步累积冲量 ÷ dt"估量级，
+   超阈值就把关节移除，`broken_joints()` 与报告的 `joints_broken` 留痕。
+4. **关节两端缺省不互相碰撞**（`collide_connected`，缺省 `false`）：与 Bullet/PhysX 同款语义。
+
+**这一轮踩到（并修掉）的三个坑，都写进了注释与文档**：
+
+* **`rad()` 不做换算**：它只是"用弧度构造"。我在 runner 里把 30 度当成 30 弧度送进伺服，
+  绕回后目标变成 −81.13°，门稳稳停在 −81°——看起来像"伺服不收敛"，其实是单位错。
+  锥形限位也中过一次（25 度 → 25 弧度 → 被 clamp 到 π，限位静默失效）。
+* **断裂判定放在 `mem::take` 借走关节表之后**：`self.joints` 那会儿是空的，判定**静默失效**
+  （力算出来 627.84 N > 阈值 500 N，关节却不断）。移到 `self.joints = joints` 之后才对。
+* **马达驱动的刚体会睡着**：伺服到位后 ω 正好是 0，睡眠判定会把它冻结在"没到位"的角度上。
+  现在只要关节带马达，两端刚体这一步不许睡（同岛邻居也跟着清醒）。
+
+**验证（全部不需要显卡）**：
+`cargo test -p quench3d-physics --lib -- ball_cone_limit hinge_servo servo_keeps joint_breaks jointed_bodies_stop`
+（锥形限位半秒内压回锥面、绕轴自转仍自由；伺服正/反向都能到位并 10 秒不漂；
+64 kg 载荷挂 500 N 关节必断、1e9 N 必不断、0/负/NaN 阈值等于不设；缺省不碰撞 vs 显式打开对比）；
+`cargo test -p quench3d-cli --lib -- joint_completion_fields`（解析 + 往返 + 5 条 error + 4 条 warning）；
+`cargo test -p quench3d-cli --test cli_e2e -- joint_servo_cone_limit_and_break_force`
+（端到端：门停在 30°±3°、自由摆仍 60° 而限位摆 < 33°、`joints_broken` 1→载荷落地 / 1e6 N 吊在原处）；
+`cargo test -p quench3d-editor --test scene_roundtrip -- export_preserves`（新字段不被编辑器丢掉）。
+
+**没做**：6DOF/万向节、角度弹簧-阻尼、疲劳/累计损伤、断裂事件回调、关节可视化与 gizmo、
+球窝伺服、锥形限位的"硬夹"（现在是速度级）。
+
+**门禁**：`tools/gate.sh` 六段全绿，**430 个测试（0 失败）**，wasm 11,601,438 字节。
+
 ## 21. 第 22 轮：物理材质 —— 静摩擦 + 摩擦/恢复的合成规则（gap #22）
 
 **做了什么**：`friction` / `restitution` 以前各写一个、接触时听谁的没得选（摩擦写死几何平均、

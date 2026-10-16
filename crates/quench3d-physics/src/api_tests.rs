@@ -212,6 +212,7 @@ fn world_api() {
         b: ball,
         local_anchor_a: Vec3::ZERO,
         local_anchor_b: vec3(0.0, 2.0, 0.0),
+        cone_limit: None,
     });
     let _idx: u32 = joint.index;
     let _gen: u32 = joint.generation;
@@ -260,6 +261,7 @@ fn joints_api() {
         b,
         local_anchor_a: Vec3::ZERO,
         local_anchor_b: vec3(-1.0, 0.0, 0.0),
+        cone_limit: None,
     };
     assert_eq!(ball.bodies(), (a, b));
     let _ = w.add_joint(ball);
@@ -279,10 +281,7 @@ fn joints_api() {
         local_axis_a: Vec3::Z,
         local_axis_b: Vec3::Z,
         limits: Some((-1.0, 1.0)),
-        motor: Some(HingeMotor {
-            target_velocity: 1.0,
-            max_impulse: 10.0,
-        }),
+        motor: Some(HingeMotor::velocity(1.0, 10.0)),
     });
     let _ = w.add_joint(Joint::Distance {
         a,

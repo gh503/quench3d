@@ -10,6 +10,39 @@
 
 ### 新增
 
+- **关节补全：球窝锥形限位、铰链伺服马达、断裂阈值、关节两端不再互相碰撞**（gap #11）。
+  以前关节只能"焊/转/滑"，做布娃娃、机械臂、可破坏门都缺零件。现在四件事都能配：
+  * `joints[].cone_limit = { half_angle_deg, axis_a?, axis_b? }`（仅 `type: "ball"`）：
+    两端各给一根局部轴，夹角被限制在 `half_angle_deg` 之内（2 个转动自由度被限，
+    绕轴自转仍然自由）。实现上复用铰链限位那一行（坐标换成两轴夹角、修正轴换成两轴叉积），
+    是**速度级**约束：半秒内压回锥面，不是瞬间夹住。
+  * `joints[].motor_target_deg / motor_stiffness / motor_damping`（仅铰链）：**位置伺服**，
+    转到目标角并停住（缺省 `stiffness = 8`、`damping = 1`）。给了目标角就按伺服走，
+    同时给 `motor_velocity` 会警告"速度被忽略"。引擎侧是
+    `HingeMotor::servo(弧度, 最大冲量).gains(kp, kd)`。
+  * `joints[].break_force`（N）/ `break_torque`（N·m）：本步约束力量级超过阈值就把关节
+    **移除**（不是禁用），断过的句柄进 `PhysicsWorld::broken_joints()`，`simulate` 报告里
+    多了 `joints_broken`。阈值为 0/负/NaN 一律等于"不设"（静默的 NaN 阈值最难查）。
+  * `joints[].collide_connected`（缺省 `false`）：**关节两端默认不再互相碰撞**，
+    与 Bullet / PhysX 的 `collide_connected = false` 一致。铰链、球窝的两端几何上就是
+    重合的（锚点相同），让它们参与碰撞等于让门和门轴互相挤——表现为"转到一半卡住"
+    "伺服停在没到位的角度上"（调试这一项时真的踩到：门停在 116°，目标是 90°）。
+    需要"连起来还能互相弹开"时显式写 `true`。
+- **被马达驱动的刚体不再自动睡眠**（顺带修的引擎 bug）。伺服到位之后速度正好是 0，
+  只看速度的睡眠判定会把它判成静止、清零速度并冻结——于是停在没到位的角度上再也回不来。
+  现在只要关节带马达（含 `target_velocity = 0`），两端刚体这一步不许睡，同岛的其他刚体
+  也跟着保持清醒；马达删掉之后恢复正常睡眠。
+  验证：`cargo test -p quench3d-physics --lib -- ball_cone_limit hinge_servo servo_keeps
+  joint_breaks jointed_bodies_stop`、`cargo test -p quench3d-cli --lib -- joint_completion_fields`、
+  `cargo test -p quench3d-cli --test cli_e2e -- joint_servo_cone_limit_and_break_force`、
+  `cargo test -p quench3d-editor --test scene_roundtrip -- export_preserves`。
+
+### 修复
+
+- **`rad()` 是"用弧度构造"，不做换算**：一度以为它会转换（`rad(90.0)` 得到 90 弧度）。
+  本次在 runner 里连踩两次（伺服目标 30 度被当成 30 弧度，绕回后变成 -81.13°；
+  锥形限位 25 度被夹到 π 而失效）。现在都用 `to_radians()`，注释里写明这个坑。
+
 - **物理材质：静摩擦 + 摩擦/恢复的合成规则**（gap #22）。以前 `friction` / `restitution`
   各写一个，接触时到底听谁的**没有选择**：摩擦写死几何平均、恢复写死取大。
   现在两个都能选，而且"静摩擦"独立出来了：

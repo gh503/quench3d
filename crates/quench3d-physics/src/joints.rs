@@ -17,13 +17,133 @@ use crate::body::BodyHandle;
 use crate::solver::{apply_impulse, apply_pseudo_impulse, BodyView};
 use crate::world::JointSlot;
 
-/// 铰链马达：以给定最大冲量驱动相对角速度趋向目标。
+/// 铰链马达：以给定最大冲量驱动相对角速度（**速度模式**）或相对角度（**伺服模式**）。
+///
+/// 两种模式的区别：
+/// * 速度模式（`target_angle: None`）：`target_velocity` 是"目标相对角速度"，给多少转多少，
+///   像电机的恒速档；
+/// * 伺服模式（`target_angle: Some(θ)`）：把它当**位置伺服**——目标速度由
+///   `stiffness × (θ - 当前角) - damping × 当前相对角速度` 现场算出来，
+///   再用 `max_impulse` 限幅。用来做"门自动开到 90°""机械臂摆到指定角度"。
+///
+/// 伺服增益不是随便填的：`stiffness` 单位 1/s（"离目标 1 弧度时想要多大角速度"），
+/// `damping` 无量纲。缺省 `stiffness = 8`、`damping = 1`，对小门/机械臂够用；
+/// `max_impulse` 仍然决定"推得动多重的门"。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HingeMotor {
-    /// 目标相对角速度（rad/s）。
+    /// 目标相对角速度（rad/s）；伺服模式下这一项被忽略。
     pub target_velocity: f32,
     /// 单步最大冲量。
     pub max_impulse: f32,
+    /// 伺服模式的目标角度（rad）；`None` = 速度模式。
+    pub target_angle: Option<f32>,
+    /// 伺服比例增益（1/s）："离目标 1 弧度时想要多大角速度"。
+    pub stiffness: f32,
+    /// 伺服求解平滑系数（≥ 0，缺省 1）。
+    ///
+    /// 它**不改变最终停在哪个角度**，只改变逼近得有多"急"：内部按
+    /// `1/(1+damping)` 的松弛系数分多次迭代逼近目标角速度。
+    /// `0` = 一次迭代到位（最急），`≥10` = 很柔和。
+    pub damping: f32,
+}
+
+impl HingeMotor {
+    /// 速度模式（最常用的一种，写起来短一点）。
+    pub fn velocity(target_velocity: f32, max_impulse: f32) -> Self {
+        Self {
+            target_velocity,
+            max_impulse,
+            target_angle: None,
+            stiffness: 8.0,
+            damping: 1.0,
+        }
+    }
+
+    /// 伺服（位置）模式：转到 `target_angle`（弧度）并停在那里。
+    pub fn servo(target_angle: f32, max_impulse: f32) -> Self {
+        Self {
+            target_angle: Some(target_angle),
+            ..Self::velocity(0.0, max_impulse)
+        }
+    }
+
+    /// 改伺服增益（比例 / 阻尼）。
+    pub fn gains(mut self, stiffness: f32, damping: f32) -> Self {
+        self.stiffness = stiffness;
+        self.damping = damping;
+        self
+    }
+
+    /// 当前这一子步想要达到的相对角速度。
+    ///
+    /// 三个容易踩的坑都在这里处理掉：
+    /// * **角度回绕**：铰链坐标是 `(-π, π]` 的。如果直接算 `target - coord`，
+    ///   刚从 179° 转过去的一瞬间坐标跳到 -179°，误差变成 +358° → 伺服会"接着往前推"，
+    ///   再也追不上目标（表现为门疯狂旋转）。所以误差必须先绕回 `(-π, π]`。
+    /// * **速度上限**：误差很大时比例项会要求几百度/秒的角速度，`max_impulse` 又允许多大，
+    ///   结果是一次猛冲。这里把目标速度夹在 `MAX_SERVO_SPEED` 以内。
+    /// * **非有限值**：一个 NaN 目标角不该让整个世界变成 NaN。
+    ///
+    /// 注意这里**只用位置环**（`kp·误差`），不做 `-kd·ω` 的显式阻尼：那个写法在
+    /// 序列冲量求解器里会把"求解一行"变成"w 在 0 与目标之间来回跳"，迭代次数是偶数时
+    /// 甚至原地不动、是奇数时猛冲（实测：同样的场景在 60 N·m·s 限幅下冲到 81° 停住）。
+    /// 位置环本身就把速度当成"误差的线性函数"，天然是临界阻尼的：`dθ/dt = kp·(目标-θ)`
+    /// 收敛不过冲。`damping` 改成"松弛系数"，只影响每次迭代逼近的快慢。
+    fn desired_velocity(&self, coord: f32) -> f32 {
+        match self.target_angle {
+            Some(target) if target.is_finite() && coord.is_finite() => {
+                let kp = self.stiffness.clamp(0.0, 60.0);
+                let error = wrap_pi(target - coord);
+                (error * kp).clamp(-MAX_SERVO_SPEED, MAX_SERVO_SPEED)
+            }
+            Some(_) => 0.0,
+            None if self.target_velocity.is_finite() => self.target_velocity,
+            None => 0.0,
+        }
+    }
+
+    /// 每次速度迭代吸收多少"目标速度 - 当前速度"（0~1）。
+    ///
+    /// 速度模式下是 1（一条纯速度约束，一步到位）；伺服模式下是 `1/(1+damping)`，
+    /// 让逼近过程可以被调柔。两种模式最终稳态一致。
+    fn velocity_relaxation(&self) -> f32 {
+        if self.target_angle.is_some() {
+            1.0 / (1.0 + self.damping.clamp(0.0, 10.0))
+        } else {
+            1.0
+        }
+    }
+}
+
+/// 伺服马达允许的目标角速度上限（rad/s，≈ 24 转/秒）。
+///
+/// 存在的理由：伺服是"位置控制"，用户给的是角度和增益，不该因为 `max_impulse` 给大了
+/// 就变成"瞬间甩过去"。有了这个上限，伺服的行为只由目标角与增益决定。
+const MAX_SERVO_SPEED: f32 = 150.0;
+
+/// 把角度绕回 `(-π, π]`。
+fn wrap_pi(mut x: f32) -> f32 {
+    if !x.is_finite() {
+        return 0.0;
+    }
+    let tau = core::f32::consts::TAU;
+    x = (x + core::f32::consts::PI).rem_euclid(tau) - core::f32::consts::PI;
+    x
+}
+
+/// 球窝关节的**锥形限位**：两端各给一根局部轴，两轴夹角不超过 `half_angle`（弧度）。
+///
+/// 典型用法：`local_axis_a = [0,1,0]`（躯干朝上）、`local_axis_b` 是手臂的朝上方向、
+/// `half_angle = 60°` → 手臂最多摆到 60° 的锥面内。它约束的是"两根轴的方向差"，
+/// 绕轴自转仍然自由（球窝本来就该这样）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BallConeLimit {
+    /// 允许的最大夹角（弧度，0~π）。
+    pub half_angle: f32,
+    /// A 端局部轴。
+    pub local_axis_a: Vec3,
+    /// B 端局部轴。
+    pub local_axis_b: Vec3,
 }
 
 /// 关节类型。
@@ -51,7 +171,7 @@ pub enum Joint {
         /// B 的本地参考姿态。
         local_frame_b: Quat,
     },
-    /// 球窝关节：只约束两锚点重合。
+    /// 球窝关节：只约束两锚点重合（转动自由；可选锥形限位限制摆动方向）。
     Ball {
         /// 刚体 A。
         a: BodyHandle,
@@ -61,6 +181,8 @@ pub enum Joint {
         local_anchor_a: Vec3,
         /// B 的本地锚点。
         local_anchor_b: Vec3,
+        /// 锥形限位（`None` = 随便转）。
+        cone_limit: Option<BallConeLimit>,
     },
     /// 铰链关节。
     Hinge {
@@ -138,6 +260,15 @@ impl Joint {
             | Joint::Distance { local_anchor_a, .. }
             | Joint::Slider { local_anchor_a, .. } => *local_anchor_a,
         }
+    }
+
+    /// 这个关节是否有**活动的马达**（速度或伺服模式）。
+    ///
+    /// 世界用它决定"被驱动的刚体这一步不许睡"（见 `update_sleeping`）。
+    /// 马达存在就算活动——包括 `target_velocity = 0`：那表示"用马达把轴按住"，
+    /// 松手（把马达删掉）之后才该恢复正常睡眠。
+    pub fn has_active_motor(&self) -> bool {
+        matches!(self, Joint::Hinge { motor: Some(_), .. })
     }
 
     /// B 端本地锚点。
@@ -394,7 +525,35 @@ impl JointSolver {
             }
 
             match joint {
-                Joint::Ball { .. } => {}
+                Joint::Ball { cone_limit, .. } => {
+                    // 锥形限位复用铰链"限位"那一行状态（`limits` / `coord` / `axis` /
+                    // `k_limit`），只是把坐标换成"两轴夹角"、修正轴换成"两轴叉积"。
+                    // 好处是不必新写一条约束行：限位那套已经测过的收敛行为直接复用。
+                    if let Some(cone) = cone_limit {
+                        let wa = va.rot.mul_vec3(cone.local_axis_a).normalize_or_zero();
+                        let wb = vb.rot.mul_vec3(cone.local_axis_b).normalize_or_zero();
+                        if wa.length_squared() > 0.5 && wb.length_squared() > 0.5 {
+                            let angle = wa.dot(wb).clamp(-1.0, 1.0).acos();
+                            // 修正轴 = 把 B 轴转回 A 轴的旋转轴。两轴几乎平行/反平行时
+                            // 叉积退化（没有确定的平面），此时限位本来"没在限"，跳过。
+                            let axis = wa.cross(wb);
+                            if axis.length_squared() > 1e-10 {
+                                let axis = axis.normalize_or_zero();
+                                let k_axis = axis.dot(ang_vec(&va, &vb, axis));
+                                if k_axis > 1e-9 {
+                                    st.kind = JointKind::Ball;
+                                    st.limits = Some((
+                                        0.0,
+                                        cone.half_angle.clamp(0.0, core::f32::consts::PI),
+                                    ));
+                                    st.coord = angle;
+                                    st.axis = axis;
+                                    st.k_limit = 1.0 / k_axis;
+                                }
+                            }
+                        }
+                    }
+                }
                 Joint::Fixed { .. } => {
                     st.kind = JointKind::Fixed;
                     let k = Mat3::from_cols(
@@ -719,7 +878,8 @@ impl JointSolver {
                     let vb = views[st.b];
                     let w_axis = (vb.ang - va.ang).dot(st.axis);
                     let max_i = m.max_impulse.abs();
-                    let mut d = (m.target_velocity - w_axis) * st.k_motor;
+                    let target = m.desired_velocity(st.coord);
+                    let mut d = (target - w_axis) * st.k_motor * m.velocity_relaxation();
                     let new = clamp(st.motor_impulse + d, -max_i, max_i);
                     d = new - st.motor_impulse;
                     st.motor_impulse = new;
@@ -727,6 +887,45 @@ impl JointSolver {
                 }
             }
         }
+    }
+
+    /// 每个关节本步的**约束力量级**（`(力 N, 力矩 N·m)`），顺序与 `prepare` 的
+    /// entries 一致（也就是世界按槽位顺序数过来的第 k 个关节）。
+    ///
+    /// 算法是"累积冲量 / dt"的**量级估计**，不是精确的约束力：
+    /// 它把点约束、标量约束、滑块限位算进力，把角度约束、铰链/球窝限位与马达算进力矩。
+    /// 断裂阈值本来就是"用户给的工程值"，量级够用比精确更重要——文档里也这么写。
+    pub fn break_magnitudes(&self, dt: f32) -> Vec<(f32, f32)> {
+        let dt = if dt.is_finite() && dt > 1e-6 {
+            dt
+        } else {
+            1e-6
+        };
+        let mut out = Vec::with_capacity(self.states.len());
+        for st in &self.states {
+            let is_slider = matches!(st.kind, JointKind::Slider { .. });
+            let is_hinge_like = matches!(st.kind, JointKind::Hinge { .. } | JointKind::Ball);
+            let linear = st.point_impulse.length()
+                + st.scalar_impulse.abs()
+                + if is_slider {
+                    st.limit_impulse.abs() + st.uv_impulse[0].abs() + st.uv_impulse[1].abs()
+                } else {
+                    0.0
+                };
+            let angular = st.ang3_impulse.length()
+                + if is_slider {
+                    st.uv_ang_impulse[0].abs() + st.uv_ang_impulse[1].abs()
+                } else {
+                    st.uv_impulse[0].abs() + st.uv_impulse[1].abs()
+                }
+                + if is_hinge_like {
+                    st.limit_impulse.abs() + st.motor_impulse.abs()
+                } else {
+                    0.0
+                };
+            out.push((linear / dt, angular / dt));
+        }
+        out
     }
 
     /// 位置修正：平移约束用伪速度（分裂冲量）。
@@ -923,6 +1122,7 @@ mod tests {
             b,
             local_anchor_a: Vec3::ZERO,
             local_anchor_b: vec3(0.0, -1.0, 0.0),
+            cone_limit: None,
         };
         assert_eq!(j.bodies(), (a, b));
         assert_eq!(j.local_anchor_b(), vec3(0.0, -1.0, 0.0));

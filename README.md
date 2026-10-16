@@ -436,8 +436,43 @@ if let Some(b) = world.body_mut(handle) {
 }
 ```
 
-关节（5 种）：`Fixed`（焊接）、`Ball`（球窝）、`Hinge`（铰链，带限位与马达）、
-`Distance`（距离/弹簧）、`Slider`（滑块，带轴向限位）。
+关节（5 种）：`Fixed`（焊接）、`Ball`（球窝，可选**锥形限位**）、`Hinge`（铰链，
+带角度限位、速度马达与**位置伺服**）、`Distance`（距离/弹簧）、`Slider`（滑块，带轴向限位）。
+每个关节都可以设**断裂阈值**（`break_force` / `break_torque`：本步约束力量级超限就把关节
+移除，`PhysicsWorld::broken_joints()` 与 `simulate` 报告的 `joints_broken` 留痕）。
+
+```rust
+use quench3d::prelude::*;
+
+// 伺服：门自动开到 90° 并停住（k p = 8 / kd = 1 是缺省）
+world.add_joint(Joint::Hinge {
+    a: frame, b: door, local_anchor_a: Vec3::ZERO, local_anchor_b: Vec3::new(-0.5, 0.0, 0.0),
+    local_axis_a: Vec3::Y, local_axis_b: Vec3::Y, limits: None,
+    motor: Some(HingeMotor::servo(90f32.to_radians(), 40.0).gains(8.0, 1.0)),
+});
+
+// 锥形限位：手臂最多摆到 60° 的锥面内（绕轴自转仍然自由）
+world.add_joint(Joint::Ball {
+    a: torso, b: arm, local_anchor_a: Vec3::ZERO, local_anchor_b: Vec3::ZERO,
+    cone_limit: Some(BallConeLimit {
+        half_angle: 60f32.to_radians(), local_axis_a: Vec3::Y, local_axis_b: Vec3::Y,
+    }),
+});
+
+// 断裂：绳子受力超过 500 N 就断
+let rope = world.add_joint(Joint::Distance {
+    a: anchor, b: load, local_anchor_a: Vec3::ZERO, local_anchor_b: Vec3::ZERO,
+    rest_length: 2.0, stiffness: 0.0, damping: 0.0,
+});
+world.set_joint_break(rope, Some(500.0), None);
+assert_eq!(world.broken_joints().len(), 1);   // 超限之后这里会有记录
+```
+
+> 关节两端**缺省不互相碰撞**（`collide_connected = false`，与 Bullet / PhysX 一致）：
+> 铰链/球窝的两端在几何上就是重合的，让它们参与碰撞等于让门和门轴互相挤。
+> 需要"连起来还能互相弹开"时显式打开 `world.set_joint_collide_connected(handle, true)`。
+> 另外：**被马达驱动的刚体不会自动睡眠**（伺服到位时速度正好是 0，否则会被冻结在
+> "还没到位"的角度上）。
 
 角色控制器（胶囊、可上台阶、贴地、沿墙滑动）：
 
@@ -516,7 +551,7 @@ quench3d::write_png(&image, "out.png")?;
 | `headless` | 无窗口集成验证：240 步物理 + 渲染出图，并断言不穿地/无 NaN | `cargo run -p quench3d --example headless` |
 | `offline_render` | 渲染特性回归：天空、网格、阴影、地面逐个开关并统计像素 | `cargo run -p quench3d-render --example offline_render` |
 | `shadow_probe` | 阴影诊断：自阴影检测 + 阴影方向与解析落点对比（误差 < 1px） | `cargo run -p quench3d-render --example shadow_probe` |
-| `joints` | 5 种关节：铰链门（马达）、垂直滑块（轴向限位）、弹簧、焊接、球窝摆 | `cargo run -p quench3d --example joints` |
+| `joints` | 5 种关节：铰链门（速度马达 + **位置伺服**）、垂直滑块（轴向限位）、弹簧、焊接、球窝摆（**锥形限位**），以及**断裂阈值**与"关节两端不互相碰撞" | `cargo run -p quench3d --example joints` |
 | `model_viewer` | 模型加载：glTF/GLB/OBJ+MTL，轨道相机对准模型；`--collide` 把模型变成静态三角网格碰撞体（丢球验证） | `cargo run -p quench3d --example model_viewer` |
 | `bench` | 物理性能与分配基准（吞吐 / 分配次数 / 长跑稳定性，`--phases` 看阶段分解、`--layout` 换布局） | `cargo run --release -p quench3d-physics --example bench` |
 | `web_client` | Web 客户端入口（§1.1 的编辑器跑在浏览器里；另导出 CI 自检探针） | `tools/build_web.sh web_client` |
@@ -682,9 +717,14 @@ NaN 刚体  : 0
     { "name": "灯头", "parent": "灯柱", "shape": { "type": "sphere", "radius": 0.25 },
       "position": [0, 1.6, 0], "rotation_deg": [0, 0, 0], "material": "灯罩" }
   ],
-  "joints": [ { "type": "hinge", "a": "门", "b": "框", "axis": [0, 1, 0],
-                "anchor_b": [0.5, 0, 0],
-                "limits": [-1.57, 0], "motor_velocity": 1.5 } ],
+  "joints": [
+    { "type": "hinge", "a": "门", "b": "框", "axis": [0, 1, 0], "anchor_b": [0.5, 0, 0],
+      "limits": [-1.57, 0], "motor_velocity": 1.5 },
+    { "type": "hinge", "a": "框", "b": "闸门", "axis": [0, 1, 0],
+      "motor_target_deg": 90.0, "motor_stiffness": 8.0, "motor_max_impulse": 40.0,
+      "break_force": 2000.0 },          // 位置伺服：开到 90° 停住；受力超 2000 N 就断
+    { "type": "ball", "a": "躯干", "b": "手臂", "cone_limit": { "half_angle_deg": 60.0 } }
+  ],
   "actions": [
     { "type": "impulse", "target": "箱子", "at_time": 2.0, "value": [0, 800, 0] },
     { "type": "force", "target": "气球", "at_step": 30, "steps": 30, "value": [0, 0.5, 0] },
@@ -755,6 +795,20 @@ NaN 刚体  : 0
   **带刚体的物体不能有父物体**（位姿由物理决定，写了会被校验器拦下，不会静默失效）。
 * `joints[].anchor_a`/`anchor_b` 是**两端各自的局部坐标**，错开它们才能表达门轴、悬臂、偏心摆；
   `axis` 同样是局部轴（物体一旦 `rotation_deg` 非零，世界轴向会跟着转）。
+* **关节的单位有两套，别混**：`limits` 是**弧度**（铰链）/ 米（滑块），`motor_velocity` 是
+  **弧度/秒**；而 `motor_target_deg`、`cone_limit.half_angle_deg` 是**度**（名字里带 `_deg`）。
+  校验器会对"限位 > 6.5 弧度""伺服目标 > 3600 度"这类明显写错单位的地方报警告。
+* `joints[].cone_limit`（只有 `ball` 有）把两端两根局部轴的夹角限制在 `half_angle_deg` 内：
+  管"摆的方向"，**绕轴自转仍然自由**；它是速度级约束，半秒内压回锥面，不是硬夹住。
+* `joints[].motor_target_deg` 一给就进**位置伺服**（同时给 `motor_velocity` 会警告"速度被忽略"）；
+  伺服不改变最终停在哪的只有 `motor_stiffness`（缺省 8）与 `motor_damping`（缺省 1，越大越柔）。
+* `joints[].break_force`（N）/ `break_torque`（N·m）用的是"本步累积冲量 ÷ dt"的**量级估计**，
+  不是精确约束力，也没有疲劳/累计损伤；超限就把关节**移除**（`simulate` 报告里 `joints_broken`）。
+  阈值写 0/负数 会报错（"不设"的正确写法是**不写这个字段**）。
+* **关节两端缺省不互相碰撞**（`collide_connected` 缺省 `false`，与 Bullet / PhysX 一致）：
+  铰链、球窝的两端几何上就重合，参与碰撞等于让门和门轴互相挤（"转到一半卡住"）。
+  要"连起来还能互相弹开"就显式写 `"collide_connected": true`。
+* **被马达驱动的刚体不会自动睡眠**（伺服到位时速度正好是 0，否则会被冻结在"还没到位"的角度）：马达删掉之后恢复正常睡眠判定。
 * `camera.orthographic_height` 一给就切正交投影（`fov_deg` 失效），适合工程/制图/2.5D 视角。
 * `actions[].at_step` 是"第 N 步**开始前**"（第 1 步是第一次物理步进，0 = 仿真开始前），
   `at_time` 是秒数写法（`round(t/dt)`），两者互斥；`movie` 的预热帧也算在步号里。
@@ -936,7 +990,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 352 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 430 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -989,8 +1043,9 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
 > 且缩放后界面真的按新尺寸重排（900×620 时右面板真的挪到 x=640）。
 > 所以"点击操作界面"这条证据是在**浏览器**里取的，用的还是同一套界面代码。
 
-物理测试覆盖：自由落体、静置接触、三层堆叠、恢复系数、高/低摩擦斜面、
-射线检测、铰链摆与马达、5 种关节、角度限位、确定性（逐位相等，含槽位复用）、
+物理测试覆盖：自由落体、静置接触、三层堆叠、恢复系数、高/低摩擦斜面、静/动摩擦分离、
+射线检测、铰链摆与马达、**位置伺服与锥形限位**、5 种关节、角度限位、**关节断裂**、
+**关节两端不互相碰撞**、确定性（逐位相等，含槽位复用）、
 200 体宽相、睡眠/唤醒、三角网格与凸包（含**薄板**：模型网格当碰撞体的典型情况）、
 病态输入、长时间稳定性。
 

@@ -160,7 +160,7 @@ pub fn schema() -> Value {
                     { "name": "--dry-run", "type": "flag", "required": false, "description": "配 --render 用时：只校验 + 跑物理，不渲染不写盘。单独用（没有 --render）会报错——simulate 本身不写任何文件" },
                     { "name": "--no-clobber", "type": "flag", "required": false, "description": "配 --render 用时生效：渲染输出已存在就报错" }
                 ],
-                "output": "{ steps, dt, gravity, bodies, dynamic, sleeping, contacts, joints, nan_bodies, lowest_y, max_speed, states[], probes[]?, sensors[]?, warnings[], trajectories[]? }（sensors 是 objects[].sensor = true 的触发区观测：谁的 enter_step/exit_step/steps_inside/entries，按名字排序，输出稳定）",
+                "output": "{ steps, dt, gravity, bodies, dynamic, sleeping, contacts, joints, joints_broken, nan_bodies, lowest_y, max_speed, states[], probes[]?, sensors[]?, warnings[], trajectories[]? }（sensors 是 objects[].sensor = true 的触发区观测：谁的 enter_step/exit_step/steps_inside/entries，按名字排序，输出稳定）",
                 "trajectory_fields": "name, shape, samples[{step,time,position,speed,displacement,tilt_deg,asleep}], start, end, min, max, fall, rise, travel, path_length, max_speed, max_tilt_deg, tilt_meaningful, tipped_over, last_motion_step",
                 "examples": [
                     "quench3d simulate scene.json --steps 600 --json",
@@ -384,8 +384,16 @@ pub fn scene_grammar() -> Value {
             "rest_length": "distance 关节的静止长度",
             "stiffness": "distance 关节刚度",
             "damping": "distance 关节阻尼",
-            "motor_velocity": "铰链马达目标角速度（弧度/秒）",
-            "motor_max_impulse": "铰链马达最大冲量"
+            "motor_velocity": "铰链马达目标角速度（弧度/秒）——速度模式",
+            "motor_target_deg": "铰链马达的**伺服目标角**（度）：给了它就转到这个角度停住（伺服模式，优先于 motor_velocity）",
+            "motor_stiffness": "伺服比例增益（1/s），缺省 8",
+            "motor_damping": "伺服阻尼增益，缺省 1",
+            "cone_limit": { "half_angle_deg": "球窝关节允许的两轴最大夹角（度，0~180）",
+                            "axis_a": "A 端局部轴，缺省 [0,1,0]", "axis_b": "B 端局部轴，缺省 [0,1,0]",
+                            "note": "只有 type = ball 支持" },
+            "break_force": "断裂力（N）：本步关节力超过它就断开；不写 = 永不断",
+            "break_torque": "断裂力矩（N·m）",
+            "collide_connected": "关节两端是否互相碰撞，缺省 false（不碰，和 Bullet/PhysX 一致）"
         },
         "action": {
             "type": ["impulse", "impulse_at_point", "torque_impulse", "velocity",
@@ -489,6 +497,9 @@ pub fn system_prompt() -> String {
     命中点；高速小物体不会一步穿过薄墙。没有旋转扫掠，只扫中心线——擦角可能漏。只对 dynamic 生效）
   - 上面这些物理参数（mass/gravity_scale/damping/allow_sleep/angular_velocity/ccd）只对 body: "dynamic" 生效
 - joints: 数组，每项：{ type: "fixed"|"ball"|"hinge"|"distance"|"slider", a: 物体名, b: 物体名,
+           cone_limit: { half_angle_deg, axis_a, axis_b }（仅 ball）,
+           motor_target_deg / motor_stiffness / motor_damping（铰链伺服）,
+           break_force / break_torque（超过就断）,
            axis: [x,y,z]（**各自刚体的局部轴**，缺省 [0,1,0]）, limits: [min,max]（铰链弧度 / 滑块米）,
            anchor_a / anchor_b: [x,y,z]（关节在两端的**局部**连接点，做门轴/悬臂时错开它们）,
            rest_length, stiffness, damping, motor_velocity }

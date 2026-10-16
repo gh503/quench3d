@@ -20,8 +20,8 @@ use quench3d::render::RenderStats;
 use serde::{Deserialize, Serialize};
 
 use crate::scene_doc::{
-    arr, v3, ActionKind, BodyKind, JointKind, MaterialDoc, ProbeDoc, ProbeShapeDoc, SceneDoc,
-    ShapeDoc, ShapeKind,
+    arr, v3, ActionKind, BodyKind, JointDoc, JointKind, MaterialDoc, ProbeDoc, ProbeShapeDoc,
+    SceneDoc, ShapeDoc, ShapeKind,
 };
 
 /// 运行期错误。
@@ -122,8 +122,10 @@ pub struct SimReport {
     pub sleeping: usize,
     /// 接触流形数。
     pub contacts: usize,
-    /// 关节数。
+    /// 关节数（**跑完之后**还剩几个）。
     pub joints: usize,
+    /// 断掉的关节数（场景里没写 `break_force` / `break_torque` 时恒为 0）。
+    pub joints_broken: usize,
     /// 含 NaN/Inf 的刚体数（正常应为 0）。
     pub nan_bodies: usize,
     /// 最低点 y。
@@ -1250,6 +1252,12 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 b,
                 local_anchor_a: anchor_a,
                 local_anchor_b: anchor_b,
+                cone_limit: j.cone_limit.as_ref().map(|c| BallConeLimit {
+                    // 注意 `rad(v)` 是"用弧度构造"，**不做换算**：度要显式 `to_radians()`。
+                    half_angle: c.half_angle_deg.to_radians(),
+                    local_axis_a: v3(c.axis_a.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
+                    local_axis_b: v3(c.axis_b.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
+                }),
             },
             JointKind::Hinge => Joint::Hinge {
                 a,
@@ -1259,10 +1267,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 local_axis_a: axis,
                 local_axis_b: axis,
                 limits: j.limits.map(|l| (l[0], l[1])),
-                motor: j.motor_velocity.map(|v| HingeMotor {
-                    target_velocity: v,
-                    max_impulse: j.motor_max_impulse.unwrap_or(f32::MAX),
-                }),
+                motor: build_hinge_motor(j)?,
             },
             JointKind::Distance => Joint::Distance {
                 a,
@@ -1283,7 +1288,14 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 limits: j.limits.map(|l| (l[0], l[1])),
             },
         };
-        world.add_joint(joint);
+        let handle = world.add_joint(joint);
+        if j.break_force.is_some() || j.break_torque.is_some() {
+            world.set_joint_break(handle, j.break_force, j.break_torque);
+        }
+        // 缺省不碰（Bullet / PhysX 一致）；显式 `true` 才让关节两端互相碰撞。
+        if j.collide_connected.unwrap_or(false) {
+            world.set_joint_collide_connected(handle, true);
+        }
     }
 
     Ok(WorldBuild {
@@ -1291,6 +1303,32 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         handles,
         born,
     })
+}
+
+/// 从关节文档里造马达：`motor_target_deg` 有就是伺服模式，否则是速度模式。
+///
+/// 两个都给时**伺服优先**（并且校验层会警告"motor_velocity 被忽略"），
+/// 因为"转到某角度停住"比"一直转"更具体，用户给了目标角显然想要前者。
+fn build_hinge_motor(j: &JointDoc) -> Result<Option<HingeMotor>, RunError> {
+    let max_impulse = j.motor_max_impulse.unwrap_or(f32::MAX);
+    match (j.motor_target_deg, j.motor_velocity) {
+        (Some(deg), _) => {
+            let motor = HingeMotor::servo(deg.to_radians(), max_impulse);
+            Ok(Some(motor.gains(
+                j.motor_stiffness.unwrap_or(8.0),
+                j.motor_damping.unwrap_or(1.0),
+            )))
+        }
+        (None, Some(v)) => Ok(Some(HingeMotor::velocity(v, max_impulse))),
+        (None, None) => {
+            if j.motor_stiffness.is_some() || j.motor_damping.is_some() {
+                return Err(RunError::scene(
+                    "写了 motor_stiffness / motor_damping 却没给 motor_target_deg 或 motor_velocity（伺服参数没地方用）",
+                ));
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn body_states(build: &WorldBuild) -> Vec<BodyState> {
@@ -1375,6 +1413,7 @@ pub fn summarize(build: &WorldBuild, steps: u32, dt: f32) -> SimReport {
         sleeping,
         contacts: build.world.contacts().len(),
         joints: build.world.joint_count(),
+        joints_broken: build.world.broken_joints().len(),
         nan_bodies: nan,
         lowest_y: if lowest_y == f32::MAX { 0.0 } else { lowest_y },
         max_speed,

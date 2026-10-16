@@ -800,11 +800,19 @@ pub(crate) fn integrate_positions<S: BodyStore>(bodies: &mut S, dt: f32) {
 }
 
 /// 睡眠状态更新。
+/// `actuated` 是"被马达驱动"的刚体（按槽位索引，长度 = `slot_count`）：
+/// 这些刚体这一步**不许睡**，也不能让同岛的其他刚体睡。
+///
+/// 为什么：马达是执行器。一个"保持 90°"的伺服在到位之后速度正好是 0，
+/// 只看速度的睡眠判定会立刻把它判为静止、`sleep()` 清零速度并冻结——
+/// 于是伺服停在一个**没到目标**的角度上再也回不来（真实踩到过：
+/// 门停在 116° 而目标是 90°）。执行器驱动的东西必须持续参与求解。
 pub(crate) fn update_sleeping<S: BodyStore>(
     bodies: &mut S,
     dt: f32,
     cfg: &SolverConfig,
     islands: &crate::island::Islands,
+    actuated: &[bool],
 ) {
     if !cfg.sleep_enabled {
         for i in 0..bodies.slot_count() {
@@ -834,6 +842,12 @@ pub(crate) fn update_sleeping<S: BodyStore>(
         // （它把自己置为睡眠，而这一遍只看速度、不看 `allow_sleep`，于是它就一直睡着）。
         // 反过来这里醒来是有代价的（每一步都要参与求解），但那正是调用方要的语义。
         if !b.allow_sleep {
+            b.sleeping = false;
+            b.sleep_timer = 0.0;
+            continue;
+        }
+        // 被马达驱动的刚体同理（而且是**临时**的：马达一撤就恢复正常的睡眠判定）。
+        if actuated.get(i).copied().unwrap_or(false) {
             b.sleeping = false;
             b.sleep_timer = 0.0;
             continue;
@@ -868,7 +882,10 @@ pub(crate) fn update_sleeping<S: BodyStore>(
         if all_ready {
             for &slot in members {
                 if let Some(b) = bodies.slot_mut(slot as usize) {
-                    if b.allow_sleep && !b.sleeping {
+                    if b.allow_sleep
+                        && !b.sleeping
+                        && !actuated.get(slot as usize).copied().unwrap_or(false)
+                    {
                         b.sleep();
                     }
                 }
@@ -886,6 +903,7 @@ pub(crate) fn update_sleeping<S: BodyStore>(
                 && b.allow_sleep
                 && !b.sleeping
                 && b.sleep_timer >= SLEEP_TIME
+                && !actuated.get(i).copied().unwrap_or(false)
             {
                 b.sleep();
             }
@@ -968,7 +986,7 @@ mod tests {
         let cfg = SolverConfig::default();
         for _ in 0..60 {
             let islands = singleton_islands(&bodies);
-            update_sleeping(&mut bodies, 1.0 / 60.0, &cfg, &islands);
+            update_sleeping(&mut bodies, 1.0 / 60.0, &cfg, &islands, &[]);
         }
         assert!(bodies[0].as_ref().unwrap().is_sleeping());
         bodies[0].as_mut().unwrap().apply_impulse(Vec3::Y);

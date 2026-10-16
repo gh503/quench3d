@@ -3383,3 +3383,166 @@ fn query_rejects_bad_flags_instead_of_ignoring_them() {
     ]);
     assert_ne!(r.code, 0);
 }
+
+/// 关节补全：铰链伺服、球窝锥形限位、断裂阈值——三条都从场景文件走到仿真报告。
+#[test]
+fn joint_servo_cone_limit_and_break_force_are_wired() {
+    let dir = temp_dir("joint_completion");
+
+    // ---- ① 铰链伺服：目标 30°，5 秒后门就该停在 30°（不是"一直转"也不是"停住不动"）----
+    let servo_scene = |target: Option<f64>, collide: Option<bool>| {
+        let mut joint = serde_json::json!({
+            "type": "hinge", "a": "锚", "b": "门", "axis": [0, 1, 0],
+            "anchor_a": [0, 0, 0], "anchor_b": [-0.4, 0, 0],
+            "motor_target_deg": target, "motor_max_impulse": 60.0,
+            "motor_stiffness": 10.0, "motor_damping": 1.0
+        });
+        if target.is_none() {
+            joint["motor_target_deg"] = serde_json::Value::Null;
+        }
+        if let Some(c) = collide {
+            joint["collide_connected"] = serde_json::json!(c);
+        }
+        serde_json::json!({
+            "objects": [
+                { "name": "锚", "shape": { "type": "box", "size": [0.1, 0.1, 0.1] },
+                  "body": "static", "material": "m" },
+                { "name": "门", "shape": { "type": "box", "size": [0.7, 1.0, 0.1] },
+                  "body": "dynamic", "material": "m", "position": [0.4, 0, 0], "density": 500 }
+            ],
+            "joints": [joint],
+            "materials": { "m": { "color": [1, 1, 1] } },
+            "camera": { "position": [0, 0, 10], "look_at": [0, 0, 0] },
+            "simulate": { "steps": 300, "dt": 0.016666667 },
+            "render": { "output": "ignored.png", "width": 32, "height": 32, "msaa": 1 }
+        })
+    };
+
+    // ---- ② 球窝锥形限位：初始 60° 摆角，半角 25° 时 1 秒内必须被压回锥面 ----
+    let cone_scene = |half_angle: Option<f64>| {
+        let mut joint = serde_json::json!({
+            "type": "ball", "a": "锚", "b": "摆", "anchor_b": [0, 0.5, 0]
+        });
+        if let Some(h) = half_angle {
+            joint["cone_limit"] = serde_json::json!({ "half_angle_deg": h });
+        }
+        serde_json::json!({
+            "objects": [
+                { "name": "锚", "shape": { "type": "sphere", "radius": 0.05 },
+                  "body": "static", "material": "m", "position": [0, 2, 0] },
+                { "name": "摆", "shape": { "type": "box", "size": [0.1, 1.0, 0.1] },
+                  "body": "dynamic", "material": "m",
+                  "position": [0.4330127, 1.75, 0], "rotation_deg": [0, 0, 60] }
+            ],
+            // 零重力：这样"有没有锥形限位"是唯一的差别。有重力的话自由摆也会往竖直方向
+            // 落回去（实测 1 秒从 60° 掉到 52°），两条曲线就分不清是谁的功劳了。
+            "gravity": [0, 0, 0],
+            "joints": [joint],
+            "materials": { "m": { "color": [1, 1, 1] } },
+            "camera": { "position": [0, 0, 10], "look_at": [0, 0, 0] },
+            "simulate": { "steps": 60, "dt": 0.016666667 },
+            "render": { "output": "ignored.png", "width": 32, "height": 32, "msaa": 1 }
+        })
+    };
+
+    // ---- ③ 断裂：64 kg 的载荷（≈628 N）挂在 500 N 的关节上 → 断；1e6 N → 不断 ----
+    let break_scene = |break_force: f64| {
+        serde_json::json!({
+            "objects": [
+                { "name": "锚", "shape": { "type": "sphere", "radius": 0.05 },
+                  "body": "static", "material": "m", "position": [0, 3, 0] },
+                { "name": "载", "shape": { "type": "box", "size": [0.4, 0.4, 0.4] },
+                  "body": "dynamic", "material": "m", "position": [0, 1, 0] }
+            ],
+            "joints": [{ "type": "distance", "a": "锚", "b": "载", "rest_length": 2.0,
+                         "stiffness": 0.0, "damping": 0.0, "break_force": break_force }],
+            "materials": { "m": { "color": [1, 1, 1] } },
+            "camera": { "position": [0, 0, 10], "look_at": [0, 0, 0] },
+            "simulate": { "steps": 180, "dt": 0.016666667 },
+            "render": { "output": "ignored.png", "width": 32, "height": 32, "msaa": 1 }
+        })
+    };
+
+    let sim = |name: &str, value: serde_json::Value| {
+        let path = write_scene(&dir, name, value);
+        let r = run(&["simulate", path.to_str().unwrap(), "--json"]);
+        assert_eq!(r.code, 0, "仿真失败（{name}）：{}", r.stderr);
+        r.json()["data"].clone()
+    };
+    // 绕某根轴转过的角度（度）。报告的 rotation 是 [x, y, z, w]。
+    let spin_about = |report: &serde_json::Value, name: &str, axis: usize| -> f64 {
+        let s = report["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap();
+        let q: Vec<f64> = s["rotation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        (2.0 * q[axis].atan2(q[3])).to_degrees().abs()
+    };
+    let y_of = |report: &serde_json::Value, name: &str| -> f64 {
+        report["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap()["position"][1]
+            .as_f64()
+            .unwrap()
+    };
+
+    // ① 伺服
+    let servo = sim("servo.json", servo_scene(Some(30.0), None));
+    assert_eq!(servo["joints"].as_u64().unwrap(), 1);
+    assert_eq!(servo["joints_broken"].as_u64().unwrap(), 0);
+    let door = spin_about(&servo, "门", 1);
+    assert!(
+        (door - 30.0).abs() < 3.0,
+        "伺服目标 30°，门实际停在 {door:.2}°（差得远说明马达没接线或没保持清醒）"
+    );
+
+    // ② 锥形限位：同样的初始 60° 摆角，有 25° 限位 vs 没有
+    let limited = sim("cone_limited.json", cone_scene(Some(25.0)));
+    let free = sim("cone_free.json", cone_scene(None));
+    let limited_swing = spin_about(&limited, "摆", 2);
+    let free_swing = spin_about(&free, "摆", 2);
+    assert!(
+        (free_swing - 60.0).abs() < 1.5,
+        "没有锥形限位时球窝不该产生任何恢复力矩，摆角应当还是 60°，实测 {free_swing:.2}°"
+    );
+    assert!(
+        limited_swing < 33.0,
+        "25° 锥形限位该把 1 秒后的摆角压回锥面附近，实测 {limited_swing:.2}°"
+    );
+
+    // ③ 断裂
+    let broken = sim("break_small.json", break_scene(500.0));
+    assert_eq!(
+        broken["joints_broken"].as_u64().unwrap(),
+        1,
+        "628 N 的载荷挂在 500 N 的关节上该断"
+    );
+    assert_eq!(
+        broken["joints"].as_u64().unwrap(),
+        0,
+        "断掉的关节不该还在计数里"
+    );
+    let fallen = y_of(&broken, "载");
+    assert!(fallen < 0.5, "断了之后载荷该掉下去，实测 y = {fallen:.2}");
+
+    let held = sim("break_big.json", break_scene(1.0e6));
+    assert_eq!(held["joints_broken"].as_u64().unwrap(), 0);
+    assert_eq!(held["joints"].as_u64().unwrap(), 1);
+    let hanging = y_of(&held, "载");
+    assert!(
+        (hanging - 1.0).abs() < 0.05,
+        "1e6 N 的关节该把载荷吊在原处，实测 y = {hanging:.3}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

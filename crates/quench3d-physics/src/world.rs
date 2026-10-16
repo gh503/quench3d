@@ -74,6 +74,12 @@ pub(crate) struct JointSlot {
     generation: u32,
     pub(crate) joint: Option<Joint>,
     pub(crate) impulses: JointImpulses,
+    /// 断裂力阈值（N）；本步关节力超过它就断。
+    pub(crate) break_force: Option<f32>,
+    /// 断裂力矩阈值（N·m）。
+    pub(crate) break_torque: Option<f32>,
+    /// 关节两端是否**互相碰撞**（缺省 `false`，与 Bullet/PhysX 一致）。
+    pub(crate) collide_connected: bool,
 }
 
 /// 宿主装入的单调时钟（秒）。
@@ -236,6 +242,10 @@ pub struct PhysicsWorld {
     /// 那一步，施力后的速度已经不低了（Δt × 加速度），拿它判定会永远选动摩擦，
     /// 于是"推得动、但推不住"变成"一推就走、一直滑"。
     scratch_pre_velocities: Vec<(Vec3, Vec3)>,
+    /// 断掉的关节（历史记录，见 [`PhysicsWorld::broken_joints`]）。
+    broken_joints: Vec<JointHandle>,
+    /// 复用缓冲：本步被马达驱动的刚体（睡眠判定用）。
+    scratch_actuated: Vec<bool>,
     /// 每步复用的关节条目缓冲。
     scratch_joint_entries: Vec<JointEntry>,
     /// 每步复用的关节冲量缓冲。
@@ -367,6 +377,8 @@ impl PhysicsWorld {
             scratch_views: Vec::new(),
             scratch_materials: Vec::new(),
             scratch_pre_velocities: Vec::new(),
+            broken_joints: Vec::new(),
+            scratch_actuated: Vec::new(),
             scratch_joint_entries: Vec::new(),
             scratch_joint_impulses: Vec::new(),
             config: SolverConfig::default(),
@@ -541,6 +553,10 @@ impl PhysicsWorld {
             let slot = &mut self.joints[index as usize];
             slot.joint = Some(joint);
             slot.impulses = JointImpulses::default();
+            // 槽位是复用的：断裂阈值必须清掉，否则新关节会继承上一个关节的阈值
+            slot.break_force = None;
+            slot.break_torque = None;
+            slot.collide_connected = false;
             JointHandle {
                 index,
                 generation: slot.generation,
@@ -551,6 +567,9 @@ impl PhysicsWorld {
                 generation: 1,
                 joint: Some(joint),
                 impulses: JointImpulses::default(),
+                break_force: None,
+                break_torque: None,
+                collide_connected: false,
             });
             JointHandle {
                 index,
@@ -585,6 +604,86 @@ impl PhysicsWorld {
     /// 关节数量。
     pub fn joint_count(&self) -> usize {
         self.joints.iter().filter(|s| s.joint.is_some()).count()
+    }
+
+    /// 设置关节的断裂阈值（`None` = 那一项不断）。
+    ///
+    /// `force` 单位 N、`torque` 单位 N·m：每步结束后算一次关节冲量 / dt，
+    /// 超过阈值就把关节**移除**（不是禁用），并记进 [`Self::broken_joints`]。
+    /// 阈值给非有限值等于不设（静默 NaN 阈值会让关节永远断或永不断）。
+    pub fn set_joint_break(
+        &mut self,
+        handle: JointHandle,
+        force: Option<f32>,
+        torque: Option<f32>,
+    ) -> bool {
+        let slot = match self.joints.get_mut(handle.index as usize) {
+            Some(s) if s.generation == handle.generation && s.joint.is_some() => s,
+            _ => return false,
+        };
+        slot.break_force = force.filter(|f| f.is_finite() && *f > 0.0);
+        slot.break_torque = torque.filter(|t| t.is_finite() && *t > 0.0);
+        true
+    }
+
+    /// 读回关节的断裂阈值（编辑器导出、报告都要用）。
+    pub fn joint_break(&self, handle: JointHandle) -> Option<(Option<f32>, Option<f32>)> {
+        let slot = self.joints.get(handle.index as usize)?;
+        if slot.generation != handle.generation || slot.joint.is_none() {
+            return None;
+        }
+        Some((slot.break_force, slot.break_torque))
+    }
+
+    /// 设置关节两端是否互相碰撞（缺省 `false` = 不碰，和 Bullet / PhysX 一致）。
+    ///
+    /// 为什么缺省是不碰：铰链/球窝的两端**物理上就重合在一起**（锚点相同），
+    /// 让它们参与碰撞等于让门和门轴互相挤——表现为"门转到一半卡住""铰链抖"，
+    /// 是新手最常见的坑。想让它们碰（比如"两个球用绳子连着、要能互相弹开"）
+    /// 就把这个开关打开。
+    pub fn set_joint_collide_connected(&mut self, handle: JointHandle, collide: bool) -> bool {
+        match self.joints.get_mut(handle.index as usize) {
+            Some(s) if s.generation == handle.generation && s.joint.is_some() => {
+                s.collide_connected = collide;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 读回关节的"两端是否互相碰撞"。
+    pub fn joint_collide_connected(&self, handle: JointHandle) -> Option<bool> {
+        let slot = self.joints.get(handle.index as usize)?;
+        if slot.generation != handle.generation || slot.joint.is_none() {
+            return None;
+        }
+        Some(slot.collide_connected)
+    }
+
+    /// 这一对刚体之间是否有"不互相碰撞"的关节（见
+    /// [`Self::set_joint_collide_connected`]）。
+    fn joint_blocks_contact(&self, ia: usize, ib: usize) -> bool {
+        self.joints.iter().any(|slot| {
+            !slot.collide_connected
+                && slot.joint.as_ref().is_some_and(|j| {
+                    let (ha, hb) = j.bodies();
+                    let (x, y) = (ha.index as usize, hb.index as usize);
+                    (x == ia && y == ib) || (x == ib && y == ia)
+                })
+        })
+    }
+
+    /// 到目前为止**断掉的关节**（按发生顺序）。
+    ///
+    /// 断掉的关节句柄已经失效（`joint()` 会返回 `None`），这里留下的是"曾经断过"
+    /// 的事实——报告与测试靠它判断"绳子到底断没断"。
+    pub fn broken_joints(&self) -> &[JointHandle] {
+        &self.broken_joints
+    }
+
+    /// 清空断裂记录（报告下一次运行前用）。
+    pub fn clear_broken_joints(&mut self) {
+        self.broken_joints.clear();
     }
 
     // -----------------------------------------------------------------
@@ -958,13 +1057,66 @@ impl PhysicsWorld {
             }
         }
         self.joints = joints;
+        // 12.5 关节断裂：本步约束力量级超过阈值就把关节**移除**
+        //
+        // 放在速度/位置迭代**之后**：断裂的那一步关节仍然正常起作用，所以行为是
+        // "拉到超过阈值才断"，而不是"预测要断就提前松手"。
+        //
+        // 位置也有讲究：必须在 `self.joints = joints` **之后**——求解期间槽位数组被
+        // `mem::take` 借走了，那会儿 `self.joints` 是空的，判定会静默失效。
+        // 只有设了阈值的关节才做这一步（省掉绝大多数场景的一次遍历与一次分配）。
+        if self
+            .joints
+            .iter()
+            .any(|s| s.break_force.is_some() || s.break_torque.is_some())
+        {
+            let magnitudes = self.joint_solver.break_magnitudes(dt);
+            let mut k = 0usize;
+            let mut broken: Vec<JointHandle> = Vec::new();
+            for (index, slot) in self.joints.iter().enumerate() {
+                if slot.joint.is_none() {
+                    continue;
+                }
+                let (force, torque) = magnitudes.get(k).copied().unwrap_or((0.0, 0.0));
+                k += 1;
+                let force_break = slot.break_force.is_some_and(|limit| force > limit);
+                let torque_break = slot.break_torque.is_some_and(|limit| torque > limit);
+                if force_break || torque_break {
+                    broken.push(JointHandle {
+                        index: index as u32,
+                        generation: slot.generation,
+                    });
+                }
+            }
+            for handle in broken {
+                if self.remove_joint(handle) {
+                    self.broken_joints.push(handle);
+                }
+            }
+        }
+
         // 归还复用缓冲（下一步继续用，稳态下不再分配）
         self.scratch_pre_velocities = pre_velocities;
         self.scratch_views = views;
         self.scratch_materials = materials;
         self.scratch_joint_impulses = impulses;
-        // 13. 睡眠
-        solver::update_sleeping(&mut self.bodies, dt, &self.config, &self.islands);
+        // 13. 睡眠（被马达驱动的刚体这一步不睡，见 `update_sleeping` 的说明）
+        let mut actuated = std::mem::take(&mut self.scratch_actuated);
+        actuated.clear();
+        actuated.resize(self.bodies.len(), false);
+        for slot in self.joints.iter() {
+            let driven = slot.joint.as_ref().is_some_and(|j| j.has_active_motor());
+            if driven {
+                let (ha, hb) = slot.joint.as_ref().unwrap().bodies();
+                for h in [ha, hb] {
+                    if let Some(flag) = actuated.get_mut(h.index as usize) {
+                        *flag = true;
+                    }
+                }
+            }
+        }
+        solver::update_sleeping(&mut self.bodies, dt, &self.config, &self.islands, &actuated);
+        self.scratch_actuated = actuated;
         self.step_count += 1;
         if let Some(prev) = lap_at {
             let now = now_seconds();
@@ -1053,6 +1205,12 @@ impl PhysicsWorld {
                 // 分组过滤在宽相已经做过一遍；这里再查一次是因为调用方可以直接改
                 // `body.groups`（宽相用的是本子步开头的快照，中间改了要以当前值为准）。
                 if !a.groups.interacts(b.groups) {
+                    continue;
+                }
+                // 关节两端缺省不互相碰撞（Bullet / PhysX 的 `collide_connected = false`）。
+                // 放在这里而不是宽相：宽相用的是"谁和谁可能碰"的粗筛，
+                // 关节过滤依赖关节表，而关节表在子步里是稳定的。
+                if !self.joints.is_empty() && self.joint_blocks_contact(ia, ib) {
                     continue;
                 }
                 (
@@ -1390,6 +1548,7 @@ mod tests {
             b,
             local_anchor_a: Vec3::ZERO,
             local_anchor_b: Vec3::ZERO,
+            cone_limit: None,
         });
         assert_eq!(w.joint_count(), 1);
         assert!(w.joint(j).is_some());

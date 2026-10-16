@@ -213,7 +213,14 @@ fn export_preserves_sections_the_editor_does_not_model() {
         { "name": "peg", "shape": { "type": "sphere", "radius": 0.25 },
           "position": [0, 4.0, 0], "body": "static" }
       ],
-      "joints": [ { "type": "hinge", "a": "box", "b": "peg", "axis": [0, 1, 0] } ]
+      "joints": [
+        { "type": "hinge", "a": "box", "b": "peg", "axis": [0, 1, 0],
+          "motor_target_deg": 30.0, "motor_stiffness": 10.0, "motor_damping": 2.0,
+          "break_force": 500.0, "break_torque": 12.0 },
+        { "type": "ball", "a": "box", "b": "peg",
+          "cone_limit": { "half_angle_deg": 25.0, "axis_a": [0, 1, 0] },
+          "collide_connected": true }
+      ]
     }"#
     .replace("__TEXTURE__", &texture_json);
 
@@ -244,6 +251,11 @@ fn export_preserves_sections_the_editor_does_not_model() {
         "probe-a",
         "\"joints\"",
         "\"type\": \"hinge\"",
+        // 新增的关节字段：编辑器自己不做这些面板，但**必须原样留着**
+        "\"motor_target_deg\": 30.0",
+        "\"break_force\": 500.0",
+        "\"cone_limit\"",
+        "\"collide_connected\": true",
     ] {
         assert!(
             saved.json.contains(needle),
