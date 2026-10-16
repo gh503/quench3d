@@ -1161,7 +1161,7 @@ pub struct ActionDoc {
     /// 第几秒开始施加（与 `at_step` 互斥）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_time: Option<f32>,
-    /// 作用量：冲量/力/速度/角冲量的 [x,y,z]。
+    /// 作用量：冲量/力/速度/角冲量的 `[x,y,z]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<[f32; 3]>,
     /// 世界坐标的作用点，仅 `impulse_at_point` 用。
@@ -1212,7 +1212,7 @@ pub struct ProbeDoc {
     /// 球形半径，缺省 1.0。
     #[serde(default = "default_probe_radius")]
     pub radius: f32,
-    /// 盒形边长，缺省 [1,1,1]。
+    /// 盒形边长，缺省 `[1,1,1]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 3]>,
     /// 只观测这些刚体（缺省观测全部 dynamic / kinematic 刚体）。

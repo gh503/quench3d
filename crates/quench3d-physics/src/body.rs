@@ -26,7 +26,7 @@ pub enum BodyType {
 ///
 /// 注意 `memberships` 缺省**不是** `ALL`：`ALL` 表示"32 个层都是我的成员"，
 /// 那样一个只想碰第 5 层的过滤体（`filter = 1 << 5`）反而会把它当成同类。
-/// 想要"在所有层里"就显式用 [`InteractionGroups::all`]。
+/// 想要"在所有层里"就显式用 `InteractionGroups::all`。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct InteractionGroups {
     /// 自己属于哪些层（位掩码）。
@@ -581,7 +581,7 @@ impl RigidBody {
     ///   只想"别再算了"但保留速度，请用 [`Self::set_linear_velocity`] 先记下来；
     /// * `allow_sleep == false` 的刚体**睡不住**：下一次 `step` 就会被 `update_sleeping`
     ///   重新置为清醒（"不允许睡眠"是硬承诺，手动 `sleep()` 也推翻不了它）；
-    /// * 别人撞上来（或 [`PhysicsWorld::wake_up_all`]）会把它唤醒。
+    /// * 别人撞上来（或 `PhysicsWorld::wake_up_all`）会把它唤醒。
     pub fn sleep(&mut self) {
         self.sleeping = true;
         self.sleep_timer = 0.0;

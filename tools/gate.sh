@@ -62,6 +62,14 @@ else
   tail -n 30 "$LOG_DIR/gate-clippy-wasm.log"
 fi
 
+step "cargo doc（-D warnings）"
+if RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace >"$LOG_DIR/gate-doc.log" 2>&1; then
+  ok doc
+else
+  bad doc
+  tail -n 20 "$LOG_DIR/gate-doc.log"
+fi
+
 step "测试（全部 crate）"
 if cargo test --workspace >"$LOG_DIR/gate-test.log" 2>&1; then
   ok tests
