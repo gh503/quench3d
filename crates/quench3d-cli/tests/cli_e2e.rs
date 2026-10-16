@@ -3909,3 +3909,114 @@ fn camera_flag_reports_unknown_names_without_touching_the_gpu() {
     ]);
     assert_ne!(ok.code, 2, "default 不该报 unknown_camera：{}", ok.stdout);
 }
+
+/// 多输出（gap #16 第 3、4 步）：`render.outputs[]` 要在**写任何东西之前**把每张的
+/// 目标路径与尺寸说清楚；`--no-clobber` 必须整体先查，不能留下半套文件。
+///
+/// 全部走 `--dry-run`：不需要显卡，CI 上也能跑。
+#[test]
+fn multiple_render_outputs_resolve_before_writing_and_honour_no_clobber() {
+    let dir = temp_dir("multi_output");
+    let shots = dir.join("shots");
+    let path = dir.join("s.json");
+    let scene = format!(
+        r#"{{
+            "format": "quench3d.scene", "version": 2, "name": "多输出",
+            "ground": {{ "size": 10 }},
+            "camera": {{ "position": [7, 4.5, 8], "look_at": [0, 1, 0] }},
+            "cameras": {{ "俯视": {{ "position": [0, 9, 0.1], "look_at": [0, 1, 0], "fov_deg": 35 }} }},
+            "render": {{
+                "output": {out},
+                "width": 100, "height": 50,
+                "outputs": [
+                    {{ "name": "a", "width": 320, "height": 200 }},
+                    {{ "name": "b", "camera": "俯视", "width": 640, "height": 400 }}
+                ]
+            }}
+        }}"#,
+        out = serde_json::to_string(&shots.join("shot.png")).unwrap()
+    );
+    std::fs::write(&path, scene).unwrap();
+
+    let r = run(&["render", path.to_str().unwrap(), "--dry-run", "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let v = r.json();
+    let d = &v["data"];
+    assert_eq!(d["dry_run"], true);
+    let outs = d["outputs"].as_array().expect("要有 outputs 明细");
+    assert_eq!(outs.len(), 2, "两张都要报出来：{d}");
+    assert_eq!(outs[0]["name"], "a");
+    assert_eq!(outs[0]["width"], 320);
+    assert_eq!(outs[0]["height"], 200);
+    assert!(
+        outs[0]["output"]
+            .as_str()
+            .unwrap()
+            .ends_with("/shots/shot-a.png"),
+        "第一张写到目录里：{}",
+        outs[0]["output"]
+    );
+    assert_eq!(outs[1]["name"], "b");
+    assert_eq!(outs[1]["width"], 640, "每张自己的尺寸");
+    assert_eq!(outs[1]["height"], 400);
+    assert!(
+        outs[1]["output"]
+            .as_str()
+            .unwrap()
+            .ends_with("/shots/shot-b.png"),
+        "带扩展名的 output 当前缀：{}",
+        outs[1]["output"]
+    );
+    let would: Vec<&str> = d["would_write"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert_eq!(would.len(), 2, "两张都该在 would_write 里：{would:?}");
+    assert!(!shots.exists(), "--dry-run 不该建目录/写盘");
+
+    // --no-clobber：任一目标已存在 → 整体退出 2，且**另一张**也不能被写出来
+    std::fs::create_dir_all(&shots).unwrap();
+    std::fs::write(shots.join("shot-a.png"), b"x").unwrap();
+    let r = run(&[
+        "render",
+        path.to_str().unwrap(),
+        "--dry-run",
+        "--no-clobber",
+        "--json",
+    ]);
+    assert_eq!(r.code, 2, "已存在要报 2：{}", r.stdout);
+    let v = r.json();
+    assert_eq!(v["error"]["kind"], "output_exists");
+    assert!(
+        v["error"]["path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("shot-a.png"),
+        "要说清是哪个目标：{}",
+        v["error"]
+    );
+    assert!(!shots.join("shot-b.png").exists(), "整体先查：不该留下半套");
+
+    // 向后兼容：没写 outputs 的场景，报告里没有 outputs 字段，would_write 只有那一个
+    let plain = dir.join("plain.json");
+    std::fs::write(
+        &plain,
+        format!(
+            r#"{{"format":"quench3d.scene","version":2,"ground":{{"size":10}},
+                "render":{{"output":{out},"width":64,"height":32}}}}"#,
+            out = serde_json::to_string(&dir.join("one.png")).unwrap()
+        ),
+    )
+    .unwrap();
+    let r = run(&["render", plain.to_str().unwrap(), "--dry-run", "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let v = r.json();
+    assert!(
+        v["data"].get("outputs").is_none(),
+        "老场景不该多出 outputs 字段：{}",
+        v["data"]
+    );
+    assert_eq!(v["data"]["would_write"].as_array().unwrap().len(), 1);
+}

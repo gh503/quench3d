@@ -214,6 +214,21 @@ pub struct Trajectory {
 /// 默认每条轨迹最多采样多少个点。
 pub const MAX_TRACE_SAMPLES: usize = 4000;
 
+/// `render.outputs[]` 里一张图的产出明细。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputReport {
+    /// 名字（`render.outputs[].name`，缺省 `out-<序号>`）。
+    pub name: String,
+    /// 实际写出的路径。
+    pub output: String,
+    /// 这一张的宽度。
+    pub width: u32,
+    /// 这一张的高度。
+    pub height: u32,
+    /// 字节数（`--dry-run` 时为 0）。
+    pub bytes: u64,
+}
+
 /// 渲染报告。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderReport {
@@ -258,6 +273,9 @@ pub struct RenderReport {
     pub would_write: Vec<String>,
     /// 总耗时（毫秒）。
     pub elapsed_ms: u64,
+    /// 一次渲多张时的明细（不写 `render.outputs` 时为空，老报告一个字不变）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<OutputReport>,
 }
 
 /// serde 辅助：`false` 不序列化（保证缺省行为下 JSON 逐字节不变）。
@@ -2674,7 +2692,87 @@ fn apply_camera(engine: &mut Engine, doc: &SceneDoc) {
 }
 
 /// 渲染场景并写 PNG。
+/// 渲染入口：写了 `render.outputs` 就一次渲多张，否则与老行为**逐位一致**。
 pub fn run_render(
+    doc: &SceneDoc,
+    output_override: Option<&std::path::Path>,
+    policy: OutputPolicy,
+) -> Result<RenderReport, RunError> {
+    if doc.render.outputs.is_empty() {
+        return run_render_single(doc, output_override, policy);
+    }
+    // 多输出：先把全部目标算清楚，再**统一**做 no-clobber 检查——
+    // 否则可能出现"渲了三张、第四张已存在"，留下半套文件。
+    let base = output_override
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| doc.render.output.clone());
+    // `render.output` 怎么写，决定多出来的那几张放哪：
+    // * 带扩展名（`shots/shot.png`）→ 当**前缀**：`shots/shot-a.png`；
+    // * 不带扩展名或以分隔符结尾（`shots/`）→ 当**目录**：`shots/a.png`。
+    // 这样"一张图"和"多张图"的输出位置是同一个意图，不需要用户再学一套规则。
+    let lossy = base.to_string_lossy().to_string();
+    let base_is_dir = base.extension().is_none() || lossy.ends_with('/') || lossy.ends_with('\\');
+    let parent = base.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let single_unnamed = doc.render.outputs.len() == 1 && doc.render.outputs[0].name.is_none();
+    let mut targets = Vec::with_capacity(doc.render.outputs.len());
+    for (i, o) in doc.render.outputs.iter().enumerate() {
+        let name = o.name.clone().unwrap_or_else(|| format!("out-{}", i + 1));
+        let path = if single_unnamed {
+            base.clone()
+        } else if base_is_dir {
+            base.join(format!("{name}.png"))
+        } else {
+            parent.join(format!("{stem}-{name}.png"))
+        };
+        targets.push((name, path, o.camera.clone(), o.width, o.height));
+    }
+    if policy.no_clobber {
+        for (_, path, _, _, _) in &targets {
+            if path.exists() {
+                return Err(RunError::output_exists(path));
+            }
+        }
+    }
+    let mut reports = Vec::with_capacity(targets.len());
+    let mut first: Option<RenderReport> = None;
+    for (name, path, camera, width, height) in targets {
+        let mut one = doc.clone();
+        one.render.output = path.clone();
+        one.render.outputs.clear(); // 防止递归
+        if let Some(w) = width {
+            one.render.width = w;
+        }
+        if let Some(h) = height {
+            one.render.height = h;
+        }
+        if let Some(cam) = camera {
+            one.select_camera(&cam).map_err(RunError::scene)?;
+        }
+        let r = run_render_single(&one, None, policy)?;
+        reports.push(OutputReport {
+            name,
+            output: r.output.clone(),
+            width: r.width,
+            height: r.height,
+            bytes: r.bytes,
+        });
+        if first.is_none() {
+            first = Some(r);
+        }
+    }
+    let mut agg = first.ok_or_else(|| RunError::scene("render.outputs 是空的"))?;
+    agg.output = reports[0].output.clone();
+    agg.bytes = reports.iter().map(|o| o.bytes).sum();
+    agg.would_write = reports.iter().map(|o| o.output.clone()).collect();
+    agg.outputs = reports;
+    Ok(agg)
+}
+
+fn run_render_single(
     doc: &SceneDoc,
     output_override: Option<&std::path::Path>,
     policy: OutputPolicy,
@@ -2733,6 +2831,7 @@ pub fn run_render(
             simulate: sim,
             dry_run: true,
             would_write: vec![output.display().to_string()],
+            outputs: Vec::new(),
             elapsed_ms: started.elapsed().as_millis() as u64,
         });
     }
@@ -2814,6 +2913,7 @@ pub fn run_render(
         simulate: sim,
         dry_run: false,
         would_write: Vec::new(),
+        outputs: Vec::new(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }

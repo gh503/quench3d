@@ -722,8 +722,12 @@ pub fn json_schema() -> Value {
     );
     defs.insert("simulate".into(), def(&["steps", "dt"]));
     defs.insert(
+        "renderOutput".into(),
+        def(&["name", "camera", "width", "height"]),
+    );
+    defs.insert(
         "render".into(),
-        def(&["output", "width", "height", "msaa", "enabled"]),
+        def(&["output", "width", "height", "msaa", "enabled", "outputs"]),
     );
     defs.insert(
         "scene".into(),
@@ -1075,6 +1079,7 @@ mod tests {
             ("PhysicsDoc", "physics"),
             ("SimulateDoc", "simulate"),
             ("RenderDoc", "render"),
+            ("OutputDoc", "renderOutput"),
         ] {
             let fields: Vec<String> = struct_fields(src, sname)
                 .into_iter()

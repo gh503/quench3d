@@ -1510,6 +1510,25 @@ impl Default for SimulateDoc {
     }
 }
 
+/// `render.outputs[]` 的一项：一次渲染多张图时，每张自己的名字 / 相机 / 尺寸。
+///
+/// 缺省（不写 `render.outputs`）就是老行为：只渲 `render.output` 一张。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputDoc {
+    /// 文件名（不含扩展名，默认 `out-<序号>`）。只当 `render.output` 是目录时用得上。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 用哪台命名相机（见 `cameras`）；缺省用 `camera` 段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera: Option<String>,
+    /// 这一张的宽度（缺省用 `render.width`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// 这一张的高度（缺省用 `render.height`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
 /// 渲染配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1526,6 +1545,13 @@ pub struct RenderDoc {
     /// MSAA 采样数，缺省 4。
     #[serde(default = "default_msaa")]
     pub msaa: u32,
+    /// 一次渲多张：每项自己的名字 / 相机 / 尺寸。
+    ///
+    /// 空 = 老行为（只渲 `output` 一张）。写了它，`output` 就当**目录**用，
+    /// 文件名 = `name`（缺省 `out-<序号>`）+ `.png`；只写一项且没给 `name` 时
+    /// 仍然直接用 `output` 那个路径（与旧场景逐位一致）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<OutputDoc>,
     /// 是否渲染（false 时只做仿真，不出图）。
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1555,6 +1581,7 @@ impl Default for RenderDoc {
             height: default_height(),
             msaa: default_msaa(),
             enabled: true,
+            outputs: Vec::new(),
         }
     }
 }
@@ -1643,6 +1670,11 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     check_section::<LightingDoc>(map.get("lighting"), "lighting", &mut out);
     check_section::<SimulateDoc>(map.get("simulate"), "simulate", &mut out);
     check_section::<RenderDoc>(map.get("render"), "render", &mut out);
+    // `outputs` 在 render 段内部，逐项走一遍（结构体的 deny_unknown_fields 只挡名字，
+    // 值的类型要这里查）
+    if let Some(render) = map.get("render").and_then(|v| v.as_object()) {
+        check_section::<Vec<OutputDoc>>(render.get("outputs"), "render.outputs", &mut out);
+    }
 
     // 模板段：字段集与物体完全相同（用同一个检查器，路径 `templates.名`）
     check_section::<BTreeMap<String, ObjectDoc>>(map.get("templates"), "templates", &mut out);
@@ -2058,6 +2090,46 @@ impl SceneDoc {
         }
         if !cam_diags.is_empty() {
             return cam_diags;
+        }
+        // `render.outputs`：名字不能重复/带路径分隔符，相机必须存在，宽高不能为 0。
+        // 这些都会让"一次渲多张"产出用户没预期的文件，属于值得当场拦下的错误。
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, o) in self.render.outputs.iter().enumerate() {
+            if let Some(name) = &o.name {
+                if name.trim().is_empty() {
+                    cam_diags.push(Diagnostic::error(
+                        "render.outputs",
+                        "输出名字不能为空（要么不写，要么给个名字）",
+                    ));
+                }
+                if name.contains('/') || name.contains('\\') || name.contains("..") {
+                    cam_diags.push(Diagnostic::error(
+                        "render.outputs",
+                        "输出名字不能含路径分隔符或 `..`（它就是文件名）",
+                    ));
+                }
+                if seen.contains(&name.as_str()) {
+                    cam_diags.push(Diagnostic::error(
+                        "render.outputs",
+                        "输出名字重复了（会互相覆盖）",
+                    ));
+                }
+                seen.push(name.as_str());
+            }
+            if let Some(cam) = &o.camera {
+                if cam != "default" && !self.cameras.contains_key(cam) {
+                    cam_diags.push(Diagnostic::error(
+                        "render.outputs",
+                        "这一项指定的相机不存在（见 `cameras` 段，或用 `default` 指 `camera` 段）",
+                    ));
+                }
+            }
+            for v in [o.width, o.height].into_iter().flatten() {
+                if v == 0 {
+                    cam_diags.push(Diagnostic::error("render.outputs", "宽/高不能为 0"));
+                }
+            }
+            let _ = i;
         }
         // 有模板/实例时：先在**声明的**文档上做结构检查（引用、实例、名字、未用模板），
         // 再把其余一切交给展开后的文档验一遍。这样每条问题只报一次，
