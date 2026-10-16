@@ -487,6 +487,7 @@ mod local_light_doc_tests {
             color: Vec3::new(0.9, 0.8, 0.7),
             intensity: 12.5,
             radius: 20.0,
+            cast_shadows: false,
         };
         let docs = point_light_docs(std::slice::from_ref(&point)).expect("有点光就该写");
         assert_eq!(docs.len(), 1);
@@ -494,6 +495,10 @@ mod local_light_doc_tests {
         assert_eq!(docs[0].color, [0.9, 0.8, 0.7]);
         assert_eq!(docs[0].intensity, 12.5);
         assert_eq!(docs[0].radius, 20.0);
+        assert_eq!(
+            docs[0].cast_shadows, None,
+            "没勾投影不许写这个字段（老场景存盘后要逐字节相同）"
+        );
 
         let spot = quench3d::render::SpotLight::new(
             Vec3::new(0.0, 9.0, 0.0),
@@ -569,9 +574,45 @@ mod local_light_doc_tests {
         assert_eq!(spots[0].cast_shadows, None);
         assert_eq!(spots[1].cast_shadows, Some(true));
     }
+
+    /// 点光源的投影开关同样必须能原样往返（它决定了 CLI 渲出来的画面有没有影子）。
+    #[test]
+    fn point_shadow_switch_survives_the_round_trip() {
+        let base = quench3d::render::PointLight::new(
+            Vec3::new(0.0, 3.0, 0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            60.0,
+            30.0,
+        );
+        let caster = base.with_cast_shadows(true);
+        let docs = point_light_docs(&[base, caster]).expect("有点光就该写");
+        assert_eq!(docs[0].cast_shadows, None);
+        assert_eq!(docs[1].cast_shadows, Some(true));
+
+        // 写进场景 JSON → 读回来，两步都不能丢（走 CLI 的同一份序列化）
+        let mut doc = quench3d_cli::scene_doc::SceneDoc::default();
+        doc.lighting.point_lights = Some(docs);
+        let text = doc.to_json_pretty();
+        assert!(
+            text.contains("\"cast_shadows\": true"),
+            "勾了投影的场景存盘文本里必须有它: {text}"
+        );
+        assert_eq!(
+            text.matches("cast_shadows").count(),
+            1,
+            "没勾的那盏不许写出这个字段: {text}"
+        );
+        let back = quench3d_cli::scene_doc::SceneDoc::from_json(&text).unwrap();
+        let points = back.lighting.point_lights.expect("点光还在");
+        assert_eq!(points[0].cast_shadows, None);
+        assert_eq!(points[1].cast_shadows, Some(true));
+    }
 }
 
 /// 引擎里的点光源 → 场景文档。空 = `None`（不写这一节）。
+///
+/// `cast_shadows` 同样只在**为真**时写进文档：不写就是 `false`（老行为），
+/// 这样"编辑器里没勾过投影"的场景存盘后与打开前逐字节相同。
 pub(crate) fn point_light_docs(
     lights: &[quench3d::render::PointLight],
 ) -> Option<Vec<quench3d_cli::scene_doc::PointLightDoc>> {
@@ -586,6 +627,7 @@ pub(crate) fn point_light_docs(
                 color: p.color.to_array(),
                 intensity: p.intensity,
                 radius: p.radius,
+                cast_shadows: if p.cast_shadows { Some(true) } else { None },
             })
             .collect(),
     )

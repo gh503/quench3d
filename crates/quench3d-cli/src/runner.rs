@@ -20,8 +20,8 @@ use quench3d::render::RenderStats;
 use serde::{Deserialize, Serialize};
 
 use crate::scene_doc::{
-    arr, v3, ActionKind, BodyKind, JointDoc, JointKind, MaterialDoc, ProbeDoc, ProbeShapeDoc,
-    SceneDoc, ShapeDoc, ShapeKind, SpotLightDoc,
+    arr, v3, ActionKind, BodyKind, JointDoc, JointKind, MaterialDoc, PointLightDoc, ProbeDoc,
+    ProbeShapeDoc, SceneDoc, ShapeDoc, ShapeKind, SpotLightDoc,
 };
 
 /// 运行期错误。
@@ -2894,15 +2894,7 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
     // 点光源：预设会整体替换 lighting，所以放在最后覆盖。
     // 注意"没写"与"写了空数组"是两种意思：前者保留预设的补光，后者才是显式清空。
     if let Some(lights) = &l.point_lights {
-        lighting.point_lights = lights
-            .iter()
-            .map(|p| PointLight {
-                position: v3(p.position),
-                color: Vec3::new(p.color[0], p.color[1], p.color[2]),
-                intensity: p.intensity,
-                radius: p.radius,
-            })
-            .collect();
+        lighting.point_lights = lights.iter().map(point_light_from_doc).collect();
     }
     // 聚光灯：与点光源**共享**局部光名额（点光源优先），所以也放在最后覆盖。
     // 不写 = 没有聚光灯（预设里也没有），写 [] 同样是空——这里两种情况行为一致。
@@ -2910,6 +2902,21 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
     if let Some(lights) = &l.spot_lights {
         lighting.spot_lights = lights.iter().map(spot_light_from_doc).collect();
     }
+}
+
+/// 单盏点光源：场景文档 → 引擎。
+///
+/// 与 [`spot_light_from_doc`] 同一个理由抽成纯函数：映射少一个字段，画面上只是
+/// "投影/位置有点不对"，靠眼睛看不出来（第 53 轮的教训）。
+pub fn point_light_from_doc(p: &PointLightDoc) -> PointLight {
+    PointLight::new(
+        v3(p.position),
+        Vec3::new(p.color[0], p.color[1], p.color[2]),
+        p.intensity,
+        p.radius,
+    )
+    // 缺省 false = 老场景（那时没有这个字段）的像素逐位不变
+    .with_cast_shadows(p.cast_shadows.unwrap_or(false))
 }
 
 /// 单盏聚光灯：场景文档 → 引擎。
@@ -3798,6 +3805,38 @@ pub fn run_doctor() -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 文档 → 引擎：点光源的每个字段都要落到引擎里，尤其是**投影开关**。
+    ///
+    /// 与聚光灯那条同形状：纯映射、不需要显卡，所以 CI 也会跑。
+    #[test]
+    fn point_light_doc_maps_every_field_into_the_engine() {
+        let doc = PointLightDoc {
+            position: [1.0, 9.0, -2.0],
+            color: [0.9, 0.8, 0.7],
+            intensity: 30.0,
+            radius: 40.0,
+            cast_shadows: Some(true),
+        };
+        let light = point_light_from_doc(&doc);
+        assert_eq!(light.position, Vec3::new(1.0, 9.0, -2.0));
+        assert_eq!(light.color, Vec3::new(0.9, 0.8, 0.7));
+        assert_eq!(light.intensity, 30.0);
+        assert_eq!(light.radius, 40.0);
+        assert!(light.cast_shadows, "文档里勾了投影，引擎里必须也是 true");
+
+        // 缺省（不写这个字段）= 不投影：老场景的像素必须逐位不变
+        let plain = PointLightDoc {
+            cast_shadows: None,
+            ..doc
+        };
+        assert!(!point_light_from_doc(&plain).cast_shadows);
+        let explicit = PointLightDoc {
+            cast_shadows: Some(false),
+            ..doc
+        };
+        assert!(!point_light_from_doc(&explicit).cast_shadows);
+    }
 
     /// 文档 → 引擎：聚光灯的每个字段都要落到引擎里，尤其是**投影开关**。
     ///
