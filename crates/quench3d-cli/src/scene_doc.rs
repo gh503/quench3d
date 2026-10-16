@@ -1375,6 +1375,16 @@ pub struct PointLightDoc {
     /// 影响半径（米），缺省 18，必须为正。
     #[serde(default = "default_light_radius")]
     pub radius: f32,
+    /// 是否投射阴影，缺省 **false**（不写 = 老的"只照亮、不投影"，像素逐位不变）。
+    ///
+    /// 整帧**只支持一盏**投影点光源：多盏同时要求投影时，按 `point_lights` 的顺序取
+    /// **第一盏**（规则见 `quench3d_render::point_shadow::pick_point_shadow`），
+    /// 校验会给一条警告说明实际用的是哪一盏。
+    ///
+    /// 点光源阴影与聚光灯阴影是**两套独立资源**（6 层深度数组 vs 一张 2D 图），
+    /// 所以"一盏投影点光源 + 一盏投影聚光灯"可以同时存在。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_shadows: Option<bool>,
 }
 
 /// 聚光灯：有方向的局部光，只照一个圆锥。
@@ -1407,7 +1417,10 @@ pub struct SpotLightDoc {
     ///
     /// 整帧**只支持一盏**投影聚光灯：多盏同时要求投影时，按 `spot_lights` 的顺序取
     /// **第一盏**（规则见 `quench3d_render::spot_shadow::pick_spot_shadow`），
-    /// 校验会给一条警告说明实际用的是哪一盏。点光源仍然不投影。
+    /// 校验会给一条警告说明实际用的是哪一盏。
+    ///
+    /// 点光源的投影是**另一套资源**（6 面立方体深度数组，见
+    /// [`PointLightDoc::cast_shadows`]），所以两边各有一盏互不影响。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_shadows: Option<bool>,
 }
@@ -2730,6 +2743,42 @@ impl SceneDoc {
                 )
                 .with_hint("把远处的灯删掉，或把它们烘进自发光材质里"),
             );
+        }
+        // 点光源阴影：整帧只支持一盏（6 个面共用一张深度数组）。
+        // 与聚光灯那条同形状，只是路径/名额不同——点光源**优先**占名额，所以
+        // "被挤掉"只可能发生在"它自己排在第 9 盏以上"这一种情况。
+        let point_casters: Vec<usize> = point_lights
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.cast_shadows == Some(true))
+            .map(|(i, _)| i)
+            .collect();
+        if point_casters.len() > 1 {
+            out.push(
+                Diagnostic::warn(
+                    format!("lighting.point_lights[{}].cast_shadows", point_casters[0]),
+                    format!(
+                        "有 {} 盏点光源要求投影，但引擎只支持一盏：实际投影的是 point_lights[{}]（第一盏要求投影的），其余照常照明但不投影",
+                        point_casters.len(),
+                        point_casters[0]
+                    ),
+                )
+                .with_hint("把其余点光源的 cast_shadows 改成 false，或把它们合并成一盏"),
+            );
+        }
+        if let Some(&first) = point_casters.first() {
+            if first >= MAX_POINT_LIGHTS {
+                out.push(
+                    Diagnostic::warn(
+                        format!("lighting.point_lights[{first}].cast_shadows"),
+                        format!(
+                            "这一盏排在第 {} 个局部光名额（一共只有 {MAX_POINT_LIGHTS} 个），它既不会照明也不会投影",
+                            first + 1
+                        ),
+                    )
+                    .with_hint("减少点光源数量，或把这一盏挪到 point_lights 前面"),
+                );
+            }
         }
         // 聚光阴影：整帧只支持一盏（一张 2D 阴影图只能对应一个视锥）。
         // 说清"实际会用哪一盏"——否则用户勾了三盏、只亮一盏，只能靠猜。
@@ -5546,6 +5595,86 @@ mod tests {
         // 存盘文本里也不该冒出这个字段（不写 = 老行为）
         assert!(!old.to_json_pretty().contains("cast_shadows"));
         assert!(old.lighting.spot_lights.as_ref().unwrap()[0]
+            .cast_shadows
+            .is_none());
+    }
+
+    /// 点光阴影：与聚光那条同形状，但**名额规则相反**——点光源优先占名额，
+    /// 所以"被挤掉"只可能是"它自己排在第 9 盏以上"。
+    #[test]
+    fn point_shadow_validation_allows_only_one_caster_and_says_which() {
+        let one = SceneDoc::from_value(json!({ "lighting": { "point_lights": [
+            { "position": [0.0, 3.0, 0.0], "cast_shadows": true } ] } }))
+        .unwrap();
+        let d = one.validate();
+        assert!(
+            d.iter().all(|x| x.severity != Severity::Warning),
+            "一盏投影点光源应当完全合法、也没有警告：{d:?}"
+        );
+
+        // 两盏都勾：警告落在**第一盏**上，并指出实际用的是它
+        let two = SceneDoc::from_value(json!({ "lighting": { "point_lights": [
+            { "position": [0.0, 3.0, 0.0] },
+            { "position": [3.0, 3.0, 0.0], "cast_shadows": true },
+            { "position": [6.0, 3.0, 0.0], "cast_shadows": true } ] } }))
+        .unwrap();
+        let d = two.validate();
+        let w = d
+            .iter()
+            .find(|x| x.severity == Severity::Warning && x.path.ends_with("cast_shadows"))
+            .unwrap_or_else(|| panic!("两盏要求投影必须警告：{d:?}"));
+        assert_eq!(
+            w.path, "lighting.point_lights[1].cast_shadows",
+            "警告要落在实际投影的那一盏上：{d:?}"
+        );
+        assert!(
+            w.message.contains("point_lights[1]"),
+            "警告里必须写清用哪一盏：{}",
+            w.message
+        );
+        assert!(w.hint.is_some(), "要给一条可执行的建议");
+
+        // 排在名额之外（第 9 盏）要求投影：它既不会照明也不会投影
+        let mut lights: Vec<serde_json::Value> = (0..8)
+            .map(|i| json!({ "position": [i as f32, 3.0, 0.0] }))
+            .collect();
+        lights.push(json!({ "position": [9.0, 3.0, 0.0], "cast_shadows": true }));
+        let starved =
+            SceneDoc::from_value(json!({ "lighting": { "point_lights": lights } })).unwrap();
+        let d = starved.validate();
+        assert!(
+            d.iter().any(|x| x.severity == Severity::Warning
+                && x.path == "lighting.point_lights[8].cast_shadows"
+                && x.message.contains("名额")),
+            "名额外的投影点光源必须单独警告：{d:?}"
+        );
+
+        // 点光 + 聚光各自投影：两套阴影图互不影响，各自一盏都不该有"多盏"警告
+        let both = SceneDoc::from_value(json!({ "lighting": {
+            "point_lights": [ { "position": [0.0, 3.0, 0.0], "cast_shadows": true } ],
+            "spot_lights": [ { "position": [0.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0],
+                               "cast_shadows": true } ] } }))
+        .unwrap();
+        let d = both.validate();
+        assert!(
+            d.iter().all(|x| x.severity != Severity::Warning),
+            "一盏投影点光 + 一盏投影聚光是允许的组合：{d:?}"
+        );
+
+        // 老场景（不写这个字段）= 不投影、零警告、零错误、存盘文本里不冒出这个字段
+        let old = SceneDoc::from_value(json!({ "lighting": { "point_lights": [
+            { "position": [0.0, 3.0, 0.0] },
+            { "position": [3.0, 3.0, 0.0] } ] } }))
+        .unwrap();
+        assert!(
+            old.validate()
+                .iter()
+                .all(|x| x.severity != Severity::Warning),
+            "不写 cast_shadows 的老场景不许多出任何警告：{:?}",
+            old.validate()
+        );
+        assert!(!old.to_json_pretty().contains("cast_shadows"));
+        assert!(old.lighting.point_lights.as_ref().unwrap()[0]
             .cast_shadows
             .is_none());
     }

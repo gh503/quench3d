@@ -631,6 +631,9 @@ fn draw_parent_picker(
 /// 方向光只有一盏，局部光是**一组**：这里做列表编辑。落在 `engine.scene.lighting` 上，
 /// 存盘由 `scene_io` 从引擎写回，所以编辑器里调的和 `quench3d render` 用的是同一组灯。
 /// 点光源与聚光灯**共享**每帧 8 盏的名额（点光源优先），超出的会在 CLI 校验里给警告。
+///
+/// 投影：点光源（6 面立方体阴影）与聚光灯（一张 2D 图）是**两套独立资源**，
+/// 各自整帧只支持一盏 —— 所以勾上一盏点光不会把聚光灯的勾去掉（反之亦然）。
 fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
     let lights = &mut engine.scene.lighting;
     let total = lights.point_lights.len() + lights.spot_lights.len();
@@ -640,6 +643,9 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
         quench3d::render::MAX_POINT_LIGHTS
     ));
     let mut remove_point = None;
+    // 点光源也是整帧只有一盏投影：勾上某一盏之后把其它点光源的勾取消掉
+    // （聚光灯那边同理，但两套阴影图互不影响，所以两个"保留谁"是分开的）。
+    let mut keep_point_caster: Option<usize> = None;
     for (i, p) in lights.point_lights.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             ui.label(format!("#{} 点光", i + 1));
@@ -672,10 +678,33 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
                         .prefix("半径 "),
                 )
                 .changed();
+            let mut shadows = p.cast_shadows;
+            if ui
+                .checkbox(&mut shadows, "投影")
+                .on_hover_text(
+                    "整帧只支持一盏投影点光源：勾上这一盏会自动取消其它点光源的勾选。\
+                     用的是 6 个 90° 面的深度数组（立方体阴影），与聚光灯那张 2D 图互不影响。",
+                )
+                .changed()
+            {
+                p.cast_shadows = shadows;
+                if shadows {
+                    keep_point_caster = Some(i);
+                }
+                *changed = true;
+            }
             if ui.small_button("删").clicked() {
                 remove_point = Some(i);
             }
         });
+    }
+    if let Some(keep) = keep_point_caster {
+        for (j, other) in lights.point_lights.iter_mut().enumerate() {
+            if j != keep && other.cast_shadows {
+                other.cast_shadows = false;
+                *changed = true;
+            }
+        }
     }
     if let Some(i) = remove_point {
         lights.point_lights.remove(i);
@@ -731,7 +760,7 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
                 .checkbox(&mut shadows, "投影")
                 .on_hover_text(
                     "整帧只支持一盏投影聚光灯：勾上这一盏会自动取消其它聚光灯的勾选。\
-                     点光源仍然不投影（立方体阴影图没做）。",
+                     点光源是另一套阴影图（6 面），两边各自只支持一盏、互不影响。",
                 )
                 .changed()
             {
@@ -803,6 +832,8 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
                 color: Vec3::new(1.0, 1.0, 1.0),
                 intensity: 12.0,
                 radius: 18.0,
+                // 新加的灯缺省不投影（与 `PointLight::new` 一致）
+                cast_shadows: false,
             });
             *changed = true;
         }

@@ -48,6 +48,7 @@ pub mod light;
 pub mod lines;
 pub mod material;
 pub mod mesh;
+pub mod point_shadow;
 pub mod renderer;
 pub mod spot_shadow;
 pub mod texture;
@@ -64,6 +65,10 @@ pub use context::{FrameError, GpuContext, GpuInitError, GpuOptions, OffscreenTar
 pub use lines::{DebugLines, LineVertex};
 pub use material::{MaterialDesc, MaterialId, MeshId, TextureId};
 pub use mesh::{MeshData, Vertex};
+pub use point_shadow::{
+    pick_point_shadow, plan_point_shadow, point_shadow_camera, PointShadowCamera, PointShadowPlan,
+    POINT_SHADOW_FACES,
+};
 pub use renderer::{
     BloomOptions, FxaaOptions, InstanceDesc, MaterialTextureSlot, RenderStats, Renderer,
     RendererOptions, SsaoOptions, DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,

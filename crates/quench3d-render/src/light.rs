@@ -94,6 +94,13 @@ impl DirectionalLight {
 }
 
 /// 点光源（最多 [`MAX_POINT_LIGHTS`] 个参与着色）。
+///
+/// **投影**：`cast_shadows` 缺省 `false`（老场景逐像素不变）。整帧**只支持一盏**投影
+/// 点光源——选择规则见 [`crate::point_shadow::pick_point_shadow`]："第一盏
+/// `cast_shadows == true` 的点光源"（点光源排在局部光名额最前面，所以只有排在第
+/// [`MAX_POINT_LIGHTS`] 盏及以后的才会被名额挤掉，这时它既不照明也不投影）。
+/// 用的是 6 个 90° 面的深度数组（立方体阴影），与聚光灯那张 2D 图是**两套独立资源**，
+/// 所以"一盏投影点光源 + 一盏投影聚光灯"可以同时存在。
 #[derive(Clone, Copy, Debug)]
 pub struct PointLight {
     /// 世界坐标。
@@ -104,6 +111,8 @@ pub struct PointLight {
     pub intensity: f32,
     /// 影响半径（在此距离衰减到 0）。
     pub radius: f32,
+    /// 是否投射阴影（缺省 false = 与加这个功能之前逐像素相同）。
+    pub cast_shadows: bool,
 }
 
 /// 聚光灯：位置 + 指向 + 一个圆锥（内锥全强度、外锥外无光）。
@@ -115,7 +124,8 @@ pub struct PointLight {
 /// **投影**：`cast_shadows` 缺省 `false`（老场景逐像素不变）。整帧**只支持一盏**投影
 /// 聚光灯——选择规则见 [`crate::spot_shadow::pick_spot_shadow`]：
 /// "第一盏 `cast_shadows == true` 且没有被局部光名额挤掉的聚光灯"。
-/// 其余聚光灯照常照明，只是不投影；点光源**仍然**不投影（立方体阴影图没做）。
+/// 其余聚光灯照常照明，只是不投影；点光源的投影是**另一套资源**（6 面深度数组，
+/// 见 [`crate::point_shadow`]），所以两者可以各有且只有一盏。
 #[derive(Clone, Copy, Debug)]
 pub struct SpotLight {
     /// 世界坐标。
@@ -191,7 +201,15 @@ impl PointLight {
             color,
             intensity,
             radius,
+            // 缺省不投影：加了 `cast_shadows` 之后，老场景的像素必须逐位不变
+            cast_shadows: false,
         }
+    }
+
+    /// 打开/关闭投影（链式）。
+    pub fn with_cast_shadows(mut self, cast_shadows: bool) -> Self {
+        self.cast_shadows = cast_shadows;
+        self
     }
 }
 
@@ -380,6 +398,28 @@ impl Lighting {
 mod tests {
     use super::*;
     use quench3d_math::vec3;
+
+    /// 与聚光灯同一条底线：**缺省不投影**必须是构造器的行为。
+    ///
+    /// 点光源在这一轮之前没有 `cast_shadows` 字段，老场景的灯全是"只照亮"，
+    /// 所以构造器缺省必须是 `false`——否则所有老场景的像素都会变（多出阴影）。
+    #[test]
+    fn point_lights_do_not_cast_shadows_unless_asked() {
+        let p = PointLight::new(Vec3::ZERO, Vec3::ONE, 1.0, 10.0);
+        assert!(!p.cast_shadows);
+        assert!(p.with_cast_shadows(true).cast_shadows);
+        assert!(
+            !p.with_cast_shadows(true)
+                .with_cast_shadows(false)
+                .cast_shadows
+        );
+        // 链式调用不许动别的字段
+        let q = p.with_cast_shadows(true);
+        assert_eq!(q.position, p.position);
+        assert_eq!(q.color, p.color);
+        assert_eq!(q.intensity, p.intensity);
+        assert_eq!(q.radius, p.radius);
+    }
 
     #[test]
     fn shadow_matrix_maps_center_into_unit_cube() {

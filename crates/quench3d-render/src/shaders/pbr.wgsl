@@ -1,4 +1,5 @@
-// 主前向渲染：PBR（Cook–Torrance）+ 平行光阴影（级联/PCF）+ 点光源 + 聚光灯（含单盏投影）+ 指数雾。
+// 主前向渲染：PBR（Cook–Torrance）+ 平行光阴影（级联/PCF）+ 点光源（含单盏立方体阴影）
+// + 聚光灯（含单盏投影）+ 指数雾。
 //@include common
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -6,6 +7,9 @@
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 // 聚光灯阴影图（第二张 2D 深度图，用同一个比较采样器）
 @group(1) @binding(2) var spot_shadow_map: texture_depth_2d;
+// 点光源阴影图：**6 层深度数组**（`+X, -X, +Y, -Y, +Z, -Z`），不是 `texture_depth_cube`
+// ——面/uv 的约定由 `point_shadow.rs::cube_face_uv` 定义，这里逐字镜像它（见下面的注释）。
+@group(1) @binding(3) var point_shadow_map: texture_depth_2d_array;
 @group(2) @binding(0) var base_color_tex: texture_2d<f32>;
 @group(2) @binding(1) var base_color_sampler: sampler;
 @group(2) @binding(2) var normal_tex: texture_2d<f32>;
@@ -160,6 +164,135 @@ fn sample_shadow(world: vec3<f32>, n_dot_l: f32) -> f32 {
     return pcf_3x3(shadow_map, uv, clip.z - bias, frame.params.z);
 }
 
+// 3x3 比较采样（**数组**版本）：与 `pcf_3x3` 形状一致，只多一个 layer 参数。
+// 同样**必须**用 `textureSampleCompareLevel`（= HLSL 的 `SampleCmpLevelZero`）：这一份
+// 被点光源那段 `if (i == 投影灯)` 包着，属于非一致控制流，D3D/FXC 对隐式梯度采样硬报错
+// （第 54 轮 windows 腿就是这么红的）。深度数组没有 mip，LOD 0 与隐式 LOD 等价。
+fn pcf_3x3_array(
+    tex: texture_depth_2d_array,
+    uv: vec2<f32>,
+    layer: i32,
+    depth: f32,
+    texel: f32,
+) -> f32 {
+    var sum = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel;
+            sum = sum + textureSampleCompareLevel(tex, shadow_sampler, uv + offset, layer, depth);
+        }
+    }
+    return sum / 9.0;
+}
+
+// 方向 → `(面, u, v)`。**必须与 `crates/quench3d-render/src/point_shadow.rs::cube_face_uv`
+// 逐字一致**：那边有一条 CPU 测试断言"这六个分支算出的 uv == 六个面矩阵投出来的 uv"，
+// 所以两边任何一处符号/层序错都会在**没有显卡的 CI 上**变红（这正是选数组而不是
+// 硬件 cube 采样的理由：硬件约定只能靠跑图试）。
+//
+// 返回值：x = 面号（0..5，喂给 `texture_depth_2d_array` 的 layer），y = u，z = v。
+// uv 是纹理空间（v 向下，与 2D 阴影图的 `0.5 - ndc.y * 0.5` 同一约定）。
+fn cube_face_uv(dir: vec3<f32>) -> vec3<f32> {
+    if (dot(dir, dir) < 1e-12) {
+        // 正好在灯心上：没有可比的深度，退化成 -Y 面的中心
+        return vec3<f32>(3.0, 0.5, 0.5);
+    }
+    let a = abs(dir);
+    // 每面的 fov 是 90° × 余量：横向分量要先除以余量（= tan(半面角)）再映射到 uv，
+    // 边界方向于是落在 1/余量 而不是 1.0，给 3x3 PCF 留出边界
+    let m = frame.point_shadow_texel.y;
+    if (a.x >= a.y && a.x >= a.z) {
+        let ma = a.x;
+        if (dir.x > 0.0) {
+            return vec3<f32>(
+                0.0,
+                0.5 * (1.0 + dir.z / ma / m),
+                0.5 * (1.0 - dir.y / ma / m),
+            );
+        }
+        return vec3<f32>(
+            1.0,
+            0.5 * (1.0 - dir.z / ma / m),
+            0.5 * (1.0 - dir.y / ma / m),
+        );
+    }
+    if (a.y >= a.z) {
+        let ma = a.y;
+        if (dir.y > 0.0) {
+            return vec3<f32>(
+                2.0,
+                0.5 * (1.0 - dir.x / ma / m),
+                0.5 * (1.0 + dir.z / ma / m),
+            );
+        }
+        return vec3<f32>(
+            3.0,
+            0.5 * (1.0 - dir.x / ma / m),
+            0.5 * (1.0 - dir.z / ma / m),
+        );
+    }
+    let ma = a.z;
+    if (dir.z > 0.0) {
+        return vec3<f32>(
+            4.0,
+            0.5 * (1.0 - dir.x / ma / m),
+            0.5 * (1.0 - dir.y / ma / m),
+        );
+    }
+    return vec3<f32>(
+        5.0,
+        0.5 * (1.0 + dir.x / ma / m),
+        0.5 * (1.0 - dir.y / ma / m),
+    );
+}
+
+// 点光源阴影（立方体阴影）：6 层数组 + 上面那份数组版 PCF。
+//
+// 与聚光那条路的差别：
+//   1. "深度"是**主分量**（垂直于被选中那个面的距离），所以只用一个 near/far；
+//   2. uv 不是矩阵投影出来的，而是 `cube_face_uv` 算出来的（渲染那 6 张图用的是
+//      同一套约定，见 `point_shadow.rs`）；
+//   3. 没有视锥边界，取而代之的是"面内 uv 越界 = 这一面不负责这个方向"。
+fn sample_point_shadow(
+    light_index: i32,
+    world: vec3<f32>,
+    n: vec3<f32>,
+    n_dot_l: f32,
+) -> f32 {
+    let idx = frame.point_shadow_params.x;
+    // idx < 0 = 这一帧没有投影点光源（缺省路径：整个函数体不会被走到）
+    if (idx < 0.0) { return 1.0; }
+    let lp = frame.point_lights[light_index].pos_range;
+    if (dot(world - lp.xyz, world - lp.xyz) <= 1e-12) { return 1.0; }
+    let near = frame.point_shadow_params.y;
+    let far = frame.point_shadow_params.z;
+    let texel = frame.point_shadow_texel.x;
+    let slope = 1.0 - clamp(n_dot_l, 0.0, 1.0) * frame.point_shadow_texel.w;
+
+    // 法线偏移：沿接收面法线把采样点推开（斜面上最有效）。一个纹素的**世界**大小
+    // 在透视下与"轴深"（主分量）成正比，所以偏移的单位必须是世界长度而不是深度值。
+    let axis0 = max(max(abs(world.x - lp.x), abs(world.y - lp.y)), abs(world.z - lp.z));
+    let texel_world0 = 2.0 * frame.point_shadow_texel.y * max(axis0, near) * texel;
+    let shifted = world + n * (texel_world0 * frame.point_shadow_texel.z);
+    let d = shifted - lp.xyz;
+    let axis_depth = max(max(abs(d.x), abs(d.y)), abs(d.z));
+    if (axis_depth <= near || axis_depth >= far) { return 1.0; }
+
+    let texel_world = 2.0 * frame.point_shadow_texel.y * axis_depth * texel;
+    // z_ndc(d) = far / (far - near) * (1 - near / d) → dz/dd = far * near / ((far - near) d²)
+    let dz_dd = far * near / (max(far - near, 1e-6) * axis_depth * axis_depth);
+    let depth_bias = texel_world * frame.point_shadow_params.w * dz_dd * slope;
+
+    let face = cube_face_uv(d);
+    let uv = vec2<f32>(face.y, face.z);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        // 余量之外：这个方向由别的面负责（或正好在面外），这一面没有可比的深度
+        return 1.0;
+    }
+    let reference = far / (far - near) * (1.0 - near / axis_depth);
+    return pcf_3x3_array(point_shadow_map, uv, i32(face.x + 0.5), reference - depth_bias, texel);
+}
+
 // 聚光灯阴影：一张 2D 深度图 + 上面那份 PCF。
 //
 // 与平行光那条路的差别只有三点：
@@ -312,13 +445,17 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> @locatio
                     // 平滑衰减：在半径处归零，避免硬边
                     let t = clamp(1.0 - pow(dist / radius, 4.0), 0.0, 1.0);
                     let atten = (t * t) / dist2;
-                    // 只有"这一盏就是投影灯"才采样阴影图（整帧最多一盏，见 spot_shadow.rs）
+                    // 只有"这一盏就是投影灯"才采样阴影图（点光/聚光各自整帧最多一盏，
+                    // 两套资源互不相干，所以两盏灯可以同时投影）
                     var shadow2 = 1.0;
                     if (i == i32(frame.spot_shadow_params.x + 0.5)) {
                         shadow2 = sample_spot_shadow(in.world_position, n, n_dot_l2);
-                        // 与平行光共用同一个"阴影强度"（0 = 不压暗）
-                        shadow2 = mix(1.0, shadow2, frame.params.w);
                     }
+                    if (i == i32(frame.point_shadow_params.x + 0.5)) {
+                        shadow2 = sample_point_shadow(i, in.world_position, n, n_dot_l2);
+                    }
+                    // 与平行光共用同一个"阴影强度"（0 = 不压暗；shadow2 == 1 时是恒等变换）
+                    shadow2 = mix(1.0, shadow2, frame.params.w);
                     let h2 = normalize(view_dir + l2);
                     let ndf = distribution_ggx(max(dot(n, h2), 0.0), roughness);
                     let g = geometry_smith(n_dot_v, n_dot_l2, roughness);

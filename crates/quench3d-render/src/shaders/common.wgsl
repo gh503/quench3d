@@ -50,6 +50,15 @@ struct Frame {
     spot_shadow_params: vec4<f32>,
     // x = 1 / 贴图边长（纹素）, y = tan(fov / 2), z = 法线偏移（纹素个数）, w = 斜率因子
     spot_shadow_texel: vec4<f32>,
+
+    // ---- 点光源阴影（6 层深度数组，整帧只支持一盏投影点光源，见 point_shadow.rs）----
+    // 与聚光灯那套是**两套独立资源**：可以同时有一盏投影点光源 + 一盏投影聚光灯。
+    // x = 投影灯在 point_lights 里的下标（**< 0 = 本帧没有点光阴影**）、y = near、
+    // z = far（= 影响半径）、w = 深度偏移（纹素个数）。
+    point_shadow_params: vec4<f32>,
+    // x = 1 / 单面边长、y = tan(半面角)（≈ 1.01 的面余量，cube_face_uv 要用）、
+    // z = 法线偏移（纹素个数）、w = 斜率因子。
+    point_shadow_texel: vec4<f32>,
 };
 
 struct Material {

@@ -17,8 +17,9 @@
 //!   这正是"归一化深度上的常量 bias 在透视投影里不等于常量世界偏移"的修法。
 //!
 //! **只支持一盏**投影聚光灯（见 [`pick_spot_shadow`]）：一张 2D 阴影图只能对应一个
-//! 视锥。多盏、级联式聚光阴影、点光源的立方体阴影图都没做——边界写在
-//! `docs/production_readiness.md` 与 `CHANGELOG.md` 里。
+//! 视锥。多盏、级联式聚光阴影都没做——边界写在 `docs/production_readiness.md`
+//! 与 `CHANGELOG.md` 里。点光源的立方体阴影在第 55 轮补上了，是**另一套资源**
+//! （6 层深度数组，见 [`crate::point_shadow`]），所以这里那张 2D 图不受影响。
 
 use quench3d_math::{Mat4, Vec3};
 
