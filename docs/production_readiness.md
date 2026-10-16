@@ -1545,3 +1545,49 @@ cargo check -p quench3d-editor            # 编辑器是 wasm+桌面双目标，
 - **没查"两端都写了轴但世界轴仍然不一致"**：新诊断只在"只写了 `axis`"时触发。两端都显式给了
   `axis_a`/`axis_b` 时，如果算出来的世界轴依然差很多（同样会把 B 扭一下），现在**不报**——
   可能是作者有意为之（预扭的铰链定义），先不猜；要报得先想清楚"什么算错"。
+
+## 11. 第 58 轮：CI 可靠性 —— 无 GPU 的 Windows runner 上的原生崩溃
+
+### 11.1 这一轮修的是什么（一句话）
+
+CI 的 **windows 腿不再被"创建真实 wgpu 上下文"的测试打死**（`0xc0000005`）：
+这类测试改成**显式 opt-in**（`QUENCH3D_GPU_TESTS=1`），CI 只在**能建出上下文**的腿
+（ubuntu / macOS）上打开它 —— 假红不再出现、覆盖不丢、跳过有可读原因、开关本身有守卫与变异证据。
+
+### 11.2 可靠性条目（可复核）
+
+| # | 条目 | 判据 / 证据 | 现状 |
+|---|---|---|---|
+| 1 | **"没 GPU 就返回 `Err`"接不住原生崩溃** | 失败形态是 `process didn't exit successfully (exit code: 0xc0000005)` 而不是 `test result: FAILED` + 断言 → 故障点在 Rust 可观测范围之外（`Result` / `catch_unwind` / panic hook 全拦不住） | 已定性（两次 CI：run 38935053883 `model_instances`、run 38931539230 `backend_fallback`，同 sha 重跑即绿） |
+| 2 | **"重跑才是判据"不作为首选** | 它会把真红一起放过去、不可复核，且掩盖"windows 上这类测试覆盖率本来就是 0" | 已明确拒绝（`docs/overnight_report.md` §52.3） |
+| 3 | **开关是显式 opt-in，且只认字面量 `1`** | `context::GPU_TESTS_ENV = "QUENCH3D_GPU_TESTS"`；未设 / `""` / `"0"` / `"true"` 一律为关 | 已落地（`crates/quench3d-render/src/context.rs`） |
+| 4 | **跳过 = 整条测试体不执行**，不是"删断言 / 体内 `if false`" | 测试把整条测试体（含 `pollster::block_on(...)`）放进 `with_gpu_tests(原因, ‖…)` 的闭包；关着时闭包一次都不调用 | 已落地（`backend_fallback.rs`、`model_instances.rs`） |
+| 5 | **守卫测试不需要显卡、也不碰进程环境变量** | `gpu_gate_builds_nothing_unless_explicitly_enabled` 直接喂判定内核的 flag（改环境变量会污染同进程的其它测试） | 已落地，且**变异验证**过 2 条（开关恒 `true` → 红；内核去掉拦截 → 红；改回 → 绿） |
+| 6 | **按腿给开关，不写死平台** | `ci.yml`：ubuntu / macOS = `"1"`，windows = `"0"`；`tools/gate.sh` 本机默认 `1`（`QUENCH3D_GPU_TESTS=0 tools/gate.sh` 可关） | 已落地；`cfg!(windows)` 这类写法被明确拒绝（会让本地 Windows 开发者丢覆盖） |
+| 7 | **开关不下沉进 `GpuContext::headless`** | 那是 CLI `render` / `movie` 的生产路径，被测试开关影响等于让所有人渲染不出来（默认关） | 已明确拒绝 |
+
+### 11.3 不变量（钉住的、可复核的）
+
+1. **没设 `QUENCH3D_GPU_TESTS=1` 时**，`backend_fallback` 与 `model_instances` 里"要真建上下文"
+   的测试体**一次都不执行**，并各打印一句可读原因（`-- --nocapture` 可见；cargo 默认吞掉通过用例的输出）。
+2. **设了 `QUENCH3D_GPU_TESTS=1` 时它们是真跑**：本机 1.99.0 工具链下
+   `backend_fallback` 7 passed（0.14s vs 关掉时 0.00s）、`model_instances` 5 passed（0.96s），
+   且 `--nocapture` 下**没有**"没有可用的 GPU"那行。
+3. **开关的判定与拦截是两段独立的守卫**：解析（只有 `"1"` 是开）+ 拦截（关着不调用闭包），
+   任一段被改坏，守卫测试立刻红。
+4. **跳过不许是"放宽断言"**：断言原样保留在闭包里；能证明它真的在跑的证据是
+   "打开开关时把断言改坏 → 红"这一条变异。
+
+### 11.4 边界（明确没做的）
+
+- **只围了两个测试二进制**（`backend_fallback.rs` / `model_instances.rs`，本轮围栏允许改的文件）。
+  仓库里其它"真建 wgpu 上下文"的测试二进制（`post_pipeline.rs`、`shadow_cascades.rs`、
+  `material_pipeline_traits.rs`、`fog_and_shadow_quality.rs`、`point_lights.rs`、
+  编辑器侧 `hierarchy.rs` / `scene_roundtrip.rs` / `history.rs`）**仍然在 windows 腿上直接建上下文**，
+  同类原生崩溃在它们身上依然可能发生 —— 这是**明确记下的欠账**（helper 已就位，逐个文件包一层即可）。
+- **本机没有无 GPU 的 Windows 环境**：无法在本机复现那次原生崩溃，
+  "windows 不再崩"只能由 CI 的 windows 腿首跑结果证明（本机只能证明"开关真的控制着建不建"）。
+- **windows 腿这几条测试的覆盖本来就是 0**（runner 没有 GPU）：本轮是把"0 覆盖"写成
+  "0 覆盖 + 可读原因"，不是把 0 变成有。要真有覆盖只能换带 GPU 的 Windows / 自托管 runner。
+- **没有加"下次自动检查其它二进制"的门禁**：那需要一份"哪些测试会建上下文"的清单，
+  而清单本身会腐烂（第 50 轮"白名单是有毒的"就是这个教训）。

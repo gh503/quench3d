@@ -5,20 +5,32 @@
 //! （这是 §8.1 记下的卡点）。这里把映射本身、面板改变换的**当场生效**、
 //! 拖动整组联动并写回、删除物体后的下标维护、撤销后的刷新各钉一条。
 //!
-//! 没有可用 GPU 时跳过（CI 机器通常没有软件光栅驱动）。
+//! **显式 opt-in**：这个二进制里每条测试都要真的创建 wgpu 上下文，所以只有设了
+//! `QUENCH3D_GPU_TESTS=1` 才执行（见 `with_gpu_tests`），否则整条测试体不跑并打印跳过原因。
+//! 理由：在没有 GPU 的 Windows runner 上创建真实 wgpu 上下文会**原生崩溃**
+//! （`STATUS_ACCESS_VIOLATION` / `0xc0000005`），进程直接死掉、`Result::Err` 接不住，
+//! 测试框架只会报 `process didn't exit successfully`。CI 只在能建出上下文的腿
+//! （ubuntu / macOS）上打开这个开关。
 #![cfg(not(target_arch = "wasm32"))]
 
 use quench3d::prelude::*;
+use quench3d::render::context::with_gpu_tests;
 use quench3d_editor::doc::Doc;
 use quench3d_editor::scene_io;
 
-/// 无窗口引擎；没有 GPU 时返回 `None`。
-fn headless_engine() -> Option<Engine> {
-    let gpu = match pollster::block_on(quench3d::render::GpuContext::headless(
-        64,
-        64,
-        Default::default(),
-    )) {
+/// 无窗口引擎；没显式 opt-in、或本机确实没有 GPU 时返回 `None`（调用方整条测试体不执行）。
+///
+/// **创建上下文那一步在 `with_gpu_tests` 的闭包里面**：没设 `QUENCH3D_GPU_TESTS=1` 时
+/// 它一次都不会被调用 —— "建失败了再 return"那种写法在原生崩溃面前是假绿。
+fn headless_engine(what: &str) -> Option<Engine> {
+    let gpu = with_gpu_tests(what, || {
+        pollster::block_on(quench3d::render::GpuContext::headless(
+            64,
+            64,
+            Default::default(),
+        ))
+    })?;
+    let gpu = match gpu {
         Ok(gpu) => gpu,
         Err(e) => {
             eprintln!("跳过：没有可用的 GPU（{e}）");
@@ -63,7 +75,9 @@ fn two_mesh_scene(tag: &str) -> (String, std::path::PathBuf) {
 /// 场景装载之后：`models[0]` 展开出了两个物体，映射指得准，普通物体不被卷进来。
 #[test]
 fn model_instance_maps_every_submesh() {
-    let Some(mut engine) = headless_engine() else {
+    let Some(mut engine) =
+        headless_engine("模型引用映射：models[0] 展开成两个物体（真的创建 wgpu 上下文）")
+    else {
         return;
     };
     let (json, _obj) = two_mesh_scene("map");
@@ -89,7 +103,8 @@ fn model_instance_maps_every_submesh() {
 /// 面板改模型变换 → **当场**作用到引擎里那一组物体（不再需要"重开后生效"）。
 #[test]
 fn model_panel_change_applies_to_engine_immediately() {
-    let Some(mut engine) = headless_engine() else {
+    let Some(mut engine) = headless_engine("模型面板改变换当场生效（真的创建 wgpu 上下文）")
+    else {
         return;
     };
     let (json, _obj) = two_mesh_scene("panel");
@@ -132,7 +147,8 @@ fn model_panel_change_applies_to_engine_immediately() {
 /// 视口里拖模型的一个网格 = 整组联动 + 写回 `models[i]`，存盘重开后一致。
 #[test]
 fn dragging_a_model_mesh_moves_the_group_and_writes_back() {
-    let Some(mut engine) = headless_engine() else {
+    let Some(mut engine) = headless_engine("拖动模型网格整组联动并写回（真的创建 wgpu 上下文）")
+    else {
         return;
     };
     let (json, _obj) = two_mesh_scene("drag");
@@ -174,7 +190,8 @@ fn dragging_a_model_mesh_moves_the_group_and_writes_back() {
 
     // 存盘 → 重开：位置与缩放必须还在（与 `model_transform_edits_are_exported` 互补）。
     let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
-    let mut engine2 = headless_engine().expect("需要 GPU 才能复核");
+    let mut engine2 =
+        headless_engine("拖动写回后重开复核（真的创建 wgpu 上下文）").expect("需要 GPU 才能复核");
     let mut doc2 = Doc::new();
     scene_io::load_text_into_doc(&mut engine2, &mut doc2, &saved.json).expect("二次载入必须成功");
     let reloaded = doc2.model_instances[0].objects.clone();
@@ -197,7 +214,8 @@ fn dragging_a_model_mesh_moves_the_group_and_writes_back() {
 /// 删掉模型组**之前**的物体：映射里剩下的下标必须整体前移，否则会拖到别人身上。
 #[test]
 fn deleting_an_object_keeps_the_mapping_pointing_at_the_model() {
-    let Some(mut engine) = headless_engine() else {
+    let Some(mut engine) = headless_engine("删物体后映射下标前移（真的创建 wgpu 上下文）")
+    else {
         return;
     };
     let (json, _obj) = two_mesh_scene("delete");
@@ -234,7 +252,8 @@ fn deleting_an_object_keeps_the_mapping_pointing_at_the_model() {
 /// 撤销一步之后：模型变换回到快照里的值，映射也跟着重新建立（不是陈旧的）。
 #[test]
 fn undo_restores_the_model_transform_and_refreshes_the_mapping() {
-    let Some(mut engine) = headless_engine() else {
+    let Some(mut engine) = headless_engine("撤销恢复模型变换并重建映射（真的创建 wgpu 上下文）")
+    else {
         return;
     };
     let (json, _obj) = two_mesh_scene("undo");

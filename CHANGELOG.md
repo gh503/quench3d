@@ -8,6 +8,26 @@
 
 ## [Unreleased]
 
+### 工程卫生
+
+- **CI 不再出现无法诊断的 Windows 假红**：在**没有 GPU 的 Windows runner** 上创建真实 wgpu
+  上下文会**原生崩溃**（`STATUS_ACCESS_VIOLATION` / `0xc0000005`），进程直接死、Rust 侧
+  拿不到 `Err` —— "没 GPU 就返回 `Err`"这种兜底**接不住原生访问违例**，CI 于是只报
+  `process didn't exit successfully`。两次实测：run 38935053883（`model_instances`）与
+  run 38931539230（`backend_fallback`），同 sha 重跑即绿。
+  现在这类测试改成**显式 opt-in**：设 `QUENCH3D_GPU_TESTS=1` 才执行，否则**整条测试体不执行**
+  并打印可读的跳过原因（不是删断言、也不是体内 `if false`）；CI 只在**能建出上下文**的
+  ubuntu / macOS 腿上打开它（覆盖不丢），windows 腿给 `"0"`。
+  本地 `tools/gate.sh` 默认打开（本机有显卡），没有显卡的机器用
+  `QUENCH3D_GPU_TESTS=0 tools/gate.sh` 关掉。
+  验证：`cargo test -p quench3d-render --test backend_fallback` 与
+  `cargo test -p quench3d-editor --test model_instances` **各跑两态**（不设变量 → 0.00s、
+  可见跳过原因；设了 → 0.14s / 0.96s、真的在真上下文上过）；不需要显卡的守卫测试
+  `gpu_gate_builds_nothing_unless_explicitly_enabled` + **三条变异红-绿**
+  （开关恒 `true` → 红；判定内核去掉拦截 → 红；打开开关时改坏断言 → 红，改回 → 绿）。
+  判据、为什么不选 `cfg!(windows)` / known-flake、以及边界（其余"真建上下文"的测试二进制
+  仍是欠账）见 `docs/overnight_report.md` §52 与 `docs/production_readiness.md` §11。
+
 ### 新增
 
 - **关节的局部轴可以按端指定（`joints[].axis_a` / `axis_b`）** —— gap #15 的第二段。

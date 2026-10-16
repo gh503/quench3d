@@ -5,6 +5,10 @@
 # CI 机器上没有 GPU：这里不安装任何 GPU/软件光栅驱动，也不需要。
 # 物理与 CLI 冒烟都不依赖显卡；渲染路径会如实走「无 GPU」分支（退出码 3），
 # 所以下面 CLI 冒烟里对 render 只接受退出码 0 或 3。
+#
+# 例外是"真的创建 wgpu 上下文"的那几条测试：它们由 `QUENCH3D_GPU_TESTS` 按腿显式开关
+# （见下面 matrix 的 `gpu_tests` 与 test 里「全部测试」那一步）。windows 腿关掉它，
+# 因为无 GPU 的 Windows 上创建上下文是**原生崩溃**（0xc0000005），Rust 侧接不住。
 name: CI
 
 on:
@@ -31,7 +35,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # `gpu_tests` 决定这条腿是否打开"需要真实 wgpu 上下文"的测试
+        # （`QUENCH3D_GPU_TESTS`，见 crates/quench3d-render/src/context.rs 里
+        # `with_gpu_tests` 的文档）。**必须按腿给，不能写死 `cfg!(windows)`**：
+        # 本地 Windows 开发者是有显卡的，一刀切会让他们也丢掉这部分覆盖。
+        #
+        # 为什么 windows 腿是 "0"：在没有 GPU 的 runner 上创建真实 wgpu 上下文会
+        # **原生崩溃**（`STATUS_ACCESS_VIOLATION` / `0xc0000005`），进程直接死掉、
+        # Rust 侧拿不到 `Err`，于是报成 `process didn't exit successfully`。
+        # run 38935053883（`model_instances`）与 run 38931539230（`backend_fallback`）
+        # 各红了一次，同 sha 重跑即绿 —— 那两条腿本来也没有 GPU，等于什么都没测。
+        # 判据与边界见 docs/overnight_report.md §52 与 docs/production_readiness.md §11。
+        include:
+          - os: ubuntu-latest
+            gpu_tests: "1"
+          - os: macos-latest
+            gpu_tests: "1"
+          - os: windows-latest
+            gpu_tests: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -65,6 +86,11 @@ jobs:
         run: cargo doc --locked --no-deps --workspace
 
       - name: 全部测试
+        # 按腿给开关：有 GPU 的腿（ubuntu / macOS）显式打开"需要真实 wgpu 上下文"的
+        # 测试 —— 覆盖不能因为 CI 假红而丢；没有 GPU 的 windows 腿给 "0"，
+        # 那几条测试整条不执行（会打印可读的跳过原因），不再让进程被原生崩溃打死。
+        env:
+          QUENCH3D_GPU_TESTS: ${{ matrix.gpu_tests }}
         run: cargo test --locked --workspace
 
       # 命令行工具端到端冒烟：这是 agent 依赖的契约（退出码 + 单行 JSON）

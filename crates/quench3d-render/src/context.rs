@@ -707,6 +707,66 @@ impl GpuContext {
     }
 }
 
+// ---------------------------------------------------------------------------
+// "真的去建 wgpu 上下文"的测试的显式开关
+// ---------------------------------------------------------------------------
+
+/// 打开"需要真实 GPU 上下文"的测试所用的环境变量：**必须显式置为 `1`**。
+///
+/// 为什么需要它：在**没有 GPU 的 Windows runner** 上创建真实 wgpu 上下文会**原生崩溃**
+/// （`STATUS_ACCESS_VIOLATION` / `0xc0000005`）——进程直接死掉，`Result::Err` 根本没机会
+/// 返回，测试框架报的是 `process didn't exit successfully`，而不是一条能读的失败。
+/// 也就是说"没 GPU 就返回 `Err`"这种兜底**接不住它**。
+/// 于是这类测试改成显式 opt-in：CI 在**确实能建出上下文**的腿（ubuntu / macOS）上打开它，
+/// 在没有 GPU 的 Windows 腿上不打开 —— 那几条测试整条不执行，并打印可读的跳过原因。
+/// 判据与边界见 `docs/overnight_report.md` §52 与 `docs/production_readiness.md` §11。
+pub const GPU_TESTS_ENV: &str = "QUENCH3D_GPU_TESTS";
+
+/// 解析开关的值：**只有**字面量 `"1"` 算打开（`未设` / `""` / `"0"` / `"true"` 都是关）。
+///
+/// 拆成一个纯函数是为了让守卫测试不需要显卡、也不碰进程级环境变量就能钉住它：
+/// `cargo test` 的测试跑在**同一进程**的多个线程里，改环境变量会污染同进程的其它测试
+/// （在无 GPU 的 Windows 上，那等于把原生崩溃放出来）。
+pub fn gpu_tests_enabled_from(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1"))
+}
+
+/// 当前进程是否**显式**打开了"需要真实 GPU 上下文"的测试。
+pub fn gpu_tests_enabled() -> bool {
+    let raw = std::env::var(GPU_TESTS_ENV).ok();
+    gpu_tests_enabled_from(raw.as_deref())
+}
+
+/// 开关的判定内核：`enabled == false` 时**不调用** `f`、打印可读原因并返回 `None`；
+/// 打开时调用 `f` 一次并把结果透传出去。
+///
+/// "开/关"作为参数传进来是刻意的（理由见 [`gpu_tests_enabled_from`]）：守卫测试直接喂
+/// flag，就能验证"关着的时候一个 wgpu 上下文都不建"，而不必在这个进程里改环境变量。
+/// 真实调用点是 [`with_gpu_tests`]，它只是取一次环境变量再转交给这里。
+pub fn run_if_gpu_tests_enabled<T>(
+    enabled: bool,
+    reason: &str,
+    f: impl FnOnce() -> T,
+) -> Option<T> {
+    if !enabled {
+        eprintln!(
+            "跳过：{reason} —— 未打开 {GPU_TESTS_ENV}=1。\
+             （本测试要真的创建 wgpu 上下文；在没有 GPU 的 Windows runner 上这一步会原生崩溃 \
+             STATUS_ACCESS_VIOLATION/0xc0000005，进程直接死掉、拿不到 Err，所以改成显式 opt-in。）"
+        );
+        return None;
+    }
+    Some(f())
+}
+
+/// 显式打开（[`GPU_TESTS_ENV`]`=1`）时执行 `f`，否则打印一句可读的跳过原因并返回 `None`。
+///
+/// 测试里的用法是"把**整条测试体**（含创建上下文那一步）放进 `f`"：
+/// 没打开开关时闭包一次都不执行，而不是"建失败了再 `return`"——后者在原生崩溃面前是假绿。
+pub fn with_gpu_tests<T>(reason: &str, f: impl FnOnce() -> T) -> Option<T> {
+    run_if_gpu_tests_enabled(gpu_tests_enabled(), reason, f)
+}
+
 /// 顶点缓冲布局（位置 / 法线 / UV / 切线）。
 pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![

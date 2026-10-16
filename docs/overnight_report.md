@@ -774,6 +774,7 @@ simulate_report_includes_an_event_stream`（物体名、步号单调、sleep 只
 （第 53 轮编辑器局部光 UI + 修默认场景/载入路径光照不对称之后是 **483** 个测试、wasm 11903880 字节，七段全绿。）
 （第 54 轮聚光灯阴影之后是 **498** 个测试、wasm 11914308 字节，七段全绿。）
 （第 57 轮 GL/downlevel：真实 WebGL2 探针 + naga GLSL 翻译守卫 + MSAA 按能力降级，与第 55 轮点光立方阴影合并之后是 **532** 个测试、wasm 11961808 字节，七段全绿。）
+（第 58 轮 CI 假红：`QUENCH3D_GPU_TESTS` 显式 opt-in + 不需要显卡的守卫测试之后是 **533** 个测试、wasm **11961808** 字节（与上轮逐字节相同：新 helper 是死代码，被裁掉了），七段全绿。）
 
 ## 21. 第 22 轮：物理材质 —— 静摩擦 + 摩擦/恢复的合成规则（gap #22）
 
@@ -1544,3 +1545,200 @@ panicked at glow-0.17.0/src/web_sys.rs:4307:9: Tex storage 2D multisample is not
    不能确定的是真机驱动上的其它差异。**最终确认只能由用户刷新页面给出。**
 4. **没查的**：原生 GL 上 MSAA 解析出黑帧的根因（在 wgpu-hal 的 gles 路径或 llvmpipe 里）。
    现在 GL 上不建多采样纹理，这条路径在项目里再也走不到；要挖它得改 `wgpu-hal`（不在围栏内）。
+
+---
+
+## 52. CI 的 windows 假红：一条接不住原生崩溃的 `Err`（第 58 轮）
+
+### 52.1 症状原文（先钉原文，别再重新猜）
+
+这类假红在最近 12 次 CI 里出现过 **2 次**，两次是**不同的测试二进制**、同一个退出码：
+
+```
+run 38935053883 @ cf52cd8
+error: test failed, to rerun pass `-p quench3d-editor --test model_instances`
+Caused by:
+  process didn't exit successfully: `...model_instances-8259af2638c9b300.exe`
+  (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+```
+
+```
+run 38931539230 @ 1c873ad
+error: test failed, to rerun pass `-p quench3d-render --test backend_fallback`
+Caused by:
+  process didn't exit successfully: `...backend_fallback-8cfe002d8085f3e7.exe`
+  (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+```
+
+已有的旁证（不是猜的）：两次都是 `0xc0000005`；`quench3d-render` **不依赖** `quench3d-cli`
+（排除"某个共享依赖在 windows 上炸"）；**同 sha 重跑即绿**；最近 12 次 CI 里 windows 腿只红过
+这 2 次（另一次是真的 FXC 编译错误，不是这一类）。两个二进制的共同点只有一个：
+**它们都在测试里"真的创建 wgpu 上下文"**（`GpuContext::headless` / `from_candidates_with`）。
+
+结论：**在没有 GPU 的 Windows runner 上创建真实 wgpu 上下文会原生崩溃**。
+
+### 52.2 为什么 `Result::Err` 接不住它
+
+这两个文件里原本就写着"没 GPU 就跳过"：
+
+```rust
+let ctx = match pollster::block_on(GpuContext::from_candidates_with(/* … */)) {
+    Ok(ctx) => ctx,
+    Err(e) => { eprintln!("跳过：没有可用的 GPU（{e}）"); return; }
+};
+```
+
+这条路的前提是"没有 GPU"会**返回** `Err`。而在无 GPU 的 Windows 上，创建真实上下文
+（DX12/DXGI 那条路）是**原生访问违例**：进程直接被操作系统打死，Rust 侧**没有机会执行
+任何代码** —— 既没有 `Err`，也没有 `panic`，连析构都跑不到。测试框架看到的因此不是
+"一条断言失败"，而是 `process didn't exit successfully ... (exit code: 0xc0000005)`。
+
+**判据**：失败形态是"进程退出码 + `process didn't exit successfully`"而不是
+"`test result: FAILED` + 一条断言"，就说明故障点在 Rust 能观测到的范围**之外** ——
+`Result` / `catch_unwind` / `panic::set_hook` 一个都拦不住。
+
+### 52.3 为什么"重跑才是判据"不作为首选
+
+同 sha 重跑确实会绿（这类崩溃是环境相关的偶发），但把重跑当判据有三个问题：
+
+1. **它把"真红"也一起放过去了**：判据一旦是"重跑一次"，任何偶发红都能被消掉，包括真 bug
+   造成的偶发红。这两次红已经害我们两次把真绿当真红、或把真红当假红来回折腾。
+2. **它不可复核**：CI 历史里只留下一条红，没有任何人能证明"它为什么红"。
+3. **它掩盖了"覆盖率本来就是 0"**：windows runner 没有 GPU，那几条测试在 windows 上
+   本来就只能走"没 GPU 就 return"的假绿分支 —— 它们**从来没在 windows 上测过任何东西**。
+   重跑只是把"什么也没测"标成绿色。
+
+所以本轮改的是"把事实写进代码"：这几条测试**默认不跑**，只在显式打开时跑。
+
+### 52.4 采用的手段：显式 opt-in + 按腿给开关
+
+`crates/quench3d-render/src/context.rs` 加了一个小 helper（1 个常量 + 4 个函数）：
+
+| 名字 | 作用 |
+|---|---|
+| `GPU_TESTS_ENV` | 环境变量名 `QUENCH3D_GPU_TESTS` |
+| `gpu_tests_enabled_from(Option<&str>)` | 纯函数：**只有字面量 `"1"` 算打开**（未设 / `""` / `"0"` / `"true"` 都是关） |
+| `gpu_tests_enabled()` | 读一次环境变量 |
+| `run_if_gpu_tests_enabled(开/关, 原因, f)` | 判定内核：**关着就根本不调用 `f`**，打印可读原因并返回 `None` |
+| `with_gpu_tests(原因, f)` | 真实调用点 = `run_if_gpu_tests_enabled(gpu_tests_enabled(), …)` |
+
+用法是"把**整条测试体**放进闭包"，而不是在体里加个 `if`：
+
+```rust
+let _ = with_gpu_tests("空候选列表要退回默认候选（真的创建 wgpu 上下文）", || {
+    // …原来的整条测试体（含 pollster::block_on(...) 那一步）…
+});
+```
+
+`model_instances.rs` 里 `headless_engine(原因)` 把**创建上下文那一步**放进了闭包内部，
+所以"没打开开关"时 wgpu 那边**一个函数都不会被调用**。
+
+CI（`.github/workflows/ci.yml`）按腿给这个变量：
+
+| 腿 | `QUENCH3D_GPU_TESTS` | 为什么 |
+|---|---|---|
+| `test (ubuntu-latest)` | `1` | 覆盖不能丢；这条腿真的能建出上下文 |
+| `test (macos-latest)` | `1` | 同上（Metal） |
+| `test (windows-latest)` | `0` | 没有 GPU，建上下文 = 原生崩溃 |
+
+`tools/gate.sh`（本地门禁）默认 `1`（本机有显卡，覆盖不能丢）；没有显卡的机器用
+`QUENCH3D_GPU_TESTS=0 tools/gate.sh` 关掉，步骤标题里会印出当前取值。
+
+### 52.5 为什么不那样做
+
+- **不用 `cfg!(windows)` 硬编码跳过**：那会让**本地 Windows 开发者**也失去这部分覆盖 ——
+  他们的机器是有显卡的。这里要区分的从来不是"平台"，而是"这条腿能不能建出上下文"。
+- **不在"检测 GPU"上做文章**：崩溃就发生在检测/创建那一步（DXGI 枚举适配器），
+  Rust 侧接不住；"先探测有没有 GPU 再决定要不要建"只是把崩溃点往前挪一点，问题不变。
+- **不记成 known-flake / 靠重跑**：理由见 52.3。
+- **不把开关下沉进 `GpuContext::headless`**：那会让 CLI 的 `render` / `movie` 在用户机器上
+  依赖一个测试开关（默认关 → 所有人都渲染不出来）。开关只能留在测试里。
+
+### 52.6 证据（本机 Linux + 有 GPU，工具链 = CI 钉的 1.99.0）
+
+**① 不设变量**（题目要求的命令，`--offline`）
+
+```
+$ env -u QUENCH3D_GPU_TESTS cargo test -p quench3d-render --test backend_fallback --offline
+running 7 tests
+test empty_candidate_list_does_not_panic_and_uses_defaults ... ok
+test gpu_gate_builds_nothing_unless_explicitly_enabled ... ok
+test hint_gl_means_gl_only ... ok
+test hint_webgpu_prefers_webgpu_but_keeps_gl_as_backstop ... ok
+test hinted_candidates_are_compiled_in ... ok
+test unknown_or_missing_hint_falls_back_to_default_candidates ... ok
+test unusable_first_candidate_falls_through_to_the_next ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+跳过原因在同一条命令加 `-- --nocapture` 后可见（**cargo 默认会把通过用例的输出吞掉**，
+这是测试框架的行为，不是我们藏起来）：
+
+```
+跳过：空候选列表要退回默认候选（真的创建 wgpu 上下文） —— 未打开 QUENCH3D_GPU_TESTS=1。…
+跳过：第一个候选不可用时回退到下一个（真的创建 wgpu 上下文） —— 未打开 QUENCH3D_GPU_TESTS=1。…
+```
+
+**② 设了变量**（同一条命令）：真的跑，0.14s（对比关掉时的 0.00s）
+
+```
+$ QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test backend_fallback --offline
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+```
+
+`--nocapture` 下**没有**"没有可用的 GPU"那行 → 断言真的在真上下文上跑了
+（打开开关时唯一一条"跳过"是守卫测试自己故意喂 `false` 的那个反例）。
+
+**③ 编辑器那两个态**（`model_instances`，5 条）
+
+```
+$ env -u QUENCH3D_GPU_TESTS cargo test -p quench3d-editor --test model_instances --offline
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test model_instances --offline
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+```
+
+关掉时 `--nocapture` 能看到 **5 条各自的原因**（"未打开 `QUENCH3D_GPU_TESTS=1`"），
+打开时 **0 条**跳过。
+
+**④ 守卫测试**（`gpu_gate_builds_nothing_unless_explicitly_enabled`，**不需要显卡**）：
+它**不读写进程级环境变量** —— `cargo test` 的测试跑在同一进程的多个线程里，改环境变量会污染
+同进程的其它测试（在无 GPU 的 Windows 上，那等于把原生崩溃放出来）—— 而是直接喂
+`run_if_gpu_tests_enabled` 的 flag：关着的时候闭包（= "建上下文"的替身）**一次都不执行**，
+打开时恰好一次且结果透传；另外还有"只有字面量 `1` 算打开"的 5 条断言。
+
+**⑤ 变异红-绿**（改坏 → 红 → 改回 → 绿，三条独立）
+
+| 变异 | 结果 |
+|---|---|
+| `gpu_tests_enabled_from` 改成恒 `true` | 红：`没设变量必须是关`（`backend_fallback.rs:43`） |
+| 判定内核 `if !enabled` 改成 `if false`（关着也执行闭包） | 红：`关着的时候必须返回 None（= 跳过）`（`backend_fallback.rs:62`） |
+| 开关**打开**时把 `assert_eq!(ctx.size(), (32, 32))` 改成 `(1, 1)` | 红：`assertion left == right failed`（`backend_fallback.rs:157`）→ 证明打开时测试体真的在跑 |
+| 同上那条坏断言、但**不设**开关 | **绿** → 这就是"跳过会藏住坏断言"的机理本身 |
+
+最后一行是本轮唯一要承认的代价：**跳过就是跳过，它不可能抓到断言写错**。所以开关必须在
+"能建出上下文"的腿上保持打开（ubuntu / macOS / 本机门禁默认）—— 而"能建出上下文"
+是**这条腿的属性**，不是平台的属性。
+
+**⑥ 门禁（`tools/gate.sh`，七段）**：七段全 `PASS`，`测试总数：533（0 失败）`
+（本轮新增 1 条不需要显卡的守卫测试：532 → 533），`wasm 字节：11961808`
+—— **与上一轮逐字节相同**（新 helper 在 wasm 侧是死代码，被裁掉了）：这个开关没有给
+Web 产物带来任何体积代价。门禁步骤标题现在会印出 `QUENCH3D_GPU_TESTS=1`。
+
+### 52.7 边界（没做的、没验证的）
+
+1. **本机没有无 GPU 的 Windows 环境，复现不了那次原生崩溃**。本机是 Linux + 有 GPU；
+   52.6 的 ①②③ 都是在**能建出上下文**的机器上做的，它们证明的是"开关真的控制着建不建"，
+   不是"windows 上不再崩"。后者只能由 CI 的 windows 腿首跑结果来证。
+2. **只围了这两个测试二进制**（`backend_fallback` / `model_instances`）—— 它们是两次假红的
+   当事者，也是本轮围栏允许改动的文件。仓库里还有其它"真建 wgpu 上下文"的测试二进制：
+   `post_pipeline.rs`、`shadow_cascades.rs`、`material_pipeline_traits.rs`、
+   `fog_and_shadow_quality.rs`、`point_lights.rs`，编辑器侧 `hierarchy.rs` /
+   `scene_roundtrip.rs` / `history.rs` —— 它们**仍在 windows 腿上直接建上下文**，
+   同样的原生崩溃在它们身上依然可能发生，只是最近 12 次 CI 恰好没轮到。
+   这是**明确记下的欠账**，不是"已经普遍修好"。（同一条 helper 已经就位，
+   后续每个文件只要把 `headless()` 那一步包进 `with_gpu_tests` 即可。）
+3. **windows 腿上这几条测试的覆盖永久是 0**（runner 没有 GPU，本来也测不了）。
+   本轮做的是"把 0 覆盖写成 0 覆盖并留下可读原因"，不是"把 0 覆盖变成有覆盖"。
+   要真有覆盖只能换一台带 GPU 的 Windows（或自托管 runner）。

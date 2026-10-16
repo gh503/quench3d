@@ -4,6 +4,7 @@
 #   tools/gate.sh              # 全套（fmt + clippy×2 + 测试 + wasm + check_web）
 #   tools/gate.sh --fast       # 跳过 wasm 构建与 check_web（改纯 Rust 时够用）
 #   GATE_SKIP_WEB=1 tools/gate.sh
+#   QUENCH3D_GPU_TESTS=0 tools/gate.sh   # 没有显卡的机器：不跑"真建 wgpu 上下文"的测试
 #
 # 为什么要有这个脚本：门禁是**五件事**，而且顺序有讲究 ——
 # `check_web.mjs` 必须最后跑（它检查的是刚构建出来的 wasm 产物）。
@@ -20,7 +21,7 @@ for arg in "$@"; do
   case "$arg" in
     --fast) FAST=1 ;;
     -h | --help)
-      sed -n '2,10p' "$0"
+      sed -n '2,11p' "$0"
       exit 0
       ;;
     *)
@@ -33,6 +34,14 @@ if [ "${GATE_SKIP_WEB:-0}" = "1" ]; then FAST=1; fi
 
 LOG_DIR="${GATE_LOG_DIR:-target/tmp}"
 mkdir -p "$LOG_DIR"
+
+# "真的创建 wgpu 上下文"的测试默认**在本机打开**（本机有显卡，覆盖不能丢）。
+# 判定只认字面量 1；没有显卡的机器（尤其 Windows）显式关掉：
+#   QUENCH3D_GPU_TESTS=0 tools/gate.sh
+# 为什么需要这个开关：在没有 GPU 的 Windows 上创建真实 wgpu 上下文会**原生崩溃**
+# （STATUS_ACCESS_VIOLATION / 0xc0000005），进程直接死，Result::Err 接不住 ——
+# 这类测试因此必须显式 opt-in。判据见 docs/overnight_report.md §52。
+export QUENCH3D_GPU_TESTS="${QUENCH3D_GPU_TESTS:-1}"
 
 fail=0
 step() { printf '\n== %s ==\n' "$1"; }
@@ -70,7 +79,7 @@ else
   tail -n 20 "$LOG_DIR/gate-doc.log"
 fi
 
-step "测试（全部 crate）"
+step "测试（全部 crate；QUENCH3D_GPU_TESTS=$QUENCH3D_GPU_TESTS）"
 # --no-fail-fast：**必须**。cargo 缺省在第一个失败的测试二进制就收工，后面的 crate 根本
 # 不会跑 —— 门禁于是只报"第一个"失败，剩下的红点要等你修完它、再跑一次才浮出来
 # （第 53 轮实测：一次门禁只暴露一个 crate 的问题，改完重跑又冒出一个）。
