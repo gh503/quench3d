@@ -3949,10 +3949,7 @@ fn multiple_render_outputs_resolve_before_writing_and_honour_no_clobber() {
     assert_eq!(outs[0]["width"], 320);
     assert_eq!(outs[0]["height"], 200);
     assert!(
-        outs[0]["output"]
-            .as_str()
-            .unwrap()
-            .ends_with("/shots/shot-a.png"),
+        outs[0]["output"].as_str().unwrap().ends_with("shot-a.png"),
         "第一张写到目录里：{}",
         outs[0]["output"]
     );
@@ -3960,10 +3957,7 @@ fn multiple_render_outputs_resolve_before_writing_and_honour_no_clobber() {
     assert_eq!(outs[1]["width"], 640, "每张自己的尺寸");
     assert_eq!(outs[1]["height"], 400);
     assert!(
-        outs[1]["output"]
-            .as_str()
-            .unwrap()
-            .ends_with("/shots/shot-b.png"),
+        outs[1]["output"].as_str().unwrap().ends_with("shot-b.png"),
         "带扩展名的 output 当前缀：{}",
         outs[1]["output"]
     );
@@ -3974,6 +3968,15 @@ fn multiple_render_outputs_resolve_before_writing_and_honour_no_clobber() {
         .map(|x| x.as_str().unwrap())
         .collect();
     assert_eq!(would.len(), 2, "两张都该在 would_write 里：{would:?}");
+    // 路径断言必须与平台无关：Windows 用 `\`，所以只查文件名与父目录名
+    for o in outs {
+        let p = std::path::Path::new(o["output"].as_str().unwrap());
+        assert!(
+            p.parent().unwrap().ends_with("shots"),
+            "两张都该放在 shots/ 下：{}",
+            p.display()
+        );
+    }
     assert!(!shots.exists(), "--dry-run 不该建目录/写盘");
 
     // --no-clobber：任一目标已存在 → 整体退出 2，且**另一张**也不能被写出来
