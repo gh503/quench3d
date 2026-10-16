@@ -2813,7 +2813,13 @@ pub fn ssao_options(doc: &SceneDoc) -> quench3d::render::SsaoOptions {
     }
 }
 
-fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
+/// 把文档里的光照应用进引擎（含"没写 `preset` 时用哪个预设"）。
+///
+/// **编辑器共用这一份**（`Doc::build_default_scene` 用一个空文档调它）：默认场景与
+/// "存盘后重新载入"必须落在同一套光照默认值上。从前编辑器默认场景吃的是
+/// `Lighting::default()`，而载入/撤销走的是这里（没写 `preset` = `Lighting::studio()`，
+/// 带两盏补光），两条路径的默认值不同 —— 于是"撤销一次就凭空多出两盏点光源"。
+pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
     let l = &doc.lighting;
     // 未知预设由 `SceneDoc::validate` 拦下（`load_scene` 会拒绝带 error 的场景），
     // 所以这里的兜底分支只对"没写 preset"生效。

@@ -694,10 +694,20 @@ fn model_transform_edits_are_exported() {
         "{}",
         before.json
     );
-    assert!(
-        !before.json.contains("3.0"),
-        "不应出现未设置的值：{}",
-        before.json
+    // 只查"模型"这一节，别用整篇 JSON 的子串匹配：整篇匹配会撞上别处的合法值
+    // （第 53 轮实测：预设补光的位置 `[5, 4, -3.0]` 撞上了 `contains("3.0")`）。
+    // 这里直接解析成场景类型再对字段断言，比子串匹配更严也更准。
+    let before_parsed = quench3d_cli::scene_doc::SceneDoc::from_json(&before.json)
+        .expect("导出的必须是合法场景 JSON");
+    assert_eq!(
+        before_parsed.models[0].position,
+        Some([0.0, 0.0, 0.0]),
+        "没动过的模型位置必须原样导出"
+    );
+    assert_eq!(
+        before_parsed.models[0].scale,
+        Some(1.0),
+        "没动过的模型缩放必须原样导出"
     );
 
     // 编辑器"模型"面板做的事：直接改底稿里的模型变换。
@@ -705,13 +715,20 @@ fn model_transform_edits_are_exported() {
     base.models[0].position = Some([3.0, 1.5, -2.0]);
     base.models[0].scale = Some(2.5);
     let after = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
-    for needle in ["3.0", "1.5", "-2.0", "2.5"] {
-        assert!(
-            after.json.contains(needle),
-            "模型变换「{needle}」没写进场景文件：\n{}",
-            after.json
-        );
-    }
+    // 同样用类型解析来断言"写进去了"：子串匹配在这里是**不健全**的——
+    // 预设补光里已有 `-3.0`，就算模型位置根本没写出去，`contains("3.0")` 也会通过。
+    let after_parsed = quench3d_cli::scene_doc::SceneDoc::from_json(&after.json)
+        .expect("导出的必须是合法场景 JSON");
+    assert_eq!(
+        after_parsed.models[0].position,
+        Some([3.0, 1.5, -2.0]),
+        "模型位置没写进场景文件"
+    );
+    assert_eq!(
+        after_parsed.models[0].scale,
+        Some(2.5),
+        "模型缩放没写进场景文件"
+    );
 
     // 存了再读回来：值必须还在（否则"重开生效"是假的）。
     let mut engine2 = headless_engine().expect("需要 GPU 才能复核");

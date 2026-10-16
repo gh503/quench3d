@@ -230,6 +230,32 @@ fn undo_restores_the_exact_serialized_scene() {
     );
 }
 
+/// 默认场景"存盘 → 重新载入"必须**逐字节恒等**。
+///
+/// 这条钉的是第 53 轮发现的不对称：编辑器默认场景以前直接吃 `Lighting::default()`，
+/// 而载入路径（撤销/重做、打开文件都走它）用 CLI 的 `apply_lighting`（没写 `preset`
+/// = `Lighting::studio()`，带两盏补光）。两条路径的默认值不同 —— 存盘再载入会凭空
+/// 多出那两盏点光源，撤销也因此在快照上显出差异。
+///
+/// 为什么以前看不见：`scene_to_json` 对局部光"沿用底稿"，把这个不对称藏了起来。
+/// 只有"逐字节往返"这种断言能抓住它。
+#[test]
+fn default_scene_survives_save_and_reload_byte_for_byte() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    let first = snapshot(&engine, &doc);
+    // 存盘 → 载入：撤销/重做与"打开文件"走的就是这条路径。
+    scene_io::load_into_engine(&mut engine, &first).expect("载入自己存出来的场景必须成功");
+    let second = snapshot(&engine, &doc);
+    assert_eq!(first, second, "默认场景存盘再载入应当逐字节相同");
+    // 再转一圈：恒等要稳定，不能只是"第一次凑巧"。
+    scene_io::load_into_engine(&mut engine, &second).expect("第二次载入也必须成功");
+    assert_eq!(snapshot(&engine, &doc), second, "第二圈也必须逐字节相同");
+}
+
 /// 历史上限：超出后丢最旧的，且新编辑清空重做链。
 #[test]
 fn history_is_bounded_and_new_edits_drop_the_redo_chain() {

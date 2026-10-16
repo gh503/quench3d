@@ -506,6 +506,17 @@ impl Doc {
         engine.world.clear();
         self.model_instances.clear();
 
+        // ---- 光照：与"存盘后重新载入"用**同一份**预设应用 ----
+        //
+        // 用一个空文档调 CLI 的 `apply_lighting`（语义 = "一个没写 lighting 的场景"），
+        // 而不是让引擎留着 `Lighting::default()`：撤销/重做与打开文件都走载入路径，
+        // 两条路径的默认光照如果不同，"撤销一次"就会凭空多出预设的补光（第 53 轮实测：
+        // 多出 studio 预设的 2 盏点光源：`[-4,5,4]` 暖色与 `[5,4,-3]` 冷色）。
+        // 这类分叉以前被 `scene_to_json` 对局部光"沿用底稿"藏住了。
+        let no_lighting =
+            quench3d_cli::scene_doc::SceneDoc::from_json("{}").expect("空场景文档必须能解析");
+        quench3d_cli::runner::apply_lighting(engine, &no_lighting);
+
         // ---- 地面：物理上是无限半空间，视觉上是一张同高度的平面 ----
         //
         // 刻意用 `unit_plane` 而不是"压扁的立方体"：立方体的表面在原点上方半个厚度处，

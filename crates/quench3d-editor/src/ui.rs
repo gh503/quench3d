@@ -626,11 +626,172 @@ fn draw_parent_picker(
 /// 场景级光照（太阳方向/强度、环境光、曝光、投影、天空与网格）。
 ///
 /// 放在"选中物体"之前：光照不属于任何物体，没选中东西时也该能调。
+/// 局部光（点光源 / 聚光灯）的增删改。
+///
+/// 方向光只有一盏，局部光是**一组**：这里做列表编辑。落在 `engine.scene.lighting` 上，
+/// 存盘由 `scene_io` 从引擎写回，所以编辑器里调的和 `quench3d render` 用的是同一组灯。
+/// 点光源与聚光灯**共享**每帧 8 盏的名额（点光源优先），超出的会在 CLI 校验里给警告。
+fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
+    let lights = &mut engine.scene.lighting;
+    let total = lights.point_lights.len() + lights.spot_lights.len();
+    ui.separator();
+    ui.label(format!(
+        "局部光 {total} / {} 盏（点光源优先，超出名额的会被忽略）",
+        quench3d::render::MAX_POINT_LIGHTS
+    ));
+    let mut remove_point = None;
+    for (i, p) in lights.point_lights.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("#{} 点光", i + 1));
+            for (axis, value) in [
+                ("X", &mut p.position.x),
+                ("Y", &mut p.position.y),
+                ("Z", &mut p.position.z),
+            ] {
+                *changed |= ui
+                    .add(egui::DragValue::new(value).speed(0.1).prefix(axis))
+                    .changed();
+            }
+            let mut color = p.color.to_array();
+            if ui.color_edit_button_rgb(&mut color).changed() {
+                p.color = Vec3::new(color[0], color[1], color[2]);
+                *changed = true;
+            }
+            *changed |= ui
+                .add(
+                    egui::DragValue::new(&mut p.intensity)
+                        .speed(0.2)
+                        .prefix("强度 "),
+                )
+                .changed();
+            *changed |= ui
+                .add(
+                    egui::DragValue::new(&mut p.radius)
+                        .speed(0.2)
+                        .range(0.01..=1000.0)
+                        .prefix("半径 "),
+                )
+                .changed();
+            if ui.small_button("删").clicked() {
+                remove_point = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove_point {
+        lights.point_lights.remove(i);
+        *changed = true;
+    }
+    let mut remove_spot = None;
+    for (i, s) in lights.spot_lights.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("#{} 聚光", i + 1));
+            for (axis, value) in [
+                ("X", &mut s.position.x),
+                ("Y", &mut s.position.y),
+                ("Z", &mut s.position.z),
+            ] {
+                *changed |= ui
+                    .add(egui::DragValue::new(value).speed(0.1).prefix(axis))
+                    .changed();
+            }
+            for (axis, value) in [
+                ("x", &mut s.direction.x),
+                ("y", &mut s.direction.y),
+                ("z", &mut s.direction.z),
+            ] {
+                *changed |= ui
+                    .add(egui::DragValue::new(value).speed(0.02).prefix(axis))
+                    .changed();
+            }
+            let mut color = s.color.to_array();
+            if ui.color_edit_button_rgb(&mut color).changed() {
+                s.color = Vec3::new(color[0], color[1], color[2]);
+                *changed = true;
+            }
+            *changed |= ui
+                .add(
+                    egui::DragValue::new(&mut s.intensity)
+                        .speed(0.2)
+                        .prefix("强度 "),
+                )
+                .changed();
+            *changed |= ui
+                .add(
+                    egui::DragValue::new(&mut s.radius)
+                        .speed(0.2)
+                        .range(0.01..=1000.0)
+                        .prefix("半径 "),
+                )
+                .changed();
+            if ui.small_button("删").clicked() {
+                remove_spot = Some(i);
+            }
+        });
+        // 锥角：引擎只存余弦，所以来回换算一次；内锥不许大于外锥（UI 也不该造出引擎不认的锥）。
+        ui.horizontal(|ui| {
+            ui.label("锥角（内 / 外，度）");
+            let mut inner = s.inner_cos.acos().to_degrees();
+            let mut outer = s.outer_cos.acos().to_degrees();
+            let a = ui
+                .add(
+                    egui::DragValue::new(&mut inner)
+                        .speed(0.2)
+                        .range(0.01..=89.99),
+                )
+                .changed();
+            let b = ui
+                .add(
+                    egui::DragValue::new(&mut outer)
+                        .speed(0.2)
+                        .range(0.01..=89.99),
+                )
+                .changed();
+            if a || b {
+                let (inner, outer) = (inner.min(outer), outer.max(inner));
+                let (position, direction, color, intensity, radius) =
+                    (s.position, s.direction, s.color, s.intensity, s.radius);
+                *s = quench3d::render::SpotLight::new(
+                    position, direction, color, intensity, radius, inner, outer,
+                );
+                *changed = true;
+            }
+        });
+    }
+    if let Some(i) = remove_spot {
+        lights.spot_lights.remove(i);
+        *changed = true;
+    }
+    ui.horizontal(|ui| {
+        if ui.button("加点光").clicked() {
+            lights.point_lights.push(quench3d::render::PointLight {
+                position: Vec3::new(0.0, 4.0, 0.0),
+                color: Vec3::new(1.0, 1.0, 1.0),
+                intensity: 12.0,
+                radius: 18.0,
+            });
+            *changed = true;
+        }
+        if ui.button("加聚光").clicked() {
+            lights.spot_lights.push(quench3d::render::SpotLight::new(
+                Vec3::new(0.0, 6.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+                12.0,
+                18.0,
+                20.0,
+                30.0,
+            ));
+            *changed = true;
+        }
+    });
+}
+
 fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     egui::CollapsingHeader::new("光照")
         .default_open(false)
         .show(ui, |ui| {
             let mut changed = false;
+            local_lights_section(ui, engine, &mut changed);
             {
                 let light = &mut engine.scene.lighting;
                 let mut dir = light

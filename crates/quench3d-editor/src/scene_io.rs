@@ -105,6 +105,11 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         cascades: Some(engine.renderer.options.shadow_cascades),
         split_lambda: Some(engine.renderer.options.shadow_split_lambda),
     });
+    // 局部光（点光源 / 聚光灯）：编辑器现在能增删改（见 ui 的 local_lights_section），
+    // 所以从**引擎**写回。空数组写成"不写这一节"：对点光源来说"没写"（保留预设补光）
+    // 与"写了 []"（显式清空）是两种意思，UI 里删光几盏灯不该顺手把预设补光也清掉。
+    lighting.point_lights = point_light_docs(&light.point_lights);
+    lighting.spot_lights = spot_light_docs(&light.spot_lights);
     // 后处理：编辑器现在能改（UI 直接改 `engine.renderer.options`），所以从引擎写回。
     // 以前这三项是"沿用底稿"——在编辑器里勾掉 FXAA，存盘却还是开着的。
     let opts = &engine.renderer.options;
@@ -464,6 +469,111 @@ fn apply_texture_overrides(material: &mut MaterialDoc, explicit: &TexturePaths) 
     if explicit.double_sided.is_some() {
         material.double_sided = explicit.double_sided;
     }
+}
+
+#[cfg(test)]
+mod local_light_doc_tests {
+    use super::*;
+
+    #[test]
+    fn local_lights_round_trip_through_the_scene_doc() {
+        // 编辑器写回走这两个纯函数（不需要 GPU，所以 CI 也跑）。
+        // 钉住三件事：空 = 不写这一节；字段一个不丢；角度"角度→余弦→角度"能回到原值。
+        assert!(point_light_docs(&[]).is_none());
+        assert!(spot_light_docs(&[]).is_none());
+
+        let point = quench3d::render::PointLight {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            color: Vec3::new(0.9, 0.8, 0.7),
+            intensity: 12.5,
+            radius: 20.0,
+        };
+        let docs = point_light_docs(std::slice::from_ref(&point)).expect("有点光就该写");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].position, [1.0, 2.0, 3.0]);
+        assert_eq!(docs[0].color, [0.9, 0.8, 0.7]);
+        assert_eq!(docs[0].intensity, 12.5);
+        assert_eq!(docs[0].radius, 20.0);
+
+        let spot = quench3d::render::SpotLight::new(
+            Vec3::new(0.0, 9.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.5),
+            30.0,
+            40.0,
+            8.0,
+            12.0,
+        );
+        let docs = spot_light_docs(std::slice::from_ref(&spot)).expect("有聚光就该写");
+        assert_eq!(docs.len(), 1);
+        let d = &docs[0];
+        assert_eq!(d.position, [0.0, 9.0, 0.0]);
+        assert_eq!(d.direction, [0.0, -1.0, 0.0]);
+        assert_eq!(d.color, [1.0, 1.0, 0.5]);
+        assert_eq!(d.intensity, 30.0);
+        assert_eq!(d.radius, 40.0);
+        // 引擎只存余弦，所以这里比的是"转回角度"的值（1e-4 度以内足够）
+        assert!((d.inner_deg - 8.0).abs() < 1e-4, "内锥角 {}", d.inner_deg);
+        assert!((d.outer_deg - 12.0).abs() < 1e-4, "外锥角 {}", d.outer_deg);
+        // 方向会被归一化（作者写 (0,-2,0) 这种也认）
+        let long = quench3d::render::SpotLight::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, -2.0, 0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            1.0,
+            1.0,
+            10.0,
+            20.0,
+        );
+        let docs = spot_light_docs(std::slice::from_ref(&long)).unwrap();
+        assert!((docs[0].direction[1] + 1.0).abs() < 1e-6);
+    }
+}
+
+/// 引擎里的点光源 → 场景文档。空 = `None`（不写这一节）。
+pub(crate) fn point_light_docs(
+    lights: &[quench3d::render::PointLight],
+) -> Option<Vec<quench3d_cli::scene_doc::PointLightDoc>> {
+    if lights.is_empty() {
+        return None;
+    }
+    Some(
+        lights
+            .iter()
+            .map(|p| quench3d_cli::scene_doc::PointLightDoc {
+                position: p.position.to_array(),
+                color: p.color.to_array(),
+                intensity: p.intensity,
+                radius: p.radius,
+            })
+            .collect(),
+    )
+}
+
+/// 引擎里的聚光灯 → 场景文档。空 = `None`（不写这一节）。
+///
+/// 角度是**从余弦反解**出来的（引擎只存余弦），所以存回去的是等价角度，
+/// 与作者写下的原始小数可能有 1e-5 量级的差别 —— 语义完全一样。
+pub(crate) fn spot_light_docs(
+    lights: &[quench3d::render::SpotLight],
+) -> Option<Vec<quench3d_cli::scene_doc::SpotLightDoc>> {
+    if lights.is_empty() {
+        return None;
+    }
+    Some(
+        lights
+            .iter()
+            .map(|s| quench3d_cli::scene_doc::SpotLightDoc {
+                position: s.position.to_array(),
+                direction: s.dir().to_array(),
+                color: s.color.to_array(),
+                intensity: s.intensity,
+                radius: s.radius,
+                inner_deg: s.inner_cos.acos().to_degrees(),
+                outer_deg: s.outer_cos.acos().to_degrees(),
+            })
+            .collect(),
+    )
 }
 
 /// 把场景 JSON 装进引擎。
