@@ -54,6 +54,57 @@
 
 ### 新增
 
+- **固定关节的参考姿态真正生效了（`joints[].frame_a` / `frame_b`）** —— gap #15 的第三段，
+  也是最后一段接线。
+  以前引擎的 `Joint::Fixed` 是**速度级**角约束：它锁的是"创建那一刻"的相对姿态，
+  `local_frame_a/b` 只是被保存下来、求解器根本不看。于是"把这扇门扭到与门框成 90°"
+  只能靠手算世界朝向、把物体初始 `rotation_deg` 摆好 —— 一旦两端各自还有朝向（比如 B 的
+  "正面"是局部 +X、A 的是局部 +Z），就没人能表达"让这两个特征对齐"。
+  - **引擎**（`crates/quench3d-physics/src/joints.rs`）：`Joint::Fixed` 的 3 自由度角约束
+    多了一个**参考姿态偏置** —— 每子步算世界系误差
+    `e = (q_b⊗frame_b)⊗(q_a⊗frame_a)⁻¹`（`fixed_frame_error`，取**最短**路径），
+    目标相对角速度 = `-0.2/dt · e`，按 `clamp_length` 夹在 20 rad/s 以内（与
+    `angular_rhs` 的轴对齐偏置同源）。**两端参考姿态都是单位四元数时走原来那条表达式**
+    （`-wrel`），老场景逐位不变 —— 由 `digest_tests` 与下面那条"写全 0 == 不写、逐位相同"一起钉住。
+  - **睡眠**：参考姿态是**每步都在修**的约束，而睡眠体在求解器里是完全冻结的
+    （`BodyView::from_body` 把 `inv_m` / `inv_I` 清零），睡着就会把修正停在半路。所以世界改用
+    `Joint::drives_bodies()`（马达 **或** 参考姿态）当"这一步不许睡"的判据；缺省固定关节
+    不在其列，老场景的睡眠行为不变。
+  - **格式**（`scene_doc.rs`）：`JointDoc.frame_a` / `frame_b`（`Option<[f32;3]>`，欧拉角 XYZ、
+    **度**，与 `rotation_deg` 同单位）。不写 = 老行为；只要有一端不是 0 就切到"扭到参考姿态"。
+  - 校验（**全部复用已有稳定码**，不新增码表条目）：非有限 → `out_of_range`；写在非 `fixed`
+    关节上 → `ineffective`；**两端都写 0**（与不写逐位等价）→ `ineffective`，消息点明"等于没写"。
+  - 共用同一份换算：`runner::joint_frame_quat`（`pub` 纯函数，度 → 四元数）由 CLI 装配、
+    格式校验、编辑器守卫三处共用；编辑器预览本来就调 `runner::build_world`，所以预览与
+    `quench3d simulate` 不会再分叉。
+  - agent 自描述三处同步：`scene_grammar()["joint"]`、`$defs.joint.properties`、系统提示词。
+    本轮顺手补上了 `joint` 人读字段表里**一直缺的** `motor_max_impulse`，并加了守卫
+    `joint_field_table_covers_every_joint_field`（人读表 ↔ `JointDoc` 字段集**逐项**对账）。
+  - 测试（**全部无显卡**）：
+    * 引擎 `crates/quench3d-physics/tests/fixed_reference_frame.rs`（4 个用例）：
+      `frame_a = 90°` 的箱体 1 秒内误差 < 5°、3 秒 < 2°，且**不过冲**、锚点位移 < 0.05；
+      两端**都是动态体**时也收敛（冲量两侧都作用）；被 3 rad/s 推歪后自己扭回来；
+      缺省参考姿态时**保持**创建时的 90°（差 < 2°）。
+    * CLI `crates/quench3d-cli/tests/joint_reference_frames.rs`：从**场景 JSON** 出发
+      （`SceneDoc` → `runner::build_world` → 引擎）验证 `frame_a=[0,90,0]` 让门板停在绕 Y 90°
+      （差 < 2°）、只写 `frame_b` 得到 -90°、缺省时保持创建姿态、**写全 0 与不写 120 步后
+      位置/朝向逐位相同**、驱动中的两端跑 10 秒也不睡。
+    * 编辑器 `crates/quench3d-editor/tests/joint_frames.rs`（3 条，**纯 CPU**，无显卡也真跑）：
+      预览走 `runner::build_world`；编辑器源码里不许出现 `Joint::Fixed` / `local_frame_*` /
+      `PhysicsWorld::new`（"两边各写一套"是静默分叉的起点）；共享换算的单位契约。
+    * `scene_doc::tests::joint_reference_frames_parse_round_trip_and_diagnose`：解析 / 往返 /
+      缺省不落盘 / 非有限 `out_of_range` / 错关节类型与"全 0"→ `ineffective` / 老场景不被吵醒。
+  - **变异验证**（改坏 → 红 → 改回 → 绿，四条独立）：
+    ① `frame_target_velocity` 去掉负号 → 3 个引擎用例红（"1 秒后误差 164.6°"）；
+    ② runner 里把 `frame_a`/`frame_b` 对调 → CLI 3 条红（门板差 179.96°）；
+    ③ `scene_grammar()["joint"]` 删掉 `frame_b` → `joint_field_table_covers_every_joint_field` 红；
+    ④ 引擎里摘掉"两端都是单位四元数"的判断（永远按参考姿态算）→ 引擎"保持创建姿态"红
+    （差 89.95°）与 CLI"缺省保持创建姿态"红。**注意**：④ 之下"写全 0 == 不写、逐位相同"
+    **仍然绿** —— 它量的是两条写法彼此一致，不是老行为的数值。两条测试分工不同，别拿错尺子。
+  - **没做**：关节的**可视化**（轴 / 锚点 / 参考姿态的 gizmo）仍然没有 —— 那要动渲染侧，
+    本轮围栏外；编辑器没有关节编辑面板（所以本轮只加了"不许分叉"的结构守卫）；
+    参考姿态只对 `fixed` 生效（`ball` 的 `cone_limit` 早就在求解器里生效，不是这一轮的事）。
+
 - **关节的局部轴可以按端指定（`joints[].axis_a` / `axis_b`）** —— gap #15 的第二段。
   以前格式里只有一根 `axis`，装配时被**同时**喂给 `local_axis_a` 与 `local_axis_b`。这只在
   "两端刚体初始朝向相同"时才等于"同一个世界轴"：门框平放、门板转了 90° 时，世界 Y 在门框
