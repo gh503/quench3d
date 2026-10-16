@@ -302,6 +302,7 @@ pub fn scene_grammar() -> Value {
             "templates": "名字 → 模板对象（字段集与物体完全相同）。物体写 `template: \"名字\"` 复用；物体自己写的字段覆盖模板；模板里写 name/parent/position/rotation_deg 没有意义（会有警告并被忽略）",
             "objects": "图元物体数组",
             "models": "外部模型数组（gltf/glb/obj）",
+            "assets": "资源搜索路径（贴图与模型的资源库）",
             "joints": "关节数组，用物体名连接",
             "actions": "定时动作数组：在指定步/秒对刚体施加冲量、力、速度或瞬移",
             "probes": "区域探针数组：只读记录谁何时进入/离开某个球形或盒形区域",
@@ -608,6 +609,7 @@ pub fn json_schema() -> Value {
             "friction",
         ]),
     );
+    defs.insert("assets".into(), def(&["search_paths"]));
     defs.insert(
         "coneLimit".into(),
         def(&["half_angle_deg", "axis_a", "axis_b"]),
@@ -760,6 +762,7 @@ pub fn json_schema() -> Value {
                                "description": "可复用的物体描述；objects[].template 引用它" },
                 "objects": { "type": "array", "items": { "$ref": "#/$defs/object" } },
                 "models": { "type": "array", "items": { "$ref": "#/$defs/model" } },
+                "assets": { "$ref": "#/$defs/assets" },
                 "joints": { "type": "array", "items": { "$ref": "#/$defs/joint" } },
                 "actions": { "type": "array", "items": { "$ref": "#/$defs/action" } },
                 "probes": { "type": "array", "items": { "$ref": "#/$defs/probe" } },
@@ -1077,6 +1080,7 @@ mod tests {
             ("MaterialDoc", "material"),
             ("GroundDoc", "ground"),
             ("ModelDoc", "model"),
+            ("AssetsDoc", "assets"),
             ("JointDoc", "joint"),
             ("ConeLimitDoc", "coneLimit"),
             ("ActionDoc", "action"),

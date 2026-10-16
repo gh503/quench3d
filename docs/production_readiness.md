@@ -864,3 +864,22 @@ N 级画进同一张深度图的 2×2 图集，主 pass 按视空间深度选级
 没有逐像素确认它到底是 PCF 把粗级的影子摊开、还是别的原因，所以不写"一定是摊开"。
 用级联的场合是**场景本身纵深大**（B）；小场景要清晰，正确做法是把 `far` 收小或提高
 `shadow_map_size`，而不是加级数。
+
+### 13.1 资产解析（第 44 轮）：一个概念不能有三套规则
+
+场景里的"资源路径"本来有三处解析：贴图走 `SceneDoc::asset_candidates`（场景目录 → 当前工作目录 →
+引擎搜索路径），模型走加载器自己的规则（原路径、`assets/`、`quench3d/assets/`、crate 目录），
+而 `validate` 检查模型时用的又是加载器那套。三者不一致的后果很具体：**模型就放在场景文件旁边**
+（最自然的写法）在工作目录不等于场景目录时加载失败，而 `validate` 有可能说没问题。
+
+这轮把三处合并成**一个**候选列表（`asset_candidates` / `model_candidates`），并加上场景级
+`assets.search_paths`（排在场景目录之后、当前工作目录之前，相对路径以场景目录为基准）。
+错误信息列出**找过哪些位置**（展开成绝对路径），因为"找不到文件"最贵的部分从来不是错误本身，
+而是不知道该往哪儿放。
+
+**测试**：`assets_search_paths_and_model_paths_use_the_same_candidates`（解析顺序 / 搜索路径展开 /
+找不到时列出的位置 / 空项与不存在目录的诊断 / 不写 `assets` 时序列化里不出现这个键）；
+e2e `scene_relative_model_paths_do_not_depend_on_the_working_directory` 全程**不需要显卡**
+（用 `simulate` 走物理侧的模型加载）。注意 e2e 里"找不到"的退出码是 **2 而不是 1**：
+`validate` 会先拦下来——所以 `resolve_model_path` 的报错路径在 CLI 上是第二道防线，
+留着是为了让引擎 API 的调用方也拿到同样的信息。

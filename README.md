@@ -787,6 +787,7 @@ NaN 刚体  : 0
     { "name": "门口", "shape": "box", "position": [3, 1, 0], "size": [2, 2, 2], "watch": ["箱子"] }
   ],
   "models": [ { "path": "chair.glb", "position": [2, 0, 0], "scale": 1, "collide": true } ],
+  "assets": { "search_paths": ["../shared/assets"] },
   "camera": { "position": [7, 4.5, 8], "look_at": [0, 1.2, 0], "fov_deg": 50,
               "near": 0.05, "far": 5000 },
   "lighting": { "preset": "studio", "sun_direction": [-0.4, -1, -0.35], "shadows": true,
@@ -1064,7 +1065,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 472 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 473 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

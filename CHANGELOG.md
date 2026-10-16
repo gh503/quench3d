@@ -10,6 +10,20 @@
 
 ### 新增
 
+- **`assets.search_paths`：场景自己的资源搜索路径**（gap #11）。不写 = 老行为完全不变；
+  写了就在"场景文件所在目录"之后、"当前工作目录"之前依次尝试，相对路径以场景目录为基准。
+  校验会报空项（错误）与不存在的目录（警告，避免打错一个字静默失效）。
+- **修掉一个真实的不一致：模型路径与贴图路径不是同一套解析规则**。
+  贴图按"场景目录 → 当前工作目录 → 引擎搜索路径"；模型却只按加载器自己的规则
+  （原路径、`assets/`、`quench3d/assets/`）——**不含场景目录**。后果：
+  `models[].path: "chair.glb"` 这种最自然的写法，在工作目录不等于场景目录时加载失败，
+  而 `validate` 用第三套规则可能还说没问题。现在贴图与模型共用同一个候选列表
+  （`SceneDoc::asset_candidates` / `model_candidates`），validate 与渲染也一致。
+  错误信息会列出**找过哪些位置**（含搜索路径展开后的绝对路径），而不是一句 CWD 相对路径的 IO 错误。
+- 测试：`assets_search_paths_and_model_paths_use_the_same_candidates`（解析顺序、搜索路径
+  展开、找不到时列出的位置、空/不存在搜索路径的诊断、不写 assets 时不出现该键）+
+  e2e `scene_relative_model_paths_do_not_depend_on_the_working_directory`（**不需要显卡**，
+  走物理侧的模型加载；含"模型就在场景旁边""靠 search_paths 找""找不到时的报错"三种情形）。
 - **级联阴影的量化验证**（不改渲染行为）：`examples/shadow_probe` 从"只诊断自阴影与方向"
   扩成**级联 sweep**（`cascades = 1/2/3/4` × 远景/近景/深景三组位形），并给出
   **半影比例**（地面边缘像素 / 核心像素）与**推导的纹素足迹**（世界单位/纹素）。

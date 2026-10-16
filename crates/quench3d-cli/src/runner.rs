@@ -256,6 +256,36 @@ fn load_model_cached(
         .map_err(|e| RunError::scene(format!("加载模型 {} 失败: {e}", path.display())))
 }
 
+/// 把场景里的模型路径解析成**真实路径**：与贴图共用同一套候选
+/// （场景目录 → `assets.search_paths` → 当前工作目录 → 引擎搜索路径）。
+///
+/// 以前这里直接把 `models[].path` 丢给加载器，而加载器只认"原路径 + assets/ +
+/// quench3d/assets/ + crate 目录"——**不含场景文件所在目录**。于是同一份场景，
+/// 贴图找得到、模型找不到；`validate` 用的又是第三套规则。
+fn resolve_model_path(
+    doc: &SceneDoc,
+    field: &str,
+    raw: &std::path::Path,
+) -> Result<std::path::PathBuf, RunError> {
+    match doc.resolve_model(raw) {
+        Some(p) => Ok(p),
+        None => {
+            let tried = doc
+                .model_candidates(raw)
+                .iter()
+                .map(|c| c.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            let mut err = RunError::io(format!(
+                "找不到模型文件 \"{}\"（找过：{tried}）",
+                raw.display()
+            ));
+            err.path = Some(field.to_string());
+            Err(err)
+        }
+    }
+}
+
 /// 报告里的模型缓存统计（没有任何模型参与时**不出现**，老报告逐字节不变）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCacheReport {
@@ -1436,7 +1466,8 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if !m.collide {
             continue;
         }
-        let model = load_model_cached(&m.path)?;
+        let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
+        let model = load_model_cached(&resolved)?;
         let s = m.scale.unwrap_or(1.0);
         let rot = euler_quat(m.rotation_deg);
         let origin = v3(m.position.unwrap_or([0.0, 0.0, 0.0]));
@@ -2580,7 +2611,8 @@ pub fn setup_visuals(
             euler_quat(m.rotation_deg),
             Vec3::splat(m.scale.unwrap_or(1.0)),
         );
-        match load_model_cached(&m.path).map(|model| engine.add_model(&model, transform)) {
+        let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
+        match load_model_cached(&resolved).map(|model| engine.add_model(&model, transform)) {
             Ok(objects) => instances.push(ModelInstance {
                 model: i,
                 path: m.path.clone(),

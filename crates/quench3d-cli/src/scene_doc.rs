@@ -148,6 +148,16 @@ pub struct SceneDoc {
     /// 外部模型文件（glTF/GLB/OBJ）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelDoc>,
+    /// 资源搜索路径（贴图与模型的"资源库"）。
+    ///
+    /// **不写 = 只按原有规则找**（场景文件所在目录 → 当前工作目录 → 引擎搜索路径），
+    /// 与没有这一节时完全一致。写了就在"场景目录"之后、"当前工作目录"之前依次尝试。
+    ///
+    /// 相对路径以**场景文件所在目录**为基准（和 `models[].path`、贴图路径同一套规则），
+    /// 绝对路径原样使用。这样把素材放在 `../shared/assets/` 里，多个场景可以共用，
+    /// 且不管从哪个工作目录跑都找得到。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<AssetsDoc>,
     /// 关节。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joints: Vec<JointDoc>,
@@ -628,6 +638,7 @@ impl Default for SceneDoc {
             objects: Vec::new(),
             templates: BTreeMap::new(),
             models: Vec::new(),
+            assets: None,
             joints: Vec::new(),
             actions: Vec::new(),
             probes: Vec::new(),
@@ -999,7 +1010,16 @@ fn default_true() -> bool {
     true
 }
 
-/// 外部模型。
+/// 资源搜索路径。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetsDoc {
+    /// 依次尝试的目录列表（相对路径以场景文件所在目录为基准）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_paths: Vec<PathBuf>,
+}
+
+/// 一个外部模型文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelDoc {
@@ -1720,7 +1740,7 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
                 out.push(
                     Diagnostic::error(key, format!("未知字段 \"{key}\"")).with_hint(
                         "顶层可用字段：format、version、name、gravity、ground、materials、\
-                         objects、models、joints、actions、probes、camera、lighting、\
+                         objects、models、assets、joints、actions、probes、camera、lighting、\
                          simulate、render",
                     ),
                 );
@@ -2100,6 +2120,21 @@ impl SceneDoc {
         if let Some(base) = &self.base_dir {
             push(base.join(raw));
         }
+        // 场景自己声明的资源库：排在"场景目录"之后、"当前工作目录"之前。
+        // 相对路径以场景目录为基准（与贴图/模型路径同一套规则）。
+        if let Some(assets) = &self.assets {
+            for sp in &assets.search_paths {
+                let dir = if sp.is_absolute() {
+                    sp.clone()
+                } else {
+                    match &self.base_dir {
+                        Some(base) => base.join(sp),
+                        None => sp.clone(),
+                    }
+                };
+                push(dir.join(raw));
+            }
+        }
         push(raw.to_path_buf());
         if let Ok(resolved) = quench3d::assets::resolve_path(rel) {
             push(resolved);
@@ -2110,6 +2145,23 @@ impl SceneDoc {
     /// 解析出第一个真实存在的候选路径（都没有时返回 `None`）。
     pub fn resolve_asset(&self, rel: &str) -> Option<PathBuf> {
         self.asset_candidates(rel).into_iter().find(|p| p.exists())
+    }
+
+    /// 模型的候选路径：与贴图**共用同一套规则**。
+    ///
+    /// 以前模型走的是加载器自己的规则（原路径、`assets/`、`quench3d/assets/`），
+    /// **不含场景文件所在目录**——于是 `models[].path: "robot.glb"` 只有在"工作目录
+    /// 正好是场景目录"时才加载得动，而 `validate` 用另一套规则又可能说没问题。
+    /// 现在贴图与模型统一：场景目录 → `assets.search_paths` → 工作目录 → 引擎搜索路径。
+    ///
+    /// 非 UTF-8 的模型路径会被 `to_string_lossy` 处理（这种路径在 JSON 里本来就写不出来）。
+    pub fn model_candidates(&self, path: &std::path::Path) -> Vec<PathBuf> {
+        self.asset_candidates(&path.to_string_lossy())
+    }
+
+    /// 解析出第一个真实存在的模型路径。
+    pub fn resolve_model(&self, path: &std::path::Path) -> Option<PathBuf> {
+        self.model_candidates(path).into_iter().find(|p| p.exists())
     }
 
     /// 按 `--camera <名字>` 选一台命名相机：把 `camera` 段换成它。
@@ -3111,6 +3163,34 @@ impl SceneDoc {
             }
         }
 
+        // 资源搜索路径：空项是错误；不存在的目录给警告（打错一个字就静默失效最难查）
+        if let Some(assets) = &self.assets {
+            for (i, sp) in assets.search_paths.iter().enumerate() {
+                let p = format!("assets.search_paths[{i}]");
+                if sp.as_os_str().is_empty() {
+                    out.push(Diagnostic::error(p, "搜索路径不能为空"));
+                    continue;
+                }
+                let dir = if sp.is_absolute() {
+                    sp.clone()
+                } else {
+                    match &self.base_dir {
+                        Some(base) => base.join(sp),
+                        None => sp.clone(),
+                    }
+                };
+                if !dir.is_dir() {
+                    out.push(
+                        Diagnostic::warn(
+                            p,
+                            format!("搜索路径 {} 不是一个存在的目录", dir.display()),
+                        )
+                        .with_hint("相对路径以场景文件所在目录为基准"),
+                    );
+                }
+            }
+        }
+
         // 模型
         for (i, m) in self.models.iter().enumerate() {
             let p = format!("models[{i}]");
@@ -3128,10 +3208,11 @@ impl SceneDoc {
                         format!("不支持的模型格式 \".{ext}\""),
                     ));
                 }
-                // 用加载器自己的解析规则（原路径、assets/、quench3d/assets/、crate 目录），
-                // 不能只看 path.exists()：那会把「靠 assets/ 搜到的合法场景」误判成错误
-                match quench3d::assets::resolve_path(&m.path) {
-                    Ok(found) => {
+                // 与贴图共用同一套候选（场景目录 → assets.search_paths → 工作目录 →
+                // 引擎搜索路径）。以前这里用的是加载器自己的规则，和渲染路径**不一致**：
+                // 场景目录里的模型会被判成"找不到"，而靠 assets/ 搜到的又可能被误判。
+                match self.resolve_model(&m.path) {
+                    Some(found) => {
                         if found != m.path {
                             out.push(Diagnostic::warn(
                                 format!("{p}.path"),
@@ -3139,12 +3220,24 @@ impl SceneDoc {
                             ));
                         }
                     }
-                    Err(e) => out.push(
-                        Diagnostic::error(format!("{p}.path"), format!("找不到模型文件（{e}）"))
+                    None => {
+                        let tried = self
+                            .model_candidates(&m.path)
+                            .iter()
+                            .map(|c| c.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(" / ");
+                        out.push(
+                            Diagnostic::error(
+                                format!("{p}.path"),
+                                format!("找不到模型文件 \"{}\"（找过：{tried}）", m.path.display()),
+                            )
                             .with_hint(
-                                "支持直接路径，以及 assets/ 与 quench3d/assets/ 下的相对路径",
+                                "把模型放到场景文件同目录、写进 assets.search_paths，\
+                                 或写成绝对路径",
                             ),
-                    ),
+                        );
+                    }
                 }
             }
             if let Some(s) = m.scale {
@@ -5031,23 +5124,101 @@ mod tests {
     }
 
     #[test]
-    fn model_path_is_checked_with_the_loader_search_path() {
-        // 真的不存在 → 错误（并给出尝试过的路径）
+    fn assets_search_paths_and_model_paths_use_the_same_candidates() {
+        let dir = std::env::temp_dir().join(format!("quench3d_assets_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib").join("robot.obj"), "o cube\n").unwrap();
+        std::fs::write(dir.join("here.glb"), b"not-really").unwrap();
+        let scene = dir.join("level.json");
+        let write = |v: serde_json::Value| {
+            std::fs::write(&scene, serde_json::to_string(&v).unwrap()).unwrap();
+        };
 
-        let doc = SceneDoc::from_value(
-            json!({ "models": [ { "path": "definitely_missing_3d7f.glb" } ] }),
-        )
-        .unwrap();
+        // 1) 场景目录里的模型：解析到**场景目录**，而不是"进程当前工作目录"。
+        //    这正是修掉的那个不一致：贴图走场景目录，模型走加载器的另一套规则。
+        write(json!({ "models": [ { "path": "here.glb" } ] }));
+        let doc = SceneDoc::from_file(&scene).unwrap();
+        assert_eq!(
+            doc.resolve_model(std::path::Path::new("here.glb")).unwrap(),
+            dir.join("here.glb")
+        );
+
+        // 2) assets.search_paths：模型在 `lib/` 里也找得到；顺序是
+        //    场景目录 → 搜索路径 → 当前工作目录 → 引擎搜索路径。
+        write(json!({
+            "assets": { "search_paths": ["lib"] },
+            "models": [ { "path": "robot.obj" } ]
+        }));
+        let doc = SceneDoc::from_file(&scene).unwrap();
+        let cands = doc.model_candidates(std::path::Path::new("robot.obj"));
+        assert_eq!(cands[0], dir.join("robot.obj"), "场景目录优先：{cands:?}");
+        assert_eq!(
+            cands[1],
+            dir.join("lib").join("robot.obj"),
+            "其次是搜索路径：{cands:?}"
+        );
+        assert_eq!(
+            doc.resolve_model(std::path::Path::new("robot.obj"))
+                .unwrap(),
+            dir.join("lib").join("robot.obj")
+        );
+        assert!(
+            doc.validate().iter().all(|d| d.severity != Severity::Error),
+            "有搜索路径能找到时不该报错：{:?}",
+            doc.validate()
+        );
+
+        // 3) 找不到：错误里要列出"找过"的位置（含搜索路径展开后的绝对路径）
+        write(json!({
+            "assets": { "search_paths": ["lib"] },
+            "models": [ { "path": "nope_3d7f.glb" } ]
+        }));
+        let doc = SceneDoc::from_file(&scene).unwrap();
         let diags = doc.validate();
         let hit = diags
             .iter()
             .find(|d| d.path == "models[0].path" && d.severity == Severity::Error)
-            .unwrap_or_else(|| panic!("应当报找不到文件: {diags:?}"));
+            .unwrap_or_else(|| panic!("应当报找不到文件：{diags:?}"));
         assert!(
-            hit.message.contains("assets"),
-            "错误里应当列出候选搜索路径: {}",
+            hit.message.contains("找过：") && hit.message.contains("lib"),
+            "错误要列出找过的位置：{}",
             hit.message
         );
+        assert!(
+            hit.hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("assets.search_paths"),
+            "提示里要说清怎么办：{:?}",
+            hit.hint
+        );
+
+        // 4) 搜索路径自身：空项 = 错误；不存在的目录 = 警告（打错一个字会静默失效）
+        write(json!({ "assets": { "search_paths": ["", "no_such_dir_3d7f"] } }));
+        let doc = SceneDoc::from_file(&scene).unwrap();
+        let diags = doc.validate();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path == "assets.search_paths[0]" && d.severity == Severity::Error),
+            "{diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path == "assets.search_paths[1]" && d.severity == Severity::Warning),
+            "{diags:?}"
+        );
+
+        // 5) 不写 assets = 老行为（候选里没有搜索路径，序列化时也不出现这个键）
+        write(json!({ "models": [ { "path": "here.glb" } ] }));
+        let doc = SceneDoc::from_file(&scene).unwrap();
+        assert!(doc.assets.is_none());
+        let round = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
+        assert!(round.assets.is_none());
+        assert!(!doc.to_json_pretty().contains("search_paths"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- 层级（格式版本 2 的 objects[].parent）------------------------------

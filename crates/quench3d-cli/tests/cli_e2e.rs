@@ -4515,3 +4515,81 @@ fn shadow_cascades_are_validated_and_change_the_image_when_a_gpu_is_present() {
         );
     }
 }
+
+/// 资产搜索路径（gap #11）：贴图与模型走**同一套**候选，且不依赖进程当前工作目录。
+///
+/// 修掉的那个不一致：贴图按"场景目录 → 当前工作目录 → 引擎搜索路径"解析，
+/// 模型却只按加载器自己的规则（原路径、`assets/`、`quench3d/assets/`）——
+/// **不含场景目录**。于是"模型就放在场景文件旁边"这种最自然的写法，
+/// 在工作目录不等于场景目录时直接加载失败（而 `validate` 用的又是第三套规则）。
+///
+/// 这条测试全程不需要显卡（用 `simulate` 走物理侧的模型加载）。
+#[test]
+fn scene_relative_model_paths_do_not_depend_on_the_working_directory() {
+    let dir = temp_dir("assets_search");
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let obj = "o tri\nv 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3\n";
+    std::fs::write(dir.join("near.obj"), obj).unwrap();
+    std::fs::write(lib.join("far.obj"), obj).unwrap();
+
+    let scene = |name: &str, models: serde_json::Value, assets: Option<serde_json::Value>| {
+        let mut v = serde_json::json!({
+            "objects": [
+                { "name": "球", "shape": { "type": "sphere", "radius": 0.4 },
+                  "position": [0, 3, 0], "body": "dynamic" }
+            ],
+            "models": models,
+            "simulate": { "steps": 2, "dt": 0.016 }
+        });
+        if let Some(a) = assets {
+            v["assets"] = a;
+        }
+        write_scene(&dir, name, v)
+    };
+
+    // 1) 模型就在场景文件旁边：不写 assets 也要加载得到（回归：修之前这里必失败）
+    let p = scene(
+        "near.json",
+        serde_json::json!([{ "path": "near.obj", "collide": true }]),
+        None,
+    );
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        r.code, 0,
+        "场景目录里的模型应当加载得到（工作目录不是场景目录）：{}",
+        r.stderr
+    );
+    assert_eq!(
+        run(&["validate", p.to_str().unwrap(), "--json"]).json()["data"]["valid"],
+        true
+    );
+
+    // 2) 模型在 `../lib`：靠 assets.search_paths 找得到（相对路径以场景目录为基准）
+    let p = scene(
+        "far.json",
+        serde_json::json!([{ "path": "far.obj", "collide": true }]),
+        Some(serde_json::json!({ "search_paths": ["lib"] })),
+    );
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        r.code, 0,
+        "assets.search_paths 里的模型应当找得到：{}",
+        r.stderr
+    );
+
+    // 3) 找不到：错误里要列出"找过"的位置（含搜索路径），而不是一句 CWD 相对路径的 IO 错误
+    let p = scene(
+        "missing.json",
+        serde_json::json!([{ "path": "nope_3d7f.obj", "collide": true }]),
+        Some(serde_json::json!({ "search_paths": ["lib"] })),
+    );
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    // 退出码 2（输入有问题）：`validate` 这一步就会拦下来，附上"找过哪些位置"
+    assert_eq!(r.code, 2, "{:?}", r.json());
+    let msg = r.json().to_string();
+    assert!(
+        msg.contains("找过：") && msg.contains("lib"),
+        "错误要列出找过哪里：{msg}"
+    );
+}
