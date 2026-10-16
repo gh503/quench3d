@@ -172,6 +172,7 @@ fn contact_api() {
         position: Vec3::ZERO,
         normal: Vec3::Y,
         penetration: 0.01,
+        feature_id: 0,
     };
     let manifold = ContactManifold {
         points: vec![point].into(),
@@ -750,4 +751,39 @@ fn phase_timing_uses_the_pluggable_clock() {
         world.step(1.0 / 60.0);
     }
     assert_eq!(world.phase_timings().steps, 10, "关掉计时后不应再累计");
+}
+
+/// 接触特征 ID（gap #20 的第一条腿）：同特征稳定、异特征可分、坏输入不 panic。
+///
+/// 它是**热启动匹配的键**：不稳定 = 冲量每步丢失（表现为"箱子忽软忽硬"）；
+/// 不可分 = 把相邻特征点的冲量错误沿用（表现为"多余的黏滞/抖动"）。
+#[test]
+fn contact_feature_ids_are_stable_and_discriminating() {
+    use crate::contact::feature_id_from_local;
+    let a = Vec3::new(0.25, -0.5, 1.0);
+    let b = Vec3::new(-0.125, 0.75, 0.0);
+    let id = feature_id_from_local(a, b);
+    assert_ne!(id, 0, "正常输入不该是「未知」");
+    assert_eq!(id, feature_id_from_local(a, b), "同输入必须同 ID");
+
+    // 同一个特征在连续帧里会有浮点噪声（1e-4 m 量级）→ 必须落进同一格
+    let jitter = Vec3::new(1.0e-4, -2.0e-4, 3.0e-5);
+    assert_eq!(
+        id,
+        feature_id_from_local(a + jitter, b - jitter),
+        "0.5 mm 以内的抖动必须得到同一个特征 ID"
+    );
+
+    // 相邻但不同的特征点（差 5 mm）必须区分开
+    let other = feature_id_from_local(a + Vec3::new(0.005, 0.0, 0.0), b);
+    assert_ne!(id, other, "相距 5 mm 的不同特征不该共用一个 ID");
+    // 任何一端变了都算不同特征
+    assert_ne!(id, feature_id_from_local(a, b + Vec3::new(0.0, 0.005, 0.0)));
+
+    // 非有限值退化为"未知"，绝不 panic、也不产生随机 ID
+    assert_eq!(feature_id_from_local(Vec3::new(f32::NAN, 0.0, 0.0), b), 0);
+    assert_eq!(
+        feature_id_from_local(a, Vec3::new(0.0, f32::INFINITY, 0.0)),
+        0
+    );
 }

@@ -10,6 +10,12 @@
 
 ### 新增
 
+- **接触特征 ID（gap #20 第一条腿）**：`ContactPoint` 新增 `feature_id`——由接触点在两端
+  的**局部坐标**按 0.5 mm 量化后哈希（`quench3d_physics::contact::feature_id_from_local`，
+  宽相/窄相与求解器共用同一个函数，所以缓存键一定对得上）。求解器的热启动缓存现在
+  **优先按 ID 精确匹配**，原先的坐标容差匹配退化为兜底。解决的问题很具体：物体滑动/旋转时，
+  靠 2 cm 容差匹配会把冲量沿用到**相邻的另一个**特征点上（表现为"慢慢滑的箱子忽软忽硬"），
+  ID 与点顺序、微小位移无关。**没做**：接触余量（speculative margin）与流形跨帧复用。
 - **`quench3d schema --json-schema`：机器可读的 JSON Schema**（draft 2020-12，gap #19）。
   给编辑器补全、CI 校验、agent 程序化自检用：`$defs` 覆盖 scene/object/shape/shapePart/
   instance/material/ground/model/joint/coneLimit/action/probe/camera/lighting/pointLight/

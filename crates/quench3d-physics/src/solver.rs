@@ -217,6 +217,8 @@ pub(crate) struct CachedImpulse {
     pub normal: f32,
     /// 累积切向冲量。
     pub tangent: [f32; 2],
+    /// 接触特征 ID（见 [`crate::contact::feature_id_from_local`]）。
+    pub feature_id: u32,
 }
 
 /// 接触冲量缓存（热启动用）。
@@ -263,6 +265,7 @@ impl ContactCache {
                     local_b: c.local_b,
                     normal: c.normal_impulse,
                     tangent: c.tangent_impulse,
+                    feature_id: c.feature_id,
                 },
             ));
         }
@@ -308,9 +311,19 @@ impl ContactCache {
         b: u32,
         local_a: Vec3,
         local_b: Vec3,
+        feature_id: u32,
         tol: f32,
     ) -> Option<CachedImpulse> {
         let list = self.list(a, b);
+        // 首选**特征 ID 精确匹配**：与点顺序、微小位移无关，不需要容差。
+        // 这也是"持久流形"的关键——没有它，滑动中的物体会把冲量沿用到相邻特征点上。
+        if feature_id != 0 {
+            for c in list {
+                if c.feature_id == feature_id {
+                    return Some(*c);
+                }
+            }
+        }
         let mut best: Option<(f32, CachedImpulse)> = None;
         for c in list {
             // 两端锚点都要接近，避免把不同特征点的冲量错误沿用。
@@ -359,6 +372,8 @@ pub(crate) struct SolverContact {
     pub normal_impulse: f32,
     /// 累积切向冲量。
     pub tangent_impulse: [f32; 2],
+    /// 接触特征 ID（热启动按它对账，见 [`ContactCache::lookup`]）。
+    pub feature_id: u32,
     /// 伪冲量（位置修正）。
     pub pseudo_impulse: f32,
 }
@@ -489,6 +504,8 @@ impl ContactSolver {
                 };
                 let local_a = va.rot.inverse().mul_vec3(position - va.pos);
                 let local_b = vb.rot.inverse().mul_vec3(position - vb.pos);
+                // 与宽相/窄相用同一个哈希，缓存键才对得上
+                let feature_id = crate::contact::feature_id_from_local(local_a, local_b);
                 // 静摩擦 vs 动摩擦：看**施力之前**的切向相对速度（`pre_velocities`）。
                 //
                 // 两个"必须"：
@@ -512,7 +529,9 @@ impl ContactSolver {
                 let mut normal_impulse = 0.0;
                 let mut tangent_impulse = [0.0f32; 2];
                 if cfg.warm_starting {
-                    if let Some(c) = cache.lookup(a as u32, b as u32, local_a, local_b, 0.02) {
+                    if let Some(c) =
+                        cache.lookup(a as u32, b as u32, local_a, local_b, feature_id, 0.02)
+                    {
                         normal_impulse = c.normal.max(0.0);
                         tangent_impulse = c.tangent;
                     }
@@ -533,6 +552,7 @@ impl ContactSolver {
                     penetration,
                     normal_impulse,
                     tangent_impulse,
+                    feature_id,
                     pseudo_impulse: 0.0,
                 });
             }

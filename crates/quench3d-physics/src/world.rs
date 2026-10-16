@@ -1775,7 +1775,27 @@ impl PhysicsWorld {
 ///
 /// 多个部件命中时把点合起来，最多 [`MAX_COMPOUND_POINTS`] 个：多了对求解器没有好处，
 /// 还会让热启动缓存抖动。超限时按**穿透深度**取最深的那几个（稳定排序，确定性）。
+/// 接触特征 ID：把接触点换算到两端局部坐标，按 0.5 mm 量化后哈希。
+///
+/// 0 保留为"未知"。量化尺度是**取舍**：太大（比如 1 cm）会让同一物体上相邻的两个
+/// 特征点撞成同一个 ID；太小（比如 1 µm）会让浮点噪声把同一个点算成两个 ID。
+/// 0.5 mm 对 0.1~10 m 尺度的场景都合适（写进文档，用户不必猜）。
+fn feature_id_of(a: &RigidBody, b: &RigidBody, world: Vec3) -> u32 {
+    crate::contact::feature_id_from_local(
+        a.transform.inverse_transform_point(world),
+        b.transform.inverse_transform_point(world),
+    )
+}
+
 fn collide_bodies(a: &RigidBody, b: &RigidBody) -> Option<ContactManifold> {
+    let mut m = collide_bodies_raw(a, b)?;
+    for p in m.points.iter_mut() {
+        p.feature_id = feature_id_of(a, b, p.position);
+    }
+    Some(m)
+}
+
+fn collide_bodies_raw(a: &RigidBody, b: &RigidBody) -> Option<ContactManifold> {
     if a.extra_parts.is_empty() && b.extra_parts.is_empty() {
         return narrowphase::collide_shapes(&a.shape, &a.transform, &b.shape, &b.transform);
     }

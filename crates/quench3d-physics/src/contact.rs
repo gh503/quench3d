@@ -14,6 +14,13 @@ pub struct ContactPoint {
     pub normal: Vec3,
     /// 穿透深度（正值）。
     pub penetration: f32,
+    /// 接触特征 ID：由**两端局部坐标量化**得到的稳定标识（0 = 未知）。
+    ///
+    /// 为什么需要它：求解器的热启动缓存按"刚体对 + 接触点"匹配冲量，靠坐标距离匹配
+    /// 在物体滑动/旋转时会把冲量沿用到**另一个**特征点上（或者干脆匹配不上），
+    /// 表现为"慢慢滑的箱子忽软忽硬"。ID 由局部坐标量化而来，同一个几何特征
+    /// 在连续帧里得到同一个 ID，与点顺序、是否新增/消失都无关。
+    pub feature_id: u32,
 }
 
 impl Default for ContactPoint {
@@ -22,7 +29,34 @@ impl Default for ContactPoint {
             position: Vec3::ZERO,
             normal: Vec3::Y,
             penetration: 0.0,
+            feature_id: 0,
         }
+    }
+}
+
+/// 接触特征 ID：两端**局部坐标**按 0.5 mm 量化后哈希（0 = 未知）。
+///
+/// 同一个几何特征在连续帧里落在同一格 → 得到同一个 ID，与接触点的顺序、
+/// 是否新增/消失无关。宽相/窄相与求解器用**同一个**函数算它，所以缓存一定能对上。
+///
+/// 量化尺度是取舍：太大（1 cm）会让同一物体上相邻的特征点撞成同一个 ID；
+/// 太小（1 µm）会让浮点噪声把同一个点算成两个 ID。0.5 mm 对 0.1~10 m 的场景都合适。
+pub(crate) fn feature_id_from_local(local_a: Vec3, local_b: Vec3) -> u32 {
+    const SCALE: f32 = 2048.0; // 1/2048 m ≈ 0.49 mm
+    let mut h: u32 = 2166136261;
+    for v in [
+        local_a.x, local_a.y, local_a.z, local_b.x, local_b.y, local_b.z,
+    ] {
+        if !v.is_finite() {
+            return 0;
+        }
+        let q = (v * SCALE) as i32 as u32;
+        h = (h ^ q).wrapping_mul(16777619);
+    }
+    if h == 0 {
+        1
+    } else {
+        h
     }
 }
 
@@ -92,6 +126,7 @@ impl ContactManifold {
                     position: p.position,
                     normal: -p.normal,
                     penetration: p.penetration,
+                    feature_id: 0,
                 })
                 .collect(),
         }
@@ -132,6 +167,7 @@ mod tests {
                 position: vec3(i as f32, 0.0, 0.0),
                 normal: Vec3::Y,
                 penetration: i as f32,
+                feature_id: 0,
             });
         }
         assert_eq!(m.len(), 4, "默认最多 4 个点");
@@ -141,6 +177,7 @@ mod tests {
                 position: vec3(i as f32, 0.0, 0.0),
                 normal: Vec3::Y,
                 penetration: (i % 3) as f32,
+                feature_id: 0,
             });
         }
         m2.truncate_by_depth(3);
@@ -158,6 +195,7 @@ mod tests {
             position: Vec3::ZERO,
             normal: Vec3::Y,
             penetration: 0.1,
+            feature_id: 0,
         });
         assert_eq!(m.flipped().points[0].normal, -Vec3::Y);
     }

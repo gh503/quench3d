@@ -98,6 +98,7 @@ fn convex_pair(sa: &Shape, ta: &Transform, sb: &Shape, tb: &Transform) -> Option
         position,
         normal: normal.normalize_or_zero(),
         penetration: depth,
+        feature_id: 0,
     }])
 }
 
@@ -192,6 +193,7 @@ fn shape_vs_plane(
             position: p,
             normal,
             penetration: pen,
+            feature_id: 0,
         });
     }
     build_manifold(&points)
@@ -215,6 +217,7 @@ fn sphere_sphere(ra: f32, ta: &Transform, rb: f32, tb: &Transform) -> Option<Con
         position,
         normal,
         penetration,
+        feature_id: 0,
     }])
 }
 
@@ -256,6 +259,7 @@ fn sphere_box(radius: f32, ta: &Transform, he: Vec3, tb: &Transform) -> Option<C
         position,
         normal,
         penetration,
+        feature_id: 0,
     }])
 }
 
@@ -286,6 +290,7 @@ fn sphere_capsule(
         position,
         normal,
         penetration,
+        feature_id: 0,
     }])
 }
 
@@ -420,6 +425,7 @@ fn box_box(he_a: Vec3, ta: &Transform, he_b: Vec3, tb: &Transform) -> Option<Con
             position,
             normal: n,
             penetration: best_edge_overlap,
+            feature_id: 0,
         }]);
     }
 
@@ -495,6 +501,7 @@ fn box_box(he_a: Vec3, ta: &Transform, he_b: Vec3, tb: &Transform) -> Option<Con
             position: p + n_ref * (sep * 0.5),
             normal,
             penetration: -sep,
+            feature_id: 0,
         });
     }
     build_manifold(&points)
@@ -579,6 +586,7 @@ fn triangle_vs_shape(
             position: q,
             normal: dir,
             penetration: r - d,
+            feature_id: 0,
         }]);
     }
 
@@ -599,6 +607,7 @@ fn triangle_vs_shape(
                         position,
                         normal,
                         penetration: e.depth,
+                        feature_id: 0,
                     }]) {
                         return Some(m);
                     }
@@ -631,6 +640,7 @@ fn triangle_vs_shape(
                         position: (pa + pb) * 0.5,
                         normal,
                         penetration: depth,
+                        feature_id: 0,
                     }]) {
                         best_depth = depth;
                         best = Some(m);
@@ -675,6 +685,7 @@ fn triangle_plane_fallback(
         position,
         normal: n,
         penetration: -sd,
+        feature_id: 0,
     }])
 }
 
