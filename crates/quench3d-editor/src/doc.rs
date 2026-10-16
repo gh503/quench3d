@@ -133,6 +133,25 @@ pub struct TexturePaths {
     pub double_sided: Option<bool>,
 }
 
+/// 模型文档里的世界位置（缺省 = 原点）。
+fn model_position(m: &quench3d_cli::scene_doc::ModelDoc) -> Vec3 {
+    let p = m.position.unwrap_or([0.0, 0.0, 0.0]);
+    Vec3::new(p[0], p[1], p[2])
+}
+
+/// 模型文档里的欧拉角（度，`Rx·Ry·Rz` 顺序）→ 四元数；缺省 = 无旋转。
+///
+/// 顺序必须与 `runner::euler_quat` 一致：单轴无所谓，复合旋转差一个顺序就是十几度。
+fn model_rotation(m: &quench3d_cli::scene_doc::ModelDoc) -> Quat {
+    match m.rotation_deg {
+        None => Quat::IDENTITY,
+        Some(d) => {
+            let r = std::f32::consts::PI / 180.0;
+            Quat::from_euler_xyz(d[0] * r, d[1] * r, d[2] * r)
+        }
+    }
+}
+
 /// 编辑器文档层：场景内容的可撤销副本 + 界面状态（选中、状态栏、帮助开关）。
 pub struct Doc {
     /// 当前选中的场景对象下标（`None` = 没选）。
@@ -147,6 +166,11 @@ pub struct Doc {
     pub history: crate::history::History,
     /// 用户显式设置的材质贴图/开关（空 = 沿用原文档的继承规则）。
     pub textures: std::collections::HashMap<String, TexturePaths>,
+    /// 模型实例映射：`models[i]` ↔ 引擎里由它展开出来的物体。
+    ///
+    /// 由 [`crate::scene_io`] 在装载、撤销、重做时刷新 —— 物体增删会让下标整体挪动，
+    /// 映射必须跟着重建，否则"拖模型"会拖到别人身上。
+    pub model_instances: Vec<quench3d_cli::runner::ModelInstance>,
     /// 最近一次载入的场景文档（原样留着）。
     ///
     /// 编辑器只"懂"物体、地面、材质标量和相机；`lighting` / `simulate` / `render` /
@@ -185,6 +209,126 @@ impl Doc {
         self.base_doc.as_mut()
     }
 
+    // -----------------------------------------------------------------------
+    // 模型实例（导入的 glTF/OBJ）↔ 引擎物体
+    // -----------------------------------------------------------------------
+
+    /// 装载 / 撤销 / 重做之后刷新映射（物体下标会被增删挪动）。
+    pub fn set_model_instances(&mut self, instances: Vec<quench3d_cli::runner::ModelInstance>) {
+        self.model_instances = instances;
+    }
+
+    /// 某个模型实例（`models` 下标）展开出来的物体下标；没有这个实例时 `None`。
+    pub fn model_objects(&self, model: usize) -> Option<&[usize]> {
+        self.model_instances
+            .iter()
+            .find(|i| i.model == model)
+            .map(|i| i.objects.as_slice())
+    }
+
+    /// 这个物体是哪个模型实例展开出来的（返回 `models` 里的下标）。
+    pub fn model_of_object(&self, object: usize) -> Option<usize> {
+        self.model_instances
+            .iter()
+            .find(|i| i.contains(object))
+            .map(|i| i.model)
+    }
+
+    /// 文档里记录的模型变换（位置 / 姿态 / 均匀缩放，缺省 = 原点 / 无旋转 / 1 倍）。
+    pub fn model_transform(&self, model: usize) -> Option<Transform> {
+        let m = self.base_doc.as_ref()?.models.get(model)?;
+        Some(Transform::new(
+            model_position(m),
+            model_rotation(m),
+            Vec3::splat(m.scale.unwrap_or(1.0)),
+        ))
+    }
+
+    /// 把 `models[model]` 的变换**当场**应用到引擎里由它展开出来的物体。
+    ///
+    /// 以前模型面板只改底稿，改完视口不动、要重开才生效；有了映射就能立刻动。
+    /// 返回真的被改到的物体数（没有映射或没有物体时是 0）。
+    pub fn apply_model_transform(&mut self, engine: &mut Engine, model: usize) -> usize {
+        let Some(transform) = self.model_transform(model) else {
+            return 0;
+        };
+        let Some(objects) = self.model_objects(model).map(<[usize]>::to_vec) else {
+            return 0;
+        };
+        let mut moved = 0;
+        for index in objects {
+            if let Some(object) = engine.scene.objects.get_mut(index) {
+                object.transform = transform;
+                moved += 1;
+            }
+        }
+        moved
+    }
+
+    /// 反过来：把一个物体（视口里被拖动的那个）的变换写回它所属的模型，
+    /// 并让它这一组物体**整组**跟着动。
+    ///
+    /// 返回 `true` 表示这个物体确实属于某个模型实例 —— 调用方据此判断
+    /// "这次拖拽是在拖模型"（要整组联动），而不是普通物体。
+    ///
+    /// 缩放统一取 X 分量：场景格式里的模型只有**均匀**缩放（`scale: f32`），
+    /// 视口里对模型成员也会强制走均匀缩放（见 `gizmo.rs`）。
+    pub fn apply_transform_to_model_group(
+        &mut self,
+        engine: &mut Engine,
+        object: usize,
+        transform: Transform,
+    ) -> bool {
+        let Some(model) = self.model_of_object(object) else {
+            return false;
+        };
+        let Some(objects) = self.model_objects(model).map(<[usize]>::to_vec) else {
+            return false;
+        };
+        let uniform = Transform::new(
+            transform.position,
+            transform.rotation,
+            Vec3::splat(transform.scale.x),
+        );
+        for index in objects {
+            if let Some(target) = engine.scene.objects.get_mut(index) {
+                target.transform = uniform;
+            }
+        }
+        self.write_model_transform(model, uniform);
+        true
+    }
+
+    /// 把变换写进底稿的 `models[model]`。没有底稿/没有这一条时返回 `false`。
+    fn write_model_transform(&mut self, model: usize, transform: Transform) -> bool {
+        let Some(base) = self.base_doc.as_mut() else {
+            return false;
+        };
+        let Some(entry) = base.models.get_mut(model) else {
+            return false;
+        };
+        entry.position = Some([
+            transform.position.x,
+            transform.position.y,
+            transform.position.z,
+        ]);
+        entry.rotation_deg = Some(crate::scene_io::to_euler_xyz_deg(transform.rotation));
+        entry.scale = Some(transform.scale.x);
+        true
+    }
+
+    /// 删掉一个物体之后维护映射里的下标（后面的物体整体前移一位）。
+    fn forget_object(&mut self, removed: usize) {
+        for instance in &mut self.model_instances {
+            instance.objects.retain(|&o| o != removed);
+            for object in &mut instance.objects {
+                if *object > removed {
+                    *object -= 1;
+                }
+            }
+        }
+    }
+
     /// 空文档。
     pub fn new() -> Self {
         Self {
@@ -194,6 +338,7 @@ impl Doc {
             show_help: false,
             history: crate::history::History::default(),
             textures: std::collections::HashMap::new(),
+            model_instances: Vec::new(),
             base_doc: None,
             baseline: Vec::new(),
             spawn_counter: 0,
@@ -220,10 +365,11 @@ impl Doc {
     /// 撤销一步（含状态提示与选区收敛）。
     pub fn undo(&mut self, engine: &mut Engine) {
         match self.history.undo(engine) {
-            Some(Ok((count, snapshot))) => {
-                self.refresh_base_from(&snapshot);
+            Some(Ok(restored)) => {
+                self.refresh_base_from(&restored.snapshot);
+                self.model_instances = restored.instances;
                 self.clamp_selection(engine);
-                self.status = format!("已撤销 → {count} 个物体");
+                self.status = format!("已撤销 → {} 个物体", restored.objects);
             }
             Some(Err(e)) => self.status = format!("撤销失败：{e}"),
             None => self.status = "没有可撤销的步骤".to_string(),
@@ -233,10 +379,11 @@ impl Doc {
     /// 重做一步（含状态提示与选区收敛）。
     pub fn redo(&mut self, engine: &mut Engine) {
         match self.history.redo(engine) {
-            Some(Ok((count, snapshot))) => {
-                self.refresh_base_from(&snapshot);
+            Some(Ok(restored)) => {
+                self.refresh_base_from(&restored.snapshot);
+                self.model_instances = restored.instances;
                 self.clamp_selection(engine);
-                self.status = format!("已重做 → {count} 个物体");
+                self.status = format!("已重做 → {} 个物体", restored.objects);
             }
             Some(Err(e)) => self.status = format!("重做失败：{e}"),
             None => self.status = "没有可重做的步骤".to_string(),
@@ -356,6 +503,7 @@ impl Doc {
     pub fn build_default_scene(&mut self, engine: &mut Engine) {
         engine.scene.clear();
         engine.world.clear();
+        self.model_instances.clear();
 
         // ---- 地面：物理上是无限半空间，视觉上是一张同高度的平面 ----
         //
@@ -527,22 +675,31 @@ impl Doc {
             self.selected = None;
             return;
         }
+        // 删的是模型展开出来的网格吗？删之前先问清楚（删完下标就变了）。
+        let was_model_mesh = self.model_of_object(index).is_some();
         let object = engine.scene.objects.remove(index);
         if let Some(handle) = object.body {
             engine.world.remove_body(handle);
         }
+        // 物体下标整体前移：模型映射必须跟着挪，否则"拖模型"会拖到别人身上。
+        self.forget_object(index);
         self.selected = if engine.scene.objects.is_empty() {
             None
         } else {
             Some(index.min(engine.scene.objects.len() - 1))
         };
         self.status = format!("已删除 {}", object.name);
+        if was_model_mesh {
+            self.status
+                .push_str("（模型引用还在文件里；这个网格存盘后重开会随模型回来）");
+        }
     }
 
     /// 清空场景（地面也不留）。
     pub fn clear(&mut self, engine: &mut Engine) {
         engine.scene.clear();
         engine.world.clear();
+        self.model_instances.clear();
         self.selected = None;
         self.capture_baseline(engine);
         self.status = "已清空场景".to_string();

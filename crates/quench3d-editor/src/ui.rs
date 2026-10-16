@@ -263,7 +263,36 @@ fn status_bar(ui: &mut Ui, engine: &Engine, doc: &Doc, gizmo: &Gizmo) {
     });
 }
 
+/// 画一行物体（点击选中 + `⌖` 聚焦），返回这一行的聚焦请求。
+fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Option<usize> {
+    let object = engine.scene.objects.get(index)?;
+    let mut label = object.name.clone();
+    if !object.visible {
+        label.push_str("（隐藏）");
+    }
+    if object.body.is_none() {
+        label.push_str(" · 显示");
+    }
+    let mut focus = None;
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(doc.selected == Some(index), label)
+            .clicked()
+        {
+            doc.selected = Some(index);
+        }
+        if ui.small_button("⌖").on_hover_text("聚焦").clicked() {
+            focus = Some(index);
+        }
+    });
+    focus
+}
+
 /// 左侧场景树。
+///
+/// 导入的模型在引擎里是"一个子网格一个物体"，散在列表里看不出它们是一伙的：
+/// 这里按 [`Doc::model_instances`] 把它们收进 `模型 #i · 路径` 分组里，
+/// 成员照旧可点选、可 `⌖` 聚焦；分组标题上还有"整组聚焦"。
 fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     egui::Panel::left("quench3d-outliner")
         .default_size(190.0)
@@ -272,30 +301,66 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.label(RichText::new(doc.status.clone()).small().weak());
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let mut focus_request: Option<usize> = None;
-                for (index, object) in engine.scene.objects.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        let selected = doc.selected == Some(index);
-                        let mut label = object.name.clone();
-                        if !object.visible {
-                            label.push_str("（隐藏）");
+                let count = engine.scene.objects.len();
+                // 物体 → 它属于哪个模型实例；以及"分组标题该画在哪个下标上"。
+                let mut owner: Vec<Option<usize>> = vec![None; count];
+                let mut header_at: Vec<Option<usize>> = vec![None; count];
+                for (mi, instance) in doc.model_instances.iter().enumerate() {
+                    for &object in &instance.objects {
+                        if let Some(slot) = owner.get_mut(object) {
+                            *slot = Some(mi);
                         }
-                        if object.body.is_none() {
-                            label.push_str(" · 显示");
+                    }
+                    if let Some(&first) = instance.objects.first() {
+                        if let Some(slot) = header_at.get_mut(first) {
+                            *slot = Some(mi);
                         }
-                        if ui.selectable_label(selected, label).clicked() {
-                            doc.selected = Some(index);
-                        }
-                        if ui.small_button("⌖").on_hover_text("聚焦").clicked() {
-                            focus_request = Some(index);
-                        }
-                    });
+                    }
                 }
-                if let Some(index) = focus_request {
-                    if let Some(bounds) = engine.scene.bounds_of(&engine.renderer, &[index]) {
+
+                let mut focus_request: Option<Vec<usize>> = None;
+                for index in 0..count {
+                    if let Some(mi) = header_at[index] {
+                        // 标题用 `models` 数组里的下标（`instance.model`），不是实例在表里的位置。
+                        let model = doc.model_instances[mi].model;
+                        let path = doc.model_instances[mi].path.display().to_string();
+                        let members = doc.model_instances[mi].objects.clone();
+                        egui::CollapsingHeader::new(
+                            RichText::new(format!("模型 #{model} · {path}"))
+                                .small()
+                                .strong(),
+                        )
+                        .id_salt(("quench3d-model-group", mi))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if ui
+                                .small_button("⌖ 整组聚焦")
+                                .on_hover_text("把相机对准这个模型的全部子网格")
+                                .clicked()
+                            {
+                                focus_request = Some(members.clone());
+                            }
+                            for &object in &members {
+                                if let Some(focus) = object_row(ui, engine, doc, object) {
+                                    focus_request = Some(vec![focus]);
+                                }
+                            }
+                        });
+                        continue;
+                    }
+                    // 已经在上面的分组里画过的成员：跳过，别再列一遍。
+                    if owner[index].is_some() {
+                        continue;
+                    }
+                    if let Some(focus) = object_row(ui, engine, doc, index) {
+                        focus_request = Some(vec![focus]);
+                    }
+                }
+                if let Some(indices) = focus_request {
+                    if let Some(bounds) = engine.scene.bounds_of(&engine.renderer, &indices) {
                         engine.orbit.focus_on(&bounds);
                     }
-                    doc.selected = Some(index);
+                    doc.selected = indices.first().copied();
                 }
             });
         });
@@ -583,12 +648,10 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
 
 /// 模型（glTF/OBJ 引用）的变换面板。
 ///
-/// 为什么改的是**底稿**（`doc.base_doc.models`）而不是引擎：导入的模型在引擎里会被展开成
-/// 若干物体，编辑器拿不到"哪个物体属于哪个模型"的映射；而导出的 `models` 段本来就是从底稿
-/// 原样带出来的。所以这里改底稿 = 存盘生效（重开后模型在新位置），并因为场景快照包含导出
-/// JSON，撤销/重做也能覆盖到它。
-///
-/// 诚实边界：改完**当场不会动**（引擎里的实例没被移动），状态栏会写明"重开后生效"。
+/// 改这里会**同时**做两件事：把新变换写进底稿的 `models[i]`（存盘生效），
+/// 以及通过 `Doc` 里的"物体↔模型"映射**当场**把引擎里那一组物体挪过去
+/// （视口立刻动，不用重开）。反向的那半条在 `gizmo.rs`：在视口里拖模型的
+/// 任何一个网格，同样是整组联动并写回 `models[i]`。
 fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     let Some(base) = doc.base_doc.as_ref() else {
         return;
@@ -596,6 +659,10 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     if base.models.is_empty() {
         return;
     }
+    // 每个模型在视口里对应几个物体（没有映射时是 None，界面如实不显示）。
+    let counts: Vec<Option<usize>> = (0..base.models.len())
+        .map(|i| doc.model_objects(i).map(<[usize]>::len))
+        .collect();
     let mut rows: Vec<(String, [f32; 3], [f32; 3], f32)> = base
         .models
         .iter()
@@ -612,8 +679,16 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     egui::CollapsingHeader::new(format!("模型（{} 个引用）", rows.len()))
         .default_open(false)
         .show(ui, |ui| {
-            for (path, position, rotation, scale) in rows.iter_mut() {
+            for (index, (path, position, rotation, scale)) in rows.iter_mut().enumerate() {
+                ui.label(RichText::new(format!("模型 #{index}")).small().strong());
                 ui.label(RichText::new(path.as_str()).small().weak());
+                if let Some(count) = counts[index] {
+                    ui.label(
+                        RichText::new(format!("视口里 {count} 个物体（整组一起动）"))
+                            .small()
+                            .weak(),
+                    );
+                }
                 ui.horizontal(|ui| {
                     ui.label("位置");
                     for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
@@ -648,14 +723,17 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         )
                         .changed();
                 });
+                ui.add_space(4.0);
             }
         });
     if !changed {
         return;
     }
-    let mut dirty = false;
+    let mut dirty: Vec<usize> = Vec::new();
     if let Some(base) = doc.base_doc.as_mut() {
-        for (m, (_, position, rotation, scale)) in base.models.iter_mut().zip(rows.iter()) {
+        for (index, (m, (_, position, rotation, scale))) in
+            base.models.iter_mut().zip(rows.iter()).enumerate()
+        {
             let same_position = m.position.unwrap_or([0.0, 0.0, 0.0]) == *position;
             let same_rotation = m.rotation_deg.unwrap_or([0.0, 0.0, 0.0]) == *rotation;
             let same_scale = m.scale.unwrap_or(1.0) == *scale;
@@ -665,18 +743,28 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             m.position = Some(*position);
             m.rotation_deg = Some(*rotation);
             m.scale = Some(*scale);
-            dirty = true;
+            dirty.push(index);
         }
     }
-    if dirty {
-        doc.status = "模型变换已写入场景文件（重新打开后模型会到新位置）".to_string();
-        if ui.input(|i| i.pointer.any_down()) {
-            doc.begin_history_transaction();
-        }
-        doc.record_edit(engine);
-        if doc.history.in_transaction() && !ui.input(|i| i.pointer.any_down()) {
-            doc.end_history_transaction(engine);
-        }
+    if dirty.is_empty() {
+        return;
+    }
+    // 当场生效：把底稿里的新变换应用到引擎里那一组物体。
+    let moved: usize = dirty
+        .iter()
+        .map(|index| doc.apply_model_transform(engine, *index))
+        .sum();
+    doc.status = if moved > 0 {
+        format!("模型变换已应用（视口更新 {moved} 个物体；存盘后重开也一致）")
+    } else {
+        "模型变换已写入场景文件（重新打开后模型会到新位置）".to_string()
+    };
+    if ui.input(|i| i.pointer.any_down()) {
+        doc.begin_history_transaction();
+    }
+    doc.record_edit(engine);
+    if doc.history.in_transaction() && !ui.input(|i| i.pointer.any_down()) {
+        doc.end_history_transaction(engine);
     }
 }
 
@@ -707,9 +795,13 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
             material_section(ui, engine, doc);
             ui.separator();
             let mut changed = false;
+            // 变换是否真的被改过（与 `changed` 分开：改名字/颜色不该触发整组联动）。
+            let transform_changed;
             let mut body_kind_change: Option<BodyKind> = None;
+            let is_model_member = doc.model_of_object(index).is_some();
             {
                 let object = &mut engine.scene.objects[index];
+                let before_transform = object.transform;
                 ui.horizontal(|ui| {
                     ui.label("名称");
                     if ui.text_edit_singleline(&mut object.name).changed() {
@@ -717,6 +809,13 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                     }
                 });
                 ui.checkbox(&mut object.visible, "可见");
+                if is_model_member {
+                    ui.label(
+                        RichText::new("模型实例：变换整组联动、缩放是均匀的（写回 models）")
+                            .small()
+                            .weak(),
+                    );
+                }
 
                 ui.add_space(4.0);
                 egui::CollapsingHeader::new("变换")
@@ -766,6 +865,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                             object.transform.scale = s;
                         }
                     });
+                transform_changed = object.transform != before_transform;
 
                 ui.add_space(4.0);
                 egui::CollapsingHeader::new("外观")
@@ -900,6 +1000,13 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
             if let Some(kind) = body_kind_change {
                 doc.set_body_kind(engine, kind);
                 changed = true;
+            }
+            // 属性面板里改的也是模型成员时，跟视口拖动走同一条路：整组一起动 + 写回 `models`。
+            if transform_changed {
+                let transform = engine.scene.objects[index].transform;
+                if doc.apply_transform_to_model_group(engine, index, transform) {
+                    doc.status = "模型实例：整组一起变换（已写回 models，存盘生效）".to_string();
+                }
             }
             if changed {
                 doc.push_transform_to_physics(engine);

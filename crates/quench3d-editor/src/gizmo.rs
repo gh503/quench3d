@@ -20,12 +20,17 @@
 //!   Esc 中途取消会还原到按下前的变换且不留下历史。
 //! * **旋转手柄画的是真实投影椭圆，命中判定也用同一条折线**：所见即所抓。
 //!   只画屏幕圆会让 Local 模式下"看到的圈"和"抓到的圈"不一致。
+//! * **模型成员整组联动**：导入的 glTF/OBJ 在引擎里是"一个子网格一个物体"，
+//!   拖其中任何一个 = 这一组一起动，并把新变换写回场景文件的 `models[i]`
+//!   （物体↔模型的映射由 `scene_io` 在装载时建立，见 `runner::ModelInstance`）；
+//!   缩放手柄对模型成员强制走等比 —— 模型格式里只有一个均匀缩放值。
 //!
 //! ## 没做的（老实说）
 //!
 //! * 拖拽中键入数值（Blender 的 `G X 2.5 Enter`）——需要一层文本输入浮层，这版没有。
 //! * 轴心切换（各自原点 / 活动物体 / 3D 光标）——现在只有"物体自己的原点"。
-//! * 屏幕空间旋转（轨迹球）、多选成组变换——多选还没做。
+//! * 屏幕空间旋转（轨迹球）、**多选**（框选 / Shift 加选）成组变换——多选还没做；
+//!   现在唯一的"成组"来源是模型实例（见上）。
 //! * 手柄是 egui 的 2D 图元，不写深度：被物体完全挡住的轴也看得见（刻意如此）。
 
 use crate::doc::Doc;
@@ -197,6 +202,8 @@ impl Gizmo {
         if escape && self.drag.is_some() {
             let drag = self.drag.take().expect("刚判断过");
             engine.scene.objects[index].transform = drag.start_transform;
+            // 拖的是模型成员时，整组一起还原（连同写回 `models[i]` 的那一份）。
+            doc.apply_transform_to_model_group(engine, index, drag.start_transform);
             doc.push_transform_to_physics(engine);
             doc.history.abort_transaction();
             doc.status = "已取消拖拽".to_string();
@@ -294,6 +301,10 @@ impl Gizmo {
                 }
             };
             engine.scene.objects[index].transform = transform;
+            // 模型（glTF/OBJ 引用）展开出来的物体：**整组一起动**，并把新变换写回
+            // `models[i]` —— 这就是"视口里实时拖动模型"，存盘后位置也保得住。
+            // 普通物体这一步什么都不做（返回 false）。
+            doc.apply_transform_to_model_group(engine, index, transform);
             doc.push_transform_to_physics(engine);
             freeze_body(engine, index);
             doc.record_edit(engine); // 事务中 → 只标脏，抬起时合成一步
@@ -318,7 +329,16 @@ impl Gizmo {
             return false;
         };
         if pressed {
-            if let Some(handle) = self.hover {
+            let mut handle = self.hover;
+            // 模型只有**均匀**缩放（场景格式里 `models[i].scale` 是一个数）：
+            // 拖模型成员的单轴缩放块时强制走等比手柄，免得拖出格式表达不了的缩放。
+            if self.mode == Mode::Scale
+                && doc.model_of_object(index).is_some()
+                && matches!(handle, Some(Handle::Axis(_)))
+            {
+                handle = Some(Handle::Uniform);
+            }
+            if let Some(handle) = handle {
                 self.drag = Some(self.begin_drag(engine, index, &screen, handle, pointer));
                 doc.begin_history_transaction();
                 doc.status = format!("开始{}…", self.mode.label());

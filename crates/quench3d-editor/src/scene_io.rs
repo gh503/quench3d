@@ -21,6 +21,16 @@ pub struct SavedScene {
     pub skipped: Vec<String>,
 }
 
+/// 一次场景装载的结果。
+pub struct Installed {
+    /// 装进引擎的物体数。
+    pub objects: usize,
+    /// 场景文件名（`名字.json`）。
+    pub name: String,
+    /// 模型实例映射（`models[i]` → 它展开出来的物体下标）。
+    pub instances: Vec<runner::ModelInstance>,
+}
+
 /// 把引擎当前场景导出成 `quench3d.scene` JSON。
 pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     // **以最近载入的那份文档为底稿**：编辑器只"懂"物体、地面、材质标量与相机，
@@ -263,7 +273,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     if inherited_models > 0 && !skipped.is_empty() {
         skipped.push(format!(
             "注意：原文档有 {inherited_models} 个 models 引用，已原样保留；\
-             上面被跳过的物体若来自模型，编辑器里的位置改动不会写回模型引用"
+             模型展开出来的物体不写成 objects（它们的变换改动已写回 models 引用）"
         ));
     }
 
@@ -312,6 +322,12 @@ fn apply_texture_overrides(material: &mut MaterialDoc, explicit: &TexturePaths) 
 /// 返回 `(物体数, 场景名)`。会顺带把相机、光照、关节一起装好 ——
 /// 因为装配代码就是 CLI 渲染用的那一份，编辑器里看到的和 CLI 渲出来的是同一个场景。
 pub fn load_into_engine(engine: &mut Engine, text: &str) -> Result<(usize, String), String> {
+    let installed = install_text(engine, text)?;
+    Ok((installed.objects, installed.name))
+}
+
+/// 装进引擎并**返回模型实例映射**（撤销/重做要重新展开模型，靠它刷新编辑器里的映射）。
+pub(crate) fn install_text(engine: &mut Engine, text: &str) -> Result<Installed, String> {
     let doc = SceneDoc::from_json(text)
         .map_err(|e| e.to_string())?
         .validated()
@@ -329,9 +345,10 @@ pub fn load_text_into_doc(
         .map_err(|e| e.to_string())?
         .validated()
         .map_err(|e| e.to_string())?;
-    let result = install_doc(engine, parsed.clone())?;
+    let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
-    Ok(result)
+    doc.set_model_instances(installed.instances);
+    Ok((installed.objects, installed.name))
 }
 
 /// 从文件装载，并记成底稿（桌面端：贴图相对路径以文件所在目录为基准）。
@@ -345,9 +362,10 @@ pub fn load_file_into_doc(
         .map_err(|e| e.to_string())?
         .validated()
         .map_err(|e| e.to_string())?;
-    let result = install_doc(engine, parsed.clone())?;
+    let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
-    Ok(result)
+    doc.set_model_instances(installed.instances);
+    Ok((installed.objects, installed.name))
 }
 
 /// 从文件装载（桌面端：贴图相对路径以文件所在目录为基准）。
@@ -360,18 +378,25 @@ pub fn load_file_into_engine(
         .map_err(|e| e.to_string())?
         .validated()
         .map_err(|e| e.to_string())?;
-    install_doc(engine, doc)
+    let installed = install_doc(engine, doc)?;
+    Ok((installed.objects, installed.name))
 }
 
-fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<(usize, String), String> {
+/// 把文档装配进引擎。映射与文档一起出来，避免调用方再猜一遍。
+fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> {
     // 物理世界与可视场景都换掉：先清干净，再按文档重建。
     let build = runner::build_world(&doc).map_err(|e| e.to_string())?;
     engine.scene.clear();
     engine.world = build.world;
-    runner::setup_visuals(engine, &doc, &build.handles).map_err(|e| e.to_string())?;
+    let instances =
+        runner::setup_visuals(engine, &doc, &build.handles).map_err(|e| e.to_string())?;
     apply_camera(engine, &doc.camera);
     let name = doc.name.clone().unwrap_or_else(|| "scene".to_string());
-    Ok((engine.scene.len(), format!("{name}.json")))
+    Ok(Installed {
+        objects: engine.scene.len(),
+        name: format!("{name}.json"),
+        instances,
+    })
 }
 
 /// 把文档里的相机装进轨道相机。
@@ -540,7 +565,7 @@ fn shape_doc_from_mesh(engine: &Engine, object: &SceneObject) -> Option<ShapeDoc
 ///
 /// 数学库里只有 `to_euler_yxz`（`Ry·Rx·Rz`），顺序不同不能互相顶替：
 /// 单轴旋转两者一致，复合旋转会差出十几度。
-fn to_euler_xyz_deg(q: Quat) -> [f32; 3] {
+pub(crate) fn to_euler_xyz_deg(q: Quat) -> [f32; 3] {
     let m = q.to_mat3();
     // 列主序：`cols[c]` 的第 r 个分量是矩阵第 r 行第 c 列。
     let m00 = m.cols[0].x;

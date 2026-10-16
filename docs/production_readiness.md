@@ -411,6 +411,10 @@
 
 ### 8.1 「模型引用接进场景树 + 视口实时拖动」要动哪里（本轮核过）
 
+> **状态：已实施（第 15 轮）**。下面保留当时的分析（为什么必须动这两条路径），
+> 实施结果写在最后一小节"实际改法"里；验证命令见
+> `cargo test -p quench3d-editor --test model_instances`。
+
 现状：模型的展开有**两条**路径，两边都只返回"成功/失败"，**不告诉调用方它加了哪些物体**：
 
 | 路径 | 位置 | 行为 |
@@ -430,3 +434,22 @@
 3. 场景树里给这些物体显示分组标题（`模型 #i path`），使它们可选中、可高亮；
 4. 测试：加载一个两 mesh 的 OBJ → 断言映射区间长度 = mesh 数；改模型变换 → 断言区间内物体真的动了；
    存盘 → 重开 → 位置仍然一致（与第 14 轮的导出测试互补）。
+
+#### 8.1.1 实际改法（第 15 轮，已跑门禁）
+
+比上面那个"最小改法"多做了一步：**反向映射也接上了**，否则"视口里拖模型"仍然会
+把子网格拖散（拖的是单个物体，存盘时它又会被跳过）。落地如下：
+
+| 改动 | 位置 | 说明 |
+|---|---|---|
+| 新增 `ModelInstance { model, path, objects }` | `crates/quench3d-cli/src/runner.rs` | `setup_visuals` 的返回值，记录 `models[i]` → 物体下标（直接用 `engine.load_model` 的返回值，不靠"前后各取一次长度"猜） |
+| 装载时把映射带进编辑器 | `crates/quench3d-editor/src/scene_io.rs` | `install_doc` 返回 `Installed { objects, name, instances }`；`load_*_into_doc` 顺手 `doc.set_model_instances` |
+| 撤销/重做后刷新（关键） | `crates/quench3d-editor/src/history.rs` | 快照是整场景重建，物体增删会让下标整体挪动；`Restored` 把新映射一起带出来，`Doc::undo/redo` 覆盖旧值。**不刷新就会拖到别的物体身上** |
+| 双向变换 | `crates/quench3d-editor/src/doc.rs` | `apply_model_transform`（模型→物体，面板用）与 `apply_transform_to_model_group`（物体→模型，拖动用）；`forget_object` 维护删除后的下标 |
+| 视口拖动 | `crates/quench3d-editor/src/gizmo.rs` | 每帧写完物体变换后调一次整组联动；`Esc` 还原整组；模型成员的缩放强制走等比手柄（格式里只有均匀 `scale`） |
+| 面板 + 属性面板 | `crates/quench3d-editor/src/ui.rs` | 模型面板改完**当场应用**；选中模型的子网格时，属性面板的数值改动也走同一条整组路径 |
+| 场景树分组 | `crates/quench3d-editor/src/ui.rs` | `模型 #i · 路径` 折叠组 + "整组聚焦"，成员照旧可点选 |
+
+顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
+README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
+

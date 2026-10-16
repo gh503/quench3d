@@ -22,11 +22,25 @@
 //! 撤销 = 把栈顶挪进 `future`，再回到新的栈顶。
 
 use quench3d::Engine;
+use quench3d_cli::runner::ModelInstance;
 
 use crate::scene_io;
 
 /// 默认保留多少步历史。
 pub const DEFAULT_CAPACITY: usize = 128;
+
+/// 撤销 / 重做成功后的结果。
+pub struct Restored {
+    /// 装回去之后的物体数。
+    pub objects: usize,
+    /// 刚装回去的那份快照（调用方据此同步自己的底稿文档）。
+    pub snapshot: String,
+    /// 该快照重新展开出的模型实例映射。
+    ///
+    /// 必须跟着刷新：撤销一次"加物体"会让后面的物体下标整体前移，
+    /// 老映射会把模型面板/整组拖动指到别的物体上。
+    pub instances: Vec<ModelInstance>,
+}
 
 /// 编辑历史。
 pub struct History {
@@ -141,19 +155,23 @@ impl History {
         self.past.len() <= 1 && self.future.is_empty()
     }
 
-    /// 撤销一步：`None` = 没有可撤销的；`Some(Ok((物体数, 快照)))` = 恢复成功
-    /// （快照是刚装回去的那份 JSON，调用方可以据此同步自己的底稿文档）；
+    /// 撤销一步：`None` = 没有可撤销的；`Some(Ok(..))` = 恢复成功
+    /// （调用方可以据此同步自己的底稿文档与模型实例映射）；
     /// `Some(Err(理由))` = 快照装载失败（历史状态保持不变）。
-    pub fn undo(&mut self, engine: &mut Engine) -> Option<Result<(usize, String), String>> {
+    pub fn undo(&mut self, engine: &mut Engine) -> Option<Result<Restored, String>> {
         if !self.can_undo() {
             return None;
         }
         let current = self.past.pop()?;
         let target = self.past.last().cloned()?;
         match restore(engine, &target) {
-            Ok(n) => {
+            Ok((objects, instances)) => {
                 self.future.push(current);
-                Some(Ok((n, target)))
+                Some(Ok(Restored {
+                    objects,
+                    snapshot: target,
+                    instances,
+                }))
             }
             Err(e) => {
                 self.past.push(current); // 装不回去就当作没撤销过
@@ -163,12 +181,16 @@ impl History {
     }
 
     /// 重做一步。语义同 [`History::undo`]。
-    pub fn redo(&mut self, engine: &mut Engine) -> Option<Result<(usize, String), String>> {
+    pub fn redo(&mut self, engine: &mut Engine) -> Option<Result<Restored, String>> {
         let target = self.future.pop()?;
         match restore(engine, &target) {
-            Ok(n) => {
+            Ok((objects, instances)) => {
                 self.past.push(target.clone());
-                Some(Ok((n, target)))
+                Some(Ok(Restored {
+                    objects,
+                    snapshot: target,
+                    instances,
+                }))
             }
             Err(e) => {
                 self.future.push(target);
@@ -179,14 +201,16 @@ impl History {
 }
 
 /// 把快照装回引擎。视角（轨道相机）与暂停状态保持不动。
-fn restore(engine: &mut Engine, snapshot: &str) -> Result<usize, String> {
+///
+/// 返回 `(物体数, 模型实例映射)`：映射必须一路传出去，见 [`Restored::instances`]。
+fn restore(engine: &mut Engine, snapshot: &str) -> Result<(usize, Vec<ModelInstance>), String> {
     let orbit = engine.orbit;
     let paused = engine.paused;
-    match scene_io::load_into_engine(engine, snapshot) {
-        Ok((count, _name)) => {
+    match scene_io::install_text(engine, snapshot) {
+        Ok(installed) => {
             engine.orbit = orbit;
             engine.paused = paused;
-            Ok(count)
+            Ok((installed.objects, installed.instances))
         }
         Err(e) => Err(e),
     }

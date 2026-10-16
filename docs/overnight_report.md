@@ -252,8 +252,8 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 **一个流程教训（已修）**：`tools/gate.sh | tail` 会让管道吞掉退出码 —— 我第一次就这么推了一个 fmt 没过的提交，
 下一提交修好；看门禁请 `tools/gate.sh > log 2>&1; echo $?`，别接管道。
 
-**② 剩余的三组半**：① 模型引用接进场景树 + 视口实时拖动（需要"物体↔模型"映射）；② 场景层级/父子与格式 v2；
-③ 后处理 FXAA/SSAO；④ 物理碰撞过滤/传感器事件/CCD。
+**② 剩余的三组半 → 第 15 轮之后剩三组**：① ~~模型引用接进场景树 + 视口实时拖动~~（第 15 轮完成，见 §12）；
+② 场景层级/父子与格式 v2；③ 后处理 FXAA/SSAO；④ 物理碰撞过滤/传感器事件/CCD。
 
 ---
 
@@ -281,3 +281,30 @@ CI：每次推送都会跑 4 个 job（ubuntu / macOS / Windows / wasm32）+ Pag
 ```
 
 顺带一条**验收要点**：`render` 的输出里有"NaN 0"这一项 —— 用它比看画面更快发现物理炸掉。
+
+---
+
+## 12. 第 15 轮：导入模型接进场景树 + 视口实时拖动（§8.1 的工作项）
+
+`docs/production_readiness.md` §8.1 里记下的卡点是"模型展开后**不给调用方物体下标**"，
+于是编辑器只能改文件里的 `models[i]`、等重开才生效。这一轮把它补上，
+并且**反过来也接**：在视口里拖模型 = 整组联动 + 写回 `models[i]`。
+
+| # | 内容 | 落点 / 证据 |
+|---|---|---|
+| 1 | `runner::ModelInstance`；`setup_visuals` 返回映射（`models[i]` → 物体下标） | `crates/quench3d-cli/src/runner.rs`；直接用 `engine.load_model` 的返回值，不靠"前后各取一次长度"猜 |
+| 2 | `scene_io::Installed` 把映射带进 `Doc`；**撤销/重做也带**（`history::Restored`） | 快照是整场景重建，物体增删会让下标整体挪动；不刷新映射就会拖到别的物体身上 |
+| 3 | `Doc`：`apply_model_transform`（模型→物体）、`apply_transform_to_model_group`（物体→模型）、`forget_object`（删除后的下标维护） | `crates/quench3d-editor/src/doc.rs` |
+| 4 | 视口拖动：整组联动 + 写回 `models[i]`；`Esc` 整组还原；模型成员缩放强制走等比 | `crates/quench3d-editor/src/gizmo.rs` |
+| 5 | 模型面板改变换**当场生效**；选中模型子网格时属性面板的变换改动走同一条路 | `crates/quench3d-editor/src/ui.rs` |
+| 6 | 场景树按 `模型 #i · 路径` 分组（成员可点选/聚焦，标题上有"整组聚焦"） | `crates/quench3d-editor/src/ui.rs` |
+
+**验证**：`cargo test -p quench3d-editor --test model_instances` —— 5 个用例（无 GPU 自动跳过）：
+两 mesh OBJ 的映射长度与下标、面板改变换**当场**作用到引擎物体、
+拖动整组联动并写回 `models` 且存盘重开后一致、删掉前面的物体后映射下标整体前移、
+撤销后模型变换与映射都刷新。
+**当前测试总数 361（0 失败）**；`tools/gate.sh` 全绿（fmt / clippy 原生 / clippy wasm32 /
+361 测试 / wasm 构建 11,415,654 字节 / `check_web.mjs`）。
+
+**没有做（别误以为有）**：多选还没做，"成组"目前只有"模型实例"这一个来源；
+不能单独挪模型的某个子网格；非均匀缩放写不回格式（`models[i].scale` 是一个数）。

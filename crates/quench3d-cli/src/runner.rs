@@ -466,6 +466,28 @@ impl WorldBuild {
     }
 }
 
+/// 一个被展开的模型引用：`SceneDoc::models[model]` 在引擎场景里对应哪些物体。
+///
+/// 为什么需要它：`setup_visuals` 把模型的**每个子网格**推成一个普通场景物体，
+/// 之后编辑器只看得见物体、看不见"它们是同一个模型"。没有这份映射，
+/// 「拖模型」就只能改文件里的 `models[i]`（重开后生效），视口里当场不动。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInstance {
+    /// `SceneDoc::models` 里的下标。
+    pub model: usize,
+    /// 场景文件里写的模型路径（界面上显示用；不影响加载，加载走 `SceneDoc`）。
+    pub path: std::path::PathBuf,
+    /// 展开出来的场景物体下标（按添加顺序；`LoadedModel::spawn` 是连续追加的）。
+    pub objects: Vec<usize>,
+}
+
+impl ModelInstance {
+    /// 这个物体属于本模型实例吗。
+    pub fn contains(&self, object: usize) -> bool {
+        self.objects.contains(&object)
+    }
+}
+
 /// 一个探针观测到的某个刚体的进入/离开记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeHit {
@@ -1364,11 +1386,14 @@ fn summarize_trace(
 // ---------------------------------------------------------------------------
 
 /// 把可视部分写进引擎（物理世界由调用方预先放入 `engine.world`）。
+///
+/// 返回**模型实例映射**（`models[i]` → 它展开出来的物体下标），见 [`ModelInstance`]。
+/// 没有模型的场景返回空表；调用方不需要时忽略即可。
 pub fn setup_visuals(
     engine: &mut Engine,
     doc: &SceneDoc,
     handles: &BTreeMap<String, BodyHandle>,
-) -> Result<(), RunError> {
+) -> Result<Vec<ModelInstance>, RunError> {
     apply_lighting(engine, doc);
 
     // 材质（贴图按路径加载并按 (路径, 是否 sRGB) 缓存，多个材质共用一张图只上一次显存）
@@ -1473,27 +1498,36 @@ pub fn setup_visuals(
         }
     }
 
-    // 模型（碰撞体已在 build_world 里建好，这里只画）
+    // 模型（碰撞体已在 build_world 里建好，这里只画）。
+    // 顺手把 `models[i]` 展开出来的物体下标记下来 —— 这是编辑器"视口里拖模型"的唯一依据。
+    let mut instances: Vec<ModelInstance> = Vec::new();
     for (i, m) in doc.models.iter().enumerate() {
         let transform = Transform::new(
             v3(m.position.unwrap_or([0.0, 0.0, 0.0])),
             euler_quat(m.rotation_deg),
             Vec3::splat(m.scale.unwrap_or(1.0)),
         );
-        if let Err(e) = engine.load_model(&m.path, transform) {
-            // 以前这里只往 stderr 打一行警告就继续渲染——用户拿到的图跟场景对不上却
-            // 以为成功了。宁可报错，也不要出一张"少了几件东西"的图。
-            let mut err = RunError::io(format!(
-                "加载模型 {} 失败: {e}（确认文件是完好的 glTF/GLB/OBJ）",
-                m.path.display()
-            ));
-            err.path = Some(format!("models[{i}]"));
-            return Err(err);
+        match engine.load_model(&m.path, transform) {
+            Ok(objects) => instances.push(ModelInstance {
+                model: i,
+                path: m.path.clone(),
+                objects,
+            }),
+            Err(e) => {
+                // 以前这里只往 stderr 打一行警告就继续渲染——用户拿到的图跟场景对不上却
+                // 以为成功了。宁可报错，也不要出一张"少了几件东西"的图。
+                let mut err = RunError::io(format!(
+                    "加载模型 {} 失败: {e}（确认文件是完好的 glTF/GLB/OBJ）",
+                    m.path.display()
+                ));
+                err.path = Some(format!("models[{i}]"));
+                return Err(err);
+            }
         }
     }
 
     apply_camera(engine, doc);
-    Ok(())
+    Ok(instances)
 }
 
 /// 贴图缓存键：`(解析后的路径, 是否按 sRGB 采样)`。
