@@ -17,9 +17,11 @@
 @group(0) @binding(1) var hdr_sampler: sampler;
 @group(0) @binding(2) var<uniform> post: PostParams;
 @group(0) @binding(3) var bloom_texture: texture_2d<f32>;
+//@gl-depth-begin
 // 深度（单采样；MSAA > 1 时是"解析"出来的那一张，见 `depth_resolve.wgsl`）。
 // 只用 `textureLoad` 按像素读，所以不需要采样器——深度也不该被双线性插值。
 @group(0) @binding(4) var depth_texture: texture_depth_2d;
+//@gl-depth-end
 
 struct PostParams {
     // x = bloom 开关（0/1），y = bloom 强度，z = bloom 阈值，w = 预留
@@ -51,6 +53,7 @@ fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+//@gl-depth-begin
 /// 裁剪空间深度 → 视空间位置（相机看向 -Z，所以近处的 z 更大）。
 fn view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let clip = vec4<f32>(uv * 2.0 - 1.0, depth, 1.0);
@@ -131,6 +134,7 @@ fn ssao_factor(coord: vec2<i32>, uv: vec2<f32>) -> f32 {
     let ratio = occlusion / f32(count);
     return clamp(1.0 - ratio * post.ssao.w, 0.0, 1.0);
 }
+//@gl-depth-end
 
 struct PostOut {
     @builtin(position) position: vec4<f32>,
@@ -155,10 +159,12 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
     let uv = in.position.xy * texel;
     var hdr = textureLoad(hdr_texture, coord, 0).rgb;
 
+    //@gl-depth-begin
     // SSAO 先乘上去（在 bloom 之前：自发光/亮区的外溢不该被环境光遮蔽压暗）
     if (post.ssao.x > 0.5) {
         hdr = hdr * ssao_factor(coord, uv);
     }
+    //@gl-depth-end
 
     // bloom 在 tonemap **之前**加回线性 HDR：亮区外溢会被同一套 tonemap 压回来，
     // 不会像"tonemap 后加"那样过曝成白块。

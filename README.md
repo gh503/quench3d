@@ -216,9 +216,21 @@ wgpu 只要看到请求里带 `BROWSER_WEBGPU` 且 `navigator.gpu` 存在，就*
 （一张画布只能有一种上下文，且不可逆）——事后回退在同一条路上根本走不通。
 
 `tools/check_web.mjs` 会静态挡住两件事：wasm 里必须真的含 WebGL2 后端、
-页面的后端探测必须发生在 `start();` 之前。真正在浏览器里的渲染本机用
-headless Chrome + SwiftShader（`--enable-unsafe-swiftshader --use-angle=swiftshader`）
-验过：会打印「后端选择：gl（navigator.gpu 存在但没有适配器…）」并正常出第一帧。
+页面的后端探测必须发生在 `start();` 之前。**真正在浏览器里**的那一层用
+[`tools/probe_webgl2.sh`](tools/probe_webgl2.sh)（headless Chrome + SwiftShader，
+`--enable-unsafe-swiftshader --use-angle=swiftshader`，缺省 `?backend=gl`）跑：
+它在日志里要求「编辑器第一帧已渲染」且页面遮罩（`#overlay`）被收掉，
+出现 `panicked at` 就判红。闸门是**遮罩**：Rust 侧只在第一帧真的画出来之后才收它，
+所以"启动成功但白屏"过不了这一关。
+
+> ⚠️ **第 57 轮的教训（为什么必须有一条真浏览器的探针）**：GL/WebGL2 是**另一套语言后端**
+> （naga → GLSL）。`post.wgsl` 的 SSAO 对深度纹理用 `textureLoad` 时，naga 的 GLSL 后端
+> 直接拒绝（`WGSL \`textureLoad\` from depth textures is not supported in GLSL`），
+> 而 wasm 上管线校验错误是**致命**的 —— **编辑器启动即 panic**，本地门禁（Vulkan）与
+> Linux CI 却全绿。现在有两层覆盖：这条浏览器探针（真机行为）
+> + 一条不需要显卡的 naga GLSL 翻译守卫（可编译性）。
+> GL 上的能力矩阵（SSAO 按能力关闭、MSAA > 1 的既有问题）见
+> [docs/production_readiness.md](docs/production_readiness.md) §12.7。
 
 ### 2.1 Web 端加载模型：走字节，不走路径
 
@@ -568,13 +580,13 @@ quench3d::write_png(&image, "out.png")?;
 | 能力 | 说明 |
 | --- | --- |
 | 着色 | 前向 Cook–Torrance PBR（金属度/粗糙度）、法线贴图、指数雾；物体写**线性 HDR** |
-| 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一 ACES 色调映射（**唯一一份**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`） |
+| 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一 ACES 色调映射（**唯一一份**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`）。**GL/WebGL2 上 SSAO 与深度解析按能力整体关闭**（naga 的 GLSL 后端不支持读深度纹理，见 [production_readiness §12.7](docs/production_readiness.md)）；tonemap / bloom / FXAA 不受影响 |
 | 阴影 | 单张 `Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段画进 2×2 图集，主 pass 按视空间深度选级 |
 | 光照 | 1 个平行光 + 最多 **8** 个点光源（`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，环境光 + 程序化天空（互为补充的 IBL 近似）；**指数距离雾**（`lighting.fog`，不写 = 关闭） |
 | 天空/地面 | 全屏三角形程序化天空（三个渐变颜色可从 `lighting.sky_colors` 调）+ 解析无限网格（`fwidth` 抗锯齿 + 深度写入） |
 | 批处理 | 按 (材质, 网格) 分批 + 实例化（96 字节/实例）+ 逐实例视锥剔除 |
 | 其它 | MSAA（1/2/4/8）、Alpha 混合与 Alpha 裁剪、无光照材质、调试线段/接触点/包围盒 |
-| 后端 | 桌面 Vulkan/Metal/DX12，Web WebGPU→WebGL2 回退；同一套 WGSL |
+| 后端 | 桌面 Vulkan/Metal/DX12，Web WebGPU→WebGL2 回退；同一套 WGSL。GL/WebGL2 上：SSAO 按能力关闭（读不了深度纹理）；**MSAA > 1 目前画面全黑**（既有问题，未修，见 [production_readiness §12.7.6](docs/production_readiness.md)） |
 
 渲染器可以脱离引擎单独使用（`quench3d-render` 的 `offline_render` 示例演示了
 不带窗口、不带物理，直接出图的用法）。

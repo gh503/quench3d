@@ -141,7 +141,68 @@ pub struct OffscreenTarget {
     pub format: wgpu::TextureFormat,
 }
 
+/// 这个后端能不能**把深度纹理当纹理读**（`textureLoad`，或非比较采样）。
+///
+/// **GL / GLES（浏览器里就是 WebGL2）不能** —— 这是 naga 的硬限制，不是能力位：
+/// GLSL 后端把 `texture_depth_2d` 一律映射成 `sampler2DShadow`，于是
+///
+/// * `textureLoad` → 翻译直接失败：
+///   `WGSL \`textureLoad\` from depth textures is not supported in GLSL`
+///   （`naga/src/back/glsl/writer.rs`，用户实测的线上现场）。GLSL 的翻译发生在**建管线**时，
+///   而 wasm 上 wgpu 把管线校验错误当致命 → 编辑器启动即 panic；
+/// * 换成非比较采样也走不通：naga 的校验器直接拒（`InvalidSampleLevelExactType`）；
+/// * 比较采样（`textureSampleCompareLevel`）能翻译，但返回的是 0/1 的比较结果，
+///   **拿不到深度值**，SSAO 用不了。
+///
+/// 所以依赖"读深度"的效果（SSAO、MSAA 深度解析）在 GL 上必须**整体关掉**，
+/// 而且不能只在 Rust 里关开关 —— WGSL 里留着那段代码，管线就建不出来。
+/// 见 `renderer::post_wgsl_for` 与 `Renderer::supports_ssao`。
+pub fn supports_depth_texture_read(backend: wgpu::Backend) -> bool {
+    !matches!(backend, wgpu::Backend::Gl)
+}
+
+/// 这个后端能不能用**多采样纹理**（`sample_count > 1`，也就是 MSAA）。
+///
+/// **GL / GLES（浏览器里就是 WebGL2）不能**，而且不是"画得不好看"，是**直接 panic**：
+/// wgpu-hal 的 gles 后端给 `sample_count > 1` 的纹理调 `gl.tex_storage_2d_multisample`
+/// （`wgpu-hal/src/gles/device.rs`），而 `glow` 的 WebGL2 实现里那个函数是
+/// `panic!("Tex storage 2D multisample is not supported")`（`glow-0.17/src/web_sys.rs`）
+/// —— 与浏览器/显卡无关，是代码里的 `unimplemented`。实测（headless Chrome + SwiftShader，
+/// 真实 WebGL2）：编辑器开到 `render.msaa = 4`（缺省值）时，
+/// 修完深度纹理那条限制之后紧接着就死在这里。
+///
+/// 原生 GL 不 panic（走真 GL 函数），但画面全黑（llvmpipe 实测，`rgba8` 与 `rgba16f` 一样），
+/// 根因在 wgpu-hal 的多采样解析路径或驱动 —— 两条路都指向同一个结论：
+/// **GL 上 `sample_count` 只能是 1**。
+///
+/// 见 [`effective_msaa_samples`]、`docs/production_readiness.md` §12.7。
+pub fn supports_msaa(backend: wgpu::Backend) -> bool {
+    !matches!(backend, wgpu::Backend::Gl)
+}
+
+/// 实际生效的多采样数：不支持的后端上一律**夹到 1**。
+///
+/// 这个函数是纯的（不碰 GPU），所以"GL 上必须夹到 1"这件事有单元测试钉着；
+/// 调用点只有 `GpuContext::build` 一处，用户看到的分辨/日志与真正建的管线一致。
+pub fn effective_msaa_samples(backend: wgpu::Backend, requested: u32) -> u32 {
+    if supports_msaa(backend) {
+        requested.clamp(1, 8)
+    } else {
+        1
+    }
+}
+
 impl GpuContext {
+    /// 当前适配器能否把深度纹理当纹理读（见 [`supports_depth_texture_read`]）。
+    pub fn supports_depth_texture_read(&self) -> bool {
+        supports_depth_texture_read(self.adapter_info.backend)
+    }
+
+    /// 当前适配器能不能用 MSAA（见 [`supports_msaa`]）。
+    pub fn supports_msaa(&self) -> bool {
+        supports_msaa(self.adapter_info.backend)
+    }
+
     /// 环境变量 `WGPU_BACKEND` 指定的后端（没写就是 `None`）。
     fn env_backends() -> Option<wgpu::Backends> {
         let env = std::env::var("WGPU_BACKEND").ok()?;
@@ -499,6 +560,18 @@ impl GpuContext {
             ),
         };
         let is_software = adapter_info.device_type == wgpu::DeviceType::Cpu;
+        // MSAA 按后端能力夹：GL/GLES（含 WebGL2）上多采样纹理要么 panic（浏览器）、
+        // 要么出黑屏（原生 llvmpipe），见 `supports_msaa`。宁可没有 MSAA，
+        // 也不能让编辑器启动即死或在黑屏上"活着"。
+        let msaa_samples = effective_msaa_samples(adapter_info.backend, options.msaa_samples);
+        if msaa_samples != options.msaa_samples.clamp(1, 8) {
+            log::warn!(
+                "后端 {:?} 不支持多采样纹理：MSAA 从 {} 降到 {}（见 docs/production_readiness.md §12.7）",
+                adapter_info.backend,
+                options.msaa_samples,
+                msaa_samples
+            );
+        }
         Ok(Self {
             instance,
             adapter,
@@ -508,7 +581,7 @@ impl GpuContext {
             format,
             config,
             size: (width.max(1), height.max(1)),
-            msaa_samples: options.msaa_samples.clamp(1, 8),
+            msaa_samples,
             adapter_info,
             is_software,
             needs_reconfigure: false,

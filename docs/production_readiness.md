@@ -39,8 +39,8 @@
 | 色调映射可选性 | 全部 | 算子**不可选不可关**，只有一条 ACES 路径（→ H1） | 🟠 |
 | 阴影 | 全部 | 1 张方向光阴影贴图（`renderer.rs:339`，Depth32Float），3×3 PCF（`pbr.wgsl:105`），分辨率 512–4096（缺省 2048）；**无 CSM** | 🟡 |
 | 阴影可调参数 | Blender / Unity | bias 是编译期常量（`renderer.rs:795`），**没有公开字段**；只有 `DirectionalLight.cast_shadows` + 全局开关 | 🟠 |
-| 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph** | 🟡 |
-| 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4 | ✅ |
+| 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO 与深度解析两趟按能力整体关闭**（§12.7） | 🟡 |
+| 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4；**GL/WebGL2 上按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧，§12.7） | 🟡 |
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent（`mesh.rs:14`）；**无顶点色、无骨骼蒙皮、无 morph** | 🟡 |
 | 实例化 | 全部 | 有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
 | LOD | 引擎级 | 无 | ❌ |
@@ -280,7 +280,7 @@
 | **H1** | **色彩管理**：输入/输出色彩空间、色调映射算子、曝光是否可声明与可选 | 只有一条固定 ACES 路径，README 未声明色彩约定 | **低（文档）+ 中（可选算子）** | ① 在文档里写清：工作空间线性、base color sRGB、输出 ACES；② 增加"tonemap 算子可选 + 曝光"两个开关即可进入 H1 门槛 |
 | **H2** | **无损往返**：存一次读一次之后场景不变 | **本轮已关闭编辑器侧的主要漏洞**：以前导出会把 `lighting`/`simulate`/`render`/`models`/`probes` 与材质 4 个贴图槽 + 7 个开关静默清零；现在以原文档为底稿，只覆盖编辑器管得着的字段，并有"存→读→再存字节相同"的固定点测试。**仍缺**：导入的 glTF 模型在编辑器里被移动后，位置改动写不回 `models` 引用 | **中** | 已做：固定点测试 + 底稿合并 + 悬空关节/动作清理。待做：模型实例的"位置回写引用"或"展开为 objects"二选一并测试 |
 | **H3** | **可复现构建**：别人拿到 commit 能构建出同样东西 | 无 `rust-toolchain.toml`、CI 未 `--locked`、无 `deny.toml`/SBOM | **低**（本轮做掉大半） | `rust-toolchain.toml` + CI `--locked`（本轮）→ 许可审计与 SBOM 留待下一轮 |
-| **H4** | **真机设备矩阵**：真浏览器/真 GPU 上跑过 | 只有 headless Chrome + SwiftShader（软件光栅） | **中** | 至少一条"真机 WebGPU"人工验证记录 + 一张矩阵表（Chrome/Firefox/Safari × 独显/核显） |
+| **H4** | **真机设备矩阵**：真浏览器/真 GPU 上跑过 | 只有 headless Chrome + SwiftShader（软件光栅）。**第 57 轮之前这一行其实是不成立的**：WebGL2 上编辑器**启动即 panic**（SSAO 读深度、MSAA 多采样纹理两条 GL 不支持的路），而门禁与 CI 都跑在 Vulkan 上 —— "矩阵里有一行"不等于"那一行绿"。现在有一条可复现的真 WebGL2 探针（`tools/probe_webgl2.sh`，判据 = 第一帧已渲染 + 遮罩收起），且 GL 上会真正降级的能力都有关卡（§12.7）；**仍然全是软件光栅**（llvmpipe / SwiftShader），没有真 GPU 记录 | **中** | 至少一条"真机 WebGPU/真机 WebGL2"人工验证记录 + 一张矩阵表（Chrome/Firefox/Safari × 独显/核显），每行都要有一条能重跑的命令（`tools/probe_webgl2.sh` 是 WebGL2 那行的模板） |
 | **H5** | **确定性边界**：哪些维度上确定、哪些不确定 | 同机同线程数有测试；跨平台/跨线程数未声明 | **低** | 文档写清边界 + 一条"跨线程数一致"的用例（已有）作为对照 |
 | **H6** | **单位与轴向约定** | 引擎内部 Y-up / 右手 / 1 单位 = 1 米（代码如此），文档未声明；导入不做轴向转换 | **低（声明）+ 中（导入选项）** | 文档声明 + 导入时的缩放/轴向选项 |
 | **H7** | **存档/格式迁移** | 有 `VERSION` 字段，无迁移代码 | **中** | 加迁移函数表 + 一条"v1 文件能读进 v2"的测试 |
@@ -1025,6 +1025,138 @@ CLI → 绝对路径原样；不写旗标时序列化里不出现该键）+ e2e
 "已经写进帮助"，守卫自己报错。修法是按词匹配（把子串后面的字符也看一眼：后面跟 `-`
 或字母数字就不算独立出现）。**守卫测试自己也会写错**，而它写错的方向通常是"过松"或"过严"：
 过松等于没有，过严会在无关的改动上乱叫——两种都得靠立刻跑一遍才知道。
+
+### 12.7 GL/downlevel 能力矩阵与"不建不出来的管线"这条不变量（第 57 轮）
+
+#### 12.7.1 现场
+
+用户在浏览器里实测到的原文（后端 = `gl`：`navigator.gpu` 存在但没有适配器时的 WebGL2 回退，
+限制档位 `downlevel_webgl2`）：
+
+```
+[ERROR] Shader translation error for stage ShaderStages(FRAGMENT): WGSL `textureLoad` from depth textures is not supported in GLSL
+panicked at wgpu-30.0.1/src/backend/wgpu_core.rs:1414:
+  In Device::create_render_pipeline, label = 'quench3d-post'
+    Internal error in ShaderStages(FRAGMENT) shader: WGSL `textureLoad` from depth textures is not supported in GLSL
+```
+
+**wasm 上管线校验错误是致命的**（wgpu 把它交给未捕获错误处理器 → panic），
+所以这不是"某个效果没画出来"，而是**编辑器启动即死**。
+
+修完上面那一段之后，同一个真实 WebGL2 环境里**紧接着撞上第二条 panic**
+（说明"只修看得到的那一条"是不够的）：
+
+```
+panicked at glow-0.17.0/src/web_sys.rs:4307:9:
+  Tex storage 2D multisample is not supported
+```
+
+即 12.7.2 里的 MSAA 那条 —— 编辑器缺省 `msaa_samples = 4`，它在**任何**浏览器上都会踩到。
+
+#### 12.7.2 能力矩阵（以本机实测 + naga 源码为准）
+
+| 后端 | 读深度纹理<br>（`textureLoad` / 采样） | SSAO | MSAA > 1 | 依据 |
+|---|---|---|---|---|
+| Vulkan / Metal / D3D12 / WebGPU | ✅ | ✅ | ✅ | 本机 Vulkan（llvmpipe）出图正常 |
+| GL / GLES / **WebGL2** | ❌ **硬限制** | ❌ 按能力关闭 | ❌ 不支持 → **已按能力夹到 1** | 见下 |
+
+"读深度纹理"在 GL 上断在 naga 的 GLSL 后端（`naga-30.0.1/src/back/glsl/writer.rs:4109`），
+它把 `texture_depth_2d` 一律映射成 **`sampler2DShadow`**（`writer.rs:599`），于是三条路都不通：
+
+| 写法 | GLSL 后端 | 结果 |
+|---|---|---|
+| `textureLoad(depth, coord, 0)` | 直接 `Error::Custom` | **建不出管线**（本次事故） |
+| `textureSampleLevel(depth, sampler, uv, 0.0)`（非比较采样器） | naga 的 WGSL 校验先拒（`InvalidSampleLevelExactType`） | 建不出管线 |
+| `textureSampleCompareLevel(depth, sampler_comparison, uv, ref)` | ✅ 生成 `textureLod(sampler2DShadow, vec3, 0.0)` | 能建，但**返回 0/1 比较结果，拿不到深度值** |
+
+所以"改成采样读深度"这条首选路在 GL 上**不存在**；能做的只有**按能力关掉依赖深度的效果**。
+
+**MSAA（`sample_count > 1`）在 GL 上同样是断的，而且更凶**（这一条是修完上面那个 panic 之后
+在**真实 WebGL2** 里紧接着撞上的）：wgpu-hal 的 gles 后端给多采样纹理调
+`gl.tex_storage_2d_multisample`（`wgpu-hal-30.0.1/src/gles/device.rs`），而 `glow-0.17`
+的 WebGL2 实现里那个函数是 `panic!("Tex storage 2D multisample is not supported")`
+（`glow-0.17.0/src/web_sys.rs` 的 web_sys 后端）—— **与浏览器、显卡都无关，是代码里的 panic**。
+原生 GL（llvmpipe）不 panic，但解析出来的画面**全黑**（`rgba8` 与 `rgba16float` 一样），
+根因在 wgpu-hal 的多采样解析路径或驱动。两条路都指向同一个结论：
+**GL 上 `sample_count` 只能是 1**，编辑器缺省 `msaa_samples = 4`（`crates/quench3d-editor/src/app.rs:57`）。
+
+#### 12.7.3 落地：能力判定 + 着色器变体（三处必须同时）
+
+| # | 落点 | 作用 |
+|---|---|---|
+| 1 | `context::supports_depth_texture_read(backend)`（只有 `Gl` = false） | **唯一判据**，运行期不会变，`Renderer::new` 里定一次 |
+| 2 | `renderer::post_wgsl_for(ssao)`：把 `post.wgsl` 里 `//@gl-depth-begin`…`//@gl-depth-end` 圈出的**三段**（深度绑定、`ssao_factor` 一族函数、`fs_main` 的调用点）整段删掉 | 交给驱动**之前**就没有那段代码 |
+| 3 | `depth_resolve_pipeline` 变成 `Option`（GL 上 `None`）；`Renderer::supports_ssao()` 报 false，`ensure_targets` 不建解析深度 | 少一条"读多采样深度"的管线、少一张全屏深度贴图 |
+| 4 | `context::effective_msaa_samples(backend, requested)`：GL 上一律返回 1（`GpuContext::build` 里唯一调用点，并且**打一条 `log::warn!`**，让"为什么我的 MSAA 没生效"在日志里有答案） | 多采样纹理根本不建，于是 glow 那条 `panic!` 永远走不到 |
+
+**为什么不是"把 `ssao.x` 置 0 让它不执行"**：GLSL 的翻译发生在 `create_render_pipeline`，
+naga 会把**整个模块**翻一遍（不理会运行期分支）—— WGSL 里留着那段代码，管线就建不出来。
+"运行时判断"在这里救不了场，必须在"交给驱动之前"删掉。删掉后 tonemap / bloom / FXAA
+一行不动（在 Vulkan 上强制走 GL 变体渲同一场景，输出**逐字节相同**，因为 SSAO 本来就关着）。
+
+#### 12.7.4 不变量（这一节真正要留下的东西）
+
+> **不变量：任何会在后端 X 上建的管线，其 WGSL 必须能被 X 的语言后端翻译出来。**
+> "本机渲得出正确的图"证明的是**运行时行为**，"门禁全绿"证明的是**本机后端能编译** ——
+> 两者都不覆盖别的后端（第 54 轮的 X3570 是 FXC，这次是 GLSL，同一个形状的第 2 次）。
+
+守住它的东西是 **一条不需要显卡的测试**：直接调 **naga 的 GLSL 后端**
+（`wgpu::naga`，wgpu 30 在 native 上无条件重导出）把"GL 上会建的每一条管线"的每个入口点
+真翻一遍，WebGL2 GLSL ES 3.00 与桌面 3.30 两档都过：
+
+```
+cargo test -p quench3d-render --lib gl_pipelines_all_translate_through_the_glsl_backend
+```
+
+变异验证（把 `post_wgsl_for` 的 GL 分支改回"返回原文"）：测试变红并打印
+`Custom("WGSL \`textureLoad\` from depth textures is not supported in GLSL")`；改回来 → 绿。
+另两条反向守卫（`full_post_wgsl_is_rejected_by_the_glsl_backend`、
+`depth_resolve_wgsl_is_rejected_by_the_glsl_backend`）钉死"这个限制现在真的存在" ——
+哪天 naga 支持了，它们会红，那时可以删掉整个变体机制。
+
+**新增后端/新增效果的规矩**：只要 WGSL 里出现"读深度"或别的后端相关写法，
+① 先看它属于哪一档能力；② 在 `supports_*` 里判；③ 让**不支持的那一档**在建管线之前就拿不到这段源码；
+④ 补一条 naga 翻译守卫。**不允许**"先建了再说，反正运行时不走那条分支"。
+**资源类的能力（MSAA、纹理格式、采样数）同理**：判定要落在一个**纯函数**上
+（`effective_msaa_samples`），这样它不需要显卡就能被单元测试钉住；判定的**唯一调用点**是
+`GpuContext::build`，用户看到的 `msaa_samples` 与真正建的纹理一致 ——
+不允许"context 报 4、渲染器偷偷用 1"。
+
+#### 12.7.5 怎么验（三层，从最便宜到最像真机）
+
+```bash
+# ① 不需要显卡：naga 的 GLSL 后端翻译 + 能力判定的纯函数
+cargo test -p quench3d-render --lib
+# ② 本机原生 GL（Mesa llvmpipe）：真建管线、真出图
+WGPU_BACKEND=gl cargo run -p quench3d-render --example offline_render
+WGPU_BACKEND=gl cargo test -p quench3d-render --no-fail-fast
+# ③ 真实 WebGL2（headless Chrome + SwiftShader，要先用 tools/build_web.sh 重建 wasm）
+tools/probe_webgl2.sh
+```
+
+三层各自的判据：
+
+| 层 | 修前 | 修后 |
+|---|---|---|
+| ① | 4 条守卫红（`textureLoad` 那段一进 GLSL 就报错） | 全部绿 |
+| ② | `panicked ... label = 'quench3d-post'`（exit 101）；就算跳过它，`msaa = 4` 也出**全黑**帧（13 KB PNG，逐像素 mean = 0.0） | exit 0；`msaa = 4` 与 `msaa = 1` 的输出**逐字节相同**（都被夹到 1），非黑像素 100%，整幅均值 `[156.41,165.44,179.80]` 对 Vulkan 的 `[156.48,165.53,179.84]`（差 < 0.1/255） |
+| ③ | 真实 WebGL2 里 `panicked ... label = 'quench3d-post'`，遮罩停在「正在创建渲染面…」 | 日志 `编辑器第一帧已渲染：1280x800`，遮罩被收，`tools/probe_webgl2.sh` 判 PASS（0 次 panic） |
+
+#### 12.7.6 明确没做的（**不要**把这一节读成"GL 后端已经无所不能"）
+
+1. **SSAO 在 GL 上是"没有了"，不是"修好了"**。深度-only 的 SSAO 依赖"按像素读深度"，
+   而 GL 上这条路是断的（12.7.2 三行表）。想恢复只能换实现（例如把深度**渲染进一张颜色目标**
+   再读 —— 需要多一趟全屏 pass，且要重新验证精度），这不在本轮范围。
+2. **MSAA 在 GL 上是"关掉"，不是"修好"**：`msaa_samples` 被夹到 1，用户设 4 也没用（会打警告）。
+   GL/WebGL2 上想要抗锯齿，得换 FXAA（已有）或以后做后处理 AA。
+3. **真机覆盖仍然只有一台**：真实 WebGL2 那一层跑在 headless Chrome + **SwiftShader**
+   （软件光栅）上，不是用户的 ANGLE/Intel HD 630。能确定的：**建管线不再失败、第一帧画出来了**
+   （SwiftShader 与 ANGLE 都走 wgpu 的同一个 gles 后端 + 同一个 glow 代码路径，
+   MSAA 那条 `panic!` 更是与驱动无关）；不能确定的：真机上会不会有别的驱动级差异。
+   用户那台机器上的最终确认只能由用户刷新页面给出。
+4. 还有一处**没查**的：原生 GL 上 MSAA 解析出黑帧的根因（wgpu-hal 的 gles 解析路径 vs llvmpipe）
+   —— 现在 GL 上不建多采样纹理了，这条路径在项目里再也走不到，本轮**没有**继续往下挖
+   （挖它要去改 `wgpu-hal`，不在围栏内）。
 
 ### 12.6 聚光灯阴影（第 54 轮）：一张图、一盏灯、为什么
 
