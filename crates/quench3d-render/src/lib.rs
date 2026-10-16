@@ -41,6 +41,7 @@
 #![forbid(unsafe_code)]
 
 pub mod camera;
+pub mod cascade;
 pub mod color;
 pub mod context;
 pub mod light;

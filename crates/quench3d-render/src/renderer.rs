@@ -45,6 +45,9 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// 而半透明与网格线都要混合。f16 的精度对"tonemap 之前"的值完全够用
 /// （相对误差 ~1e-3，落在 8 位输出的 1 个色阶以内，见 `post_pass` 的像素测试）。
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// 阴影级联的最大级数（图集是 2x2 分块，所以最多 4 级）。
+pub const MAX_SHADOW_CASCADES: usize = 4;
+
 /// 阴影贴图格式（可比较采样）。
 pub const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -64,8 +67,16 @@ pub struct FrameUniforms {
     pub light_color: [f32; 4],
     /// rgb = 环境光颜色，w = 强度。
     pub ambient: [f32; 4],
-    /// 阴影视图投影矩阵。
+    /// 阴影视图投影矩阵（级联时是**第一级**的矩阵，阴影 pass 每一级还会各自覆盖它）。
     pub shadow_matrix: [[f32; 4]; 4],
+    /// 相机视图矩阵（级联按视空间深度选级：`depth = -(view * world).z`）。
+    pub view: [[f32; 4]; 4],
+    /// 每一级的光源空间矩阵（只有前 `cascade_info.x` 个有效）。
+    pub shadow_matrices: [[[f32; 4]; 4]; MAX_SHADOW_CASCADES],
+    /// 每一级的远平面距离（视空间米数，严格递增，最后一个 = 相机远平面）。
+    pub cascade_splits: [f32; 4],
+    /// x = 级联数量（0 = 这一帧不投影阴影），y = 分块缩放（1 级 = 1，多级 = 0.5），z/w 备用。
+    pub cascade_info: [f32; 4],
     /// 天顶色。
     pub sky_zenith: [f32; 4],
     /// 地平线色。
@@ -359,6 +370,14 @@ pub struct RendererOptions {
     pub shadow_map_size: u32,
     /// 是否启用阴影。
     pub shadows: bool,
+    /// 阴影级联数（1 = 单级，与老行为一致；2~4 = 把视锥切段，每段一个分块）。
+    ///
+    /// 单级用一个固定的、围绕相机前方的正交盒，远处细节靠 `shadow_radius` 粗放覆盖；
+    /// 多级按 PSSM 切分视锥，近处细远处粗——同样的贴图分辨率下，近处阴影质量明显更好，
+    /// 代价是每一级各画一遍阴影 pass，且每一级只有 `贴图边长 / 2` 个纹素（图集是 2x2）。
+    pub shadow_cascades: u32,
+    /// 级联切分的对数/均匀混合系数（0 = 均匀，1 = 全对数），只在 `shadow_cascades > 1` 时有意义。
+    pub shadow_split_lambda: f32,
     /// 是否启用无限网格。
     pub grid: bool,
     /// 网格高度。
@@ -378,6 +397,8 @@ impl Default for RendererOptions {
         Self {
             shadow_map_size: 2048,
             shadows: true,
+            shadow_cascades: 1,
+            shadow_split_lambda: 0.5,
             grid: true,
             grid_height: 0.0,
             sky: true,
@@ -439,6 +460,12 @@ pub struct Renderer {
     shadow_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
     shadow_bind_group: wgpu::BindGroup,
+    /// 每一级各自的帧常量（阴影 pass 的顶点着色器只读 `shadow_matrix`，
+    /// 一级一个 buffer 才能在同一帧里画完 4 级——同一 buffer 的多次写入只会在提交时生效）。
+    shadow_frame_buffers: [wgpu::Buffer; MAX_SHADOW_CASCADES],
+    shadow_frame_bind_groups: [wgpu::BindGroup; MAX_SHADOW_CASCADES],
+    /// 图集里一个分块的边长（像素）；整图边长 = 它的 2 倍。
+    shadow_tile_size: u32,
 
     // 资源表
     meshes: Vec<GpuMesh>,
@@ -831,7 +858,8 @@ impl Renderer {
             }],
         });
 
-        let shadow_size = options.shadow_map_size.clamp(512, 4096);
+        let shadow_size = (options.shadow_map_size.clamp(512, 4096) / 2) * 2;
+        let shadow_tile_size = shadow_size / 2;
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("quench3d-shadow-map"),
             size: wgpu::Extent3d {
@@ -859,6 +887,32 @@ impl Renderer {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
+        let mut shadow_frame_buffers = Vec::with_capacity(MAX_SHADOW_CASCADES);
+        let mut shadow_frame_bind_groups = Vec::with_capacity(MAX_SHADOW_CASCADES);
+        for i in 0..MAX_SHADOW_CASCADES {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("quench3d-shadow-frame-uniform"),
+                size: std::mem::size_of::<FrameUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quench3d-shadow-frame-bind-group"),
+                layout: &frame_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            });
+            let _ = i;
+            shadow_frame_buffers.push(buf);
+            shadow_frame_bind_groups.push(bg);
+        }
+        let shadow_frame_buffers: [wgpu::Buffer; MAX_SHADOW_CASCADES] =
+            shadow_frame_buffers.try_into().expect("正好 4 个");
+        let shadow_frame_bind_groups: [wgpu::BindGroup; MAX_SHADOW_CASCADES] =
+            shadow_frame_bind_groups.try_into().expect("正好 4 个");
+
         let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quench3d-shadow-bind-group"),
             layout: &shadow_bind_layout,
@@ -1227,6 +1281,9 @@ impl Renderer {
             shadow_view,
             shadow_sampler,
             shadow_bind_group,
+            shadow_frame_buffers,
+            shadow_frame_bind_groups,
+            shadow_tile_size,
             meshes: Vec::new(),
             materials: Vec::new(),
             textures: Vec::new(),
@@ -1826,23 +1883,65 @@ impl Renderer {
     }
 
     /// 计算本帧的阴影视图投影矩阵。
-    fn shadow_matrix_for(&self, camera: &Camera, lighting: &Lighting) -> Mat4 {
-        match lighting.sun {
-            Some(s) if s.cast_shadows && self.options.shadows => {
-                let radius = s.shadow_radius.clamp(2.0, 4000.0);
-                let focus = camera.position + camera.forward() * (radius * 0.45);
-                s.shadow_matrix(focus, radius, radius * 2.0)
-            }
-            _ => Mat4::IDENTITY,
+    /// 算这一帧的阴影级联：每一级的光源空间矩阵 + 每一级的远平面距离。
+    ///
+    /// 返回的矩阵个数同时就是级联数量；**0 个**表示这一帧不投影阴影（没有平行光、
+    /// 或 `cast_shadows` / `shadows` 关掉了）。
+    ///
+    /// 单级（`shadow_cascades = 1`）保持老行为：围绕相机前方 `shadow_radius` 的一个正交盒，
+    /// 用 `shadow_radius` 而不是相机视锥来决定范围——老场景的阴影完全不变（逐像素一致）。
+    fn shadow_cascades_for(&self, camera: &Camera, lighting: &Lighting) -> (Vec<Mat4>, Vec<f32>) {
+        let Some(s) = lighting
+            .sun
+            .filter(|s| s.cast_shadows && self.options.shadows)
+        else {
+            return (Vec::new(), vec![camera.far]);
+        };
+        let radius = s.shadow_radius.clamp(2.0, 4000.0);
+        let n = self
+            .options
+            .shadow_cascades
+            .clamp(1, MAX_SHADOW_CASCADES as u32);
+        if n <= 1 {
+            let focus = camera.position + camera.forward() * (radius * 0.45);
+            return (
+                vec![s.shadow_matrix(focus, radius, radius * 2.0)],
+                vec![camera.far.max(camera.near + 1.0)],
+            );
         }
+        // 多级：按相机视锥切段。近平面夹一下，避免 near 太小导致第一级只有几厘米。
+        let near = camera.near.max(0.05);
+        let far = camera.far.max(near + 1.0);
+        let splits = crate::cascade::splits(near, far, n, self.options.shadow_split_lambda);
+        let inv_view_proj = camera.view_projection().inverse();
+        let tile = self.shadow_tile_size.max(256) as f32;
+        let matrices = crate::cascade::matrices(&s, &inv_view_proj, near, far, &splits, tile);
+        (matrices, splits)
     }
 
     fn build_frame_uniforms(
         &self,
         camera: &Camera,
         lighting: &Lighting,
-        shadow_matrix: Mat4,
+        cascades: &[Mat4],
+        splits: &[f32],
     ) -> FrameUniforms {
+        let shadow_matrix = cascades.first().copied().unwrap_or(Mat4::IDENTITY);
+        let mut shadow_matrices = [[[0.0f32; 4]; 4]; MAX_SHADOW_CASCADES];
+        for (i, m) in cascades.iter().take(MAX_SHADOW_CASCADES).enumerate() {
+            shadow_matrices[i] = m.to_cols_arrays();
+        }
+        let mut cascade_splits = [camera.far.max(camera.near + 1.0); 4];
+        for (i, d) in splits.iter().take(4).enumerate() {
+            cascade_splits[i] = *d;
+        }
+        let cascade_count = cascades.len().min(MAX_SHADOW_CASCADES);
+        // 分块之后的纹素尺寸：PCF 的偏移与深度偏移都要按**分块**算，否则多级阴影会有条纹
+        let (tile_scale, texel_map) = if cascade_count > 1 {
+            (0.5f32, self.shadow_tile_size.max(256) as f32)
+        } else {
+            (1.0f32, self.options.shadow_map_size.clamp(512, 4096) as f32)
+        };
         let view_proj = camera.view_projection();
         let inv_view_proj = view_proj.inverse();
         let sun = lighting.sun;
@@ -1876,7 +1975,6 @@ impl Renderer {
             None => ([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
         };
 
-        let shadow_map_size = self.shadow_texture.width() as f32;
         FrameUniforms {
             view_proj: view_proj.to_cols_arrays(),
             inv_view_proj: inv_view_proj.to_cols_arrays(),
@@ -1890,6 +1988,10 @@ impl Renderer {
                 lighting.ambient_intensity,
             ],
             shadow_matrix: shadow_matrix.to_cols_arrays(),
+            view: camera.view().to_cols_arrays(),
+            shadow_matrices,
+            cascade_splits,
+            cascade_info: [cascade_count as f32, tile_scale, 0.0, 0.0],
             sky_zenith: [
                 lighting.sky.zenith.x,
                 lighting.sky.zenith.y,
@@ -1917,8 +2019,8 @@ impl Renderer {
             params: [
                 self.time,
                 // 深度偏移：约 1.5 个世界空间纹素，换算到归一化深度（与 shadow_matrix 的深度范围无关，恒为 0.75/size）
-                0.75 / shadow_map_size,
-                1.0 / shadow_map_size,
+                0.75 / texel_map,
+                1.0 / texel_map,
                 lighting.shadow_strength.clamp(0.0, 1.0),
             ],
             point_lights,
@@ -1953,10 +2055,24 @@ impl Renderer {
         self.ensure_instance_capacity(&ctx.device, self.staging.len().max(1));
         self.ensure_line_capacity(&ctx.device, self.lines.vertices.len().max(1));
 
-        let shadow_matrix = self.shadow_matrix_for(camera, lighting);
-        let uniforms = self.build_frame_uniforms(camera, lighting, shadow_matrix);
+        let (cascades, splits) = self.shadow_cascades_for(camera, lighting);
+        let shadow_count = cascades.len().min(MAX_SHADOW_CASCADES);
+        let uniforms = self.build_frame_uniforms(camera, lighting, &cascades, &splits);
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniforms));
+
+        // 阴影 pass 每一级各自一个帧常量：顶点着色器只读 `shadow_matrix`，
+        // 一级一个 buffer 才能在同一帧里画完多级。
+        for i in 0..MAX_SHADOW_CASCADES {
+            let mut one = uniforms;
+            one.shadow_matrix = cascades
+                .get(i)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY)
+                .to_cols_arrays();
+            ctx.queue
+                .write_buffer(&self.shadow_frame_buffers[i], 0, bytemuck::bytes_of(&one));
+        }
 
         // 后处理参数（bloom 开关/强度/阈值 + bloom 贴图尺寸 + FXAA 阈值）
         let bloom = self.options.bloom;
@@ -2023,7 +2139,13 @@ impl Renderer {
         self.visible_ranges.resize(self.batches.len(), (0, 0));
         self.draw_order.clear();
         let want_shadow = uniforms.light_color[3] > 0.5;
-        let shadow_frustum = Frustum::from_view_projection(&shadow_matrix);
+        // 每一级一个视锥：物体只要落在**任意一级**里就得画进阴影图，
+        // 否则"远处的物体只出现在第 3 级里"这种情形会缺影子。
+        let shadow_frustums: Vec<Frustum> = cascades
+            .iter()
+            .take(shadow_count.max(1))
+            .map(Frustum::from_view_projection)
+            .collect();
 
         let mut write = 0u32;
         let mut shadow_batches: Vec<(MeshId, u32, u32)> = Vec::new();
@@ -2041,7 +2163,7 @@ impl Renderer {
                 self.visible.push(*raw);
                 write += 1;
                 batch_count += 1;
-                if want_shadow && shadow_frustum.intersects_aabb(bounds) {
+                if want_shadow && shadow_frustums.iter().any(|f| f.intersects_aabb(bounds)) {
                     shadow_any = true;
                 }
             }
@@ -2089,39 +2211,59 @@ impl Renderer {
                 label: Some("quench3d-encoder"),
             });
 
-        // ---------- 阴影 pass ----------
+        // ---------- 阴影 pass（级联：每一级画进图集 2x2 的一个分块） ----------
+        // 级联画在**同一个编码器**里：一级一个 pass、一级一个分块视口。
+        // 第一级清整图，后面几级用 Load——否则后一级的 Clear 会把前一级擦掉。
         if want_shadow && !shadow_batches.is_empty() {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("quench3d-shadow-pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+            let count = shadow_count.max(1);
+            let full = (self.shadow_tile_size * 2) as f32;
+            for ci in 0..count {
+                let (vx, vy, vs) = if count <= 1 {
+                    (0.0, 0.0, full)
+                } else {
+                    let col = (ci % 2) as f32;
+                    let row = (ci / 2) as f32;
+                    let t = self.shadow_tile_size as f32;
+                    (col * t, row * t, t)
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quench3d-shadow-pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: if ci == 0 {
+                                wgpu::LoadOp::Clear(1.0)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.shadow_pipeline);
-            pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            let mut current_mesh = u32::MAX;
-            for (mesh, first, count) in &shadow_batches {
-                if *mesh != current_mesh {
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.shadow_pipeline);
+                pass.set_bind_group(0, &self.shadow_frame_bind_groups[ci], &[]);
+                pass.set_viewport(vx, vy, vs, vs, 0.0, 1.0);
+                pass.set_scissor_rect(vx as u32, vy as u32, vs as u32, vs as u32);
+                let mut current_mesh = u32::MAX;
+                for (mesh, first, cnt) in &shadow_batches {
+                    if *mesh != current_mesh {
+                        let m = &self.meshes[*mesh as usize];
+                        pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                        pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        current_mesh = *mesh;
+                    }
+                    pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
                     let m = &self.meshes[*mesh as usize];
-                    pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
-                    pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    current_mesh = *mesh;
+                    pass.draw_indexed(0..m.index_count, 0, *first..(*first + *cnt));
+                    stats.shadow_draw_calls += 1;
                 }
-                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-                let m = &self.meshes[*mesh as usize];
-                pass.draw_indexed(0..m.index_count, 0, *first..(*first + *count));
-                stats.shadow_draw_calls += 1;
+                drop(pass);
             }
-            drop(pass);
         }
 
         // ---------- 主 pass（渲染到线性 HDR 中间目标） ----------
@@ -2629,16 +2771,22 @@ mod tests {
             32,
             "PointLight 必须是两个 vec4"
         );
-        assert_eq!(offset_of!(FrameUniforms, point_lights), 336);
-        assert_eq!(offset_of!(FrameUniforms, params2), 592);
-        assert_eq!(size_of::<FrameUniforms>(), 608);
+        assert_eq!(offset_of!(FrameUniforms, shadow_matrix), 192);
+        // 级联字段紧跟在 shadow_matrix 之后（WGSL 里也是这个顺序）
+        assert_eq!(offset_of!(FrameUniforms, view), 256);
+        assert_eq!(offset_of!(FrameUniforms, shadow_matrices), 320);
+        assert_eq!(offset_of!(FrameUniforms, cascade_splits), 576);
+        assert_eq!(offset_of!(FrameUniforms, cascade_info), 592);
+        assert_eq!(offset_of!(FrameUniforms, point_lights), 688);
+        assert_eq!(offset_of!(FrameUniforms, params2), 944);
+        assert_eq!(size_of::<FrameUniforms>(), 960);
     }
 
     #[test]
     fn frame_uniforms_size_is_multiple_of_16() {
         let size = std::mem::size_of::<FrameUniforms>();
         assert_eq!(size % 16, 0, "uniform 结构大小必须是 16 的倍数: {size}");
-        assert_eq!(size, 608, "FrameUniforms 布局与 WGSL 不一致");
+        assert_eq!(size, 960, "FrameUniforms 布局与 WGSL 不一致");
     }
 
     #[test]

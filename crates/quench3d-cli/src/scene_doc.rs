@@ -1458,8 +1458,28 @@ pub struct ShadowQualityDoc {
     ///
     /// **这是"覆盖范围 ↔ 精度"的旋钮**：给得越大，远处物体也能投上阴影，
     /// 但同样的贴图分辨率摊在更大面积上 → 阴影边缘更糊、锯齿更明显。
+    ///
+    /// **只在 `cascades = 1`（缺省）时有意义**：多级阴影按相机视锥切段，
+    /// 覆盖范围由视锥决定，不再用这个半径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
+    /// 阴影级联数（1~4，缺省 1）：1 = 单级（与老场景逐像素一致），2~4 = 把相机视锥切段分级。
+    ///
+    /// 单级用一个固定的正交盒（覆盖相机前方 `radius` 米）：贴图分辨率全给这一块，
+    /// 远处要么被截断要么靠加大 `radius` 牺牲精度。多级把视锥按深度切成 N 段，
+    /// **近处细、远处粗**——同样的贴图分辨率下近处阴影明显更干净。
+    ///
+    /// 代价要说清楚：N 级要画 N 遍阴影 pass，而且每级只分到**半张**贴图（2x2 图集），
+    /// 所以 N > 1 时每一级的有效分辨率是 `贴图边长 / 2`。近处划算；超远场景更应该提高
+    /// `shadow_map_size`，而不是一味加级数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cascades: Option<u32>,
+    /// 级联切分的"对数 ↔ 均匀"混合系数（0~1，缺省 0.5），只在 `cascades > 1` 时有意义。
+    ///
+    /// 1 = 全对数切分（近处最细，远处跨度大）；0 = 均匀切分（每级跨度一样）。
+    /// 缺省 0.5 是常见的折中。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_lambda: Option<f32>,
 }
 
 /// 天空渐变的三个颜色（**线性空间**）。
@@ -2585,6 +2605,22 @@ impl SceneDoc {
                     .with_hint("引擎会在 2~4000 米之间钳制；常规模拟给 10~60"),
                 ),
                 _ => {}
+            }
+            if let Some(n) = q.cascades {
+                if !(1..=4).contains(&n) {
+                    out.push(Diagnostic::error(
+                        "lighting.shadow_quality.cascades",
+                        "cascades 必须在 1~4 之间（1 = 单级；4 是 2x2 图集的上限）",
+                    ));
+                }
+            }
+            if let Some(l) = q.split_lambda {
+                if !l.is_finite() || !(0.0..=1.0).contains(&l) {
+                    out.push(Diagnostic::error(
+                        "lighting.shadow_quality.split_lambda",
+                        "split_lambda 必须在 0~1 之间（0 = 均匀切分，1 = 全对数切分）",
+                    ));
+                }
             }
         }
         // 天空颜色：三个通道都要有限非负

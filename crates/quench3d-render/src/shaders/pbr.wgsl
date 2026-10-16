@@ -102,16 +102,35 @@ fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> v
     return f0 + (f90 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
-// 阴影：3x3 PCF 比较采样
+// 阴影：3x3 PCF 比较采样（多级时先按视空间深度选级，再映射到图集的 2x2 分块）
 fn sample_shadow(world: vec3<f32>, n_dot_l: f32) -> f32 {
     let bias = frame.params.y * (1.0 - n_dot_l * 0.8);
-    let clip = frame.shadow_matrix * vec4<f32>(world, 1.0);
+    let cascades = u32(frame.cascade_info.x + 0.5);
+    var m = frame.shadow_matrix;
+    var tile = vec2<f32>(0.0, 0.0);
+    var scale = 1.0;
+    if (cascades > 1u) {
+        // 视空间深度：取矩阵第 3 行即可（等价于 -(view * world).z）
+        let depth = -(frame.view * vec4<f32>(world, 1.0)).z;
+        var i = 0u;
+        loop {
+            if (i + 1u >= cascades) { break; }
+            if (depth < frame.cascade_splits[i]) { break; }
+            i = i + 1u;
+        }
+        m = frame.shadow_matrices[i];
+        scale = frame.cascade_info.y;
+        tile = vec2<f32>(f32(i % 2u), f32(i / 2u)) * scale;
+    }
+    let clip = m * vec4<f32>(world, 1.0);
     // WebGPU 的帧缓冲 Y 轴向下：NDC 的 +Y 对应纹理第 0 行，
     // 因此采样 uv 的 V 必须翻转，否则会采到镜像位置的深度（表现为自阴影）。
-    let uv = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || clip.z < 0.0 || clip.z > 1.0) {
+    let uv_local = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+    // 越界判据用**分块内**的 uv：否则 PCF 会越过边界采到隔壁那一级的深度（接缝）
+    if (uv_local.x < 0.0 || uv_local.x > 1.0 || uv_local.y < 0.0 || uv_local.y > 1.0 || clip.z < 0.0 || clip.z > 1.0) {
         return 1.0;
     }
+    let uv = tile + uv_local * scale;
     let depth = clip.z - bias;
     let texel = frame.params.z;
     var sum = 0.0;

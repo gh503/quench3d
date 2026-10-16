@@ -4382,3 +4382,136 @@ fn model_cache_parses_each_file_once_per_run() {
     // 缓存本来就是"每次运行一份"。那条行为由 `assets::cache_tests`
     // 的进程内单测（`cache_hits_misses_and_invalidates_on_file_change`）钉住。
 }
+
+/// 级联阴影（gap #24）：字段校验 + 从场景文件真的接进渲染器。
+///
+/// 拆成"不依赖显卡"和"依赖显卡"两半：
+/// 1. 校验部分（0/5、split_lambda 越界必须报错）**任何机器都能跑**；
+/// 2. 渲染部分要有 GPU——无 GPU 时退出码 3 就算跳过（CI 是这种情况）。
+///    有 GPU 时断言"级联数真的改变了画面"：这是"字段接上了"的证据，
+///    而不是"代码看起来接上了"。
+#[test]
+fn shadow_cascades_are_validated_and_change_the_image_when_a_gpu_is_present() {
+    let dir = temp_dir("cascades");
+    let scene = |out: &str, cascades: u32, lambda: f64| {
+        serde_json::json!({
+            "objects": [
+                { "name": "地板", "shape": { "type": "box", "size": [24, 0.5, 24] },
+                  "position": [0, -0.25, 0], "material": "grey" },
+                { "name": "浮箱", "shape": { "type": "box", "size": [2, 1.6, 2] },
+                  "position": [0, 0.8, 0], "material": "warm" }
+            ],
+            "materials": {
+                "grey": { "color": [0.85, 0.85, 0.85], "roughness": 0.9 },
+                "warm": { "color": [0.9, 0.6, 0.3], "roughness": 0.7 }
+            },
+            "camera": { "position": [0, 5, 8], "look_at": [0, 0, 0] },
+            "render": { "output": out, "width": 192, "height": 128, "msaa": 1 },
+            "lighting": {
+                "sky": false, "grid": false,
+                "shadow_quality": { "cascades": cascades, "split_lambda": lambda }
+            }
+        })
+    };
+
+    // ---- 1. 校验（不需要显卡）----
+    for (n, lambda, ok) in [
+        (1u32, 0.5f64, true),
+        (4, 0.5, true),
+        (0, 0.5, false),
+        (5, 0.5, false),
+    ] {
+        let p = write_scene(
+            &dir,
+            &format!("v{n}-{lambda}.json"),
+            scene("v.png", n, lambda),
+        );
+        let r = run(&["validate", p.to_str().unwrap(), "--json"]);
+        let v = r.json();
+        assert_eq!(v["data"]["valid"], ok, "cascades={n} 的合法性判断不对：{v}");
+        if !ok {
+            assert!(
+                v["data"]["diagnostics"]
+                    .as_array()
+                    .map(|d| d
+                        .iter()
+                        .any(|x| x["path"] == "lighting.shadow_quality.cascades"))
+                    .unwrap_or(false),
+                "要指出是 cascades 的问题：{v}"
+            );
+        }
+    }
+    let p = write_scene(&dir, "bad-lambda.json", scene("v.png", 2, 1.5));
+    let v = run(&["validate", p.to_str().unwrap(), "--json"]).json();
+    assert_eq!(v["data"]["valid"], false, "{v}");
+    assert!(
+        v["data"]["diagnostics"]
+            .as_array()
+            .map(|d| d
+                .iter()
+                .any(|x| x["path"] == "lighting.shadow_quality.split_lambda"))
+            .unwrap_or(false),
+        "要指出是 split_lambda 的问题：{v}"
+    );
+
+    // ---- 2. 渲染（有 GPU 才有意义）----
+    let single = dir.join("single.png");
+    let quad = dir.join("quad.png");
+    let p1 = write_scene(&dir, "single.json", scene("single.png", 1, 0.5));
+    let p4 = write_scene(&dir, "quad.json", scene("quad.png", 4, 0.5));
+    // 输出走 `--out`（绝对路径）：场景里的 `render.output` 是相对量，
+    // 相对路径会落到**进程当前目录**（也就是仓库里的 crates/quench3d-cli/），
+    // 跑一次测试就往仓库里丢两张 PNG——`git add -A` 很容易顺手把它们提交上去。
+    let r1 = run(&[
+        "render",
+        p1.to_str().unwrap(),
+        "--out",
+        single.to_str().unwrap(),
+        "--json",
+    ]);
+    let r4 = run(&[
+        "render",
+        p4.to_str().unwrap(),
+        "--out",
+        quad.to_str().unwrap(),
+        "--json",
+    ]);
+    if r1.code == 3 && r4.code == 3 {
+        return; // 没有 GPU：这台机器上只能验证校验部分
+    }
+    assert_eq!(r1.code, 0, "{}", r1.stderr);
+    assert_eq!(r4.code, 0, "{}", r4.stderr);
+    let (_, _, a) = decode_rgba(&single);
+    let (_, _, b) = decode_rgba(&quad);
+    let changed = a
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0.iter())
+        .filter(|(x, y)| {
+            (x[0] as i32 - y[0] as i32).abs()
+                + (x[1] as i32 - y[1] as i32).abs()
+                + (x[2] as i32 - y[2] as i32).abs()
+                > 6
+        })
+        .count();
+    assert!(
+        changed > 24,
+        "级联数只改了 {changed} 个像素：字段像是没接进渲染器"
+    );
+    // 两种模式下都得真有影子：最暗的像素要明显暗过平均值
+    for (name, img) in [("单级", &a), ("四级", &b)] {
+        let lum: Vec<f64> = img
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64)
+            .collect();
+        let mean = lum.iter().sum::<f64>() / lum.len() as f64;
+        let min = lum.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            mean - min > 20.0,
+            "{name}阴影：画面最暗 {min:.1} 与均值 {mean:.1} 差得太少，可能根本没画出影子"
+        );
+    }
+}

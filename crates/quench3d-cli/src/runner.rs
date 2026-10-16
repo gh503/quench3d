@@ -2707,6 +2707,29 @@ fn texture_from_doc(
 }
 
 /// 把场景里的 bloom 配置翻成渲染器选项（缺省关闭）。
+/// 阴影级联数（缺省 1 = 单级，与老场景逐像素一致）。
+///
+/// 文档里的 `cascades` 直接决定"画几遍阴影 pass"；这里再夹一次范围，
+/// 免得手改的 JSON 绕过校验（校验是给作者看的，这里是给渲染器兜底的）。
+fn shadow_cascades(doc: &SceneDoc) -> u32 {
+    doc.lighting
+        .shadow_quality
+        .as_ref()
+        .and_then(|q| q.cascades)
+        .unwrap_or(1)
+        .clamp(1, 4)
+}
+
+/// 级联切分系数（缺省 0.5；同样再夹一次范围）。
+fn shadow_split_lambda(doc: &SceneDoc) -> f32 {
+    doc.lighting
+        .shadow_quality
+        .as_ref()
+        .and_then(|q| q.split_lambda)
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0)
+}
+
 fn bloom_options(doc: &SceneDoc) -> quench3d::render::BloomOptions {
     let Some(b) = &doc.lighting.bloom else {
         return quench3d::render::BloomOptions::default();
@@ -3039,6 +3062,8 @@ fn run_render_single(
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
             ssao: ssao_options(doc),
+            shadow_cascades: shadow_cascades(doc),
+            shadow_split_lambda: shadow_split_lambda(doc),
             ..Default::default()
         },
         ..Default::default()
@@ -3452,6 +3477,8 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
             ssao: ssao_options(doc),
+            shadow_cascades: shadow_cascades(doc),
+            shadow_split_lambda: shadow_split_lambda(doc),
             ..Default::default()
         },
         ..Default::default()

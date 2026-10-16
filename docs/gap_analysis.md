@@ -631,7 +631,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 21 | ~~查询补全 + 查询加速结构~~ ✅ 2026-10-17：`raycast_all` / 任意形状 `overlap_shape` / 单向 `QueryFilter`（mask + 传感器开关）/ `distance_to` + `QueryIndex` 快照网格（射线 3D DDA）；CLI `query`、MCP `quench3d_query`、编辑器 F7 查询探针。**没做**：`shape_cast` 仍线性、CLI 不做批量查询、索引是快照（世界一动就回退线性） | 引擎 |
 | 22 | ~~物理材质与 combine mode、静/动摩擦分离~~ ✅ 2026-10-17：`CombineRule`（5 条：几何平均/平均/取小/取大/相乘，摩擦缺省几何平均、恢复缺省取大 = 老行为）、`static_friction`（缺省跟随动摩擦）、世界级 `physics.{friction_combine,restitution_combine,static_friction_speed}` + 物体级覆盖、编辑器滑块与下拉。判定用**施力前**速度（否则静摩擦永远不生效）。**没做**：材质的各向异性/滚动摩擦、`friction_combine` 在两端都显式且不同时只有一条确定性优先级（取 slot 靠前者） | 引擎 |
 | 23 | 动画/蒙皮（glTF animations/skins 导入 + 播放 + 混合） | 引擎（大） |
-| 24 | CSM 级联阴影 + 点光/聚光阴影 + 聚光灯 | 引擎 |
+| 24 | 🟡 部分（第 42 轮）：**CSM 已落地**——`lighting.shadow_quality.cascades`（1~4，缺省 1 = 老行为逐像素不变）+ `split_lambda`（0~1）；CPU 侧 `cascade.rs`（PSSM 切分 / 视锥角点 / 切段角点 / 每级矩阵 + 分块纹素对齐）有"每级矩阵必须罩住自己那段视锥"的几何断言（转斜相机也测，无显卡）；渲染侧画进 2×2 图集、着色器按视空间深度选级、剔除按"落在任意一级"；e2e 覆盖校验（0/5/1.5 报错）与"画面确实变化 + 两种模式都真有影子"。**没做**：点光源/聚光灯阴影（立方体阴影图）、"近处更清晰"的独立量化（远投射体对比统计量不可分，未得出结论；`shadow_probe` 例子是现成的量化入口） | 渲染 |
 | 25 | 后处理链骨架（HDR 中间目标 + tonemap 移出物体着色器）✅ 2026-10-16 + Bloom ✅（`lighting.bloom`）+ FXAA ✅（`lighting.fxaa`）+ SSAO ✅（`lighting.ssao`，深度-only、无去噪）+ TAA/景深 ❌ | 引擎（大） |
 | 26 | IBL / 环境贴图 | 引擎 |
 | 27 | 资源管线：Web 端模型加载（bytes/fetch）✅ 2026-10-15（`load_model_from_bytes` + wasm 探针验证）+ **CPU 侧模型缓存 ✅ 第 41 轮**（`assets::ModelCache`：进程内、规范化路径为 key、按 `(文件长度, mtime)` 失效、256 MiB 估算预算 + LRU 淘汰、`stats()`；`simulate` 报告的 `model_cache{...}` 是可达观测口径，e2e 钉住"同文件两条引用 = 1 次解析 + 1 次命中"、"不同文件 2 次解析"、"没模型的场景报告里不出现这个字段"）+ **显存释放仍 ❌**（GPU 缓冲还是只增不减，反复 `load_model` 必涨显存——这条本轮没动，见 readiness §11） | 引擎 |

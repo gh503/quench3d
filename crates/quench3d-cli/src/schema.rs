@@ -680,7 +680,10 @@ pub fn json_schema() -> Value {
         def(&["position", "color", "intensity", "radius"]),
     );
     defs.insert("fog".into(), def(&["color", "density"]));
-    defs.insert("shadowQuality".into(), def(&["strength", "radius"]));
+    defs.insert(
+        "shadowQuality".into(),
+        def(&["strength", "radius", "cascades", "split_lambda"]),
+    );
     defs.insert("skyColors".into(), def(&["zenith", "horizon", "ground"]));
     defs.insert(
         "ssao".into(),

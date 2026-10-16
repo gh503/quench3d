@@ -569,7 +569,7 @@ quench3d::write_png(&image, "out.png")?;
 | --- | --- |
 | 着色 | 前向 Cook–Torrance PBR（金属度/粗糙度）、法线贴图、指数雾；物体写**线性 HDR** |
 | 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一 ACES 色调映射（**唯一一份**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`） |
-| 阴影 | 单张 2048² `Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`lighting.shadow_quality.strength`）与覆盖半径（`.radius`）可从场景文件调 |
+| 阴影 | 单张 `Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段画进 2×2 图集，主 pass 按视空间深度选级 |
 | 光照 | 1 个平行光 + 最多 **8** 个点光源（`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，环境光 + 程序化天空（互为补充的 IBL 近似）；**指数距离雾**（`lighting.fog`，不写 = 关闭） |
 | 天空/地面 | 全屏三角形程序化天空（三个渐变颜色可从 `lighting.sky_colors` 调）+ 解析无限网格（`fwidth` 抗锯齿 + 深度写入） |
 | 批处理 | 按 (材质, 网格) 分批 + 实例化（96 字节/实例）+ 逐实例视锥剔除 |
@@ -825,6 +825,9 @@ NaN 刚体  : 0
   `[1, 0.92, 0.85]` 这种数，写 `[1, 235, 220]` 那种 0~255 的整数会过曝或全黑。
 * `lighting.shadow_quality` 与开关 `lighting.shadows` 是两件事：开关管"投不投"，
   这一节管"投得好不好"（`strength` 0~1、`radius` 米）。**阴影贴图分辨率不在场景文件里**。
+  `cascades`（1~4，缺省 1）决定分几级：1 = 单级（与老场景逐像素一致，覆盖范围看 `radius`），
+  2~4 = 按相机视锥切段、近处细远处粗；每级只分到半张贴图，所以**加级数不如提高分辨率**来得直接。
+  `split_lambda`（0~1，缺省 0.5）调"对数 ↔ 均匀"切分。`cascades > 1` 时 `radius` 不再起作用。
   `threshold` 是**线性**亮度（Rec.709），太阳圆盘/自发光可以远大于 1，所以 1.0 通常只让它们外溢；
   bloom 加在 tonemap **之前**，所以亮区外溢不会过曝成白块。
 * `lighting.ssao` 同样**不写 = 关闭**（像素与关闭时逐位相同）；写 `{}` 就是打开。
@@ -1061,7 +1064,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 465 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 470 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1124,9 +1127,9 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 136 个测试分七块：
+命令行工具的 137 个测试分七块：
 
-* **契约测试**（`tests/cli_e2e.rs`，49 个）真的去 spawn `quench3d` 子进程，断言
+* **契约测试**（`tests/cli_e2e.rs`，50 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；
   其中 4 条是「能力真的接线了」的像素/数值证据：**材质贴图**（同一箱子带/不带贴图的
   中心色差）、**点光源**（一盏红灯必须把箱子照红，且显式清空预设补光必须改变画面）、

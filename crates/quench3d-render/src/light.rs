@@ -45,6 +45,25 @@ impl DirectionalLight {
     /// 采用"以相机目标点为中心、沿光线方向拉出正交投影"的经典做法，
     /// 光源环绕相机移动时阴影贴图不会抖动（对中心做了纹素对齐）。
     pub fn shadow_matrix(&self, center: Vec3, radius: f32, depth_range: f32) -> Mat4 {
+        self.shadow_matrix_with_map_size(
+            center,
+            radius,
+            depth_range,
+            self.shadow_map_size.max(256) as f32,
+        )
+    }
+
+    /// 与 [`DirectionalLight::shadow_matrix`] 相同，但**纹素对齐用的贴图尺寸可指定**。
+    ///
+    /// 级联阴影把 N 级画进同一张深度图的 2x2 分块（见 [`crate::cascade`]），每一级实际只有
+    /// `贴图尺寸 / 2` 个纹素；纹素对齐必须按**分块**算，否则每一级的阴影都会随相机抖动。
+    pub fn shadow_matrix_with_map_size(
+        &self,
+        center: Vec3,
+        radius: f32,
+        depth_range: f32,
+        map_size_px: f32,
+    ) -> Mat4 {
         let dir = self.direction.normalize_or_zero();
         let up = if dir.y.abs() > 0.95 { Vec3::Z } else { Vec3::Y };
         let eye = center - dir * (radius + depth_range * 0.6);
@@ -57,7 +76,7 @@ impl DirectionalLight {
         let m = proj * view;
 
         // 纹素对齐：把中心点投影到阴影贴图空间并吸附到纹素格点。
-        let size = self.shadow_map_size.max(256) as f32;
+        let size = map_size_px.max(256.0);
         let mut m = m;
         let origin = m.transform_point3(center);
         let texel = 2.0 / size;

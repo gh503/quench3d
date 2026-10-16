@@ -20,6 +20,14 @@ struct Frame {
     // rgb = 环境光颜色, w = 环境光强度
     ambient: vec4<f32>,
     shadow_matrix: mat4x4<f32>,
+    // 相机视图矩阵（级联按视空间深度选级：depth = -(view * world).z）
+    view: mat4x4<f32>,
+    // 每一级的光源空间矩阵（只有前 cascade_info.x 个有效）
+    shadow_matrices: array<mat4x4<f32>, 4>,
+    // 每一级的远平面距离（视空间米数，严格递增）
+    cascade_splits: vec4<f32>,
+    // x = 级联数量（0 = 不投影阴影）, y = 图集分块缩放（单级 1，多级 0.5）, z/w 备用
+    cascade_info: vec4<f32>,
     sky_zenith: vec4<f32>,
     sky_horizon: vec4<f32>,
     sky_ground: vec4<f32>,

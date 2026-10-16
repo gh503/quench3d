@@ -95,9 +95,15 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         color: Some([light.fog.color.x, light.fog.color.y, light.fog.color.z]),
         density: Some(light.fog.density),
     });
+    // 编辑器还没有级联的 UI：`cascades` / `split_lambda` **沿用底稿**。
+    // 不能写 `None`——否则"载入 cascades: 4 的场景 → 随手存一下"就把它悄悄变回单级，
+    // 画面变了而用户什么都没改过，这种丢失最难查。
+    let draft_quality = lighting.shadow_quality;
     lighting.shadow_quality = Some(quench3d_cli::scene_doc::ShadowQualityDoc {
         strength: Some(light.shadow_strength),
         radius: light.sun.as_ref().map(|s| s.shadow_radius),
+        cascades: draft_quality.as_ref().and_then(|q| q.cascades),
+        split_lambda: draft_quality.as_ref().and_then(|q| q.split_lambda),
     });
     lighting.sky_colors = Some(quench3d_cli::scene_doc::SkyColorsDoc {
         zenith: Some([light.sky.zenith.x, light.sky.zenith.y, light.sky.zenith.z]),
