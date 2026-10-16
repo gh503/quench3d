@@ -10,25 +10,12 @@
 
 ### 新增
 
-- **接触特征 ID（gap #20 第一条腿）**：`ContactPoint` 新增 `feature_id`——由接触点在两端
-  的**局部坐标**按 0.5 mm 量化后哈希（`quench3d_physics::contact::feature_id_from_local`，
-  宽相/窄相与求解器共用同一个函数，所以缓存键一定对得上）。求解器的热启动缓存现在
-  **优先按 ID 精确匹配**，原先的坐标容差匹配退化为兜底。解决的问题很具体：物体滑动/旋转时，
-  靠 2 cm 容差匹配会把冲量沿用到**相邻的另一个**特征点上（表现为"慢慢滑的箱子忽软忽硬"），
-  ID 与点顺序、微小位移无关。**没做**：接触余量（speculative margin）与流形跨帧复用。
-- **`quench3d schema --json-schema`：机器可读的 JSON Schema**（draft 2020-12，gap #19）。
-  给编辑器补全、CI 校验、agent 程序化自检用：`$defs` 覆盖 scene/object/shape/shapePart/
-  instance/material/ground/model/joint/coneLimit/action/probe/camera/lighting/pointLight/
-  fog/shadowQuality/skyColors/ssao/fxaa/bloom/physics/simulate/render + 6 个枚举，
-  全部 `additionalProperties: false`（与 `validate` 的"未知字段 = 错误"一致）。
-  不带 `--json` 时直接打印 schema 本身（好 pipe 进文件）。
-  **分工说清楚：schema 管"结构"，`quench3d validate` 管"语义"**（数值范围、互斥、交叉引用）。
-  手写 + **一致性测试**（不引新依赖）：`json_schema_matches_the_source_structs` 会 `include_str!`
-  读 `scene_doc.rs`，逐字段对账 24 个结构体与 6 个枚举——加字段忘了改 schema 一定红。
-- **版本迁移策略**：版本 1 → 2 的唯一差别是 v2 起 `objects[].parent` 生效，**没有 parent 的
-  文件语义完全一样**，所以"迁移"就是把 `version` 改成 2；诊断里现在直接给出这句话
-  （未来版本的文件给出"请升级 quench3d"）。不做迁移器——那会维护一份没人需要的重写逻辑。
-
+- 无新增（第 29 轮是**核对轮**）：逐条验证 gap #15（`actions[]` + `probes[]`）与
+  gap #18（角速度 / 阻尼 / `gravity_scale` / `mass` / 睡眠）确实是"格式 + 校验 + 引擎 +
+  CLI + 编辑器"全程可用，把两行从"待做"改成 ✅ 并写明**边界**（探针没有可视化绘制、
+  动作没有时间线 UI、`mass` 与 `density` 同时写时密度优先、没有 `sleep_threshold`
+  这类更细的睡眠参数）。证据：`cli_e2e.rs:2345/2500/2577`、`scene_doc.rs:158/164/195-205/890-907`、
+  `scene_io.rs:37/386`。判据写进 `docs/production_readiness_criteria.md` 附表。
 - **模板 + 实例：一段描述摆出很多物体**（gap #14）。以前堆 1000 个箱子就要在 JSON 里
   写 1000 份重复描述——agent 生成大场景时 token 直接爆。
   * `templates`: `{ "箱子": { "shape": {...}, "body": "dynamic", "material": "木头" } }`
