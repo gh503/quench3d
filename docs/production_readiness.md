@@ -1102,7 +1102,16 @@ naga 会把**整个模块**翻一遍（不理会运行期分支）—— WGSL �
 
 守住它的东西是 **一条不需要显卡的测试**：直接调 **naga 的 GLSL 后端**
 （`wgpu::naga`，wgpu 30 在 native 上无条件重导出）把"GL 上会建的每一条管线"的每个入口点
-真翻一遍，WebGL2 GLSL ES 3.00 与桌面 3.30 两档都过：
+真翻一遍，WebGL2 GLSL ES 3.00 与桌面 3.30 两档都过。
+
+> 这条守卫**只在有 GL 后端的平台上**存在（windows / linux / android / freebsd / emscripten）：
+> `naga/glsl-out` 是跟着 wgpu 的 gles 后端一起被编进来的，`wgpu-core/Cargo.toml` 的 target 表
+> 只在那几个平台拉起它 —— **macOS 上 wgpu 走 Metal，连 GL 后端都不编**，所以那里既没有
+> 这个模块、也没有"GL 上建管线"这件事（那里由文本级守卫
+> `post_gl_variant_drops_every_depth_texture` 兜底）。
+> 这不是理论：第 57 轮推上去之后 CI 的 **macOS 腿**就是这么红的
+> （`error[E0432]: unresolved import wgpu::naga::back::glsl`），
+> 修法是按 wgpu 的 target 表把守卫收窄到有 GL 后端的平台，**不是**把它删掉或降级成 grep。
 
 ```
 cargo test -p quench3d-render --lib gl_pipelines_all_translate_through_the_glsl_backend

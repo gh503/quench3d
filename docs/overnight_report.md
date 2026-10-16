@@ -1294,11 +1294,16 @@ WGPU_BACKEND=gl cargo run -p quench3d-render --example offline_render
 
 这条路能走通是因为本机有 Mesa 的 GL（llvmpipe，`WGPU_BACKEND=gl` 能拿到适配器）。
 
-**② 不需要显卡的守卫（CI 也能跑）**：直接调 naga 的 GLSL 后端翻译
+**② 不需要显卡的守卫（CI 的 linux/windows 腿能跑；macOS 腿不行，见本节末）**：直接调 naga 的 GLSL 后端翻译
 ——`wgpu::naga`（wgpu 30 在 native 上无条件重导出），
 `gl_pipelines_all_translate_through_the_glsl_backend` 把"GL 上会建的每一条管线"的每个入口点
 在 **WebGL2 GLSL ES 3.00** 与**桌面 3.30 core** 两档上真翻一遍。
 它挡的是"这条管线在 GL 上建不出来"，而不是"这段代码看起来像有问题"。
+（**平台门槛**：`naga/glsl-out` 跟着 wgpu 的 gles 后端走，只在 windows / linux / android /
+freebsd / emscripten 上被编进来。第一版我没加这个 cfg，推上去之后 CI 的 **macOS 腿**红了 ——
+`error[E0432]: unresolved import wgpu::naga::back::glsl`。这不是"误报"，是**守卫写到了
+没有这个后端的平台上**：macOS 上 wgpu 走 Metal，`naga::back::glsl` 那个模块根本不存在。
+修法是按 wgpu 的 target 表收窄，而不是删掉它 —— 删掉等于把这类事故的本地守卫全丢了。）
 同一层里还有 `gl_backend_is_declared_unable_to_use_msaa`：MSAA 的判定被做成了**纯函数**
 （`context::effective_msaa_samples`），所以它也不需要显卡 —— GL 上任何请求值（0/1/2/4/8/64）
 都必须落在 1，而 Vulkan/Metal/DX12/WebGPU 上必须原样保留用户的设置（4 就是 4）。

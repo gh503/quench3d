@@ -150,7 +150,10 @@
     上复现**同一条消息、同一个 label**：
     `WGPU_BACKEND=gl cargo run -p quench3d-render --example offline_render`
     —— 修前 `panicked at ... label = 'quench3d-post'`（exit 101），修后同一命令 exit 0 并出图。
-  - 无显卡守卫：`renderer::tests::gl_pipelines_all_translate_through_the_glsl_backend` 用
+  - 无显卡守卫（**只在有 GL 后端的平台上**编：windows / linux / android / freebsd / emscripten
+    —— `naga/glsl-out` 跟着 wgpu 的 gles 后端走，macOS 上 wgpu 走 Metal、连 GL 后端都不编，
+    那里靠不依赖 naga 的文本级守卫 `post_gl_variant_drops_every_depth_texture` 兜底）：
+    `renderer::tests::gl_pipelines_all_translate_through_the_glsl_backend` 用
     **naga 的 GLSL 后端**把"GL 上会建的每一条管线"的**每个入口点**真翻一遍（WebGL2 GLSL ES 3.00
     与桌面 3.30 两档）；另有两条反向守卫 `full_post_wgsl_is_rejected_by_the_glsl_backend` /
     `depth_resolve_wgsl_is_rejected_by_the_glsl_backend` 钉死"原文必然被拒"（哪天 naga 支持了，

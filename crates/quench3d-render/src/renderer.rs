@@ -3152,7 +3152,25 @@ mod tests {
     ///
     /// `Err` 里带上入口点名 —— 事故现场那句 `In Device::create_render_pipeline,
     /// label = 'quench3d-post'` 的等价物。
-    #[cfg(not(target_arch = "wasm32"))]
+    // 平台门槛（四条守卫共用）：这些守卫要 `naga` 的 **GLSL 后端**（`naga/glsl-out`），
+    // 而那个特性只跟着 wgpu 的 gles 后端一起被编进来。`wgpu-core/Cargo.toml` 里那份
+    // target 表写得很清楚：`cfg(any(windows, target_os = "linux", target_os = "android",
+    // target_os = "freebsd"))` → `wgpu-core-deps-windows-linux-android`（+ emscripten 那份），
+    // 也就是**只有这些平台**有 GL 后端、才有 `naga/glsl-out`。macOS 上 wgpu 走 Metal、
+    // 连 GL 后端都不编，这几条守卫在那里既编不出来也没有对象
+    // （那里还有一条不依赖 naga 的文本级守卫兜底：`post_gl_variant_drops_every_depth_texture`）；
+    // wasm32 没有 test harness。**别因为"换个平台就编不过"而删掉它们** ——
+    // 删掉之后 GL/WebGL2 这一类事故就没有任何本地守卫了（第 57 轮的教训）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
     fn translate_all_entries_to_glsl(
         src: &str,
         version: wgpu::naga::back::glsl::Version,
@@ -3214,7 +3232,17 @@ mod tests {
     /// 之前为什么没人抓到：本地跑的是 Vulkan，naga 的**只有 GLSL 后端**有这条限制；
     /// Windows 腿也不跑 GL。所以这个"编译一遍"的守卫是唯一能在本地/CI 上挡住它的东西
     /// —— 它比 grep 硬：跑的就是建管线时的那段代码。
-    #[cfg(not(target_arch = "wasm32"))]
+    // 平台门槛同 `translate_all_entries_to_glsl`（要 `naga/glsl-out`）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
     #[test]
     fn gl_pipelines_all_translate_through_the_glsl_backend() {
         use wgpu::naga::back::glsl::Version;
@@ -3260,7 +3288,17 @@ mod tests {
     /// 这条是"上面那个变体为什么必须存在"的证据，也是"这个 bug 真的存在"的复现：
     /// 事故原文就是这句 `WGSL \`textureLoad\` from depth textures is not supported in GLSL`
     /// （naga `back/glsl/writer.rs`）。哪天 naga 支持了，这里会红 —— 那时可以删掉整个变体机制。
-    #[cfg(not(target_arch = "wasm32"))]
+    // 平台门槛同 `translate_all_entries_to_glsl`（要 `naga/glsl-out`）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
     #[test]
     fn full_post_wgsl_is_rejected_by_the_glsl_backend() {
         let err = translate_all_entries_to_glsl(
@@ -3281,7 +3319,17 @@ mod tests {
     ///
     /// 它读的是 `texture_depth_multisampled_2d`，**连"改成采样"这条退路都没有**
     /// （多采样纹理不能采样）。GL 上它的用途（SSAO）已经整体关掉，所以直接不建。
-    #[cfg(not(target_arch = "wasm32"))]
+    // 平台门槛同 `translate_all_entries_to_glsl`（要 `naga/glsl-out`）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
     #[test]
     fn depth_resolve_wgsl_is_rejected_by_the_glsl_backend() {
         assert!(
