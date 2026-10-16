@@ -6,6 +6,9 @@
 //!
 //! 用于验证完整渲染管线（PBR / 阴影 / 天空 / 网格 / MSAA / 像素回读），
 //! 也适合放进 CI 做渲染回归测试。
+//!
+//! 环境变量：`F3D_MSAA=1|2|4`（缺省 4）、`F3D_NO_SKY` / `F3D_NO_GRID` / `F3D_NO_SHADOW` /
+//! `F3D_NO_GROUND`（自检用）、`F3D_SUFFIX`（输出文件名后缀）、`WGPU_BACKEND=gl` 走 GL。
 
 use quench3d_math::{vec3, Quat, Transform, Vec3, Vec4};
 use quench3d_render::prelude::*;
@@ -23,12 +26,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_shadow = env_flag("F3D_NO_SHADOW");
     let no_ground = env_flag("F3D_NO_GROUND");
     let suffix = std::env::var("F3D_SUFFIX").unwrap_or_default();
+    // MSAA 数可以换：GL/WebGL2 后端上 `> 1` 目前画面全黑（与深度纹理那条限制无关的既有问题，
+    // 见 `docs/production_readiness.md` §12.7.6），这个开关就是复现它的入口。
+    let msaa = std::env::var("F3D_MSAA")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
 
     let mut ctx = pollster::block_on(GpuContext::headless(
         width,
         height,
         GpuOptions {
-            msaa_samples: 4,
+            msaa_samples: msaa,
             ..Default::default()
         },
     ))?;

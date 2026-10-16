@@ -3,6 +3,7 @@
 //! 使用方式是"立即模式"：每帧 `begin_frame()` → 多次 `draw()` → `render()`。
 //! 渲染器内部会做视锥剔除、按网格/材质合批、以及实例缓冲的按需扩容。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
@@ -30,9 +31,60 @@ const BLOOM_WGSL: &str = include_str!("shaders/bloom.wgsl");
 const FXAA_WGSL: &str = include_str!("shaders/fxaa.wgsl");
 const DEPTH_RESOLVE_WGSL: &str = include_str!("shaders/depth_resolve.wgsl");
 
+/// `post.wgsl` 里"依赖读深度纹理"的区段标记（见 [`post_wgsl_for`]）。
+const GL_DEPTH_BEGIN: &str = "//@gl-depth-begin";
+/// 区段结束标记。
+const GL_DEPTH_END: &str = "//@gl-depth-end";
+
 /// 把 `//@include common` 展开为公共 uniform 定义。
 fn expand(source: &str) -> String {
     source.replace("//@include common", COMMON_WGSL)
+}
+
+/// `post.wgsl` 的**变体选择**：这个后端能不能读深度纹理。
+///
+/// `//@gl-depth-begin` 与 `//@gl-depth-end` 之间的区段（深度纹理绑定、`view_pos`/
+/// `interleaved_gradient`/`ssao_factor` 三个函数、以及 `fs_main` 里的调用点）在
+/// "不能读深度纹理"的后端上会被**整段删掉**（哪些后端不行见
+/// [`crate::context::supports_depth_texture_read`]）。
+///
+/// 为什么是删源码，而不是"把 `ssao` 开关置 0 让它不执行"：GLSL 的翻译发生在**建管线**
+/// 的时候，naga 会把整个模块都翻一遍——只要 WGSL 里还留着
+/// `textureLoad(depth_texture, ..)`，`quench3d-post` 这条管线就建不出来。wasm 上 wgpu 把
+/// 管线校验错误当致命错误，结果是**编辑器启动即 panic**（用户实测：Web 编辑器在 GL/WebGL2 上启动即 panic）。
+/// 换句话说："运行时判断开关"在这里救不了场，必须在"交给驱动之前"就把代码去掉。
+///
+/// 删掉之后 SSAO 在 GL 上完全不做（不是"关掉强度"，是这一趟不存在），
+/// tonemap / bloom / FXAA 一行都不动 —— 见下面的单元测试。
+fn post_wgsl_for(ssao: bool) -> Cow<'static, str> {
+    if ssao {
+        return Cow::Borrowed(POST_WGSL);
+    }
+    let mut out = String::with_capacity(POST_WGSL.len());
+    let mut dropping = false;
+    let mut regions = 0usize;
+    for line in POST_WGSL.lines() {
+        if line.contains(GL_DEPTH_BEGIN) {
+            dropping = true;
+            regions += 1;
+            continue;
+        }
+        if line.contains(GL_DEPTH_END) {
+            dropping = false;
+            continue;
+        }
+        if !dropping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    debug_assert!(!dropping, "post.wgsl 的 {GL_DEPTH_BEGIN} 区段没有闭合");
+    debug_assert_eq!(
+        regions, 3,
+        "post.wgsl 的深度区段应当是 3 段（绑定/函数/调用点）"
+    );
+    out.shrink_to_fit();
+    Cow::Owned(out)
 }
 
 /// 场景深度格式。
@@ -527,7 +579,10 @@ pub struct Renderer {
     /// FXAA：tonemap 之后的画面 → 抗锯齿 → 目标（见 `fxaa.wgsl`）。
     fxaa_pipeline: wgpu::RenderPipeline,
     /// SSAO 需要单采样深度；`sample_count > 1` 时靠这一趟把 MSAA 深度解析出来。
-    depth_resolve_pipeline: wgpu::RenderPipeline,
+    ///
+    /// `None` = 这个后端读不了深度纹理（GL/WebGL2），这一趟根本不建 —— 它的 WGSL 里
+    /// 同样有 `textureLoad(ms_depth, ..)`，建了就会 panic（见 [`post_wgsl_for`]）。
+    depth_resolve_pipeline: Option<wgpu::RenderPipeline>,
     post_layout: wgpu::BindGroupLayout,
     bloom_layout: wgpu::BindGroupLayout,
     /// FXAA 的绑定组布局（比后处理少一张 bloom 贴图）。
@@ -648,6 +703,14 @@ pub struct Renderer {
     bloom_size: (u32, u32),
     target_size: (u32, u32),
     pub sample_count: u32,
+    /// 这个后端能不能把深度纹理当纹理读（GL/WebGL2 不能）。
+    ///
+    /// 它决定三件事：`post.wgsl` 用哪个变体、`depth_resolve` 这条管线建不建、
+    /// 以及 [`Renderer::supports_ssao`] 的返回值。**只在 `new()` 里定一次**——
+    /// 它由适配器后端决定，运行期不会变。
+    depth_texture_read: bool,
+    /// "GL 不支持 SSAO，已忽略"这条警告只打一次（每帧打会把日志刷爆）。
+    ssao_warned: bool,
 
     /// 渲染选项。
     pub options: RendererOptions,
@@ -981,11 +1044,16 @@ impl Renderer {
             });
 
         // ---------- 着色器 ----------
-        let pbr_module = ctx.create_shader("quench3d-pbr", &expand(PBR_WGSL));
-        let post_module = ctx.create_shader("quench3d-post", POST_WGSL);
+        // GL/GLES（含浏览器 WebGL2）读不了深度纹理：一切依赖它的东西在这里就必须分叉，
+        // 否则建管线时 naga 翻译失败 → wasm 上 panic（见 `post_wgsl_for`）。
+        let depth_texture_read = ctx.supports_depth_texture_read();
+        let post_module = ctx.create_shader("quench3d-post", &post_wgsl_for(depth_texture_read));
         let bloom_module = ctx.create_shader("quench3d-bloom", BLOOM_WGSL);
         let fxaa_module = ctx.create_shader("quench3d-fxaa", FXAA_WGSL);
-        let depth_resolve_module = ctx.create_shader("quench3d-depth-resolve", DEPTH_RESOLVE_WGSL);
+        // 深度解析那一趟同样有 `textureLoad(ms_depth, ..)`：不支持就不建（连模块都不建）。
+        let depth_resolve_module = depth_texture_read
+            .then(|| ctx.create_shader("quench3d-depth-resolve", DEPTH_RESOLVE_WGSL));
+        let pbr_module = ctx.create_shader("quench3d-pbr", &expand(PBR_WGSL));
         let shadow_module = ctx.create_shader("quench3d-shadow", &expand(SHADOW_WGSL));
         let sky_module = ctx.create_shader("quench3d-sky", &expand(SKY_WGSL));
         let grid_module = ctx.create_shader("quench3d-grid", &expand(GRID_WGSL));
@@ -1435,27 +1503,33 @@ impl Renderer {
         );
         // 深度解析：没有颜色附件，只有深度附件；`frag_depth` 写回同一格式的深度目标。
         // 比较函数是 `Always`（我们不是在做深度测试，只是在搬运数值）。
-        let depth_resolve_pipeline = build_pipeline(
-            device,
-            PipelineSpec {
-                label: "quench3d-depth-resolve",
-                layout: &depth_resolve_pipeline_layout,
-                module: &depth_resolve_module,
-                vs_entry: "vs_main",
-                fs_entry: Some("fs_main"),
-                buffers: vec![],
-                targets: vec![],
-                depth: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                sample_count: 1,
-                primitive: wgpu::PrimitiveState::default(),
-            },
-        );
+        //
+        // 只在"能读深度纹理"的后端上建。它读的是 `texture_depth_multisampled_2d`，
+        // 同样是 naga GLSL 后端不支持的形式 —— 在 GL 上建它就等于开机 panic，
+        // 而 GL 上 SSAO 本来就整体关掉了，这一趟没有任何用处。
+        let depth_resolve_pipeline = depth_resolve_module.as_ref().map(|module| {
+            build_pipeline(
+                device,
+                PipelineSpec {
+                    label: "quench3d-depth-resolve",
+                    layout: &depth_resolve_pipeline_layout,
+                    module,
+                    vs_entry: "vs_main",
+                    fs_entry: Some("fs_main"),
+                    buffers: vec![],
+                    targets: vec![],
+                    depth: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    sample_count: 1,
+                    primitive: wgpu::PrimitiveState::default(),
+                },
+            )
+        });
         // FXAA 输出到**真正的目标**（`ctx.format`，sRGB）：着色器给的是线性值，
         // 编码由目标格式的硬件转换完成（和 post 那一趟一样）。
         let fxaa_pipeline = build_fullscreen_pipeline(
@@ -1600,11 +1674,40 @@ impl Renderer {
             bloom_size: (0, 0),
             target_size: (0, 0),
             sample_count,
+            depth_texture_read,
+            ssao_warned: false,
             options,
             time: 0.0,
             frame_index: 0,
             stats: RenderStats::default(),
         }
+    }
+
+    /// 这个渲染器**能不能**做 SSAO。
+    ///
+    /// GL/GLES（含浏览器 WebGL2）上是 `false`：那个后端的 GLSL 翻译不支持读深度纹理，
+    /// 详见 [`crate::context::supports_depth_texture_read`]。调用方（编辑器的 UI、
+    /// e2e 测试）应当用它决定"要不要真的断言 AO 生效"，而不是直接看
+    /// [`RendererOptions::ssao`] 里的开关。
+    pub fn supports_ssao(&self) -> bool {
+        self.depth_texture_read
+    }
+
+    /// 这一帧 SSAO 是否**真的**生效：配置里开着 **且** 后端支持。
+    ///
+    /// 后端不支持时会打一条警告（只打一次：这个方法每帧都会被调用）。
+    fn ssao_active(&mut self) -> bool {
+        if self.options.ssao.enabled && !self.depth_texture_read {
+            if !self.ssao_warned {
+                self.ssao_warned = true;
+                log::warn!(
+                    "当前后端读不了深度纹理（GL/GLES 的 naga GLSL 限制），SSAO 已忽略；\
+                     画面与其它的后处理不受影响"
+                );
+            }
+            return false;
+        }
+        self.options.ssao.enabled
     }
 
     fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -1921,7 +2024,13 @@ impl Renderer {
     fn ensure_targets(&mut self, ctx: &GpuContext, size: (u32, u32)) {
         // 开了 SSAO 就得有单采样深度可用（多采样时是解析出来的那一张）。
         // 这一条必须进提前返回的判断：编辑器里勾选 SSAO 是**运行时**改 options 的。
-        let ssao_depth_ready = self.options.ssao.enabled == self.resolved_depth_view.is_some();
+        //
+        // `ssao_active()` 已经把"后端读不了深度纹理"这一条算进去了：GL 上它恒为 false，
+        // 于是 `resolved_depth_view` 不会建、后处理绑定组绑占位深度视图、
+        // `post.wgsl` 用的也是删掉 SSAO 的那个变体 —— 三者必须**同时**成立，
+        // 否则要么管线建不出来，要么着色器读了没绑的资源。
+        let ssao_on = self.ssao_active();
+        let ssao_depth_ready = ssao_on == self.resolved_depth_view.is_some();
         if self.target_size == size && self.depth_view.is_some() && ssao_depth_ready {
             return;
         }
@@ -1984,8 +2093,8 @@ impl Renderer {
         self.ldr_view = Some(ldr_view.clone());
 
         // SSAO 的深度输入：多采样时先解析成单采样；单采样时就是主 pass 那一张。
-        // 只在开了 SSAO 时建（关掉就什么都不多占用、像素也与以前逐位相同）。
-        if self.options.ssao.enabled && self.sample_count > 1 {
+        // 只在（真的能生效的）SSAO 开着时建（关掉就什么都不多占用、像素也与以前逐位相同）。
+        if ssao_on && self.sample_count > 1 {
             let resolved = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("quench3d-depth-resolved"),
                 size: wgpu::Extent3d {
@@ -2014,7 +2123,7 @@ impl Renderer {
             self.resolved_depth_view = Some(resolved_view);
         } else {
             self.depth_resolve_bind_group = None;
-            self.resolved_depth_view = if self.options.ssao.enabled {
+            self.resolved_depth_view = if ssao_on {
                 Some(depth_view.clone())
             } else {
                 None
@@ -2418,7 +2527,7 @@ impl Renderer {
         let fxaa = self.options.fxaa;
         let fxaa_on = fxaa.enabled;
         let ssao = self.options.ssao;
-        let ssao_on = ssao.enabled;
+        let ssao_on = self.ssao_active();
         // 半球采样点要投回屏幕（proj）、深度要反投影成视空间位置（inv_proj）
         let proj = camera.projection_matrix();
         let inv_proj = proj.inverse();
@@ -2796,10 +2905,13 @@ impl Renderer {
 
         // ---------- 深度解析（可选：开了 SSAO 且 MSAA > 1） ----------
         // 把多采样深度的第 0 号采样搬到单采样深度贴图，供后处理按像素读取。
+        // 三个都要有：绑定组/目标视图（跟着 `ssao_on` 建）与管线（GL 上是 `None`）。
         if ssao_on {
-            if let (Some(bind_group), Some(resolved)) =
-                (&self.depth_resolve_bind_group, &self.resolved_depth_view)
-            {
+            if let (Some(pipeline), Some(bind_group), Some(resolved)) = (
+                &self.depth_resolve_pipeline,
+                &self.depth_resolve_bind_group,
+                &self.resolved_depth_view,
+            ) {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("quench3d-depth-resolve-pass"),
                     color_attachments: &[],
@@ -2815,7 +2927,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.depth_resolve_pipeline);
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, bind_group, &[]);
                 pass.draw(0..3, 0..1);
                 stats.post_passes += 1;
@@ -3302,6 +3414,299 @@ mod tests {
         assert!(
             PBR_WGSL.contains("textureSampleCompareLevel("),
             "PCF 的 Level 比较采样不见了：要么阴影被删了，要么改成了别的写法"
+        );
+    }
+
+    /// 用 naga 的 **GLSL 后端**把一段 WGSL 的每个入口点都翻一遍。
+    ///
+    /// 这就是 GL/WebGL2 后端在建管线时真正跑的那段代码（`wgpu-hal` 的 gles 后端把 WGSL
+    /// 翻成 GLSL 再交给驱动编译），所以它**不需要显卡、不需要 GL 上下文**，却能在
+    /// Linux/Vulkan 机器上（以及 CI）抓住"这条管线在 GL 上根本建不出来"。
+    ///
+    /// `Err` 里带上入口点名 —— 事故现场那句 `In Device::create_render_pipeline,
+    /// label = 'quench3d-post'` 的等价物。
+    // 平台门槛（四条守卫共用）：这些守卫要 `naga` 的 **GLSL 后端**（`naga/glsl-out`），
+    // 而那个特性只跟着 wgpu 的 gles 后端一起被编进来。`wgpu-core/Cargo.toml` 里那份
+    // target 表写得很清楚：`cfg(any(windows, target_os = "linux", target_os = "android",
+    // target_os = "freebsd"))` → `wgpu-core-deps-windows-linux-android`（+ emscripten 那份），
+    // 也就是**只有这些平台**有 GL 后端、才有 `naga/glsl-out`。macOS 上 wgpu 走 Metal、
+    // 连 GL 后端都不编，这几条守卫在那里既编不出来也没有对象
+    // （那里还有一条不依赖 naga 的文本级守卫兜底：`post_gl_variant_drops_every_depth_texture`）；
+    // wasm32 没有 test harness。**别因为"换个平台就编不过"而删掉它们** ——
+    // 删掉之后 GL/WebGL2 这一类事故就没有任何本地守卫了（第 57 轮的教训）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
+    fn translate_all_entries_to_glsl(
+        src: &str,
+        version: wgpu::naga::back::glsl::Version,
+    ) -> Result<usize, String> {
+        use wgpu::naga::{back::glsl, front::wgsl, proc::BoundsCheckPolicies, valid, ShaderStage};
+        let module = wgsl::parse_str(src)
+            .map_err(|e| format!("WGSL 解析失败：{}", e.emit_to_string(src)))?;
+        let info =
+            valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::empty())
+                .validate(&module)
+                .map_err(|e| format!("WGSL 校验失败：{e:?}"))?;
+        let entries: Vec<(ShaderStage, String)> = module
+            .entry_points
+            .iter()
+            .map(|ep| (ep.stage, ep.name.clone()))
+            .collect();
+        // GLSL 的 `layout(binding = N)` 靠这张表：不给就会在写全局变量时报错。
+        let mut bindings = glsl::BindingMap::default();
+        let mut next = 0u8;
+        for (_, global) in module.global_variables.iter() {
+            if let Some(binding) = global.binding {
+                bindings.insert(binding, next);
+                next = next.saturating_add(1);
+            }
+        }
+        let options = glsl::Options {
+            version,
+            writer_flags: glsl::WriterFlags::empty(),
+            binding_map: bindings,
+            zero_initialize_workgroup_memory: true,
+        };
+        for (stage, name) in &entries {
+            let mut glsl = String::new();
+            let pipeline = glsl::PipelineOptions {
+                shader_stage: *stage,
+                entry_point: name.clone(),
+                multiview: None,
+            };
+            let mut writer = glsl::Writer::new(
+                &mut glsl,
+                &module,
+                &info,
+                &options,
+                &pipeline,
+                BoundsCheckPolicies::default(),
+            )
+            .map_err(|e| format!("入口点 {name}（{stage:?}）翻译失败：{e:?}"))?;
+            writer
+                .write()
+                .map_err(|e| format!("入口点 {name}（{stage:?}）翻译失败：{e:?}"))?;
+        }
+        Ok(entries.len())
+    }
+
+    /// **在 GL/WebGL2 上建的每一条管线，其 WGSL 都必须能被 GLSL 后端翻译出来。**
+    ///
+    /// 这是用户实测到的线上事故（`quench3d-post` 的 fragment 对深度纹理用 `textureLoad` →
+    /// naga 拒绝 → wasm 上 wgpu 把管线校验错误当致命 → **编辑器启动即 panic**）的直接守卫。
+    /// 之前为什么没人抓到：本地跑的是 Vulkan，naga 的**只有 GLSL 后端**有这条限制；
+    /// Windows 腿也不跑 GL。所以这个"编译一遍"的守卫是唯一能在本地/CI 上挡住它的东西
+    /// —— 它比 grep 硬：跑的就是建管线时的那段代码。
+    // 平台门槛同 `translate_all_entries_to_glsl`（要 `naga/glsl-out`）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
+    #[test]
+    fn gl_pipelines_all_translate_through_the_glsl_backend() {
+        use wgpu::naga::back::glsl::Version;
+        // 浏览器 WebGL2（GLSL ES 3.00）与桌面 GL（3.30 core）都过一遍。
+        let versions = [
+            (
+                "webgl2",
+                Version::Embedded {
+                    version: 300,
+                    is_webgl: true,
+                },
+            ),
+            ("gl330", Version::Desktop(330)),
+        ];
+        // `post` 用的是**给 GL 的那个变体**（删掉深度区段），不是 `POST_WGSL` 原文。
+        let post_gl = post_wgsl_for(false);
+        let pbr = expand(PBR_WGSL);
+        let shadow = expand(SHADOW_WGSL);
+        let sky = expand(SKY_WGSL);
+        let grid = expand(GRID_WGSL);
+        let line = expand(LINE_WGSL);
+        let sources: [(&str, &str); 8] = [
+            ("post.wgsl(gl 变体)", post_gl.as_ref()),
+            ("pbr.wgsl", pbr.as_str()),
+            ("shadow.wgsl", shadow.as_str()),
+            ("sky.wgsl", sky.as_str()),
+            ("grid.wgsl", grid.as_str()),
+            ("line.wgsl", line.as_str()),
+            ("bloom.wgsl", BLOOM_WGSL),
+            ("fxaa.wgsl", FXAA_WGSL),
+        ];
+        for (version_name, version) in versions {
+            for (name, src) in sources {
+                let entries = translate_all_entries_to_glsl(src, version)
+                    .unwrap_or_else(|e| panic!("{name} 在 {version_name} 上建不出管线：{e}"));
+                assert!(entries > 0, "{name} 里一个入口点都没有？");
+            }
+        }
+    }
+
+    /// 反向确认：**原文的 `post.wgsl`（带深度 `textureLoad`）在 GLSL 后端上必然被拒**。
+    ///
+    /// 这条是"上面那个变体为什么必须存在"的证据，也是"这个 bug 真的存在"的复现：
+    /// 事故原文就是这句 `WGSL \`textureLoad\` from depth textures is not supported in GLSL`
+    /// （naga `back/glsl/writer.rs`）。哪天 naga 支持了，这里会红 —— 那时可以删掉整个变体机制。
+    // 平台门槛同 `translate_all_entries_to_glsl`（要 `naga/glsl-out`）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
+    #[test]
+    fn full_post_wgsl_is_rejected_by_the_glsl_backend() {
+        let err = translate_all_entries_to_glsl(
+            POST_WGSL,
+            wgpu::naga::back::glsl::Version::Embedded {
+                version: 300,
+                is_webgl: true,
+            },
+        )
+        .expect_err("原文的 post.wgsl 居然能翻成 GLSL？那这个变体机制可以删了");
+        assert!(
+            err.contains("textureLoad") && err.contains("depth"),
+            "报错不是预期的那条（深度纹理 textureLoad）：{err}"
+        );
+    }
+
+    /// `depth_resolve.wgsl`（MSAA 深度 → 单采样深度）同样翻不出来 —— 所以 GL 上不建这条管线。
+    ///
+    /// 它读的是 `texture_depth_multisampled_2d`，**连"改成采样"这条退路都没有**
+    /// （多采样纹理不能采样）。GL 上它的用途（SSAO）已经整体关掉，所以直接不建。
+    // 平台门槛同 `translate_all_entries_to_glsl`（要 `naga/glsl-out`）。
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "emscripten"
+        )
+    ))]
+    #[test]
+    fn depth_resolve_wgsl_is_rejected_by_the_glsl_backend() {
+        assert!(
+            translate_all_entries_to_glsl(
+                DEPTH_RESOLVE_WGSL,
+                wgpu::naga::back::glsl::Version::Embedded {
+                    version: 300,
+                    is_webgl: true,
+                },
+            )
+            .is_err(),
+            "depth_resolve.wgsl 能翻成 GLSL 了：请重新评估 GL 上能否恢复 SSAO"
+        );
+    }
+
+    /// GL 变体里不许再出现任何深度纹理（正向 + 反向都断言）。
+    #[test]
+    fn post_gl_variant_drops_every_depth_texture() {
+        let gl = post_wgsl_for(false);
+        for bad in [
+            "texture_depth_2d",
+            "texture_depth_multisampled_2d",
+            "depth_texture",
+        ] {
+            assert!(
+                !gl.contains(bad),
+                "GL 变体里还有 `{bad}`：GLSL 后端会拒绝建管线"
+            );
+        }
+        for keep in [
+            "aces_tonemap(",
+            "hdr_texture",
+            "textureSampleLevel(bloom_texture",
+        ] {
+            assert!(
+                gl.contains(keep),
+                "GL 变体里 `{keep}` 不见了：不该动的东西被删了"
+            );
+        }
+        // 反向：原文里这些东西必须还在（否则上面的"删干净了"可能只是因为全空了）。
+        assert!(POST_WGSL.contains("texture_depth_2d"));
+        assert!(POST_WGSL.contains("ssao_factor("));
+        // 开关打开时返回的必须是原文，一个字节都不改。
+        assert_eq!(post_wgsl_for(true), POST_WGSL);
+    }
+
+    /// GL 上不改任何开关也建得出管线：`supports_depth_texture_read` 是唯一的判据。
+    #[test]
+    fn gl_backend_is_declared_unable_to_read_depth_textures() {
+        assert!(!crate::context::supports_depth_texture_read(
+            wgpu::Backend::Gl
+        ));
+        for ok in [
+            wgpu::Backend::Vulkan,
+            wgpu::Backend::Metal,
+            wgpu::Backend::Dx12,
+            wgpu::Backend::BrowserWebGpu,
+        ] {
+            assert!(
+                crate::context::supports_depth_texture_read(ok),
+                "{ok:?} 上深度纹理是按像素读的：关掉 SSAO 是功能回退，不是修复"
+            );
+        }
+    }
+
+    #[test]
+    fn gl_backend_is_declared_unable_to_use_msaa() {
+        // 依据是两处实测（不是猜）：① 真实 WebGL2（headless Chrome + SwiftShader）上
+        // `glow` 的 `tex_storage_2d_multisample` 是 `panic!`；② 原生 GL（llvmpipe）上
+        // MSAA > 1 出纯黑帧。两条路都指向"GL 上 sample_count 只能是 1"。
+        assert!(!crate::context::supports_msaa(wgpu::Backend::Gl));
+        assert_eq!(
+            crate::context::effective_msaa_samples(wgpu::Backend::Gl, 4),
+            1,
+            "缺省 msaa = 4：GL 上必须夹到 1，否则编辑器在 WebGL2 上启动即 panic"
+        );
+        for bad in [0, 1, 2, 4, 8, 64] {
+            assert_eq!(
+                crate::context::effective_msaa_samples(wgpu::Backend::Gl, bad),
+                1,
+                "GL 上任何请求值都必须落在 1"
+            );
+        }
+        for ok in [
+            wgpu::Backend::Vulkan,
+            wgpu::Backend::Metal,
+            wgpu::Backend::Dx12,
+            wgpu::Backend::BrowserWebGpu,
+        ] {
+            assert!(crate::context::supports_msaa(ok), "{ok:?} 上 MSAA 是好的");
+            assert_eq!(
+                crate::context::effective_msaa_samples(ok, 4),
+                4,
+                "{ok:?} 上不许动用户的 MSAA 设置"
+            );
+        }
+        // 其它后端仍按老规矩夹在 1..=8
+        assert_eq!(
+            crate::context::effective_msaa_samples(wgpu::Backend::Vulkan, 0),
+            1
+        );
+        assert_eq!(
+            crate::context::effective_msaa_samples(wgpu::Backend::Vulkan, 64),
+            8
         );
     }
 

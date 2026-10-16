@@ -601,6 +601,13 @@ fn ssao_images() -> Option<(ImageData, ImageData, Camera)> {
             ..Default::default()
         },
     );
+    // GL/WebGL2 上读不了深度纹理（naga GLSL 限制）→ SSAO 整体关掉，
+    // 见 `Renderer::supports_ssao`。这不是"失败被跳过"：这条断言在该后端上**没有意义**，
+    // AO 根本不参与着色（`WGPU_BACKEND=gl` 跑这个测试会走到这里，并打印原因）。
+    if !renderer.supports_ssao() {
+        eprintln!("跳过：当前后端读不了深度纹理，SSAO 已按能力关闭（GL/WebGL2）");
+        return None;
+    }
     // 无光照中灰：AO 是乘上去的，平坦面上"暗了多少"可以逐像素直接读
     let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.6, 0.6, 0.6, 1.0).unlit());
     let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
