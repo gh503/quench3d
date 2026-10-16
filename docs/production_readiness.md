@@ -1714,3 +1714,21 @@ CI 的 **windows 腿不再被"创建真实 wgpu 上下文"的测试打死**（`0
   CI 里真正的断言覆盖来自 macOS 腿（Metal）。
 * **windows 腿的这部分覆盖永久是 0**：开关关掉 = 不执行。这不是本轮引入的损失
   （本来也建不出上下文），但不要让"CI 全绿"被读成"windows 上渲染路径测过了"。
+
+### 13.5 上线实测（CI）
+
+`ab728a6`（run `38961249990`，`attempt = 1`）五腿全绿：
+
+* **macOS 腿开关 `1`：10 个二进制全部真跑**（0.19s ~ 0.88s，Metal），
+  `backend_fallback` 7p/0.19s、`post_pipeline` 8p/0.88s、`scene_roundtrip` 10p/0.29s …；
+* **ubuntu 腿开关 `1` 但 runner 没有适配器**：全部 0.00s + 46 条内层
+  "没有可用的 GPU"原因 → 这些断言在 ubuntu 上**仍然是空的**（本轮没装软件光栅）；
+* **windows 腿开关 `0`**：全部 0.00s、`7/2/2/2/8/1/8/7/5/10 passed; 0 failed`、
+  **首跑绿**、47 条可读的"未打开开关"原因；
+  `process didn't exit successfully` 与 `exit code: 0xc0000005` 各 **0** 次。
+
+`70829d2` 那一轮在 macOS 红过一次，红点是**我新写的 shell 行**
+（macOS 的 bash 3.2 把紧跟 `$VAR` 的全角 `（` 算进变量名 → `set -u` 报 unbound），
+不是任何断言；同一轮 windows/ubuntu 都是绿的。修法与完整证据见
+`docs/overnight_report.md` §54.8。**这条也说明：跨腿矩阵要留，一行只在一个平台上错的脚本
+单腿 CI 抓不到。**
