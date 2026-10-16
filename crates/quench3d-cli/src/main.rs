@@ -366,7 +366,9 @@ fn dispatch(args: &Args) -> i32 {
                                     Severity::Error => "错误",
                                     Severity::Warning => "警告",
                                 };
-                                println!("  [{tag}] {}: {}", d.path, d.message);
+                                // 诊断码也打到人读的那一行：文本输出与 JSON 的 code 一致，
+                                // grep 一行就能按码分流，不用先解析 JSON。
+                                println!("  [{tag}][{}] {}: {}", d.code, d.path, d.message);
                                 if let Some(h) = &d.hint {
                                     println!("         建议: {h}");
                                 }
@@ -378,7 +380,7 @@ fn dispatch(args: &Args) -> i32 {
                     finish(args, "validate", Ok(value), started, |_| {
                         println!("场景合法（{warnings} 条警告）");
                         for d in &diags {
-                            println!("  [警告] {}: {}", d.path, d.message);
+                            println!("  [警告][{}] {}: {}", d.code, d.path, d.message);
                         }
                     })
                 }
@@ -1687,7 +1689,7 @@ fn fail(args: &Args, command: &str, error: ErrorInfo, started: Instant) -> i32 {
             eprintln!("建议: {h}");
         }
         for d in e.diagnostics.iter().take(10) {
-            eprintln!("  - {}: {}", d.path, d.message);
+            eprintln!("  - [{}] {}: {}", d.code, d.path, d.message);
         }
     }
     envelope.exit_code()

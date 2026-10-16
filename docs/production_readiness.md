@@ -164,7 +164,7 @@
 | 许可与依赖审计 | 企业合规 | 无 `deny.toml` / SBOM / `cargo-audit` | ❌ |
 | 变更日志 | 全部 | **本轮**：`CHANGELOG.md` | ✅（本轮） |
 | 贡献指南 | 开源协作 | **本轮**：`CONTRIBUTING.md`（含门禁命令与验证配方） | ✅（本轮） |
-| 错误模型（可机读错误码） | 生产集成 | CLI 错误文本可读，**无稳定错误码** | 🟠 |
+| 错误模型（可机读错误码） | 生产集成 | **本轮**：校验诊断每条都带稳定 `code`（17 个码，文档表 + schema + 系统提示三处同步，有对账测试）；顶层 `error.kind` 仍是粗粒度（`report.rs` 不在本轮围栏内）。详见 §8.15 | 🟡 |
 | 文档完整度 | 全部 | README 1300+ 行、10 个示例；缺"色彩管理 / 单位轴向 / 确定性边界"三类**声明**（→ H1/H5/H6） | 🟡 |
 | 测试规模 | 全部 | 337 → **本轮 352**（+历史 6、+gizmo 单元 7、+往返 2），0 失败 | ✅（本轮） |
 | CI 矩阵 | 全部 | `test`（ubuntu / macOS / Windows）+ `wasm32-unknown-unknown` 四个 job，另有 Pages 工作流 | ✅ |
@@ -196,7 +196,7 @@
 | 库级 SDK | Unity/Unreal C++/C# | Rust crate 门面 `quench3d`（`Engine`/`World`/`Scene`），wasm 侧 `start()`/`on_scene_file()` | 有 | **已达标** | ✅ |
 | 自定义渲染 pass / 插件 | Unity SRP / Unreal RDG | **无**（`renderer.rs` 固定三步链，无 Pass trait / render graph） | 能插入一个自定义后处理并出图 | **2–4 人月** | ❌ |
 | 热重载（改脚本不重启） | Unity / Godot | 无 | 改脚本 1 秒内生效 | **1–2 人月** | ❌ |
-| 稳定错误码 | 生产集成 | 无（错误是中文文本，无 code） | 每个失败路径有稳定 code 且文档化 | **0.5–1 人月** | 🟠 |
+| 稳定错误码 | 生产集成 | **本轮**：**校验诊断**的 232 个出错点全部有稳定 `code`（17 个码，`docs/error_codes.md` + `quench3d schema --json` 的 `error_codes` + 系统提示三处同步，逐格对账测试）；运行期错误（`RunError`）与 `error.kind` 仍未细分 | 每个失败路径有稳定 code 且文档化 | 校验路径**已完成**；运行期错误剩余约 0.5 人月 | 🟡 |
 
 **结论**：**没有脚本层**是"给 agent 用"这条定位上的真实缺口 —— 目前 agent 只能通过 CLI/MCP 的**离散命令**驱动，不能写"每步都对接触力做判断"这种逻辑。这是下一批里性价比很高的一项（不需要图形学）。
 
@@ -239,7 +239,7 @@
 | S3 物理仿真 | **有条件替代（窄）** | 无行业基准 V&V；确定性未划跨平台边界；无接触力导出/接触 ID | 确定性刚体参数扫描 / CI 回归 / 教学 |
 | S4 游戏 | **不能替代** | 动画、音频、UI、输入映射、存档四件全无；无存档迁移 | 刚体玩法原型的物理核心 |
 | S5 Web 分发 | **不能替代** | wasm 11 MB；真机 WebGPU 未验证（只有 SwiftShader）；H1 色彩；无无障碍 | 内部演示嵌入 |
-| S6 自动化流水线 | **有条件替代（最接近）** | 可复现构建缺口（本轮已补 3 项，仍缺 SBOM/许可审计）；无迁移器；错误码只有粗粒度 | Blender 无头脚本中"纯仿真/出图/回归"那部分 |
+| S6 自动化流水线 | **有条件替代（最接近）** | 可复现构建缺口（本轮已补 3 项，仍缺 SBOM/许可审计）；无迁移器；错误码**校验路径已细化**（第 55 轮，`diagnostics[].code`），运行期错误仍粗 | Blender 无头脚本中"纯仿真/出图/回归"那部分 |
 
 **一句话**：S6/S3 的窄子集已经可以进生产；S1/S2/S4/S5 在**任何**标的上都不构成替代，而这与"功能多不多"关系不大——是 §4 那四类硬指标在挡路。
 
@@ -266,7 +266,7 @@
 | 替代 Blender 做**建模** | 编辑模式（点/边/面选择与拓扑编辑）、UV 展开（LSCM/ABF 级 + UDIM）、布尔（1000 病态用例 0 崩溃、结果水密）、修改器栈（≥20 个、非破坏、可确定性重算）、雕刻（1000 万面 ≥15 fps） | **差整整一个产品**（全无）。不做这个承诺 |
 | 替代 Unity/Unreal 做**游戏** | 动画系统、音频、UI、输入映射、存档与迁移、脚本热重载、构建导出 | 四件核心全无。**不构成替代** |
 | 替代 three.js editor 做**Web 演示** | Web 端材质/后处理/资源管线生态、真机矩阵、包体 ≤ 几 MB | 生态与体积都不在一个量级。只适合内部演示嵌入 |
-| 替代 Blender 无头**批量出图/仿真** | CLI 稳定、可复现构建、像素 golden、分辨率/编码可控、错误可机读 | **最接近**：CLI 与确定性强，缺像素 golden 与错误码（本轮补了构建可复现） |
+| 替代 Blender 无头**批量出图/仿真** | CLI 稳定、可复现构建、像素 golden、分辨率/编码可控、错误可机读 | **最接近**：CLI 与确定性强，**校验诊断已可机读分流**（第 55 轮 `code`），仍缺像素 golden（本轮补了构建可复现） |
 | 替代**物理仿真工具** | 行业基准 V&V（如标准落球/堆叠/摩擦锥用例比对）、接触力/接触 ID 导出、确定性边界声明、单位约定 | 只有自洽回归。**不能作为验收依据**，只能作为"没退化"的门禁 |
 
 ---
@@ -349,7 +349,8 @@
 
 - 多选/框选、灯光编辑面板、材质贴图槽界面、glTF 导入进文档层；
   （场景层级与父子变换已在第 16 轮补上，见 §8.2）；
-- 像素 golden 进 CI、场景格式迁移器、错误码、许可审计与 SBOM；
+- 像素 golden 进 CI、场景格式迁移器、许可审计与 SBOM；
+  （~~错误码~~ **已在第 55 轮补上**：校验诊断的稳定 `code`，见 §8.15；运行期错误的码仍未做）
 - 色彩管理（H1）、单位/轴向（H6）、确定性边界（H5）的正式声明 —— 三者是**纯文档缺口**，列入第二晚。
 
 ## 6. 三晚路线（按 ROI 排序）
@@ -361,7 +362,9 @@
 2. 往返测试断言"贴图引用不丢" + 场景格式补贴图字段 + 导不出时报错；
 3. 场景格式迁移器 + "v1 文件读进 v2"测试；
 4. 色彩管理（H1）与确定性边界（H5）、单位约定（H6）写成正式声明文档；
-5. 错误码：CLI 错误加稳定 `code` 字段。
+5. ~~错误码：CLI 错误加稳定 `code` 字段。~~ ✅ **2026-10-19 第 55 轮**：**校验诊断**的
+   `diagnostics[].code` 已落地（17 个码 + 文档表 + schema + 系统提示 + 对账/稳定性测试 + 变异验证，
+   见 §8.15）。**仍缺**：顶层 `error.kind` 与运行期 `RunError` 的细分（要动 `report.rs`）。
 
 **第三晚（P2，编辑器体验闭环）**：
 1. 多选 + 框选 + Shift 加选，gizmo 支持成组变换（以选中中心为轴心）；
@@ -456,6 +459,57 @@
 
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
+
+### 8.15 「校验诊断的稳定错误码」怎么落的（第 55 轮，已跑门禁）
+
+> **状态：已实施**（`diagnostics[].code`）。验证：
+> `cargo test -p quench3d-cli --lib -- error_code`、
+> `cargo test -p quench3d-cli --lib -- diagnostic_codes_are_stable`、
+> `cargo test -p quench3d-cli --lib -- serde_errors_classify`、
+> `cargo test -p quench3d-cli --lib -- schema_error_codes`、
+> `cargo test -p quench3d-cli --test cli_e2e -- diagnostics_carry_stable`。
+
+这一轮补的是 §1.12 与 S6-Q2 上那条"错误码只有 4 类"的欠账：agent 以前只能按中文
+`message` 分支，文案一改分支就烂。现在**每条校验诊断都带一个稳定的 `code`**。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 数据 | `Diagnostic.code: ErrorCode`（`scene_doc.rs`） | `code` 说**性质**、`path` 说**位置**、`message` 只给人读。码表故意窄（17 个），不是"一条诊断一个码"——后者既不稳定也没法穷举。老 JSON 没有 `code` 时反序列化成兜底码 `invalid`（`#[serde(default)]` 向后兼容） |
+| 生成 | `define_error_codes!` 宏 | **一处声明**同时生成枚举、`ALL`、`TABLE` 与 `as_str`/`meaning`/`agent_action`。这样"加了变体忘了加总表"在结构上不可能（`as_str` 的 `match` 穷尽）；线上名字来自同一个字面量，不手写第二份 |
+| 分类 | `classify_serde_code` 挂在 `check_at` 这个**唯一出口** | 未知字段/类型不对/枚举拼错/缺字段全部从这里出去，所以字段级诊断不可能漏码。散在几十个 `check_*` 里各写一遍必漏 |
+| 调用点 | 232 个 `Diagnostic::error/warn` 全部改成 `error_code`/`warn_code` | 两参数的老构造器**保留**（围栏外的 `generate.rs` 测试夹具还在用），它给兜底码 `invalid` |
+| 文档 | `docs/error_codes.md` | 码表由 `quench3d schema --json` **生成**（文件里有 BEGIN/END 标记），不是手抄；文档开头给了一条能重算整表的命令 |
+| schema | `schema()["error_codes"]` + 系统提示 | agent 的自描述入口能查到"码 → 含义 → 该做什么"；系统提示里也写了"按 code 分支、别按文案" |
+
+**测试（无显卡，全部本机跑过）**：
+
+| 测试 | 盯什么 |
+|---|---|
+| `error_code_table_is_self_consistent` | 码名唯一、snake_case、无 `|`（会破坏文档表格）、serde 名字与表一致、缺省是兜底码 |
+| `error_codes_doc_matches_the_table` | `docs/error_codes.md` 的码/含义/动作与 `ErrorCode::TABLE` **逐格**对账 |
+| `diagnostic_codes_are_stable_and_specific` | **稳定契约**：15 种典型问题各给哪个码、落在哪个 `path`，并断言这段场景不出现兜底码 |
+| `serde_errors_classify_into_stable_codes` | 结构检查唯一出口的分类规则 |
+| `diagnostics_without_a_code_deserialize_to_invalid` | 老 JSON 的向后兼容 |
+| `schema_error_codes_match_the_table` / `system_prompt_mentions_diagnostic_codes` | schema 与系统提示没漏码 |
+| `diagnostics_carry_stable_machine_readable_codes`（e2e） | 真跑二进制：每条诊断都有 `code`、具体问题给具体码、码表能从 `schema --json` 查到、**文本输出里也带码** |
+
+**变异验证（故意改坏 → 测试必须红 → 改回来 → 绿）**：
+
+| 变异 | 变红的测试 |
+|---|---|
+| 把 `asset_not_found` 改名成 `asset_missing` | `error_codes_doc_matches_the_table`、`diagnostic_codes_are_stable_and_specific`、e2e `diagnostics_carry_stable_machine_readable_codes`（3 条独立守卫） |
+| 把 `models[0].path` 的码误改成 `OutOfRange` | `diagnostic_codes_are_stable_and_specific`（文档对账**正确**地保持绿：表没变） |
+| 手改 `docs/error_codes.md` 的一格文案 | `error_codes_doc_matches_the_table` |
+| 停掉 `classify_serde_code` 的 unknown-field 分支 | `serde_errors_classify_into_stable_codes` |
+
+**没做（诚实边界）**：
+
+- **顶层 `error.kind` 仍然是粗粒度**（`scene`/`invalid`/`environment`/`network`/`io`/`runtime`）。
+  细分只发生在 `diagnostics[].code` 上。`ErrorInfo` 定义在 `crates/quench3d-cli/src/report.rs`，
+  本轮围栏不含该文件，所以没动它 —— 也因此 `RunError`（渲染/仿真阶段失败）仍然没有码。
+- 兜底码 `invalid` 仍可能出现：围栏外的 `generate.rs` 两处测试夹具用两参数构造器，
+  以及以后新加的检查忘了给码。它不是"正常码"，出现即代表该补。
+- 没有做 `--json-schema` 里的 per-code 断言（码表只进 `schema`，不进 JSON Schema）。
 
 ### 8.14 「接触特征 ID + 持久热启动」怎么落的（第 28 轮，🟡 部分）
 

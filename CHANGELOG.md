@@ -10,6 +10,38 @@
 
 ### 新增
 
+- **校验诊断的稳定机器可读错误码（`diagnostics[].code`）**。以前
+  `quench3d validate` 只给 `severity` + `path` + 中文 `message`，agent 想区分
+  「模型路径不存在」和「字段非法」只能正则匹配中文文案 —— 文案一改，分支就烂。
+  现在每条校验诊断都带一个**稳定**的 `code`（17 个：`unknown_field`、`missing_field`、
+  `invalid_type`、`invalid_value`、`out_of_range`、`unknown_reference`、`duplicate_name`、
+  `reserved_name`、`cycle`、`asset_not_found`、`io_error`、`limit_exceeded`、
+  `mutually_exclusive`、`ineffective`、`suspicious_value`、`unit_ambiguity`、`invalid`）。
+  - **`code` 说性质、`path` 说位置、`message` 只给人读**：码表故意做得窄（一条诊断一个码
+    既不稳定也没法穷举）。码是契约：**发布后不改名、不改含义，只新增**（新增算契约变更）。
+  - 覆盖：`scene_doc.rs` 的 **232 个**校验出错点全部显式给码；字段级问题（未知字段/类型不对/
+    枚举拼错/缺字段）在**唯一出口** `check_at` 里由 `classify_serde_code` 分类，结构检查不可能漏码。
+    两参数的老构造器保留，它给兜底码 `invalid`（兼容围栏外的调用点与老 JSON）。
+  - **向后兼容**：老 JSON 里没有 `code` 的诊断仍能反序列化（`#[serde(default)]`，落到 `invalid`）；
+    序列化时 `code` 一定在。
+  - 人读输出同步：`validate` 的文本输出与错误信封都打成 `[错误][invalid_value] path: message`，
+    `grep` 一行就能按码分流，不必先解析 JSON。
+  - agent 自描述：`quench3d schema --json` 新增顶层 `error_codes` 段（由 `ErrorCode::TABLE`
+    生成，不手写第二份），系统提示也写明"按 code 分支、别按文案"。
+  - 文档：新增 [docs/error_codes.md](docs/error_codes.md)（码表 + 契约 + 怎么加新码 + 一条
+    重算整表的命令）；README §6.4 补了分支表。
+  - 测试（全部无显卡）：`error_code_table_is_self_consistent`、
+    `error_codes_doc_matches_the_table`（与文档逐格对账）、
+    `diagnostic_codes_are_stable_and_specific`（15 种典型问题各给哪个码、落在哪个 path）、
+    `serde_errors_classify_into_stable_codes`、`diagnostics_without_a_code_deserialize_to_invalid`、
+    `schema_error_codes_match_the_table`、`system_prompt_mentions_diagnostic_codes`，
+    以及 e2e `diagnostics_carry_stable_machine_readable_codes`（真跑二进制，含"每条诊断都有码"
+    与"文本输出也带码"）。
+  - **变异验证**（故意改坏 → 测试必须红 → 改回来 → 绿）：改名 `asset_not_found` → 3 条独立
+    守卫变红；误改 `models[0].path` 的码 → 稳定性测试变红（文档对账正确地保持绿）；
+    手改文档一格 → 对账测试变红；停掉 unknown-field 分类分支 → 分类测试变红。
+  - **没做**：顶层 `error.kind`（`scene`/`invalid`/…）与运行期 `RunError` 仍是粗粒度 ——
+    `ErrorInfo` 定义在 `crates/quench3d-cli/src/report.rs`，不在该轮允许改动的文件围栏内。
 - **聚光灯阴影（spot shadow）：一盏聚光灯可以投影**。以前只有太阳（平行光）会投影，
   聚光灯打出来的光是"穿透一切"的 —— 聚光灯是场景里最像"手电筒 / 舞台灯"的东西，
   没有影子时箱子底下、墙根都是亮的，一眼假。

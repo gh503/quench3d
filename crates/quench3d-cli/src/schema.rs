@@ -1,11 +1,12 @@
 //! 能力清单（`quench3d schema`）与大模型系统提示。
 //!
 //! agent 接入时先读 `quench3d schema --json`，就能知道：有哪些命令、每个参数的类型与
-//! 缺省值、场景文件的完整语法、退出码含义、以及可以直接照抄的示例。
+//! 缺省值、场景文件的完整语法、退出码与**诊断码**的含义、以及可以直接照抄的示例。
 //!
 //! [`system_prompt`] 是同一份能力给大模型看的浓缩版：把场景语法、单位、可用图元、
 //! 关节类型和输出要求讲清楚，让模型直接产出可用的场景 JSON。
 
+use crate::scene_doc::ErrorCode;
 use serde_json::{json, Value};
 
 /// CLI 版本。
@@ -43,6 +44,21 @@ pub const EXAMPLE_SCENE: &str = r#"{
 }
 "#;
 
+/// 诊断码清单（`quench3d schema --json` 的 `error_codes`）。
+///
+/// **不手写第二份表**：直接从 [`ErrorCode::TABLE`] 生成，所以码表改了这里自动跟上，
+/// 不可能出现"文档说支持、schema 里没有"或反过来的情况。
+pub fn error_codes() -> Value {
+    Value::Array(
+        ErrorCode::TABLE
+            .iter()
+            .map(|(_, wire, meaning, action)| {
+                json!({ "code": wire, "meaning": meaning, "agent_action": action })
+            })
+            .collect(),
+    )
+}
+
 /// 完整能力清单。
 pub fn schema() -> Value {
     json!({
@@ -62,11 +78,15 @@ pub fn schema() -> Value {
             "3": "环境问题（无可用 GPU / 后端缺失）——换机器或装驱动",
             "4": "网络或大模型服务问题——检查服务地址、模型名、API Key"
         },
+        // 诊断码：agent 按 `code` 分支，而不是按中文文案分支。`code` 说**是什么性质**，
+        // `path` 说**在哪里**；两个合起来才是完整定位。这张表由 `error_codes()` 从
+        // scene_doc.rs 的 ErrorCode::TABLE 生成，并有测试与 docs/error_codes.md 对账。
+        "error_codes": error_codes(),
         "envelope": {
             "success": { "ok": true, "command": "render", "version": VERSION, "elapsed_ms": 812, "data": {} },
             "failure": { "ok": false, "command": "render", "version": VERSION, "elapsed_ms": 3,
                           "error": { "kind": "scene", "message": "…", "path": "objects[0].shape", "hint": "…",
-                                     "diagnostics": [ { "severity": "error", "path": "objects[0].shape", "message": "…" } ] } }
+                                     "diagnostics": [ { "severity": "error", "code": "invalid_value", "path": "objects[0].shape.type", "message": "…" } ] } }
         },
         // 全局旗标：`commands[].args` 描述的是"某个命令的参数"，而 `--json`、`--camera`、
         // `--asset-path` 这类对所有命令都生效的旗标以前在 schema 里**完全不存在**，
@@ -932,6 +952,15 @@ animations: [{ target, loop?, start?, speed?, weight?, position?: {times,values}
    `quench3d query scene.json --overlap "box:2,1,2@0,1,0"`（任意形状重叠）。
    层过滤是**单向**的（--mask 只看被查方在不在掩码里），触发区用 --no-sensors 排除。
 
+修复回路（你写错了会拿到这些）：
+- 校验失败时每条诊断都有稳定的机器可读 `code`：按 `path` 定位、按 `code` 决定动作。
+  完整表见 `quench3d schema --json` 的 `error_codes` 或 `docs/error_codes.md`。
+- `unknown_field` / `missing_field` / `invalid_type`：结构问题（字段名、缺字段、JSON 类型）；
+  `invalid_value` / `out_of_range`：取值问题（枚举拼错、数字越界或非有限）；
+  `unknown_reference`：引用了不存在的物体/材质/模板/相机名；
+  `mutually_exclusive`：两个字段只能留一个；`duplicate_name`：同命名空间重名。
+- **不要靠缺省绕过**：引擎对未知取值不兜底；`ineffective` 表示这条写了也不会生效（等于没写）。
+
 只输出 JSON，第一个字符必须是 `{`。"#
     .to_string()
 }
@@ -1008,6 +1037,59 @@ mod tests {
         let joints = g["joint"]["type"].as_array().unwrap();
         for k in ["fixed", "ball", "hinge", "distance", "slider"] {
             assert!(joints.iter().any(|v| v == k), "语法缺少关节 {k}");
+        }
+    }
+
+    /// `schema` 里的诊断码表必须与 `ErrorCode::TABLE` 逐格一致，且真的挂在 schema 上。
+    ///
+    /// 这张表是 agent 唯一的"码 → 该做什么"查询入口，漏一个码就等于让 agent 对那个
+    /// 分支退化成读中文文案。
+    #[test]
+    fn schema_error_codes_match_the_table() {
+        use crate::scene_doc::ErrorCode;
+        let arr = error_codes();
+        let arr = arr.as_array().expect("error_codes 必须是数组");
+        assert_eq!(
+            arr.len(),
+            ErrorCode::TABLE.len(),
+            "schema 的码数量与 ErrorCode::TABLE 不一致"
+        );
+        for (v, (code, wire, meaning, action)) in arr.iter().zip(ErrorCode::TABLE) {
+            assert_eq!(v["code"], *wire, "{wire}: code 不一致");
+            assert_eq!(v["meaning"], *meaning, "{wire}: 含义不一致");
+            assert_eq!(v["agent_action"], *action, "{wire}: agent 动作不一致");
+            assert_eq!(code.as_str(), *wire);
+        }
+        // 必须真的挂在顶层 schema 上（只连 `error_codes()` 忘了接进 `schema()` 就白做）
+        let s = schema();
+        assert_eq!(
+            s["error_codes"].as_array().map(Vec::len),
+            Some(ErrorCode::TABLE.len()),
+            "schema() 里没有挂上 error_codes"
+        );
+        assert!(
+            s["envelope"]["failure"]["error"]["diagnostics"][0]["code"].is_string(),
+            "信封示例里应当带 code"
+        );
+    }
+
+    /// 系统提示要把"按 code 分支"讲给大模型，否则修复回路仍然只会重读中文。
+    #[test]
+    fn system_prompt_mentions_diagnostic_codes() {
+        let p = system_prompt();
+        assert!(p.contains("error_codes"), "系统提示要指向 error_codes 表");
+        for code in [
+            "unknown_field",
+            "missing_field",
+            "invalid_type",
+            "invalid_value",
+            "out_of_range",
+            "unknown_reference",
+            "mutually_exclusive",
+            "duplicate_name",
+            "ineffective",
+        ] {
+            assert!(p.contains(code), "系统提示缺少诊断码 {code}");
         }
     }
 

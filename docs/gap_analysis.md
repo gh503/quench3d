@@ -198,7 +198,10 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 单测 `paused_freezes_simulation_time_but_not_frame_stats`；`render_sequence` 同规则。
 
 **agent 向缺口**（这是本项目的卖点，所以单列）：错误**分类**已有（`error.kind` = invalid/env/io/scene + 退出码 2/3/4），
-但仍无**细粒度错误码**（agent 分不出"模型路径不存在"与"字段非法"，只能读自由文本 message）；
+~~细粒度错误码~~ ✅ **2026-10-19 第 55 轮**：**校验诊断**每条都带稳定 `code`（17 个码；`docs/error_codes.md`
++ `quench3d schema --json` 的 `error_codes` + 系统提示三处同步，逐格对账/稳定性/e2e 守卫测试，变异验证过）。
+现在 agent 能按 `diagnostics[].code` 而不是中文文案分支（`asset_not_found` vs `invalid_type` 一眼可分）。
+**仍无**：顶层 `error.kind` 与运行期 `RunError` 的细分（`ErrorInfo` 在 `report.rs`）；
 ~~**不幂等**（默认输出名固定 `output.png`、`--out` 直接覆盖 → 多 agent 并行必然互踩）~~
 ✅ **已加保护**（2026-10-15）：`--no-clobber`（输出/帧目录已存在就退出码 2、`error.kind = output_exists`、
 带 `path` 与 `hint`，一个字节都不动）与 `--dry-run`（只校验 + 跑物理 + 采探针，**不建 GPU、不写盘**，
@@ -330,7 +333,8 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
   resources/prompts 仍然永远为空；
 * ~~⚠️ **API key 仍经 curl 命令行参数传递**~~ ✅ **已修**：走 0600 配置文件 + `curl -K`，
   密钥不进 argv；"假 curl"测试抄 argv 断言搜不到密钥（反证过：塞回 argv 测试就红）；
-  仍无细粒度错误码（agent 分不出"模型路径不存在"与"字段非法"，只能读 message）与 LLM 流式/重试/token 预算。
+  ~~仍无细粒度错误码~~ ✅ 2026-10-19 第 55 轮：校验诊断的 `diagnostics[].code` 已落地（见上）；
+  仍无 LLM 流式/重试/token 预算。
 
 #### 跨过"玩具 → 能用"的 5 件事（按性价比排序）
 
@@ -449,7 +453,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 9 | ✅ | **行为 / 时间轴** | `SimulateDoc` 只有 `steps`/`dt`（:464-470）；而 CLI 有 `--trace` / `--bodies` / `--layout` / `--no-sleep` 等参数（runner.rs 里 trace 12 处命中，scene_doc.rs 里 0 处） | 「第 60 步给球一个冲量」「记录这个物体的轨迹」在场景文件里表达不了 → **agent 从 `schema` 看到的能力 < CLI 实际能力** |
 | 10 | ✅ | **正交相机 / 多相机 / 裁剪面** | `CameraDoc` 只有 `fov_deg`（:416） | 平面图、CAD 视图、分屏、像素风做不了 |
 | 11 | ✅ 2026-10-19（第 44~45 轮） | ~~`models[].path` 是裸路径~~ **已修 + 已加资源库**：`assets.search_paths`（场景级搜索路径，相对路径以场景目录为基准）；贴图与模型**共用同一套候选**（场景目录 → `assets.search_paths` → 当前工作目录 → 引擎搜索路径），validate 与渲染也一致；找不到时错误里列出找过的位置。**修掉的 bug**：模型以前不走场景目录，`models[].path: "chair.glb"` 在工作目录≠场景目录时直接失败（贴图却正常），validate 用的还是第三套规则。**运行时可加**：`--asset-path a:b`（只影响这一次运行，不改场景文件）；**仍缺**：跨文件 include/prefab（见 #13）、资源索引与去重报告 | 素材复用要靠相对路径约定 |
-| 12 | **机器可读 schema** | `quench3d schema` 输出的是手写示例 + 文字（schema.rs:16-42） | agent 拿不到 JSON Schema 做程序化校验/补全，只能事后 `validate` |
+| 12 | ✅ **机器可读 schema** | `quench3d schema` 输出的是手写示例 + 文字（schema.rs:16-42） | ~~agent 拿不到 JSON Schema~~ **已修**（第 27 轮）：`schema --json-schema`（draft 2020-12，见 P1 #19 与 readiness §8.13）。**第 55 轮补上配套的那半**：schema 表达不了的范围/互斥/交叉引用仍以 `validate` 为准，而 `validate` 的每条诊断现在都有稳定 `code`（见 §1 的 agent 向缺口），所以"schema 校验过了但跑不了"这件事至少能被程序分支处理 |
 | 13 | **多文件组合（include / prefab / variant）** | 无（全仓无命中） | 大场景不能拆分复用 |
 | 14 | **单位与轴向写进文件** | 约定在 README:430 与 schema 文字里，文件本身没有 | 与外部工具交换时需要口头约定 |
 | 15 | **关节锚点与参考姿态** | 引擎 `Joint` 有 `local_anchor_a/b`、`local_frame_a/b`、`local_axis_a/b`（joints.rs:34-118）；`runner.rs:452-474` 把锚点硬编码为 `Vec3::ZERO`、`local_axis_a/b` 赋**同一个向量** | 文档说 `axis` 是"世界轴"，但只有两刚体都没旋转时才成立；门上装合页（锚点在门边缘）、摆锤挂杆子末端——做不到 |
@@ -674,3 +678,4 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 ## 6. 相关文档
 
 - **仿真视频方案**（可行性、实测速度、三条路线、行业对标、落地顺序）→ [`docs/simulation_video.md`](simulation_video.md)
+- **诊断码表**（稳定契约、17 个码的含义与 agent 动作、怎么加新码）→ [`docs/error_codes.md`](error_codes.md)

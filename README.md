@@ -913,20 +913,39 @@ NaN 刚体  : 0
 ```json
 {"ok":false,"command":"validate","version":"0.1.0","elapsed_ms":0,
  "error":{"kind":"invalid","message":"场景不合法：2 个错误、0 条警告","diagnostics":[
-   {"severity":"error","path":"objects[0].shape.type","message":"unknown variant `pyramid`, expected one of `box`, `sphere`, …"},
-   {"severity":"error","path":"objects[0].body","message":"unknown variant `flying`, expected one of `none`, `static`, …"}]}}
+   {"severity":"error","code":"invalid_value","path":"objects[0].shape.type","message":"unknown variant `pyramid`, expected one of `box`, `sphere`, …"},
+   {"severity":"error","code":"invalid_value","path":"objects[0].body","message":"unknown variant `flying`, expected one of `none`, `static`, …"}]}}
 ```
 
 | 退出码 | 含义 | agent 应当怎么做 |
 | --- | --- | --- |
 | 0 | 成功 | 读 `data` |
-| 2 | 输入不合法（场景/参数） | 按 `error.diagnostics[].path` 改输入后重试 |
+| 2 | 输入不合法（场景/参数） | 按 `error.diagnostics[].code` 决定动作、按 `[].path` 定位，改输入后重试 |
 | 3 | 环境不可用（无 GPU / 后端缺失） | 改用 `simulate`，或换机器 |
 | 4 | 网络或大模型服务问题 | 检查服务是否启动、地址与模型名 |
 | 1 | 其它运行期错误 | 记录并上报 |
 
 诊断是**一次全给**：上面那份输出里同一个物体的两个字段错误同时返回，
 每条都有精确到字段的路径——这让 agent 可以一轮改完，而不是反复试错。
+
+每条诊断还带一个**稳定的机器可读 `code`**（`diagnostics[].code`）：`code` 说**是什么性质**
+（该做什么），`path` 说**在哪里**（改哪里），`message` 只给人读。所以 agent 按 `code` 分支，
+不用正则匹配中文文案——文案改了分支不会烂。典型分支：
+
+| `code` | 意思 | 该怎么办 |
+| --- | --- | --- |
+| `unknown_field` / `missing_field` / `invalid_type` | 字段名、缺字段、JSON 类型 | 按 hint 里的合法字段表改 |
+| `invalid_value` / `out_of_range` | 枚举拼错 / 数字越界或非有限 | 换成允许的取值 |
+| `unknown_reference` | 引用了不存在的物体/材质/模板/相机 | 改名或补定义（hint 带可用名单） |
+| `asset_not_found` | 贴图/模型文件找不到 | 放到消息列出的候选位置，或加 `assets.search_paths` |
+| `duplicate_name` / `reserved_name` / `cycle` | 重名 / 保留名 / 父子成环 | 改名 / 换名 / 打断环 |
+| `mutually_exclusive` | 两个字段只能留一个 | 删一个 |
+| `ineffective` / `suspicious_value` | 写了不生效 / 合法但很可能不是本意 | 删掉或复核数值 |
+| `unit_ambiguity` | 单位容易混（弧度 vs 度、米 vs 度） | 确认单位 |
+
+**完整码表**（17 个，含每个码的"agent 该做什么"）见 [docs/error_codes.md](docs/error_codes.md)，
+也可以让 agent 直接读 `quench3d schema --json` 的 `error_codes` 段（同一份表，由测试对账）。
+码是**契约**：发布后不改名、不改含义，只会新增。
 
 ### 6.5 接大模型：自然语言 → 场景
 

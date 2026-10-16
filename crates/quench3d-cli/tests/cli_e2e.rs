@@ -852,7 +852,104 @@ fn absurd_scene_sizes_are_rejected_with_clear_diagnostics() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 物理材质接线（gaps #22）：静摩擦与摩擦合成规则**真的改变仿真结果**。
+/// 诊断码（第 55 轮）：agent 按 `code` 分支，不再按中文文案分支。
+///
+/// 这个用例钉三件事：① 每条诊断都带稳定 `code`；② 具体问题给具体码（不是一律兜底）；
+/// ③ 码表能从 `schema --json` 查到、并且文本输出里也带码。全程不需要显卡。
+#[test]
+fn diagnostics_carry_stable_machine_readable_codes() {
+    let dir = temp_dir("diag_codes");
+    let scene = write_scene(
+        &dir,
+        "bad.json",
+        serde_json::json!({
+            "objects": [
+                { "name": "a", "body": "dynamic", "shape": { "type": "box", "size": [1, 1, 1] } },
+                // 没有刚体却写了 velocity：会被忽略（ineffective）
+                { "name": "b", "body": "none", "velocity": [1, 0, 0],
+                  "shape": { "type": "sphere", "radius": 0.5 } }
+            ],
+            // 引用了不存在的物体 b（unknown_reference）
+            "joints": [ { "type": "fixed", "a": "a", "b": "nope" } ],
+            // 找不到模型文件（asset_not_found）
+            "models": [ { "path": "definitely_missing_xyz_55b.glb" } ],
+            // 视场角越界（out_of_range）
+            "camera": { "fov_deg": 400 }
+        }),
+    );
+    let r = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "坏场景要退出码 2：{}", r.stdout);
+    let v = r.json();
+    let diags = v["data"]["diagnostics"].as_array().expect("要有诊断");
+    assert!(!diags.is_empty(), "{v}");
+
+    // ① 每条诊断都必须有非空 code
+    for d in diags {
+        let code = d["code"]
+            .as_str()
+            .unwrap_or_else(|| panic!("诊断缺少 code：{d}"));
+        assert!(!code.is_empty(), "code 不能为空：{d}");
+    }
+    // ② 具体问题给具体码（兜底码 invalid 只该在没归类时出现）
+    let pairs: Vec<(&str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["code"].as_str().unwrap(),
+                d["path"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    for expected in [
+        ("unknown_reference", "joints[0].b"),
+        ("asset_not_found", "models[0].path"),
+        ("out_of_range", "camera.fov_deg"),
+        ("ineffective", "objects[1].velocity"),
+    ] {
+        assert!(
+            pairs.contains(&expected),
+            "缺少 {expected:?}，实际：{pairs:?}"
+        );
+    }
+    assert!(
+        !pairs.iter().any(|(c, _)| *c == "invalid"),
+        "这段场景不该出现兜底码：{pairs:?}"
+    );
+
+    // ③ 码表可从 schema 查到（agent 的自描述入口）
+    let s = run(&["schema", "--json"]).json();
+    let codes: Vec<String> = s["data"]["error_codes"]
+        .as_array()
+        .expect("schema 要有 error_codes")
+        .iter()
+        .map(|e| e["code"].as_str().unwrap().to_string())
+        .collect();
+    for c in [
+        "unknown_reference",
+        "asset_not_found",
+        "out_of_range",
+        "ineffective",
+    ] {
+        assert!(codes.contains(&c.to_string()), "码表里缺 {c}：{codes:?}");
+    }
+    assert_eq!(
+        codes.len(),
+        quench3d_cli::scene_doc::ErrorCode::TABLE.len(),
+        "schema 里的码数量必须等于源码总表（不能只写一半）"
+    );
+
+    // ④ 人读的文本输出也带码（grep 一行就能分流，不用先解析 JSON）
+    let text = run(&["validate", scene.to_str().unwrap()]);
+    assert_eq!(text.code, 2);
+    assert!(
+        text.stdout.contains("asset_not_found") && text.stdout.contains("unknown_reference"),
+        "文本输出里也要有码：{}",
+        text.stdout
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 ///
 /// 只断言"字段解析成功了"是不够的：这两个参数的全部价值就是让箱子
 /// "按住 / 滑走""滑得远 / 滑得近"，所以这里用 `simulate` 报告里的 `displacement`

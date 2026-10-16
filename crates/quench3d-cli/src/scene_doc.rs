@@ -68,11 +68,163 @@ pub enum Severity {
     Warning,
 }
 
+/// 定义稳定的诊断码：**一处声明同时生成枚举、`ALL` 总表与线上名字**。
+///
+/// 为什么用宏：诊断码是给 agent 分支用的契约，最怕"枚举加了一个变体、总表忘了加"，
+/// 那样 `quench3d schema` 与 `docs/error_codes.md` 会静默漏掉一个码。宏让三件事
+/// 从同一行声明里生成，结构上不可能漂移（枚举本身是穷尽的，`as_str` 的 `match`
+/// 少一个变体就编译不过）。
+macro_rules! define_error_codes {
+    ($(
+        $(#[$meta:meta])*
+        $variant:ident => $wire:literal, $meaning:literal, $action:literal;
+    )*) => {
+        /// 校验诊断的**稳定机器可读错误码**。
+        ///
+        /// 契约：`code` 描述**问题的性质**，`path` 描述**问题在哪**。两者合起来才是
+        /// 完整的定位 —— 所以码表故意做得窄（十几个）而不是"一条诊断一个码"：
+        /// 后者既没法稳定，agent 也没法穷举。
+        ///
+        /// **码一旦发布就不再改含义、不再改名**（改名等于破坏下游分支）。要新增性质
+        /// 就加新码；要调整措辞改 `meaning`/`agent_action` 文案即可，那是给人读的。
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum ErrorCode {
+            $(
+                $(#[$meta])*
+                #[serde(rename = $wire)]
+                $variant,
+            )*
+        }
+
+        impl ErrorCode {
+            /// 全部诊断码，顺序与 [`ErrorCode::TABLE`] 一致。
+            pub const ALL: &'static [ErrorCode] = &[$(ErrorCode::$variant,)*];
+
+            /// 码总表：`(码, 线上名字, 含义, agent 该怎么办)`。
+            ///
+            /// **这是诊断码唯一的真相源**：`quench3d schema --json` 的 `error_codes`
+            /// 与 `docs/error_codes.md` 都由测试与它对账，不手工维护第二份。
+            pub const TABLE: &'static [(ErrorCode, &'static str, &'static str, &'static str)] =
+                &[$((ErrorCode::$variant, $wire, $meaning, $action),)*];
+
+            /// 线上名字（JSON 里 `code` 字段的值，也是文档表里的名字）。
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(ErrorCode::$variant => $wire,)*
+                }
+            }
+
+            /// 这个码是什么意思（给人和 agent 读）。
+            pub const fn meaning(self) -> &'static str {
+                match self {
+                    $(ErrorCode::$variant => $meaning,)*
+                }
+            }
+
+            /// agent 拿到这个码之后该做什么。
+            pub const fn agent_action(self) -> &'static str {
+                match self {
+                    $(ErrorCode::$variant => $action,)*
+                }
+            }
+        }
+    };
+}
+
+define_error_codes! {
+    /// 写了引擎不认识的字段：拼错，或者用了已经删掉的字段。
+    UnknownField => "unknown_field",
+        "出现了模型/格式里不存在的字段名",
+        "按 hint 里的合法字段表改名或删掉；嵌套结构的父字段名也可能只是拼错";
+    /// 缺了这条写法必需的字段。
+    MissingField => "missing_field",
+        "缺了当前写法必需的字段（不同动作类型需要的字段不同）",
+        "补上提示里的字段；别靠缺省猜，缺省不等于\"它会自己补\"";
+    /// JSON 类型不对。
+    InvalidType => "invalid_type",
+        "JSON 类型不对（该给数组给了字符串、该给数字给了布尔……）",
+        "按提示里的期望类型改 JSON 值（注意 `[x,y,z]` 是数组，不是字符串）";
+    /// 取值不在允许集合里。
+    InvalidValue => "invalid_value",
+        "取值不在允许集合里：枚举拼错、格式/预设/扩展名不支持、空数组、两条轨道长度不一致",
+        "换成提示里列出的取值（枚举名区分大小写）；引擎不会对未知取值兜底";
+    /// 数值越界、非有限或退化。
+    OutOfRange => "out_of_range",
+        "数值越界、非有限（NaN/Inf）、符号不对，或退化（零向量/零尺寸/上限小于下限）",
+        "按提示的范围改数值；单位见字段说明（`rotation_deg` 是度，铰链 `limits` 是弧度）";
+    /// 按名字引用了不存在的东西。
+    UnknownReference => "unknown_reference",
+        "按名字引用了不存在的东西：物体、刚体、材质、模板或相机",
+        "改引用名，或把被引用的东西补进对应段；hint 里通常带可用名单";
+    /// 同一命名空间里名字重复。
+    DuplicateName => "duplicate_name",
+        "同一命名空间里名字重复（`instances` 展开之后的重名也算）",
+        "改名；重名会让后者覆盖前者，或让引用挂到错的物体上";
+    /// 用了保留名。
+    ReservedName => "reserved_name",
+        "用了引擎保留的名字（例如相机段里的 `default`）",
+        "换成别的名字；保留名的含义见 hint";
+    /// 父子链成环。
+    Cycle => "cycle",
+        "父子引用成环（沿 `parent` 走回自己）",
+        "打断环：环上至少一个物体的 `parent` 要指向环外或留空";
+    /// 找不到资源文件。
+    AssetNotFound => "asset_not_found",
+        "找不到贴图/模型文件，或 `assets.search_paths` 指向不存在的目录",
+        "把文件放到消息里列出的候选位置之一，或用 `assets.search_paths` / `--asset-path` 加一条搜索路径";
+    /// 读写文件失败。
+    IoError => "io_error",
+        "读写文件失败：不只是\"找不到\"，还包括权限、目录、编码",
+        "按消息里的 OS 错误处理路径/权限/编码；这不是场景语法问题，改 JSON 没用";
+    /// 超过规模上限。
+    LimitExceeded => "limit_exceeded",
+        "超过规模上限：物体数、步数、动作数、探针数、局部光名额",
+        "拆成多个场景或减少数量；hint 里给了具体上限";
+    /// 两个字段只能写一个。
+    MutuallyExclusive => "mutually_exclusive",
+        "两个字段只能写一个，却同时写了（`shape`/`shapes`、`at_step`/`at_time`……）",
+        "删掉其中一个；hint 说明同时写时哪个优先";
+    /// 写法合法但不会生效。
+    Ineffective => "ineffective",
+        "写法合法但不会生效：字段会被忽略、是死字段，或该物体根本没有刚体",
+        "要么删掉这个字段，要么改成会生效的写法；**别以为写了就生效**";
+    /// 合法但很可能不是本意。
+    SuspiciousValue => "suspicious_value",
+        "合法但很可能不是本意：数值异常大/小，或语义容易误解（如 `scale` 只影响渲染）",
+        "复核这个数值是否真的想要；引擎会照写执行，不会替你夹紧";
+    /// 单位容易混。
+    UnitAmbiguity => "unit_ambiguity",
+        "单位容易混：弧度与度、米与度",
+        "确认单位：`rotation_deg`/`motor_target_deg`/`cone_limit` 用度，铰链 `limits` 与马达速度用弧度";
+    /// 兜底：还没归类的诊断。
+    Invalid => "invalid",
+        "兜底码：这条诊断还没有被归类（历史诊断，或新加的检查忘了给码）",
+        "只能读 message；如果经常撞到它，给它补一个专门的码（见 docs/error_codes.md）";
+}
+
+impl Default for ErrorCode {
+    /// 缺省是兜底码 [`ErrorCode::Invalid`]：老 JSON（没有 `code` 字段）反序列化时用它。
+    fn default() -> Self {
+        ErrorCode::Invalid
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// 一条校验诊断。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
     /// 级别。
     pub severity: Severity,
+    /// **稳定**的机器可读错误码——agent 按它分支，而不是按中文文案。
+    ///
+    /// 老 JSON 里没有这个字段时反序列化成 [`ErrorCode::Invalid`]（向后兼容）。
+    #[serde(default)]
+    pub code: ErrorCode,
     /// JSON 路径，例如 `objects[2].shape.size`。
     pub path: String,
     /// 人可读说明。
@@ -83,30 +235,76 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// 造一条错误诊断。
+    /// 造一条错误诊断（兜底码 [`ErrorCode::Invalid`]）。
+    ///
+    /// 只有"确实没法归类"时才用它；能归类的请用 [`Diagnostic::error_code`]。
     pub fn error(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::error_code(ErrorCode::Invalid, path, message)
+    }
+
+    /// 造一条警告诊断（兜底码 [`ErrorCode::Invalid`]）。
+    pub fn warn(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::warn_code(ErrorCode::Invalid, path, message)
+    }
+
+    /// 造一条**带稳定诊断码**的错误诊断。
+    pub fn error_code(
+        code: ErrorCode,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             severity: Severity::Error,
+            code,
             path: path.into(),
             message: message.into(),
             hint: None,
         }
     }
 
-    /// 造一条警告诊断。
-    pub fn warn(path: impl Into<String>, message: impl Into<String>) -> Self {
+    /// 造一条**带稳定诊断码**的警告诊断。
+    pub fn warn_code(code: ErrorCode, path: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
+            code,
             path: path.into(),
             message: message.into(),
             hint: None,
         }
+    }
+
+    /// 改写诊断码（少见：先用通用构造再用它覆盖）。
+    pub fn with_code(mut self, code: ErrorCode) -> Self {
+        self.code = code;
+        self
     }
 
     /// 附上修复建议。
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
+    }
+}
+
+/// 把 serde 的反序列化错误归类成稳定的诊断码。
+///
+/// 结构检查（未知字段 / 类型不对 / 枚举拼错 / 缺字段）全部经过 `check_at` 这一个出口，
+/// 所以在这里分类一次就覆盖了所有字段级问题——不用在几十个调用点各写一遍。
+pub fn classify_serde_code(message: &str) -> ErrorCode {
+    let m = message;
+    if m.contains("unknown field") {
+        ErrorCode::UnknownField
+    } else if m.contains("missing field") {
+        ErrorCode::MissingField
+    } else if m.contains("unknown variant") || m.contains("invalid value") {
+        ErrorCode::InvalidValue
+    } else if m.contains("invalid type")
+        || m.contains("invalid length")
+        || m.starts_with("expected")
+    {
+        ErrorCode::InvalidType
+    } else {
+        ErrorCode::Invalid
     }
 }
 
@@ -486,19 +684,21 @@ impl SceneDoc {
         for (name, t) in &self.templates {
             let p = format!("templates.{name}");
             if t.name.is_some() {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("{p}.name"),
                     "模板里的 name 没有意义（名字属于物体/实例），会被忽略",
                 ));
             }
             if t.parent.is_some() || t.position.is_some() || t.rotation_deg.is_some() {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(ErrorCode::Ineffective,
                     &p,
                     "模板里的 parent / position / rotation_deg 没有意义（模板只描述\"长什么样\"），会被忽略；位置请写在 instances 或物体上",
                 ));
             }
             if t.template.is_some() || t.instances.is_some() {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     &p,
                     "模板里不能再写 template / instances（模板不支持嵌套），会被忽略",
                 ));
@@ -517,20 +717,26 @@ impl SceneDoc {
                         format!("已定义的模板：{}", known.join("、"))
                     };
                     out.push(
-                        Diagnostic::error(format!("{p}.template"), format!("找不到模板 `{t}`"))
-                            .with_hint(hint),
+                        Diagnostic::error_code(
+                            ErrorCode::UnknownReference,
+                            format!("{p}.template"),
+                            format!("找不到模板 `{t}`"),
+                        )
+                        .with_hint(hint),
                     );
                 }
             }
             match o.instances.as_deref() {
-                Some([]) => out.push(Diagnostic::error(
+                Some([]) => out.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
                     format!("{p}.instances"),
                     "instances 不能是空数组（要么删掉，要么至少写一个副本）",
                 )),
                 Some(list) => {
                     // 实例多起来是实打实的物理开销（每个副本一个独立刚体，不是 GPU 实例化）
                     if list.len() > 64 {
-                        out.push(Diagnostic::warn(
+                        out.push(Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
                             format!("{p}.instances"),
                             format!(
                                 "{} 个副本会变成 {} 个独立刚体（每个都参与物理），确认这是想要的",
@@ -543,7 +749,8 @@ impl SceneDoc {
                         let ip = format!("{p}.instances[{k}]");
                         if let Some(v) = &inst.position {
                             if !finite3(v) {
-                                out.push(Diagnostic::error(
+                                out.push(Diagnostic::error_code(
+                                    ErrorCode::OutOfRange,
                                     format!("{ip}.position"),
                                     "实例位置必须是有限数",
                                 ));
@@ -551,7 +758,8 @@ impl SceneDoc {
                         }
                         if let Some(v) = &inst.rotation_deg {
                             if !finite3(v) {
-                                out.push(Diagnostic::error(
+                                out.push(Diagnostic::error_code(
+                                    ErrorCode::OutOfRange,
                                     format!("{ip}.rotation_deg"),
                                     "实例欧拉角必须是有限数",
                                 ));
@@ -559,7 +767,8 @@ impl SceneDoc {
                         }
                         if let Some(v) = &inst.scale {
                             if !finite3(v) || v.iter().any(|x| *x <= 0.0) {
-                                out.push(Diagnostic::error(
+                                out.push(Diagnostic::error_code(
+                                    ErrorCode::OutOfRange,
                                     format!("{ip}.scale"),
                                     "实例缩放必须有限且为正",
                                 ));
@@ -579,7 +788,8 @@ impl SceneDoc {
         }
         for name in self.templates.keys() {
             if !used.contains_key(name.as_str()) {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("templates.{name}"),
                     "这个模板没有被任何物体引用（白写一节；确认不是漏了 template 字段）",
                 ));
@@ -618,7 +828,8 @@ impl SceneDoc {
                 }
             }
             out.push(
-                Diagnostic::error(
+                Diagnostic::error_code(
+                    ErrorCode::DuplicateName,
                     where_.first().cloned().unwrap_or_else(|| "objects".into()),
                     format!("名字 `{d}` 重复（实例展开后每个物体的名字必须唯一）"),
                 )
@@ -1791,7 +2002,11 @@ impl From<serde_json::Error> for DocError {
 pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let Some(map) = value.as_object() else {
-        out.push(Diagnostic::error("$", "场景根节点必须是 JSON 对象"));
+        out.push(Diagnostic::error_code(
+            ErrorCode::InvalidType,
+            "$",
+            "场景根节点必须是 JSON 对象",
+        ));
         return out;
     };
 
@@ -1804,7 +2019,12 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
             // 注意：嵌套结构里的未知字段也会报 "unknown field"，所以必须比字段名
             if unknown_field_name(&e.to_string()).as_deref() == Some(key.as_str()) {
                 out.push(
-                    Diagnostic::error(key, format!("未知字段 \"{key}\"")).with_hint(
+                    Diagnostic::error_code(
+                        ErrorCode::UnknownField,
+                        key,
+                        format!("未知字段 \"{key}\""),
+                    )
+                    .with_hint(
                         "顶层可用字段：format、version、name、gravity、ground、materials、\
                          objects、models、assets、joints、actions、probes、camera、lighting、\
                          simulate、render",
@@ -1926,7 +2146,8 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
             for (i, part) in list.iter().enumerate() {
                 let pp = format!("{path}.shapes[{i}]");
                 let Some(pmap) = part.as_object() else {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidType,
                         pp.clone(),
                         "部件必须是对象 { shape, position?, rotation_deg? }",
                     ));
@@ -1939,7 +2160,8 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
                 check_field::<[f32; 3]>(pmap, "rotation_deg", &pp, out);
             }
         } else {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::error_code(
+                ErrorCode::InvalidType,
                 format!("{path}.shapes"),
                 "shapes 必须是数组（每个元素 { shape, position?, rotation_deg? }）",
             ));
@@ -1967,7 +2189,8 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
             for (k, inst) in list.iter().enumerate() {
                 let ip = format!("{path}.instances[{k}]");
                 let Some(imap) = inst.as_object() else {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidType,
                         ip.clone(),
                         "实例必须是对象 { position?, rotation_deg?, scale?, name? }",
                     ));
@@ -1979,7 +2202,8 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
                 check_field::<[f32; 3]>(imap, "scale", &ip, out);
             }
         } else {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::error_code(
+                ErrorCode::InvalidType,
                 format!("{path}.instances"),
                 "instances 必须是数组",
             ));
@@ -2103,7 +2327,14 @@ fn check_section<T: DeserializeOwned>(
 
 fn check_at<T: DeserializeOwned>(value: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     if let Err(e) = serde_json::from_value::<T>(value.clone()) {
-        out.push(Diagnostic::error(path, clean_serde_message(&e.to_string())));
+        let message = clean_serde_message(&e.to_string());
+        // 类型/枚举/缺字段这一类问题全部从这里出去，所以在**唯一出口**分类一次，
+        // 就覆盖了所有字段级诊断（散在各个 `check_*` 里迟早会漏）。
+        out.push(Diagnostic::error_code(
+            classify_serde_code(&message),
+            path,
+            message,
+        ));
     }
 }
 
@@ -2139,7 +2370,8 @@ impl SceneDoc {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, DocError> {
         let path_ref = path.as_ref();
         let text = std::fs::read_to_string(path_ref).map_err(|e| {
-            DocError::Invalid(vec![Diagnostic::error(
+            DocError::Invalid(vec![Diagnostic::error_code(
+                ErrorCode::IoError,
                 "$",
                 format!("无法读取场景文件 {}: {e}", path.as_ref().display()),
             )
@@ -2285,14 +2517,19 @@ impl SceneDoc {
         for name in self.cameras.keys() {
             if name.trim().is_empty() {
                 cam_diags.push(
-                    Diagnostic::error("cameras", "相机名字不能为空").with_hint(
-                        "空名字没法被 `--camera` 引用；给它起个名字，或直接写 `camera` 段",
-                    ),
+                    Diagnostic::error_code(ErrorCode::InvalidValue, "cameras", "相机名字不能为空")
+                        .with_hint(
+                            "空名字没法被 `--camera` 引用；给它起个名字，或直接写 `camera` 段",
+                        ),
                 );
             } else if name == "default" {
                 cam_diags.push(
-                    Diagnostic::error("cameras", "`default` 是保留名（指 `camera` 段这台）")
-                        .with_hint("把这一项改名，例如 `default` → `main`"),
+                    Diagnostic::error_code(
+                        ErrorCode::ReservedName,
+                        "cameras",
+                        "`default` 是保留名（指 `camera` 段这台）",
+                    )
+                    .with_hint("把这一项改名，例如 `default` → `main`"),
                 );
             }
         }
@@ -2302,19 +2539,22 @@ impl SceneDoc {
         for (i, o) in self.render.outputs.iter().enumerate() {
             if let Some(name) = &o.name {
                 if name.trim().is_empty() {
-                    cam_diags.push(Diagnostic::error(
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
                         "render.outputs",
                         "输出名字不能为空（要么不写，要么给个名字）",
                     ));
                 }
                 if name.contains('/') || name.contains('\\') || name.contains("..") {
-                    cam_diags.push(Diagnostic::error(
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
                         "render.outputs",
                         "输出名字不能含路径分隔符或 `..`（它就是文件名）",
                     ));
                 }
                 if seen.contains(&name.as_str()) {
-                    cam_diags.push(Diagnostic::error(
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::DuplicateName,
                         "render.outputs",
                         "输出名字重复了（会互相覆盖）",
                     ));
@@ -2323,7 +2563,8 @@ impl SceneDoc {
             }
             if let Some(cam) = &o.camera {
                 if cam != "default" && !self.cameras.contains_key(cam) {
-                    cam_diags.push(Diagnostic::error(
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::UnknownReference,
                         "render.outputs",
                         "这一项指定的相机不存在（见 `cameras` 段，或用 `default` 指 `camera` 段）",
                     ));
@@ -2331,7 +2572,11 @@ impl SceneDoc {
             }
             for v in [o.width, o.height].into_iter().flatten() {
                 if v == 0 {
-                    cam_diags.push(Diagnostic::error("render.outputs", "宽/高不能为 0"));
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "render.outputs",
+                        "宽/高不能为 0",
+                    ));
                 }
             }
             let _ = i;
@@ -2341,10 +2586,15 @@ impl SceneDoc {
         for a in &self.animations {
             let label = a.name.clone().unwrap_or_else(|| a.target.clone());
             if a.target.trim().is_empty() {
-                cam_diags.push(Diagnostic::error("animations", "动画的 target 不能为空"));
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
+                    "animations",
+                    "动画的 target 不能为空",
+                ));
             }
             if a.position.is_none() && a.rotation.is_none() {
-                cam_diags.push(Diagnostic::error(
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::MissingField,
                     "animations",
                     format!(
                         "动画 `{label}` 至少要有一条 position 或 rotation 轨道（否则它什么都不做）"
@@ -2353,7 +2603,8 @@ impl SceneDoc {
             }
             if let Some(w) = a.weight {
                 if !w.is_finite() || !(0.0..=1.0).contains(&w) {
-                    cam_diags.push(Diagnostic::error(
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "animations",
                         "weight 必须在 0~1 之间（0 = 不生效，1 = 完全生效）",
                     ));
@@ -2361,35 +2612,50 @@ impl SceneDoc {
             }
             if let Some(sp) = a.speed {
                 if !(sp.is_finite() && sp > 0.0) {
-                    cam_diags.push(Diagnostic::error("animations", "speed 必须是正的有限值"));
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "animations",
+                        "speed 必须是正的有限值",
+                    ));
                 }
             }
             if let Some(st) = a.start {
                 if !st.is_finite() {
-                    cam_diags.push(Diagnostic::error("animations", "start 必须是有限值"));
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "animations",
+                        "start 必须是有限值",
+                    ));
                 }
             }
             for (what, tr) in [("position", &a.position), ("rotation", &a.rotation)] {
                 let Some(tr) = tr else { continue };
                 if tr.times.len() != tr.values.len() {
-                    cam_diags.push(Diagnostic::error(
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
                         "animations",
                         format!("{what} 轨道的关键帧 times 与 values 长度必须一致"),
                     ));
                 }
                 if tr.times.is_empty() {
-                    cam_diags.push(Diagnostic::error("animations", "关键帧不能是空的"));
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        "animations",
+                        "关键帧不能是空的",
+                    ));
                 }
                 let mut prev = f32::NEG_INFINITY;
                 for (k, t) in tr.times.iter().enumerate() {
                     if !t.is_finite() || *t < 0.0 {
-                        cam_diags.push(Diagnostic::error(
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             "animations",
                             format!("{what} 轨道的关键帧时间必须是非负有限值"),
                         ));
                     }
                     if *t <= prev {
-                        cam_diags.push(Diagnostic::error(
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
                             "animations",
                             format!(
                                 "{what} 轨道的关键帧时间必须严格递增（同一时刻只能有一个取值）"
@@ -2399,7 +2665,8 @@ impl SceneDoc {
                     prev = *t;
                     if let Some(v) = tr.values.get(k) {
                         if v.iter().any(|c| !c.is_finite()) {
-                            cam_diags.push(Diagnostic::error(
+                            cam_diags.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
                                 "animations",
                                 format!("{what} 轨道的关键帧取值必须是有限数"),
                             ));
@@ -2412,7 +2679,8 @@ impl SceneDoc {
                 if what == "rotation" {
                     for w in tr.values.windows(2) {
                         if (0..3).any(|c| (w[1][c] - w[0][c]).abs() > 180.0) {
-                            cam_diags.push(Diagnostic::warn(
+                            cam_diags.push(Diagnostic::warn_code(
+                                ErrorCode::SuspiciousValue,
                                 "animations",
                                 format!(
                                     "{what} 有一段跨度超过 180°：朝向按四元数 slerp 走最短弧，\
@@ -2451,7 +2719,7 @@ impl SceneDoc {
         // --- 规模上限：宁可给一条明确诊断，也不要跑到内存耗尽 / 卡死 ---
         if self.objects.len() > MAX_OBJECTS {
             out.push(
-                Diagnostic::error(
+                Diagnostic::error_code(ErrorCode::LimitExceeded,
                     "objects",
                     format!(
                         "物体数 {} 超过上限 {MAX_OBJECTS}（每个物体都会参与宽相/窄相，再大请拆成多个场景）",
@@ -2463,13 +2731,14 @@ impl SceneDoc {
         }
         if let Some(v) = self.physics.static_friction_speed {
             if !v.is_finite() || v < 0.0 {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "physics.static_friction_speed",
                     "静/动摩擦的切换速度必须是非负的有限数",
                 ));
             } else if v > 1.0 {
                 out.push(
-                    Diagnostic::warn(
+                    Diagnostic::warn_code(ErrorCode::SuspiciousValue,
                         "physics.static_friction_speed",
                         format!("阈值 {v} m/s 偏大：慢速滑行会被当成静止接触（表现为「滑到一半突然很黏」）"),
                     )
@@ -2480,7 +2749,8 @@ impl SceneDoc {
 
         if self.simulate.steps > MAX_STEPS {
             out.push(
-                Diagnostic::error(
+                Diagnostic::error_code(
+                    ErrorCode::LimitExceeded,
                     "simulate.steps",
                     format!("步数 {} 超过上限 {MAX_STEPS}", self.simulate.steps),
                 )
@@ -2488,7 +2758,8 @@ impl SceneDoc {
             );
         }
         if !(self.simulate.dt.is_finite() && self.simulate.dt > 0.0) {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::error_code(
+                ErrorCode::OutOfRange,
                 "simulate.dt",
                 format!("时间步长必须是有限正数，当前为 {}", self.simulate.dt),
             ));
@@ -2496,7 +2767,8 @@ impl SceneDoc {
 
         if self.format != FORMAT {
             out.push(
-                Diagnostic::error(
+                Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
                     "format",
                     format!("未知格式 \"{}\"，应为 \"{FORMAT}\"", self.format),
                 )
@@ -2515,7 +2787,8 @@ impl SceneDoc {
                 format!("这个文件比当前版本新：请升级 quench3d（当前支持 {VERSION}）")
             };
             out.push(
-                Diagnostic::error(
+                Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
                     "version",
                     format!("不支持的版本 {}，当前支持 {VERSION}", self.version),
                 )
@@ -2524,7 +2797,11 @@ impl SceneDoc {
         }
         if let Some(g) = &self.gravity {
             if !finite3(g) {
-                out.push(Diagnostic::error("gravity", "重力必须是有限数"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "gravity",
+                    "重力必须是有限数",
+                ));
             }
         }
 
@@ -2532,35 +2809,44 @@ impl SceneDoc {
         for (name, m) in &self.materials {
             let p = format!("materials.{name}");
             if !finite3(&m.color) {
-                out.push(Diagnostic::error(format!("{p}.color"), "颜色必须是有限数"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.color"),
+                    "颜色必须是有限数",
+                ));
             }
             if m.color.iter().any(|c| *c < 0.0 || *c > 1.0) {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::SuspiciousValue,
                     format!("{p}.color"),
                     "颜色分量应在 0~1 之间",
                 ));
             }
             if !(0.0..=1.0).contains(&m.metallic) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.metallic"),
                     "金属度应在 0~1 之间",
                 ));
             }
             if !(0.05..=1.0).contains(&m.roughness) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.roughness"),
                     "粗糙度应在 0.05~1 之间",
                 ));
             }
             if !m.emissive.is_finite() || m.emissive < 0.0 {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.emissive"),
                     "自发光强度必须是非负有限数",
                 ));
             }
             if let Some(a) = m.alpha {
                 if !a.is_finite() || !(0.0..=1.0).contains(&a) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.alpha"),
                         format!("不透明度应在 0~1 之间，当前为 {a}"),
                     ));
@@ -2568,7 +2854,8 @@ impl SceneDoc {
             }
             if let Some(c) = &m.emissive_color {
                 if !finite3(c) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.emissive_color"),
                         "自发光颜色必须是有限数",
                     ));
@@ -2576,7 +2863,8 @@ impl SceneDoc {
             }
             if let Some(u) = m.uv_scale {
                 if !u.is_finite() || u <= 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.uv_scale"),
                         format!("UV 缩放必须是正有限数，当前为 {u}"),
                     ));
@@ -2584,7 +2872,8 @@ impl SceneDoc {
             }
             if let Some(n) = m.normal_scale {
                 if !n.is_finite() {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.normal_scale"),
                         "法线强度必须是有限数",
                     ));
@@ -2592,12 +2881,14 @@ impl SceneDoc {
             }
             if let Some(cut) = m.alpha_cutoff {
                 if !cut.is_finite() || cut < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.alpha_cutoff"),
                         format!("alpha 裁剪阈值必须是非负有限数，当前为 {cut}"),
                     ));
                 } else if cut > 0.0 && m.alpha_blend == Some(true) {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::MutuallyExclusive,
                         format!("{p}.alpha_cutoff"),
                         "同时给了 alpha_cutoff 与 alpha_blend：裁剪优先，混合不会生效",
                     ));
@@ -2608,13 +2899,18 @@ impl SceneDoc {
                 let Some(path) = path else { continue };
                 let shown = format!("{p}.{field}");
                 if path.trim().is_empty() {
-                    out.push(Diagnostic::error(shown, "贴图路径不能为空"));
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        shown,
+                        "贴图路径不能为空",
+                    ));
                     continue;
                 }
                 let lower = path.to_ascii_lowercase();
                 if !(lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
                 {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::InvalidValue,
                         format!("{p}.{field}"),
                         format!("只支持 PNG/JPEG 贴图，当前是 \"{path}\""),
                     ));
@@ -2627,7 +2923,8 @@ impl SceneDoc {
                         .collect::<Vec<_>>()
                         .join(" / ");
                     out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::AssetNotFound,
                             format!("{p}.{field}"),
                             format!("找不到贴图文件 \"{path}\"（找过：{tried}）"),
                         )
@@ -2642,25 +2939,29 @@ impl SceneDoc {
         for (i, l) in point_lights.iter().enumerate() {
             let p = format!("lighting.point_lights[{i}]");
             if !finite3(&l.position) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.position"),
                     "点光源位置必须是有限数",
                 ));
             }
             if !finite3(&l.color) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.color"),
                     "点光源颜色必须是有限数",
                 ));
             }
             if !l.intensity.is_finite() || l.intensity < 0.0 {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.intensity"),
                     "点光源强度必须是非负有限数",
                 ));
             }
             if !l.radius.is_finite() || l.radius <= 0.0 {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.radius"),
                     "点光源半径必须是正有限数",
                 ));
@@ -2671,15 +2972,24 @@ impl SceneDoc {
         for (i, l) in spots.iter().enumerate() {
             let p = format!("lighting.spot_lights[{i}]");
             if l.radius <= 0.0 {
-                out.push(Diagnostic::error(format!("{p}.radius"), "影响半径必须为正"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.radius"),
+                    "影响半径必须为正",
+                ));
             }
             if l.intensity < 0.0 {
-                out.push(Diagnostic::error(format!("{p}.intensity"), "强度不能为负"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.intensity"),
+                    "强度不能为负",
+                ));
             }
             let in_range = |d: f32| d > 0.0 && d < 90.0;
             if !in_range(l.inner_deg) || !in_range(l.outer_deg) {
                 out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.inner_deg"),
                         format!(
                             "锥角必须落在 (0, 90) 度之间（现在内 {} 度、外 {} 度）",
@@ -2690,7 +3000,8 @@ impl SceneDoc {
                 );
             } else if l.inner_deg > l.outer_deg {
                 out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.inner_deg"),
                         format!("内锥角 {} 度不能大于外锥角 {} 度", l.inner_deg, l.outer_deg),
                     )
@@ -2700,8 +3011,12 @@ impl SceneDoc {
             let d = l.direction;
             if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < 1e-6 {
                 out.push(
-                    Diagnostic::error(format!("{p}.direction"), "照射方向不能是零向量")
-                        .with_hint("例如 [0, -1, 0] 表示向下照"),
+                    Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.direction"),
+                        "照射方向不能是零向量",
+                    )
+                    .with_hint("例如 [0, -1, 0] 表示向下照"),
                 );
             }
         }
@@ -2709,7 +3024,7 @@ impl SceneDoc {
         let local_total = point_lights.len() + spots.len();
         if local_total > MAX_POINT_LIGHTS {
             out.push(
-                Diagnostic::warn(
+                Diagnostic::warn_code(ErrorCode::LimitExceeded,
                     "lighting.spot_lights",
                     format!(
                         "点光源 + 聚光灯共 {local_total} 盏，超过 {MAX_POINT_LIGHTS} 盏的部分不参与着色（点光源优先）"
@@ -2720,7 +3035,8 @@ impl SceneDoc {
         }
         if point_lights.len() > MAX_POINT_LIGHTS {
             out.push(
-                Diagnostic::warn(
+                Diagnostic::warn_code(
+                    ErrorCode::LimitExceeded,
                     "lighting.point_lights",
                     format!(
                         "给了 {} 盏点光源，但着色时最多 {} 盏生效，其余会被忽略",
@@ -2741,7 +3057,7 @@ impl SceneDoc {
             .collect();
         if casters.len() > 1 {
             out.push(
-                Diagnostic::warn(
+                Diagnostic::warn_code(ErrorCode::Ineffective,
                     format!("lighting.spot_lights[{}].cast_shadows", casters[0]),
                     format!(
                         "有 {} 盏聚光灯要求投影，但引擎只支持一盏：实际投影的是 spot_lights[{}]（第一盏要求投影的），其余照常照明但不投影",
@@ -2757,7 +3073,7 @@ impl SceneDoc {
             let packed = point_lights.len().min(MAX_POINT_LIGHTS) + first;
             if packed >= MAX_POINT_LIGHTS {
                 out.push(
-                    Diagnostic::warn(
+                    Diagnostic::warn_code(ErrorCode::Ineffective,
                         format!("lighting.spot_lights[{first}].cast_shadows"),
                         format!(
                             "这一盏排在第 {} 个局部光名额（点光源优先，一共只有 {MAX_POINT_LIGHTS} 个），它既不会照明也不会投影",
@@ -2773,18 +3089,21 @@ impl SceneDoc {
         if let Some(fog) = &self.lighting.fog {
             if let Some(c) = fog.color {
                 if !finite3(&c) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.fog.color",
                         "雾颜色必须是有限数",
                     ));
                 } else if c.iter().any(|v| *v < 0.0) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.fog.color",
                         "雾颜色不能是负数（线性空间的辐射值没有负的）",
                     ));
                 } else if c.iter().any(|v| *v > 4.0) {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
                             "lighting.fog.color",
                             format!("雾颜色 {c:?} 明显超过 1（线性空间），画面会很怪"),
                         )
@@ -2793,12 +3112,14 @@ impl SceneDoc {
                 }
             }
             match fog.density {
-                Some(d) if !d.is_finite() || d < 0.0 => out.push(Diagnostic::error(
+                Some(d) if !d.is_finite() || d < 0.0 => out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "lighting.fog.density",
                     "雾密度必须是非负有限数",
                 )),
                 Some(d) if d > 1.0 => out.push(
-                    Diagnostic::warn(
+                    Diagnostic::warn_code(
+                        ErrorCode::SuspiciousValue,
                         "lighting.fog.density",
                         format!("雾密度 {d} 太大（每米衰减），几米之外就全是雾了"),
                     )
@@ -2811,7 +3132,8 @@ impl SceneDoc {
         if let Some(q) = &self.lighting.shadow_quality {
             match q.strength {
                 Some(v) if !v.is_finite() || !(0.0..=1.0).contains(&v) => out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.shadow_quality.strength",
                         "阴影强度必须在 0~1 之间",
                     )
@@ -2820,12 +3142,14 @@ impl SceneDoc {
                 _ => {}
             }
             match q.radius {
-                Some(v) if !v.is_finite() || v <= 0.0 => out.push(Diagnostic::error(
+                Some(v) if !v.is_finite() || v <= 0.0 => out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "lighting.shadow_quality.radius",
                     "阴影覆盖半径必须是正有限数（米）",
                 )),
                 Some(v) if v > 400.0 => out.push(
-                    Diagnostic::warn(
+                    Diagnostic::warn_code(
+                        ErrorCode::SuspiciousValue,
                         "lighting.shadow_quality.radius",
                         format!("阴影覆盖半径 {v} 米太大：分辨率摊得太薄，阴影会糊成一片"),
                     )
@@ -2835,7 +3159,8 @@ impl SceneDoc {
             }
             if let Some(n) = q.cascades {
                 if !(1..=4).contains(&n) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.shadow_quality.cascades",
                         "cascades 必须在 1~4 之间（1 = 单级；4 是 2x2 图集的上限）",
                     ));
@@ -2843,7 +3168,8 @@ impl SceneDoc {
             }
             if let Some(l) = q.split_lambda {
                 if !l.is_finite() || !(0.0..=1.0).contains(&l) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.shadow_quality.split_lambda",
                         "split_lambda 必须在 0~1 之间（0 = 均匀切分，1 = 全对数切分）",
                     ));
@@ -2859,12 +3185,14 @@ impl SceneDoc {
             ] {
                 let Some(c) = c else { continue };
                 if !finite3(&c) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("lighting.sky_colors.{name}"),
                         "天空颜色必须是有限数",
                     ));
                 } else if c.iter().any(|v| *v < 0.0) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("lighting.sky_colors.{name}"),
                         "天空颜色不能是负数",
                     ));
@@ -2874,19 +3202,29 @@ impl SceneDoc {
 
         if let Some(g) = &self.ground {
             if !g.size.is_finite() || g.size <= 0.0 {
-                out.push(Diagnostic::error("ground.size", "地面边长必须为正数"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "ground.size",
+                    "地面边长必须为正数",
+                ));
             }
             if !g.y.is_finite() {
-                out.push(Diagnostic::error("ground.y", "地面高度必须是有限数"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "ground.y",
+                    "地面高度必须是有限数",
+                ));
             }
             if !g.friction.is_finite() || g.friction < 0.0 {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "ground.friction",
                     "地面摩擦系数必须是非负数",
                 ));
             }
             if !(0.0..=1.0).contains(&g.restitution) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "ground.restitution",
                     "地面恢复系数应在 0~1 之间",
                 ));
@@ -2894,8 +3232,12 @@ impl SceneDoc {
             if let Some(m) = &g.material {
                 if !self.materials.contains_key(m) {
                     out.push(
-                        Diagnostic::error("ground.material", format!("未定义的材质 \"{m}\""))
-                            .with_hint("在 materials 里补上，或删掉该字段使用默认材质"),
+                        Diagnostic::error_code(
+                            ErrorCode::UnknownReference,
+                            "ground.material",
+                            format!("未定义的材质 \"{m}\""),
+                        )
+                        .with_hint("在 materials 里补上，或删掉该字段使用默认材质"),
                     );
                 }
             }
@@ -2907,7 +3249,8 @@ impl SceneDoc {
             // 形状：`shape` 与 `shapes` 二选一
             if o.shape.is_some() && o.shapes.is_some() {
                 out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::MutuallyExclusive,
                         format!("{p}.shapes"),
                         "shape 与 shapes 只能写一个（单形状用 shape，复合形状用 shapes）",
                     )
@@ -2918,7 +3261,8 @@ impl SceneDoc {
                 (Some(shape), None) => validate_shape(shape, &format!("{p}.shape"), &mut out),
                 (None, Some(parts)) => {
                     if parts.is_empty() {
-                        out.push(Diagnostic::error(
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
                             format!("{p}.shapes"),
                             "shapes 不能是空数组（至少一个部件）",
                         ));
@@ -2928,7 +3272,8 @@ impl SceneDoc {
                         validate_shape(&part.shape, &format!("{pp}.shape"), &mut out);
                         if let Some(v) = &part.position {
                             if !finite3(v) {
-                                out.push(Diagnostic::error(
+                                out.push(Diagnostic::error_code(
+                                    ErrorCode::OutOfRange,
                                     format!("{pp}.position"),
                                     "部件位置必须是有限数",
                                 ));
@@ -2936,21 +3281,23 @@ impl SceneDoc {
                         }
                         if let Some(v) = &part.rotation_deg {
                             if !finite3(v) {
-                                out.push(Diagnostic::error(
+                                out.push(Diagnostic::error_code(
+                                    ErrorCode::OutOfRange,
                                     format!("{pp}.rotation_deg"),
                                     "部件欧拉角必须是有限数",
                                 ));
                             }
                         }
                         if part.shape.kind == ShapeKind::Plane {
-                            out.push(Diagnostic::warn(
+                            out.push(Diagnostic::warn_code(ErrorCode::SuspiciousValue,
                                 &pp,
                                 "无限半空间当复合形状的一个部件：整个刚体都会被它撑成无限大（通常只想当整个物体用）",
                             ));
                         }
                     }
                     if parts.len() == 1 {
-                        out.push(Diagnostic::warn(
+                        out.push(Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
                             format!("{p}.shapes"),
                             "只写了一个部件：用 shape 更直接（行为完全一样）",
                         ));
@@ -2962,7 +3309,8 @@ impl SceneDoc {
             }
             if let Some(v) = &o.position {
                 if !finite3(v) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.position"),
                         "位置必须是有限数",
                     ));
@@ -2970,7 +3318,8 @@ impl SceneDoc {
             }
             if let Some(r) = &o.rotation_deg {
                 if !finite3(r) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.rotation_deg"),
                         "旋转必须是有限数",
                     ));
@@ -2978,7 +3327,8 @@ impl SceneDoc {
             }
             if let Some(s) = &o.scale {
                 if !finite3(s) || s.iter().any(|v| *v <= 0.0) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.scale"),
                         "缩放必须是正有限数",
                     ));
@@ -2987,19 +3337,28 @@ impl SceneDoc {
             if let Some(m) = &o.material {
                 if !self.materials.contains_key(m) {
                     out.push(
-                        Diagnostic::error(format!("{p}.material"), format!("未定义的材质 \"{m}\""))
-                            .with_hint("在 materials 里补上，或删掉该字段"),
+                        Diagnostic::error_code(
+                            ErrorCode::UnknownReference,
+                            format!("{p}.material"),
+                            format!("未定义的材质 \"{m}\""),
+                        )
+                        .with_hint("在 materials 里补上，或删掉该字段"),
                     );
                 }
             }
             if let Some(d) = o.density {
                 if !d.is_finite() || d <= 0.0 {
-                    out.push(Diagnostic::error(format!("{p}.density"), "密度必须为正数"));
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.density"),
+                        "密度必须为正数",
+                    ));
                 }
             }
             if let Some(e) = o.restitution {
                 if !(0.0..=1.0).contains(&e) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.restitution"),
                         "恢复系数应在 0~1 之间",
                     ));
@@ -3007,7 +3366,8 @@ impl SceneDoc {
             }
             if let Some(f) = o.friction {
                 if !f.is_finite() || f < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.friction"),
                         "摩擦系数必须是非负数",
                     ));
@@ -3015,14 +3375,16 @@ impl SceneDoc {
             }
             if let Some(sf) = o.static_friction {
                 if !sf.is_finite() || sf < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.static_friction"),
                         "静摩擦系数必须是非负数",
                     ));
                 } else if let Some(df) = o.friction {
                     if df.is_finite() && sf < df - 1e-6 {
                         out.push(
-                            Diagnostic::warn(
+                            Diagnostic::warn_code(
+                                ErrorCode::SuspiciousValue,
                                 format!("{p}.static_friction"),
                                 format!(
                                     "静摩擦 {sf} 比动摩擦 {df} 小：不会更黏，只会更容易起步滑动"
@@ -3034,20 +3396,23 @@ impl SceneDoc {
                 }
             }
             if o.friction_combine.is_some() && o.body == BodyKind::None {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     &p,
                     "这个物体没有刚体（body = none），friction_combine 不会生效",
                 ));
             }
             if o.restitution_combine.is_some() && o.body == BodyKind::None {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     &p,
                     "这个物体没有刚体（body = none），restitution_combine 不会生效",
                 ));
             }
             if let Some(v) = &o.velocity {
                 if !finite3(v) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.velocity"),
                         "速度必须是有限数",
                     ));
@@ -3055,7 +3420,8 @@ impl SceneDoc {
             }
             if let Some(v) = &o.angular_velocity {
                 if !finite3(v) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.angular_velocity"),
                         "角速度必须是有限数",
                     ));
@@ -3067,7 +3433,8 @@ impl SceneDoc {
             ] {
                 if let Some(d) = value {
                     if !d.is_finite() || d < 0.0 {
-                        out.push(Diagnostic::error(
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             format!("{p}.{key}"),
                             format!("{key} 必须是非负数"),
                         ));
@@ -3076,7 +3443,8 @@ impl SceneDoc {
             }
             if let Some(g) = o.gravity_scale {
                 if !g.is_finite() {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.gravity_scale"),
                         "重力缩放必须是有限数",
                     ));
@@ -3085,8 +3453,12 @@ impl SceneDoc {
             if let Some(m) = o.mass {
                 if !m.is_finite() || m <= 0.0 {
                     out.push(
-                        Diagnostic::error(format!("{p}.mass"), "质量必须为正数")
-                            .with_hint("想按密度自动算质量就删掉 mass、只留 density"),
+                        Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.mass"),
+                            "质量必须为正数",
+                        )
+                        .with_hint("想按密度自动算质量就删掉 mass、只留 density"),
                     );
                 }
             }
@@ -3105,7 +3477,8 @@ impl SceneDoc {
                 .map(|(name, _)| *name)
                 .collect();
                 if !ignored.is_empty() {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         &p,
                         format!(
                             "body 是 {:?}，这些字段只对 dynamic 生效，会被忽略：{}",
@@ -3121,7 +3494,8 @@ impl SceneDoc {
                 .any(|part| part.shape.kind == ShapeKind::Plane);
             if has_plane && o.body == BodyKind::Dynamic {
                 out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
                         format!("{p}.body"),
                         "平面不能是动态刚体（无限大物体没有有限质量）",
                     )
@@ -3129,7 +3503,8 @@ impl SceneDoc {
                 );
             }
             if o.body == BodyKind::None && o.velocity.is_some() {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("{p}.velocity"),
                     "物体没有刚体，速度不会生效",
                 ));
@@ -3138,7 +3513,8 @@ impl SceneDoc {
             if let Some(layer) = o.collision_layer {
                 if layer > 31 {
                     out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             format!("{p}.collision_layer"),
                             format!("碰撞层 {layer} 超出范围（0~31）"),
                         )
@@ -3149,7 +3525,8 @@ impl SceneDoc {
             if let Some(mask) = &o.collides_with {
                 for (k, layer) in mask.iter().enumerate() {
                     if *layer > 31 {
-                        out.push(Diagnostic::error(
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             format!("{p}.collides_with[{k}]"),
                             format!("层号 {layer} 超出范围（0~31）"),
                         ));
@@ -3160,14 +3537,16 @@ impl SceneDoc {
                 let before = seen.len();
                 seen.dedup();
                 if seen.len() != before {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("{p}.collides_with"),
                         "层号有重复，重复项没有额外作用",
                     ));
                 }
                 if mask.is_empty() {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
                             format!("{p}.collides_with"),
                             "空列表 = 谁也不碰：这个物体会穿过所有东西",
                         )
@@ -3175,7 +3554,8 @@ impl SceneDoc {
                     );
                 }
                 if o.body == BodyKind::None {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("{p}.collides_with"),
                         "物体没有刚体，碰撞过滤不会生效",
                     ));
@@ -3183,7 +3563,8 @@ impl SceneDoc {
                 // 只和自己那一层碰是常见写法；但若连自己那层都不含，容易看漏
                 if let Some(layer) = o.collision_layer {
                     if !mask.contains(&layer) {
-                        out.push(Diagnostic::warn(
+                        out.push(Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
                             format!("{p}.collides_with"),
                             format!("列表里不含自己的层 {layer}，它不会和同层物体碰撞"),
                         ));
@@ -3194,7 +3575,8 @@ impl SceneDoc {
             if o.sensor == Some(true) {
                 if o.body == BodyKind::None {
                     out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
                             format!("{p}.sensor"),
                             "传感器需要刚体（body 是 \"none\" 的物体不参与物理）",
                         )
@@ -3202,19 +3584,22 @@ impl SceneDoc {
                     );
                 }
                 if o.density.is_some() || o.mass.is_some() {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         &p,
                         "传感器不产生冲量，密度/质量对它没有意义",
                     ));
                 }
                 if o.restitution.is_some() || o.friction.is_some() {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         &p,
                         "传感器不产生冲量，恢复系数/摩擦对它没有意义",
                     ));
                 }
                 if has_plane {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::SuspiciousValue,
                         format!("{p}.sensor"),
                         "无限半空间当传感器：整个空间永远在里面，事件只在开始时报一次",
                     ));
@@ -3223,13 +3608,15 @@ impl SceneDoc {
             // CCD：只对动态刚体有意义
             if o.ccd == Some(true) {
                 if o.body != BodyKind::Dynamic {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("{p}.ccd"),
                         format!("body 是 {:?}，CCD 只对 dynamic 生效，会被忽略", o.body),
                     ));
                 }
                 if has_plane {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("{p}.ccd"),
                         "无限半空间不需要 CCD（它不会动）",
                     ));
@@ -3238,7 +3625,8 @@ impl SceneDoc {
             // scale 是渲染专用的：碰撞形状取 shape 里的原始尺寸，这里放大会静默对不上
             if o.scale.is_some() && o.body != BodyKind::None {
                 out.push(
-                    Diagnostic::warn(
+                    Diagnostic::warn_code(
+                        ErrorCode::SuspiciousValue,
                         format!("{p}.scale"),
                         "scale 只影响渲染，碰撞形状仍用 shape 的原始尺寸",
                     )
@@ -3253,7 +3641,8 @@ impl SceneDoc {
             if let Some(n) = o.name.as_deref() {
                 if let Some(first) = seen_names.insert(n, i) {
                     out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::DuplicateName,
                             format!("objects[{i}].name"),
                             format!("物体名 \"{n}\" 与 objects[{first}] 重复"),
                         )
@@ -3272,19 +3661,23 @@ impl SceneDoc {
                 continue;
             };
             if parent.trim().is_empty() {
-                out.push(Diagnostic::error(p, "父物体名不能为空"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
+                    p,
+                    "父物体名不能为空",
+                ));
                 continue;
             }
             if o.name.as_deref() == Some(parent) {
                 out.push(
-                    Diagnostic::error(&p, "物体不能以自己为父")
+                    Diagnostic::error_code(ErrorCode::Cycle, &p, "物体不能以自己为父")
                         .with_hint("删掉 parent 字段，或用另一个物体的名字"),
                 );
                 continue;
             }
             if !seen_names.contains_key(parent) {
                 out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(ErrorCode::UnknownReference,
                         &p,
                         format!("找不到名为 \"{parent}\" 的父物体（父物体必须写在 objects 里并显式命名）"),
                     )
@@ -3294,7 +3687,8 @@ impl SceneDoc {
             }
             if o.body != BodyKind::None {
                 out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
                         &p,
                         format!(
                             "objects[{i}] 是 {:?} 刚体，位姿由物理决定，不能再挂父物体",
@@ -3318,7 +3712,8 @@ impl SceneDoc {
                         // 否则一个三物体的环会刷出三条一模一样的诊断。
                         if walked.iter().all(|&w| w > i) {
                             out.push(
-                                Diagnostic::error(
+                                Diagnostic::error_code(
+                                    ErrorCode::Cycle,
                                     format!("objects[{i}].parent"),
                                     format!(
                                         "父子链成环（从 objects[{i}] 出发沿 parent 又回到自己）"
@@ -3343,7 +3738,11 @@ impl SceneDoc {
             for (i, sp) in assets.search_paths.iter().enumerate() {
                 let p = format!("assets.search_paths[{i}]");
                 if sp.as_os_str().is_empty() {
-                    out.push(Diagnostic::error(p, "搜索路径不能为空"));
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        p,
+                        "搜索路径不能为空",
+                    ));
                     continue;
                 }
                 let dir = if sp.is_absolute() {
@@ -3356,7 +3755,8 @@ impl SceneDoc {
                 };
                 if !dir.is_dir() {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::AssetNotFound,
                             p,
                             format!("搜索路径 {} 不是一个存在的目录", dir.display()),
                         )
@@ -3370,7 +3770,11 @@ impl SceneDoc {
         for (i, m) in self.models.iter().enumerate() {
             let p = format!("models[{i}]");
             if m.path.as_os_str().is_empty() {
-                out.push(Diagnostic::error(format!("{p}.path"), "模型路径不能为空"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
+                    format!("{p}.path"),
+                    "模型路径不能为空",
+                ));
             } else {
                 let ext = m
                     .path
@@ -3378,7 +3782,8 @@ impl SceneDoc {
                     .map(|e| e.to_string_lossy().to_ascii_lowercase())
                     .unwrap_or_default();
                 if !matches!(ext.as_str(), "gltf" | "glb" | "obj") {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
                         format!("{p}.path"),
                         format!("不支持的模型格式 \".{ext}\""),
                     ));
@@ -3389,7 +3794,8 @@ impl SceneDoc {
                 match self.resolve_model(&m.path) {
                     Some(found) => {
                         if found != m.path {
-                            out.push(Diagnostic::warn(
+                            out.push(Diagnostic::warn_code(
+                                ErrorCode::SuspiciousValue,
                                 format!("{p}.path"),
                                 format!("文件不在写的路径上，实际会用 {}", found.display()),
                             ));
@@ -3403,7 +3809,8 @@ impl SceneDoc {
                             .collect::<Vec<_>>()
                             .join(" / ");
                         out.push(
-                            Diagnostic::error(
+                            Diagnostic::error_code(
+                                ErrorCode::AssetNotFound,
                                 format!("{p}.path"),
                                 format!("找不到模型文件 \"{}\"（找过：{tried}）", m.path.display()),
                             )
@@ -3417,7 +3824,11 @@ impl SceneDoc {
             }
             if let Some(s) = m.scale {
                 if !s.is_finite() || s <= 0.0 {
-                    out.push(Diagnostic::error(format!("{p}.scale"), "缩放必须是正数"));
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.scale"),
+                        "缩放必须是正数",
+                    ));
                 }
             }
         }
@@ -3434,7 +3845,8 @@ impl SceneDoc {
             for (field, name) in [("a", &j.a), ("b", &j.b)] {
                 match names.get(name.as_str()) {
                     None => out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::UnknownReference,
                             format!("{p}.{field}"),
                             format!("找不到名为 \"{name}\" 的物体"),
                         )
@@ -3443,7 +3855,8 @@ impl SceneDoc {
                     Some(o) => {
                         if o.body == BodyKind::None {
                             out.push(
-                                Diagnostic::error(
+                                Diagnostic::error_code(
+                                    ErrorCode::InvalidValue,
                                     format!("{p}.{field}"),
                                     format!("物体 \"{name}\" 没有刚体，不能参与关节"),
                                 )
@@ -3458,19 +3871,29 @@ impl SceneDoc {
                 && ends[0].body == BodyKind::Static
                 && ends[1].body == BodyKind::Static
             {
-                out.push(Diagnostic::warn(&p, "关节两端都是静态刚体，不会有任何运动"));
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
+                    &p,
+                    "关节两端都是静态刚体，不会有任何运动",
+                ));
             }
             if j.kind == JointKind::Distance && j.rest_length.is_some_and(|l| l < 0.0) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.rest_length"),
                     "静止长度不能为负",
                 ));
             }
             if let Some(l) = &j.limits {
                 if !l[0].is_finite() || !l[1].is_finite() {
-                    out.push(Diagnostic::error(format!("{p}.limits"), "限位必须是有限数"));
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.limits"),
+                        "限位必须是有限数",
+                    ));
                 } else if l[0] > l[1] {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.limits"),
                         format!("下限 {} 大于上限 {}", l[0], l[1]),
                     ));
@@ -3482,23 +3905,36 @@ impl SceneDoc {
                 let zero =
                     !bad && (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]) < 1e-12;
                 if bad {
-                    out.push(Diagnostic::error(format!("{p}.axis"), "轴向必须是有限数"));
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.axis"),
+                        "轴向必须是有限数",
+                    ));
                 } else if zero {
                     out.push(
-                        Diagnostic::error(format!("{p}.axis"), "轴向不能是零向量")
-                            .with_hint("铰链/滑块的轴必须是某个方向，例如 [0, 1, 0]"),
+                        Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.axis"),
+                            "轴向不能是零向量",
+                        )
+                        .with_hint("铰链/滑块的轴必须是某个方向，例如 [0, 1, 0]"),
                     );
                 }
             }
             for (key, anchor) in [("anchor_a", &j.anchor_a), ("anchor_b", &j.anchor_b)] {
                 if let Some(v) = anchor {
                     if !finite3(v) {
-                        out.push(Diagnostic::error(format!("{p}.{key}"), "锚点必须是有限数"));
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.{key}"),
+                            "锚点必须是有限数",
+                        ));
                     }
                 }
             }
             if j.kind != JointKind::Hinge && j.motor_velocity.is_some() {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("{p}.motor_velocity"),
                     "只有铰链关节支持马达",
                 ));
@@ -3508,7 +3944,8 @@ impl SceneDoc {
                 if let Some(l) = &j.limits {
                     if l.iter().any(|v| v.abs() > 6.5) {
                         out.push(
-                            Diagnostic::warn(
+                            Diagnostic::warn_code(
+                                ErrorCode::UnitAmbiguity,
                                 format!("{p}.limits"),
                                 format!(
                                     "铰链限位单位是弧度，当前最大 {:.2} rad ≈ {:.0}°",
@@ -3523,7 +3960,8 @@ impl SceneDoc {
                 if let Some(v) = j.motor_velocity {
                     if v.abs() > 100.0 {
                         out.push(
-                            Diagnostic::warn(
+                            Diagnostic::warn_code(
+                                ErrorCode::UnitAmbiguity,
                                 format!("{p}.motor_velocity"),
                                 format!("马达速度单位是弧度/秒，当前 {v}"),
                             )
@@ -3533,7 +3971,7 @@ impl SceneDoc {
                 }
                 if j.motor_target_deg.is_some() && j.motor_velocity.is_some() {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(ErrorCode::MutuallyExclusive,
                             format!("{p}.motor_velocity"),
                             "同时给了 motor_target_deg 与 motor_velocity：按伺服模式走，速度会被忽略",
                         )
@@ -3547,7 +3985,8 @@ impl SceneDoc {
                     ("motor_damping", j.motor_damping.is_some()),
                 ] {
                     if given {
-                        out.push(Diagnostic::warn(
+                        out.push(Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
                             format!("{p}.{key}"),
                             "只有铰链关节支持马达",
                         ));
@@ -3556,12 +3995,14 @@ impl SceneDoc {
             }
             if let Some(deg) = j.motor_target_deg {
                 if !deg.is_finite() {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.motor_target_deg"),
                         "伺服目标角必须是有限数",
                     ));
                 } else if deg.abs() > 3600.0 {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::UnitAmbiguity,
                         format!("{p}.motor_target_deg"),
                         format!("伺服目标角 {deg}° 不太像个角度（单位是度）"),
                     ));
@@ -3573,7 +4014,8 @@ impl SceneDoc {
             ] {
                 if let Some(v) = v {
                     if !v.is_finite() || v < 0.0 {
-                        out.push(Diagnostic::error(
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             format!("{p}.{key}"),
                             "伺服增益必须是非负的有限数",
                         ));
@@ -3587,13 +4029,15 @@ impl SceneDoc {
                         || cone.half_angle_deg < 0.0
                         || cone.half_angle_deg > 180.0
                     {
-                        out.push(Diagnostic::error(
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             format!("{p}.cone_limit.half_angle_deg"),
                             "锥形限位的半角必须在 0~180 度之间",
                         ));
                     } else if cone.half_angle_deg < 0.5 {
                         out.push(
-                            Diagnostic::warn(
+                            Diagnostic::warn_code(
+                                ErrorCode::SuspiciousValue,
                                 format!("{p}.cone_limit.half_angle_deg"),
                                 "半角几乎是 0：这等于把球窝锁死，通常想要的是 fixed 关节",
                             )
@@ -3604,12 +4048,14 @@ impl SceneDoc {
                         if let Some(a) = axis {
                             let zero = a.iter().all(|v| v.abs() < 1e-6);
                             if !finite3(a) {
-                                out.push(Diagnostic::error(
+                                out.push(Diagnostic::error_code(
+                                    ErrorCode::OutOfRange,
                                     format!("{p}.cone_limit.{key}"),
                                     "锥形限位的轴必须是有限数",
                                 ));
                             } else if zero {
-                                out.push(Diagnostic::error(
+                                out.push(Diagnostic::error_code(
+                                    ErrorCode::OutOfRange,
                                     format!("{p}.cone_limit.{key}"),
                                     "锥形限位的轴不能是零向量",
                                 ));
@@ -3617,7 +4063,8 @@ impl SceneDoc {
                         }
                     }
                 }
-                (Some(_), _) => out.push(Diagnostic::error(
+                (Some(_), _) => out.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
                     format!("{p}.cone_limit"),
                     "锥形限位只有球窝关节（type = ball）支持",
                 )),
@@ -3633,12 +4080,14 @@ impl SceneDoc {
                 if let Some(v) = v {
                     let unit = if key == "break_force" { "N" } else { "N·m" };
                     if !v.is_finite() || v <= 0.0 {
-                        out.push(Diagnostic::error(
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             format!("{p}.{key}"),
                             format!("断裂阈值必须是正数（{unit}）；不想让它断就别写这个字段"),
                         ));
                     } else if v < 0.5 {
-                        out.push(Diagnostic::warn(
+                        out.push(Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
                             format!("{p}.{key}"),
                             format!("断裂阈值只有 {v} {unit}：几乎一上力就断"),
                         ));
@@ -3668,7 +4117,8 @@ impl SceneDoc {
 
         if self.actions.len() > MAX_ACTIONS {
             out.push(
-                Diagnostic::error(
+                Diagnostic::error_code(
+                    ErrorCode::LimitExceeded,
                     "actions",
                     format!("动作数 {} 超过上限 {MAX_ACTIONS}", self.actions.len()),
                 )
@@ -3682,7 +4132,8 @@ impl SceneDoc {
             // 时序：步号与秒数二选一
             if a.at_step.is_some() && a.at_time.is_some() {
                 out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::MutuallyExclusive,
                         format!("{p}.at_time"),
                         "at_step 与 at_time 只能给一个（给了两个不知道听谁的）",
                     )
@@ -3698,7 +4149,8 @@ impl SceneDoc {
             };
             if let Some(t) = a.at_time {
                 if !t.is_finite() || t < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.at_time"),
                         format!("时间点必须是有限的非负数，当前为 {t}"),
                     ));
@@ -3706,14 +4158,19 @@ impl SceneDoc {
             }
             if self.simulate.steps == 0 {
                 out.push(
-                    Diagnostic::warn(&p, "simulate.steps = 0，一步都不跑，动作不会触发")
-                        .with_hint("给 simulate.steps 一个正数（例如 120）"),
+                    Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        &p,
+                        "simulate.steps = 0，一步都不跑，动作不会触发",
+                    )
+                    .with_hint("给 simulate.steps 一个正数（例如 120）"),
                 );
             }
             if let Some(step) = eff_step {
                 if self.simulate.steps > 0 && step > self.simulate.steps {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
                             &p,
                             format!(
                                 "在第 {step} 步施加，但 simulate.steps = {}，这个动作不会触发",
@@ -3728,7 +4185,8 @@ impl SceneDoc {
             // 参数：缺了必需的、或者给了用不上的，都要说清楚（静默忽略最难查）
             match &a.value {
                 None if a.kind.needs_value() => out.push(
-                    Diagnostic::error(
+                    Diagnostic::error_code(
+                        ErrorCode::MissingField,
                         format!("{p}.value"),
                         format!("{kind} 动作需要 value（[x, y, z]）"),
                     )
@@ -3740,11 +4198,13 @@ impl SceneDoc {
                         _ => "给一个方向与大小",
                     }),
                 ),
-                Some(v) if !finite3(v) => out.push(Diagnostic::error(
+                Some(v) if !finite3(v) => out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.value"),
                     "value 必须是有限数",
                 )),
-                Some(_) if !a.kind.needs_value() => out.push(Diagnostic::warn(
+                Some(_) if !a.kind.needs_value() => out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("{p}.value"),
                     format!("{kind} 动作不需要 value，会被忽略"),
                 )),
@@ -3752,49 +4212,57 @@ impl SceneDoc {
             }
             if a.kind.uses_point() {
                 match &a.point {
-                    None => out.push(Diagnostic::error(
+                    None => out.push(Diagnostic::error_code(
+                        ErrorCode::MissingField,
                         format!("{p}.point"),
                         "impulse_at_point 需要 point（世界坐标的作用点）",
                     )),
-                    Some(q) if !finite3(q) => out.push(Diagnostic::error(
+                    Some(q) if !finite3(q) => out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.point"),
                         "作用点必须是有限数",
                     )),
                     Some(_) => {}
                 }
             } else if a.point.is_some() {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("{p}.point"),
                     format!("只有 impulse_at_point 用 point，{kind} 会忽略它"),
                 ));
             }
             if a.kind.uses_position() {
                 match &a.position {
-                    None => out.push(Diagnostic::error(
+                    None => out.push(Diagnostic::error_code(
+                        ErrorCode::MissingField,
                         format!("{p}.position"),
                         "teleport 需要 position（目标位置）",
                     )),
-                    Some(v) if !finite3(v) => out.push(Diagnostic::error(
+                    Some(v) if !finite3(v) => out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.position"),
                         "目标位置必须是有限数",
                     )),
                     Some(_) => {}
                 }
                 if a.rotation_deg.as_ref().is_some_and(|r| !finite3(r)) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{p}.rotation_deg"),
                         "目标朝向必须是有限数",
                     ));
                 }
             } else {
                 if a.position.is_some() {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("{p}.position"),
                         format!("只有 teleport 用 position，{kind} 会忽略它"),
                     ));
                 }
                 if a.rotation_deg.is_some() {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("{p}.rotation_deg"),
                         format!("只有 teleport 用 rotation_deg，{kind} 会忽略它"),
                     ));
@@ -3802,13 +4270,15 @@ impl SceneDoc {
             }
             if a.kind.uses_steps() {
                 if a.steps == 0 {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("{p}.steps"),
                         "steps = 0，这个力一步都不会施加",
                     ));
                 }
             } else if a.steps != 1 {
-                out.push(Diagnostic::warn(
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("{p}.steps"),
                     format!("steps 只对 force 生效，{kind} 会忽略它"),
                 ));
@@ -3818,7 +4288,8 @@ impl SceneDoc {
             if a.target == "*" {
                 if a.kind != ActionKind::Wake {
                     out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
                             format!("{p}.target"),
                             format!("target \"*\" 只有 wake 动作支持，{kind} 需要一个具体刚体名"),
                         )
@@ -3829,14 +4300,16 @@ impl SceneDoc {
                 // 目标必须是能动的刚体
                 match bodies.get(a.target.as_str()) {
                     None => out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::UnknownReference,
                             format!("{p}.target"),
                             format!("找不到名为 \"{}\" 的刚体", a.target),
                         )
                         .with_hint(body_name_hint),
                     ),
                     Some(BodyKind::None) => out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
                             format!("{p}.target"),
                             format!(
                                 "物体 \"{}\" 没有刚体（body = none），动作不会生效",
@@ -3846,7 +4319,8 @@ impl SceneDoc {
                         .with_hint("把它的 body 改成 dynamic"),
                     ),
                     Some(BodyKind::Static) if a.kind.pushes() => out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
                             &p,
                             format!(
                                 "\"{}\" 是静态刚体（无限质量），{kind} 打上去不会有任何效果",
@@ -3862,7 +4336,8 @@ impl SceneDoc {
 
         if self.probes.len() > MAX_PROBES {
             out.push(
-                Diagnostic::error(
+                Diagnostic::error_code(
+                    ErrorCode::LimitExceeded,
                     "probes",
                     format!("探针数 {} 超过上限 {MAX_PROBES}", self.probes.len()),
                 )
@@ -3873,18 +4348,21 @@ impl SceneDoc {
         for (i, pr) in self.probes.iter().enumerate() {
             let p = format!("probes[{i}]");
             if pr.name.trim().is_empty() {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
                     format!("{p}.name"),
                     "探针名不能为空（报告里用它标识）",
                 ));
             } else if !probe_names.insert(pr.name.as_str()) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::DuplicateName,
                     format!("{p}.name"),
                     format!("探针名 \"{}\" 重复，报告里无法区分", pr.name),
                 ));
             }
             if !finite3(&pr.position) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     format!("{p}.position"),
                     "探针中心必须是有限数",
                 ));
@@ -3892,22 +4370,28 @@ impl SceneDoc {
             match pr.shape {
                 ProbeShapeDoc::Sphere => {
                     if !(pr.radius.is_finite() && pr.radius > 0.0) {
-                        out.push(Diagnostic::error(
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             format!("{p}.radius"),
                             format!("球形探针半径必须是有限正数，当前为 {}", pr.radius),
                         ));
                     }
                     if pr.size.is_some() {
                         out.push(
-                            Diagnostic::warn(format!("{p}.size"), "球形探针不用 size，会被忽略")
-                                .with_hint("要盒形区域就把 shape 写成 \"box\""),
+                            Diagnostic::warn_code(
+                                ErrorCode::Ineffective,
+                                format!("{p}.size"),
+                                "球形探针不用 size，会被忽略",
+                            )
+                            .with_hint("要盒形区域就把 shape 写成 \"box\""),
                         );
                     }
                 }
                 ProbeShapeDoc::Box => {
                     if let Some(sz) = pr.size {
                         if !finite3(&sz) || sz.iter().any(|v| *v <= 0.0) {
-                            out.push(Diagnostic::error(
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
                                 format!("{p}.size"),
                                 "盒形探针边长必须是有限正数",
                             ));
@@ -3918,13 +4402,15 @@ impl SceneDoc {
             for (k, name) in pr.watch.iter().enumerate() {
                 match bodies.get(name.as_str()) {
                     None => out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::UnknownReference,
                             format!("{p}.watch[{k}]"),
                             format!("找不到名为 \"{name}\" 的刚体"),
                         )
                         .with_hint(body_name_hint),
                     ),
-                    Some(BodyKind::None) => out.push(Diagnostic::error(
+                    Some(BodyKind::None) => out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
                         format!("{p}.watch[{k}]"),
                         format!("物体 \"{name}\" 没有刚体，位置永远不会变"),
                     )),
@@ -3933,8 +4419,12 @@ impl SceneDoc {
             }
             if self.simulate.steps == 0 {
                 out.push(
-                    Diagnostic::warn(&p, "simulate.steps = 0，探针不会观测到任何东西")
-                        .with_hint("给 simulate.steps 一个正数（例如 120）"),
+                    Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        &p,
+                        "simulate.steps = 0，探针不会观测到任何东西",
+                    )
+                    .with_hint("给 simulate.steps 一个正数（例如 120）"),
                 );
             }
         }
@@ -3944,13 +4434,15 @@ impl SceneDoc {
             let enabled = b.enabled.unwrap_or(true);
             if let Some(i) = b.intensity {
                 if !i.is_finite() || i < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.bloom.intensity",
                         "bloom 强度必须是非负数",
                     ));
                 } else if i == 0.0 && enabled {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
                             "lighting.bloom.intensity",
                             "bloom 开着但强度为 0，等于没开",
                         )
@@ -3960,13 +4452,15 @@ impl SceneDoc {
             }
             if let Some(t) = b.threshold {
                 if !t.is_finite() || t < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.bloom.threshold",
                         "bloom 阈值必须是非负数",
                     ));
                 } else if t > 20.0 {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
                             "lighting.bloom.threshold",
                             format!("阈值 {t} 超过了太阳圆盘的亮度，bloom 基本不会触发"),
                         )
@@ -3985,10 +4479,14 @@ impl SceneDoc {
             ] {
                 let Some(v) = value else { continue };
                 if !v.is_finite() || v < 0.0 {
-                    out.push(Diagnostic::error(key, "FXAA 阈值必须是非负数"));
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        key,
+                        "FXAA 阈值必须是非负数",
+                    ));
                 } else if v > 1.0 && enabled {
                     out.push(
-                        Diagnostic::warn(key, format!("阈值 {v} 大于 1，几乎不会判定出边缘"))
+                        Diagnostic::warn_code(ErrorCode::SuspiciousValue, key, format!("阈值 {v} 大于 1，几乎不会判定出边缘"))
                             .with_hint(
                                 "亮度差是 0~1 的量：常用 edge_threshold 0.166、edge_threshold_min 0.0833",
                             ),
@@ -4002,13 +4500,15 @@ impl SceneDoc {
             let enabled = a.enabled.unwrap_or(true);
             if let Some(r) = a.radius {
                 if !r.is_finite() || r <= 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.ssao.radius",
                         "SSAO 半径必须是正数（单位：米）",
                     ));
                 } else if r > 20.0 {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
                             "lighting.ssao.radius",
                             format!("半径 {r} 米太大，几乎整屏都会被压暗"),
                         )
@@ -4018,14 +4518,16 @@ impl SceneDoc {
             }
             if let Some(b) = a.bias {
                 if !b.is_finite() || b < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.ssao.bias",
                         "SSAO 深度偏移不能是负数",
                     ));
                 } else if let Some(r) = a.radius {
                     if r.is_finite() && r > 0.0 && b >= r {
                         out.push(
-                            Diagnostic::warn(
+                            Diagnostic::warn_code(
+                                ErrorCode::SuspiciousValue,
                                 "lighting.ssao.bias",
                                 format!("偏移 {b} 不小于半径 {r}，遮挡会被全部滤掉"),
                             )
@@ -4036,17 +4538,23 @@ impl SceneDoc {
             }
             if let Some(st) = a.strength {
                 if !st.is_finite() || st < 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         "lighting.ssao.strength",
                         "SSAO 强度不能是负数",
                     ));
                 } else if st == 0.0 && enabled {
                     out.push(
-                        Diagnostic::warn("lighting.ssao.strength", "SSAO 开着但强度为 0，等于没开")
-                            .with_hint("想要接触阴影就给个正数（例如 1.0），或者去掉 ssao 这一节"),
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
+                            "lighting.ssao.strength",
+                            "SSAO 开着但强度为 0，等于没开",
+                        )
+                        .with_hint("想要接触阴影就给个正数（例如 1.0），或者去掉 ssao 这一节"),
                     );
                 } else if st > 1.0 {
-                    out.push(Diagnostic::warn(
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::SuspiciousValue,
                         "lighting.ssao.strength",
                         format!("强度 {st} 大于 1，接触处会被压得过黑"),
                     ));
@@ -4055,7 +4563,8 @@ impl SceneDoc {
             if let Some(n) = a.samples {
                 if !(1..=64).contains(&n) {
                     out.push(
-                        Diagnostic::error(
+                        Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
                             "lighting.ssao.samples",
                             format!("SSAO 采样数 {n} 超出范围（1~64）"),
                         )
@@ -4069,10 +4578,12 @@ impl SceneDoc {
         if let Some(preset) = self.lighting.preset.as_deref() {
             if !matches!(preset, "studio" | "day" | "night" | "none") {
                 out.push(
-                    Diagnostic::error("lighting.preset", format!("未知的光照预设 \"{preset}\""))
-                        .with_hint(
-                            "可选：studio（缺省）/ day / night / none（无主光、环境光为 0）",
-                        ),
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        "lighting.preset",
+                        format!("未知的光照预设 \"{preset}\""),
+                    )
+                    .with_hint("可选：studio（缺省）/ day / night / none（无主光、环境光为 0）"),
                 );
             }
         }
@@ -4080,7 +4591,8 @@ impl SceneDoc {
         // 相机
         if let Some(f) = self.camera.fov_deg {
             if !f.is_finite() || !(1.0..=179.0).contains(&f) {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "camera.fov_deg",
                     "视场角应在 1~179 度之间",
                 ));
@@ -4088,17 +4600,26 @@ impl SceneDoc {
         }
         if let Some(n) = self.camera.near {
             if !n.is_finite() || n <= 0.0 {
-                out.push(Diagnostic::error("camera.near", "近裁剪面必须为正数"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "camera.near",
+                    "近裁剪面必须为正数",
+                ));
             }
         }
         if let Some(f) = self.camera.far {
             if !f.is_finite() || f <= 0.0 {
-                out.push(Diagnostic::error("camera.far", "远裁剪面必须为正数"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "camera.far",
+                    "远裁剪面必须为正数",
+                ));
             }
         }
         if let (Some(n), Some(f)) = (self.camera.near, self.camera.far) {
             if n.is_finite() && f.is_finite() && f <= n {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "camera.far",
                     format!("远裁剪面必须大于近裁剪面（near={n}, far={f}）"),
                 ));
@@ -4106,7 +4627,8 @@ impl SceneDoc {
         }
         if let Some(h) = self.camera.orthographic_height {
             if !h.is_finite() || h <= 0.0 {
-                out.push(Diagnostic::error(
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
                     "camera.orthographic_height",
                     "正交投影的可视高度必须为正数",
                 ));
@@ -4114,11 +4636,16 @@ impl SceneDoc {
         }
         if let Some(d) = self.camera.distance {
             if !d.is_finite() || d <= 0.0 {
-                out.push(Diagnostic::error("camera.distance", "环绕距离必须为正数"));
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "camera.distance",
+                    "环绕距离必须为正数",
+                ));
             }
         }
         if self.camera.position.is_some() && self.camera.look_at.is_none() {
-            out.push(Diagnostic::warn(
+            out.push(Diagnostic::warn_code(
+                ErrorCode::SuspiciousValue,
                 "camera.look_at",
                 "只给了位置没给注视点，相机会看向原点",
             ));
@@ -4126,31 +4653,39 @@ impl SceneDoc {
 
         // 仿真 / 渲染
         if !self.simulate.dt.is_finite() || self.simulate.dt <= 0.0 || self.simulate.dt > 0.5 {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::error_code(
+                ErrorCode::OutOfRange,
                 "simulate.dt",
                 "步长必须在 (0, 0.5] 秒之间",
             ));
         }
         if self.render.width == 0 || self.render.height == 0 {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::error_code(
+                ErrorCode::OutOfRange,
                 "render.width/height",
                 "渲染尺寸必须大于 0",
             ));
         }
         if self.render.width > 8192 || self.render.height > 8192 {
-            out.push(Diagnostic::warn(
+            out.push(Diagnostic::warn_code(
+                ErrorCode::SuspiciousValue,
                 "render.width/height",
                 "渲染尺寸过大，软件光栅下可能非常慢",
             ));
         }
         if !matches!(self.render.msaa, 1 | 2 | 4 | 8) {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::error_code(
+                ErrorCode::InvalidValue,
                 "render.msaa",
                 "MSAA 只能是 1 / 2 / 4 / 8",
             ));
         }
         if self.render.output.as_os_str().is_empty() {
-            out.push(Diagnostic::error("render.output", "输出路径不能为空"));
+            out.push(Diagnostic::error_code(
+                ErrorCode::InvalidValue,
+                "render.output",
+                "输出路径不能为空",
+            ));
         }
 
         out
@@ -4177,7 +4712,8 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
         ShapeKind::Box => {
             if let Some(size) = s.size {
                 if !finite3(&size) || size.iter().any(|v| *v <= 0.0) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{path}.size"),
                         "边长必须是正有限数",
                     ));
@@ -4187,7 +4723,8 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
         ShapeKind::Sphere => {
             if let Some(r) = s.radius {
                 if !r.is_finite() || r <= 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{path}.radius"),
                         "半径必须为正数",
                     ));
@@ -4197,7 +4734,8 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
         ShapeKind::Capsule | ShapeKind::Cylinder => {
             if let Some(h) = s.half_height {
                 if !h.is_finite() || h <= 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{path}.half_height"),
                         "半高必须为正数",
                     ));
@@ -4205,7 +4743,8 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
             }
             if let Some(r) = s.radius {
                 if !r.is_finite() || r <= 0.0 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{path}.radius"),
                         "半径必须为正数",
                     ));
@@ -4215,7 +4754,8 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
         ShapeKind::Plane => {
             if let Some(n) = s.normal {
                 if !finite3(&n) || Vec3::from_array(n).length_squared() < 1e-6 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{path}.normal"),
                         "法线必须是非零有限向量",
                     ));
@@ -4223,26 +4763,30 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
             }
         }
         ShapeKind::Convex => match &s.points {
-            None => out.push(Diagnostic::error(
+            None => out.push(Diagnostic::error_code(
+                ErrorCode::MissingField,
                 format!("{path}.points"),
                 "凸包必须提供 points",
             )),
             Some(pts) => {
                 if pts.len() < 4 {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{path}.points"),
                         format!("凸包至少需要 4 个顶点，当前 {}", pts.len()),
                     ));
                 }
                 if pts.iter().any(|p| !finite3(p)) {
-                    out.push(Diagnostic::error(
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
                         format!("{path}.points"),
                         "顶点必须是有限数",
                     ));
                 }
                 if pts.len() >= 4 && pts.iter().all(finite3) {
                     out.push(
-                        Diagnostic::warn(
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
                             path,
                             "凸包的物理是精确凸包，但渲染用点集的 AABB 盒体近似",
                         )
@@ -6239,6 +6783,238 @@ mod tests {
         let diags = doc.validate();
         let d = diag_at(&diags, "version").expect("版本 1 必须报错");
         assert!(d.message.contains("当前支持 2"), "{}", d.message);
+    }
+
+    // ---------- 诊断码：稳定契约（第 55 轮） ----------
+
+    /// 把一段场景 JSON 的**全部**诊断收集成 `(code, path)`：结构错误（`from_json` 就失败）
+    /// 与语义错误（`validate`）都算。
+    fn codes_of(json_text: &str) -> Vec<(String, String)> {
+        let diags = match SceneDoc::from_json(json_text) {
+            Ok(doc) => doc.validate(),
+            Err(DocError::Invalid(diags)) => diags,
+            Err(e) => panic!("既不是结构诊断也不是合法场景：{e}"),
+        };
+        diags
+            .into_iter()
+            .map(|d| (d.code.as_str().to_string(), d.path))
+            .collect()
+    }
+
+    #[test]
+    fn error_code_table_is_self_consistent() {
+        // 宏从同一份声明生成枚举/ALL/TABLE，所以这里主要盯"表里的内容本身能不能当契约用"。
+        assert_eq!(
+            ErrorCode::ALL.len(),
+            ErrorCode::TABLE.len(),
+            "ALL 与 TABLE 长度不一致"
+        );
+        assert!(
+            ErrorCode::ALL.contains(&ErrorCode::Invalid),
+            "兜底码必须在表里"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, (code, wire, meaning, action)) in ErrorCode::TABLE.iter().enumerate() {
+            assert_eq!(*code, ErrorCode::ALL[i], "ALL 与 TABLE 顺序不一致");
+            assert_eq!(code.as_str(), *wire, "as_str 与表里的名字不一致");
+            assert!(
+                !wire.is_empty() && !meaning.is_empty() && !action.is_empty(),
+                "{wire} 有空字段"
+            );
+            // 竖线会破坏 docs/error_codes.md 的表格解析（对账测试会静默漏行）。
+            assert!(
+                !wire.contains('|') && !meaning.contains('|') && !action.contains('|'),
+                "{wire} 的字段里不能有 `|`"
+            );
+            assert!(
+                wire.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{wire} 不是 snake_case 的线上名字"
+            );
+            assert!(seen.insert(*wire), "码名重复：{wire}");
+            // 线上名字必须真的是 serde 序列化结果（否则 schema 与 JSON 会对不上）
+            let value = serde_json::to_value(code).expect("序列化诊断码");
+            assert_eq!(value, serde_json::json!(wire), "{wire} 的 serde 名字不一致");
+            let back: ErrorCode = serde_json::from_value(value).expect("反序列化诊断码");
+            assert_eq!(back, *code);
+        }
+        assert_eq!(seen.len(), ErrorCode::ALL.len());
+        assert_eq!(ErrorCode::default(), ErrorCode::Invalid, "缺省必须是兜底码");
+    }
+
+    #[test]
+    fn error_codes_doc_matches_the_table() {
+        // 文档表与码表**逐格**对账：改了 `define_error_codes!` 而没重算 docs/error_codes.md
+        // 就会红。生成命令写在文档开头（quench3d schema --json 一行管道）。
+        const DOC: &str = include_str!("../../../docs/error_codes.md");
+        let body = DOC
+            .split("<!-- BEGIN GENERATED TABLE")
+            .nth(1)
+            .expect("docs/error_codes.md 缺少 BEGIN 标记")
+            .split("<!-- END GENERATED TABLE -->")
+            .next()
+            .expect("docs/error_codes.md 缺少 END 标记");
+        let mut rows: Vec<(String, String, String)> = Vec::new();
+        for line in body.lines() {
+            let line = line.trim();
+            if !line.starts_with("| `") {
+                continue;
+            }
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            assert_eq!(cells.len(), 3, "文档表这一行不是 3 列：{line}");
+            rows.push((
+                cells[0].trim_matches('`').to_string(),
+                cells[1].to_string(),
+                cells[2].to_string(),
+            ));
+        }
+        assert_eq!(
+            rows.len(),
+            ErrorCode::TABLE.len(),
+            "docs/error_codes.md 里的码数量与 ErrorCode::TABLE 不一致"
+        );
+        for ((_, wire, meaning, action), (dw, dm, da)) in ErrorCode::TABLE.iter().zip(rows.iter()) {
+            assert_eq!(wire, dw, "码名不一致");
+            assert_eq!(meaning, dm, "{wire} 的含义与文档不一致");
+            assert_eq!(action, da, "{wire} 的 agent 动作与文档不一致");
+        }
+    }
+
+    /// 断言某段场景在某个路径上给出某个码，且不出现兜底码。
+    #[track_caller]
+    fn assert_code(json_text: &str, code: &str, path: &str) {
+        let got = codes_of(json_text);
+        assert!(
+            got.iter().any(|(c, p)| c == code && p == path),
+            "期望在 {path} 上得到 {code}，实际：{got:?}"
+        );
+        assert!(
+            !got.iter().any(|(c, _)| c == "invalid"),
+            "这段场景不该出现兜底码 invalid：{got:?}"
+        );
+    }
+
+    /// **稳定契约**：哪种问题给哪个码。这里每一条都是 agent 会用来分支的判定，
+    /// 改了码（或改了 path）必须是有意识的决定，而不是顺手。
+    #[test]
+    fn diagnostic_codes_are_stable_and_specific() {
+        // 结构层：JSON 一解析就失败
+        assert_code(r#"{"object": []}"#, "unknown_field", "object");
+        assert_code(r#"{"gravity": "up"}"#, "invalid_type", "gravity");
+        assert_code(
+            r#"{"objects":[{"shape":{"type":"pyramid"}}]}"#,
+            "invalid_value",
+            "objects[0].shape.type",
+        );
+        assert_code(
+            r#"{"objects":[{"name":"a","shape":{}}]}"#,
+            "missing_field",
+            "objects[0].shape",
+        );
+        // 引用 / 命名
+        assert_code(
+            r#"{"objects":[{"name":"a","body":"dynamic","shape":{"type":"box","size":[1,1,1]}}],
+                "joints":[{"type":"fixed","a":"a","b":"nope"}]}"#,
+            "unknown_reference",
+            "joints[0].b",
+        );
+        assert_code(
+            r#"{"objects":[{"name":"a"},{"name":"a"}]}"#,
+            "duplicate_name",
+            "objects[1].name",
+        );
+        assert_code(
+            r#"{"objects":[{"name":"a","parent":"b"},{"name":"b","parent":"a"}]}"#,
+            "cycle",
+            "objects[0].parent",
+        );
+        assert_code(r#"{"cameras":{"default":{}}}"#, "reserved_name", "cameras");
+        // 取值 / 互斥 / 上限
+        assert_code(
+            r#"{"objects":[{"name":"a","shape":{"type":"box"},"shapes":[{"shape":{"type":"box"}}]}]}"#,
+            "mutually_exclusive",
+            "objects[0].shapes",
+        );
+        assert_code(
+            r#"{"camera":{"fov_deg":400}}"#,
+            "out_of_range",
+            "camera.fov_deg",
+        );
+        assert_code(
+            r#"{"simulate":{"steps":2000000}}"#,
+            "limit_exceeded",
+            "simulate.steps",
+        );
+        // 语义：写了不生效 / 单位易混 / 资源找不到
+        assert_code(
+            r#"{"objects":[{"name":"a","body":"none","velocity":[1,0,0]}]}"#,
+            "ineffective",
+            "objects[0].velocity",
+        );
+        assert_code(
+            r#"{"objects":[{"name":"a","body":"dynamic","shape":{"type":"box","size":[1,1,1]}},
+                 {"name":"b","body":"dynamic","shape":{"type":"box","size":[1,1,1]}}],
+                "joints":[{"type":"hinge","a":"a","b":"b","limits":[0,90]}]}"#,
+            "unit_ambiguity",
+            "joints[0].limits",
+        );
+        assert_code(
+            r#"{"models":[{"path":"definitely_missing_xyz.glb"}]}"#,
+            "asset_not_found",
+            "models[0].path",
+        );
+        // io_error 走的是 `from_file`（读盘失败），不是 `from_json`
+        let missing = std::env::temp_dir().join("quench3d_no_such_dir_55b/scene.json");
+        let diags = match SceneDoc::from_file(&missing) {
+            Err(DocError::Invalid(diags)) => diags,
+            other => panic!("读不存在的文件应当给结构诊断，实际：{other:?}"),
+        };
+        assert!(
+            diags.iter().any(|d| d.code == ErrorCode::IoError),
+            "读盘失败应当是 io_error：{diags:?}"
+        );
+    }
+
+    /// 老 JSON（诊断里没有 `code`）必须还能反序列化，并且落到兜底码。
+    #[test]
+    fn diagnostics_without_a_code_deserialize_to_invalid() {
+        let d: Diagnostic =
+            serde_json::from_str(r#"{"severity":"error","path":"objects[0]","message":"旧诊断"}"#)
+                .expect("没有 code 的老诊断要能解析");
+        assert_eq!(d.code, ErrorCode::Invalid);
+        // 序列化时 code 一定在（契约：每条诊断都带码）
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["code"], "invalid");
+        assert_eq!(v["path"], "objects[0]");
+    }
+
+    /// serde 错误分类：结构检查的唯一出口，分类错了所有字段级诊断都会错。
+    #[test]
+    fn serde_errors_classify_into_stable_codes() {
+        assert_eq!(
+            classify_serde_code("unknown field `foo`, expected one of `a`, `b`"),
+            ErrorCode::UnknownField
+        );
+        assert_eq!(
+            classify_serde_code("missing field `type`"),
+            ErrorCode::MissingField
+        );
+        assert_eq!(
+            classify_serde_code("unknown variant `pyramid`, expected one of `box`"),
+            ErrorCode::InvalidValue
+        );
+        assert_eq!(
+            classify_serde_code("invalid type: string \"up\", expected an array of 3 numbers"),
+            ErrorCode::InvalidType
+        );
+        assert_eq!(
+            classify_serde_code("invalid length 2, expected an array of 3 elements"),
+            ErrorCode::InvalidType
+        );
+        assert_eq!(
+            classify_serde_code("backwards incompatible something"),
+            ErrorCode::Invalid
+        );
     }
 }
 
