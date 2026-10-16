@@ -459,6 +459,7 @@ pub fn scene_grammar() -> Value {
             "sky": "是否绘制天空，缺省 true",
             "grid": "是否绘制无限网格，缺省 true",
             "shadows": "是否投射阴影，缺省 true",
+            "spot_lights": "聚光灯数组（有方向的局部光，与点光源共享 8 盏名额）",
             "point_lights": "点光源数组：{ position:[x,y,z], color:[r,g,b]（**线性**、非 sRGB）, intensity（缺省 12）, radius（影响半径，缺省 18）}；最多 8 盏生效。**不写这个字段 = 保留预设自带的补光**，写 [] 才是显式清空",
             "fog": "指数距离雾：{ color:[r,g,b]（**线性**、非 sRGB，缺省跟随预设）, density（每米，缺省 0.02，0 = 关闭）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。天空与参考网格也会跟着淡出；常见 density 0.02~0.1（0.05 大约 20 米外看不清）",
             "shadow_quality": "阴影质量：{ strength（0~1，缺省 0.85；0 = 阴影不压暗，1 = 全黑）, radius（阴影相机覆盖半径，米，缺省 28）}。与开关 `shadows` 分开：这一节只调质量。radius 是「覆盖范围 ↔ 精度」的旋钮，给大能让远处也投上阴影但边缘更糊。**阴影贴图分辨率（像素）不在场景文件里**：它是渲染器构造参数",
@@ -695,6 +696,18 @@ pub fn json_schema() -> Value {
         "pointLight".into(),
         def(&["position", "color", "intensity", "radius"]),
     );
+    defs.insert(
+        "spotLight".into(),
+        def(&[
+            "position",
+            "direction",
+            "color",
+            "intensity",
+            "radius",
+            "inner_deg",
+            "outer_deg",
+        ]),
+    );
     defs.insert("fog".into(), def(&["color", "density"]));
     defs.insert(
         "shadowQuality".into(),
@@ -725,6 +738,7 @@ pub fn json_schema() -> Value {
             "shadow_quality",
             "sky_colors",
             "point_lights",
+            "spot_lights",
             "bloom",
             "fxaa",
             "ssao",
@@ -878,6 +892,7 @@ animations: [{ target, loop?, start?, speed?, weight?, position?: {times,values}
   （给了 orthographic_height 就是正交投影，没有近大远小）
 - lighting: { preset: "studio"|"day"|"night", sun_direction: [x,y,z], sun_intensity, ambient, exposure, sky: true, grid: true, shadows: true,
              point_lights: [ { position: [x,y,z], color: [r,g,b]（线性）, intensity: 12, radius: 18 } ],
+             spot_lights: [ { position: [x,y,z], direction: [0,-1,0], intensity: 12, radius: 18, inner_deg: 20, outer_deg: 30 } ],
              fog: { color: [r,g,b]（线性）, density: 0.03 },
              shadow_quality: { strength: 0.85, radius: 28 },
              sky_colors: { zenith: [r,g,b], horizon: [r,g,b], ground: [r,g,b] }（线性）,
@@ -1102,6 +1117,7 @@ mod tests {
             ("CameraDoc", "camera"),
             ("LightingDoc", "lighting"),
             ("PointLightDoc", "pointLight"),
+            ("SpotLightDoc", "spotLight"),
             ("FogDoc", "fog"),
             ("ShadowQualityDoc", "shadowQuality"),
             ("SkyColorsDoc", "skyColors"),

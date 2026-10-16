@@ -1377,6 +1377,42 @@ pub struct PointLightDoc {
     pub radius: f32,
 }
 
+/// 聚光灯：有方向的局部光，只照一个圆锥。
+///
+/// 与点光源**共享**引擎的局部光名额（8 盏，点光源优先），所以场景里点光源 + 聚光灯
+/// 一共超过 8 盏时会有警告，超出的部分不参与着色。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpotLightDoc {
+    /// 位置（世界坐标）。
+    pub position: [f32; 3],
+    /// 照射方向（会被归一化；零向量是错误）。
+    pub direction: [f32; 3],
+    /// 颜色 `[r, g, b]`，缺省白色（**线性空间**，与 `point_lights.color` 一致）。
+    #[serde(default = "default_light_color")]
+    pub color: [f32; 3],
+    /// 强度（线性），缺省 12。
+    #[serde(default = "default_light_intensity")]
+    pub intensity: f32,
+    /// 影响半径（米），缺省 18，必须为正。
+    #[serde(default = "default_light_radius")]
+    pub radius: f32,
+    /// 内锥角（度）：这个角度内是全强度，缺省 20。
+    #[serde(default = "default_spot_inner_deg")]
+    pub inner_deg: f32,
+    /// 外锥角（度）：这个角度外完全没有光，缺省 30，必须大于内锥角。
+    #[serde(default = "default_spot_outer_deg")]
+    pub outer_deg: f32,
+}
+
+fn default_spot_inner_deg() -> f32 {
+    20.0
+}
+
+fn default_spot_outer_deg() -> f32 {
+    30.0
+}
+
 fn default_light_color() -> [f32; 3] {
     [1.0, 1.0, 1.0]
 }
@@ -1447,6 +1483,10 @@ pub struct LightingDoc {
     /// 会在超过上限时给出警告，而不是让用户以为都亮了。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point_lights: Option<Vec<PointLightDoc>>,
+    /// 聚光灯列表（有方向的局部光）。`None`（不写）与 `[]`（显式空）行为一致，
+    /// 都没有聚光灯；与点光源共享 8 盏的局部光名额。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spot_lights: Option<Vec<SpotLightDoc>>,
     /// Bloom（泛光/亮区外溢）。
     ///
     /// **不写 = 关闭**（与改造前的像素完全一致）；写了这一节就是打开。
@@ -2618,6 +2658,58 @@ impl SceneDoc {
                     "点光源半径必须是正有限数",
                 ));
             }
+        }
+        // 聚光灯：角度范围、内锥 < 外锥、半径/强度、方向非零
+        let spots = self.lighting.spot_lights.as_deref().unwrap_or(&[]);
+        for (i, l) in spots.iter().enumerate() {
+            let p = format!("lighting.spot_lights[{i}]");
+            if l.radius <= 0.0 {
+                out.push(Diagnostic::error(format!("{p}.radius"), "影响半径必须为正"));
+            }
+            if l.intensity < 0.0 {
+                out.push(Diagnostic::error(format!("{p}.intensity"), "强度不能为负"));
+            }
+            let in_range = |d: f32| d > 0.0 && d < 90.0;
+            if !in_range(l.inner_deg) || !in_range(l.outer_deg) {
+                out.push(
+                    Diagnostic::error(
+                        format!("{p}.inner_deg"),
+                        format!(
+                            "锥角必须落在 (0, 90) 度之间（现在内 {} 度、外 {} 度）",
+                            l.inner_deg, l.outer_deg
+                        ),
+                    )
+                    .with_hint("内锥是全强度区、外锥是光斑边界；90 度就已经是半球了"),
+                );
+            } else if l.inner_deg > l.outer_deg {
+                out.push(
+                    Diagnostic::error(
+                        format!("{p}.inner_deg"),
+                        format!("内锥角 {} 度不能大于外锥角 {} 度", l.inner_deg, l.outer_deg),
+                    )
+                    .with_hint("把内锥角改小（光斑中心更实），或把外锥角改大（光斑边缘更散）"),
+                );
+            }
+            let d = l.direction;
+            if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < 1e-6 {
+                out.push(
+                    Diagnostic::error(format!("{p}.direction"), "照射方向不能是零向量")
+                        .with_hint("例如 [0, -1, 0] 表示向下照"),
+                );
+            }
+        }
+        // 点光源与聚光灯共享名额：说清楚"谁会被丢掉"，否则画面少一盏灯很难查
+        let local_total = point_lights.len() + spots.len();
+        if local_total > MAX_POINT_LIGHTS {
+            out.push(
+                Diagnostic::warn(
+                    "lighting.spot_lights",
+                    format!(
+                        "点光源 + 聚光灯共 {local_total} 盏，超过 {MAX_POINT_LIGHTS} 盏的部分不参与着色（点光源优先）"
+                    ),
+                )
+                .with_hint("减少局部光数量，或把远处的灯合并成一盏"),
+            );
         }
         if point_lights.len() > MAX_POINT_LIGHTS {
             out.push(
@@ -5296,6 +5388,52 @@ mod tests {
         let round = SceneDoc::from_json(&plain.to_json_pretty()).unwrap();
         assert!(round.extra_asset_paths.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spot_light_validation_catches_the_ways_cones_go_wrong() {
+        // 缺省值要能直接用：只写位置与方向就是一盏合法的聚光灯
+        let ok = SceneDoc::from_value(json!({ "lighting": { "spot_lights": [
+            { "position": [0.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0] } ] } }))
+        .unwrap();
+        let d = ok.validate();
+        assert!(
+            d.iter().all(|x| x.severity != Severity::Error),
+            "只写位置+方向应当合法：{d:?}"
+        );
+        let bad = SceneDoc::from_value(json!({ "lighting": { "spot_lights": [
+            { "position": [0.0, 5.0, 0.0], "direction": [0.0, 0.0, 0.0],
+              "inner_deg": 30.0, "outer_deg": 20.0, "radius": 0.0 },
+            { "position": [0.0, 5.0, 0.0], "direction": [0.0, -1.0, 0.0], "inner_deg": 95.0 } ] } }))
+        .unwrap();
+        let d = bad.validate();
+        for path in [
+            "lighting.spot_lights[0].direction",
+            "lighting.spot_lights[0].inner_deg",
+            "lighting.spot_lights[0].radius",
+            "lighting.spot_lights[1].inner_deg",
+        ] {
+            assert!(
+                d.iter()
+                    .any(|x| x.path == path && x.severity == Severity::Error),
+                "{path} 应当报错：{d:?}"
+            );
+        }
+        // 局部光共享名额：超过 8 盏要警告（点光源优先，超出的不参与着色）
+        let many: Vec<serde_json::Value> = (0..9)
+            .map(|i| {
+                json!({ "position": [i as f32, 5.0, 0.0], "direction": [0.0, -1.0, 0.0],
+                             "radius": 10.0 })
+            })
+            .collect();
+        let over = SceneDoc::from_value(json!({ "lighting": { "spot_lights": many } })).unwrap();
+        assert!(
+            over.validate()
+                .iter()
+                .any(|x| x.severity == Severity::Warning && x.path == "lighting.spot_lights"),
+            "9 盏聚光灯要警告超预算：{:?}",
+            over.validate()
+        );
     }
 
     // --- 层级（格式版本 2 的 objects[].parent）------------------------------

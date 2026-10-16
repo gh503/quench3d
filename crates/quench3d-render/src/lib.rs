@@ -56,8 +56,10 @@ pub use camera::{Camera, CameraInput, FlyCamera, Frustum, OrbitCamera, Projectio
 /// `Device`、`SurfaceConfiguration`…）时一律走这里，避免各处各写一个版本号。
 pub use wgpu;
 
+pub use crate::light::{
+    DirectionalLight, FogParams, Lighting, PointLight, SkyParams, SpotLight, MAX_POINT_LIGHTS,
+};
 pub use context::{FrameError, GpuContext, GpuInitError, GpuOptions, OffscreenTarget};
-pub use light::{DirectionalLight, FogParams, Lighting, PointLight, SkyParams, MAX_POINT_LIGHTS};
 pub use lines::{DebugLines, LineVertex};
 pub use material::{MaterialDesc, MaterialId, MeshId, TextureId};
 pub use mesh::{MeshData, Vertex};
@@ -72,6 +74,7 @@ pub mod prelude {
     pub use crate::camera::{Camera, CameraInput, FlyCamera, OrbitCamera, Projection};
     pub use crate::color;
     pub use crate::context::{FrameError, GpuContext, GpuOptions};
+    pub use crate::light::SpotLight;
     pub use crate::light::{DirectionalLight, FogParams, Lighting, PointLight, SkyParams};
     pub use crate::lines::DebugLines;
     pub use crate::material::MaterialDesc;

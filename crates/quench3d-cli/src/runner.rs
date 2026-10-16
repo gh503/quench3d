@@ -2882,6 +2882,24 @@ fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
             })
             .collect();
     }
+    // 聚光灯：与点光源**共享**局部光名额（点光源优先），所以也放在最后覆盖。
+    // 不写 = 没有聚光灯（预设里也没有），写 [] 同样是空——这里两种情况行为一致。
+    if let Some(lights) = &l.spot_lights {
+        lighting.spot_lights = lights
+            .iter()
+            .map(|p| {
+                SpotLight::new(
+                    v3(p.position),
+                    v3(p.direction),
+                    Vec3::new(p.color[0], p.color[1], p.color[2]),
+                    p.intensity,
+                    p.radius,
+                    p.inner_deg,
+                    p.outer_deg,
+                )
+            })
+            .collect();
+    }
 }
 
 /// 应用相机配置。

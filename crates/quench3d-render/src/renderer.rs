@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, Frustum};
 use crate::context::{vertex_layout, FrameError, GpuContext};
-use crate::light::{Lighting, MAX_POINT_LIGHTS};
+use crate::light::{Lighting, PointLight, SpotLight, MAX_POINT_LIGHTS};
 use crate::lines::{DebugLines, LineVertex};
 use crate::material::{MaterialDesc, MaterialId, MeshId, TextureId};
 use crate::mesh::MeshData;
@@ -108,6 +108,44 @@ pub struct PointLightUniform {
     pub pos_range: [f32; 4],
     /// rgb = 颜色，w = 强度。
     pub color_intensity: [f32; 4],
+    /// xyz = 照射方向（聚光灯），w = 外锥角余弦；**w = 0 表示这是一盏点光源**。
+    pub dir_outer: [f32; 4],
+    /// x = 内锥角余弦，y = 1 表示聚光灯（0 表示点光源），zw 备用。
+    pub cone_inner: [f32; 4],
+}
+
+/// 把点光源与聚光灯打包进同一条 `array<PointLight, 8>`。
+///
+/// 顺序是**确定**的：点光源先占名额，聚光灯补后面，超出的忽略（场景校验会给警告）。
+/// 抽成纯函数是为了能直接测——"聚光灯有没有被塞进正确的位置、锥角余弦对不对"
+/// 这种事一旦错了，画面只是"有一点不对"，靠眼睛很难发现。
+pub fn pack_local_lights(
+    points: &[PointLight],
+    spots: &[SpotLight],
+) -> ([PointLightUniform; MAX_POINT_LIGHTS], usize) {
+    let mut out = [PointLightUniform::zeroed(); MAX_POINT_LIGHTS];
+    let mut n = 0usize;
+    for l in points.iter().take(MAX_POINT_LIGHTS) {
+        out[n] = PointLightUniform {
+            pos_range: [l.position.x, l.position.y, l.position.z, l.radius.max(0.01)],
+            color_intensity: [l.color.x, l.color.y, l.color.z, l.intensity],
+            // w = 0 → 点光源（着色器靠这个区分）
+            dir_outer: [0.0, 0.0, 0.0, 0.0],
+            cone_inner: [1.0, 0.0, 0.0, 0.0],
+        };
+        n += 1;
+    }
+    for s in spots.iter().take(MAX_POINT_LIGHTS - n) {
+        let d = s.dir();
+        out[n] = PointLightUniform {
+            pos_range: [s.position.x, s.position.y, s.position.z, s.radius.max(0.01)],
+            color_intensity: [s.color.x, s.color.y, s.color.z, s.intensity],
+            dir_outer: [d.x, d.y, d.z, s.outer_cos],
+            cone_inner: [s.inner_cos, 1.0, 0.0, 0.0],
+        };
+        n += 1;
+    }
+    (out, n)
 }
 
 /// 每实例的顶点数据。
@@ -1946,14 +1984,8 @@ impl Renderer {
         let inv_view_proj = view_proj.inverse();
         let sun = lighting.sun;
 
-        let mut point_lights = [PointLightUniform::zeroed(); MAX_POINT_LIGHTS];
-        let count = lighting.point_lights.len().min(MAX_POINT_LIGHTS);
-        for (i, l) in lighting.point_lights.iter().take(count).enumerate() {
-            point_lights[i] = PointLightUniform {
-                pos_range: [l.position.x, l.position.y, l.position.z, l.radius.max(0.01)],
-                color_intensity: [l.color.x, l.color.y, l.color.z, l.intensity],
-            };
-        }
+        let (point_lights, count) =
+            pack_local_lights(&lighting.point_lights, &lighting.spot_lights);
 
         let (light_dir, light_color) = match sun {
             Some(s) => {
@@ -2769,12 +2801,19 @@ mod tests {
     fn frame_uniform_layout_matches_wgsl() {
         use std::mem::{offset_of, size_of};
         // 偏移量按 `shaders/common.wgsl` 的 `Frame` 手算：mat4x4 = 64、vec4 = 16，
-        // 全部 16 字节对齐。点光是 `array<PointLight, 8>`，单盏 32 字节、交错排列。
+        // 全部 16 字节对齐。局部光是 `array<PointLight, 8>`，单盏 **64** 字节
+        // （位置/半径、颜色/强度、方向/外锥余弦、内锥余弦）、交错排列。
         assert_eq!(
             size_of::<PointLightUniform>(),
-            32,
-            "PointLight 必须是两个 vec4"
+            64,
+            "PointLight 必须是四个 vec4（点光源与聚光灯共用同一条数组）"
         );
+        assert_eq!(
+            offset_of!(PointLightUniform, dir_outer),
+            32,
+            "方向与外锥余弦必须在第三段（WGSL 同顺序）"
+        );
+        assert_eq!(offset_of!(PointLightUniform, cone_inner), 48);
         assert_eq!(offset_of!(FrameUniforms, shadow_matrix), 192);
         // 级联字段紧跟在 shadow_matrix 之后（WGSL 里也是这个顺序）
         assert_eq!(offset_of!(FrameUniforms, view), 256);
@@ -2782,15 +2821,92 @@ mod tests {
         assert_eq!(offset_of!(FrameUniforms, cascade_splits), 576);
         assert_eq!(offset_of!(FrameUniforms, cascade_info), 592);
         assert_eq!(offset_of!(FrameUniforms, point_lights), 688);
-        assert_eq!(offset_of!(FrameUniforms, params2), 944);
-        assert_eq!(size_of::<FrameUniforms>(), 960);
+        assert_eq!(offset_of!(FrameUniforms, params2), 1200);
+        assert_eq!(size_of::<FrameUniforms>(), 1216);
     }
 
     #[test]
     fn frame_uniforms_size_is_multiple_of_16() {
         let size = std::mem::size_of::<FrameUniforms>();
         assert_eq!(size % 16, 0, "uniform 结构大小必须是 16 的倍数: {size}");
-        assert_eq!(size, 960, "FrameUniforms 布局与 WGSL 不一致");
+        assert_eq!(size, 1216, "FrameUniforms 布局与 WGSL 不一致");
+    }
+
+    #[test]
+    fn pack_local_lights_puts_spots_after_points_with_the_cone_intact() {
+        // 2 盏点光 + 3 盏聚光 → 5 个名额，聚光灯从下标 2 开始
+        let points = vec![
+            crate::light::PointLight::new(Vec3::new(1.0, 0.0, 0.0), Vec3::ONE, 2.0, 10.0),
+            crate::light::PointLight::new(Vec3::new(2.0, 0.0, 0.0), Vec3::ONE, 3.0, 11.0),
+        ];
+        let spots = vec![
+            crate::light::SpotLight::new(
+                Vec3::new(0.0, 5.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::ONE,
+                4.0,
+                20.0,
+                10.0,
+                25.0,
+            ),
+            crate::light::SpotLight::new(
+                Vec3::new(0.0, 5.0, 1.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::ONE,
+                5.0,
+                21.0,
+                20.0,
+                40.0,
+            ),
+            crate::light::SpotLight::new(
+                Vec3::new(0.0, 5.0, 2.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::ONE,
+                6.0,
+                22.0,
+                30.0,
+                60.0,
+            ),
+        ];
+        let (packed, n) = pack_local_lights(&points, &spots);
+        assert_eq!(n, 5);
+        // 点光源两盏：w = 0 是"这是点光源"的标志
+        assert_eq!(packed[0].dir_outer[3], 0.0);
+        assert_eq!(packed[1].dir_outer[3], 0.0);
+        assert_eq!(packed[1].pos_range[3], 11.0);
+        // 聚光灯：位置/半径、方向（单位向量）、外锥余弦、内锥余弦
+        assert_eq!(packed[2].pos_range[3], 20.0);
+        assert_eq!(packed[2].cone_inner[1], 1.0, "y=1 表示聚光灯");
+        let outer = 25.0f32.to_radians().cos();
+        let inner = 10.0f32.to_radians().cos();
+        assert!(
+            (packed[2].dir_outer[3] - outer).abs() < 1e-6,
+            "外锥余弦要按角度算：{} vs {outer}",
+            packed[2].dir_outer[3]
+        );
+        assert!((packed[2].cone_inner[0] - inner).abs() < 1e-6);
+        assert!(
+            packed[2].dir_outer[3] < packed[2].cone_inner[0],
+            "外锥余弦必须小于内锥余弦（外锥更大 → 余弦更小）"
+        );
+        // 方向归一化 + 零方向兜底
+        assert!((packed[2].dir_outer[1] + 1.0).abs() < 1e-6);
+        let zero =
+            crate::light::SpotLight::new(Vec3::ZERO, Vec3::ZERO, Vec3::ONE, 1.0, 5.0, 10.0, 20.0);
+        let (packed_zero, _) = pack_local_lights(&[], &[zero]);
+        assert!(
+            (packed_zero[0].dir_outer[1] + 1.0).abs() < 1e-6,
+            "零方向要退化成向下照而不是 NaN"
+        );
+        // 名额有限：点光源先占满时聚光灯进不来（顺序确定，不是随机）
+        let many: Vec<_> = (0..MAX_POINT_LIGHTS)
+            .map(|i| {
+                crate::light::PointLight::new(Vec3::new(i as f32, 0.0, 0.0), Vec3::ONE, 1.0, 5.0)
+            })
+            .collect();
+        let (packed_full, n_full) = pack_local_lights(&many, &spots);
+        assert_eq!(n_full, MAX_POINT_LIGHTS);
+        assert!(packed_full.iter().all(|l| l.dir_outer[3] == 0.0));
     }
 
     #[test]

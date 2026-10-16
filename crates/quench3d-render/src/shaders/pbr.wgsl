@@ -222,7 +222,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> @locatio
             lo = lo + (kd * albedo.rgb / PI + specular) * radiance * n_dot_l;
         }
 
-        // ---- 点光源 ----
+        // ---- 点光源 / 聚光灯（同一条数组：dir_outer.w > 0 表示聚光灯）----
         let count = i32(frame.params2.x + 0.5);
         for (var i = 0; i < count; i = i + 1) {
             let lp = frame.point_lights[i].pos_range;
@@ -232,8 +232,26 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> @locatio
             let dist = sqrt(dist2);
             if (dist < radius) {
                 let l2 = to_light / dist;
+                // 聚光灯：外锥外直接丢弃，内外锥之间平滑过渡
+                let outer_cos = frame.point_lights[i].dir_outer.w;
+                var cone = 1.0;
+                if (outer_cos > 0.0) {
+                    let spot_dir = normalize(frame.point_lights[i].dir_outer.xyz);
+                    // l2 是从表面指向灯的方向，所以与"照射方向"反向比较
+                    let cos_angle = dot(-l2, spot_dir);
+                    if (cos_angle < outer_cos) {
+                        cone = 0.0;
+                    } else {
+                        let inner_cos = frame.point_lights[i].cone_inner.x;
+                        cone = clamp(
+                            (cos_angle - outer_cos) / max(inner_cos - outer_cos, 1e-4),
+                            0.0,
+                            1.0,
+                        );
+                    }
+                }
                 let n_dot_l2 = dot(n, l2);
-                if (n_dot_l2 > 0.0) {
+                if (n_dot_l2 > 0.0 && cone > 0.0) {
                     // 平滑衰减：在半径处归零，避免硬边
                     let t = clamp(1.0 - pow(dist / radius, 4.0), 0.0, 1.0);
                     let atten = (t * t) / dist2;
@@ -245,7 +263,8 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> @locatio
                     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
                     let radiance2 = frame.point_lights[i].color_intensity.rgb
                         * frame.point_lights[i].color_intensity.w
-                        * atten;
+                        * atten
+                        * cone;
                     lo = lo + (kd * albedo.rgb / PI + specular) * radiance2 * n_dot_l2;
                 }
             }

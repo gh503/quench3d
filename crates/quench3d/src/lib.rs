@@ -177,7 +177,8 @@ pub mod prelude {
     pub use quench3d_render::{
         color, Camera, CameraInput, DebugLines, DirectionalLight, FlyCamera, FogParams, GpuContext,
         GpuOptions, ImageData, InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshData, MeshId,
-        OrbitCamera, PointLight, RenderStats, Renderer, RendererOptions, SkyParams, TextureId,
+        OrbitCamera, PointLight, RenderStats, Renderer, RendererOptions, SkyParams, SpotLight,
+        TextureId,
     };
     pub use winit::event::WindowEvent;
     pub use winit::keyboard::KeyCode;

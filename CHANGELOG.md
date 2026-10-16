@@ -10,6 +10,31 @@
 
 ### 新增
 
+- **聚光灯（spot lights）**：`lighting.spot_lights` —— 有方向的局部光，照亮一个圆锥。
+  引擎侧 `SpotLight`（位置 / 方向 / 颜色 / 强度 / 半径 / 内锥角 / 外锥角），
+  与点光源**共享**每帧 8 盏的局部光名额（点光源优先，超额的被忽略并在校验里给警告）。
+  WGSL 里两者共用同一条 `array<PointLight, 8>`：`dir_outer.w > 0` 就是聚光灯
+  （w = 外锥角余弦），内外锥之间按余弦平滑过渡。
+- 校验：锥角必须落在 `(0, 90)` 度、**内锥必须小于外锥**、半径为正、方向非零；
+  `--asset-path` 那种"能解析但看着不对"的坑这里也堵住了（都有明确的 hint）。
+- 测试：`pack_local_lights_puts_spots_after_points_with_the_cone_intact`（纯函数：顺序、
+  方向归一化、零方向兜底、角→余弦、名额耗尽时点光优先）、
+  `spot_light_validation_catches_the_ways_cones_go_wrong`（缺省可用 / 四类非法值 /
+  超预算警告）、`frame_uniform_layout_matches_wgsl` 更新到 64 字节/盏、FrameUniforms 1216 字节。
+- **GPU 侧量化验证（本机跑的，CI 无显卡不跑）**：顶视 120 米地面、关天空与网格、
+  只留一盏 9 米高的聚光灯，256×256 渲染后统计高亮像素占比：
+
+  | 场景 | 高亮(>150)占比 | 预期（按 tan² 外锥角） |
+  |---|---|---|
+  | 无灯（对照） | 0.00% | 0 |
+  | 8/12 度 | 0.53% | 0.50% |
+  | 8/45 度 | 11.06% | 11.0% |
+  | 8/12 度、斜 30 度 | 0.83% | 光斑移开且变大 |
+
+  实测与几何预期吻合到 6% 以内，说明"角度 → 余弦 → 圆锥判断"这条链路是对的。
+
+### 新增
+
 - **`schema` 新增 `global_flags`**：`--json`、`--camera`、`--asset-path`、`--out`、`--width`、
   `--height`、`--base-url`、`--model`。`commands[].args` 只描述"某个命令的参数"，
   这些"对所有命令都生效"的旗标以前在 schema 里**完全不存在**——agent 只能靠 `--help` 或猜。

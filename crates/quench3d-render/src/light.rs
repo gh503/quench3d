@@ -106,6 +106,65 @@ pub struct PointLight {
     pub radius: f32,
 }
 
+/// 聚光灯：位置 + 指向 + 一个圆锥（内锥全强度、外锥外无光）。
+///
+/// 与点光源**共享**每帧的局部光名额（[`MAX_POINT_LIGHTS`] 个，先放点光源、
+/// 再放聚光灯，放不下的忽略）——所以聚光灯多的时候点光源会被挤掉，这是有意的：
+/// 预算固定、行为可预测，比"有时亮有时不亮"更好查。
+#[derive(Clone, Copy, Debug)]
+pub struct SpotLight {
+    /// 世界坐标。
+    pub position: Vec3,
+    /// 照射方向（不需要自己归一化）。
+    pub direction: Vec3,
+    /// 颜色（线性空间）。
+    pub color: Vec3,
+    /// 强度。
+    pub intensity: f32,
+    /// 影响半径（米，在此距离衰减到 0）。
+    pub radius: f32,
+    /// 内锥角余弦（此角内为全强度）。
+    pub inner_cos: f32,
+    /// 外锥角余弦（此角外完全无光）。
+    pub outer_cos: f32,
+}
+
+impl SpotLight {
+    /// 从**角度**（度）构造：引擎内部只存余弦，避免每帧算三角函数。
+    pub fn new(
+        position: Vec3,
+        direction: Vec3,
+        color: Vec3,
+        intensity: f32,
+        radius: f32,
+        inner_deg: f32,
+        outer_deg: f32,
+    ) -> Self {
+        // 角度在场景校验里已经查过，这里只做兜底：夹到 (0, 90) 并保证 inner >= outer
+        let clamp = |d: f32| d.clamp(0.01, 89.99);
+        let inner = clamp(inner_deg).to_radians();
+        let outer = clamp(outer_deg).to_radians().max(inner);
+        Self {
+            position,
+            direction,
+            color,
+            intensity,
+            radius,
+            inner_cos: inner.cos(),
+            outer_cos: outer.cos(),
+        }
+    }
+
+    /// 单位方向（零向量时退化为向下照，避免 NaN）。
+    pub fn dir(&self) -> Vec3 {
+        if self.direction.length_squared() > 1e-12 {
+            self.direction.normalize()
+        } else {
+            Vec3::new(0.0, -1.0, 0.0)
+        }
+    }
+}
+
 impl PointLight {
     /// 便捷构造。
     pub fn new(position: Vec3, color: Vec3, intensity: f32, radius: f32) -> Self {
@@ -186,8 +245,10 @@ pub struct Lighting {
     pub ambient_color: Vec3,
     /// 环境光强度。
     pub ambient_intensity: f32,
-    /// 点光源列表（超出上限的部分被忽略）。
+    /// 点光源列表（超出上限的部分被忽略；与聚光灯**共享**同一份预算）。
     pub point_lights: Vec<PointLight>,
+    /// 聚光灯列表（排在点光源之后，放不下的忽略）。
+    pub spot_lights: Vec<SpotLight>,
     /// 天空参数。
     pub sky: SkyParams,
     /// 雾参数。
@@ -205,6 +266,7 @@ impl Default for Lighting {
             ambient_color: Vec3::new(0.40, 0.47, 0.62),
             ambient_intensity: 0.40,
             point_lights: Vec::new(),
+            spot_lights: Vec::new(),
             sky: SkyParams::default(),
             fog: FogParams::default(),
             exposure: 1.0,

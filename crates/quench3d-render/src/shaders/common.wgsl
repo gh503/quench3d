@@ -6,6 +6,10 @@ struct PointLight {
     pos_range: vec4<f32>,
     // rgb = 颜色, w = 强度
     color_intensity: vec4<f32>,
+    // xyz = 照射方向（聚光灯），w = 外锥角余弦；w = 0 表示这是点光源
+    dir_outer: vec4<f32>,
+    // x = 内锥角余弦，y = 1 表示聚光灯（0 表示点光源）
+    cone_inner: vec4<f32>,
 };
 
 struct Frame {
