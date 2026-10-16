@@ -883,3 +883,20 @@ e2e `scene_relative_model_paths_do_not_depend_on_the_working_directory` 全程**
 （用 `simulate` 走物理侧的模型加载）。注意 e2e 里"找不到"的退出码是 **2 而不是 1**：
 `validate` 会先拦下来——所以 `resolve_model_path` 的报错路径在 CLI 上是第二道防线，
 留着是为了让引擎 API 的调用方也拿到同样的信息。
+
+### 13.2 `--asset-path`（第 45 轮）：旗标要登记在**进程级**
+
+搜索路径写进场景是"这份场景自己的规矩"；`--asset-path` 是"这一次运行"的补充（渲染农场、CI、
+临时素材目录）。多个目录用 `:` 分隔（Windows `;`，与 `PATH` 一致），相对路径以场景目录为基准，
+顺序排在 `assets.search_paths` 之后。
+
+一个实现细节值得记：一开始我把旗标写进 `SceneDoc` 的字段、在两个装载点各调一次——结果
+`simulate` 仍然报"找不到模型"。原因是**命令实现内部还会自己 `from_file` 一次**（多输出渲染、
+内部校验），逐个传参总会漏。改成进程级 `OnceLock`（`set_cli_asset_paths`）后 `asset_candidates`
+无条件读它，所有装载点都看得到。**"旗标有时不生效"是最难查的一类 bug**：能过的地方过得去，
+过不去的地方看起来像路径写错了。
+
+测试：`cli_asset_paths_are_tried_after_the_scene_ones`（候选顺序：场景目录 → 场景声明 →
+CLI → 绝对路径原样；不写旗标时序列化里不出现该键）+ e2e
+`cli_asset_path_flag_resolves_assets_without_touching_the_scene`（不加旗标必失败、加了必成功、
+`:` 分隔列表里有一个命中即可、**场景文件逐字节未变**），两者都不需要显卡。

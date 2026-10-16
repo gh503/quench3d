@@ -32,6 +32,7 @@ const MAX_FIXED_DT: f32 = 1.0;
 
 const VALUE_FLAGS: &[&str] = &[
     "--camera",
+    "--asset-path",
     "--out",
     "--width",
     "--height",
@@ -149,6 +150,8 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_INVALID as u8);
         }
     };
+    // 资源搜索路径要在任何场景装载之前登记（命令内部可能自己再 from_file 一次）
+    quench3d_cli::scene_doc::set_cli_asset_paths(asset_paths_from_args(&args));
     let code = dispatch(&args);
     ExitCode::from(code as u8)
 }
@@ -335,7 +338,8 @@ fn dispatch(args: &Args) -> i32 {
                 );
             };
             match SceneDoc::from_file(path) {
-                Ok(doc) => {
+                Ok(mut doc) => {
+                    apply_asset_paths(args, &mut doc);
                     let diags = doc.validate();
                     let errors = diags
                         .iter()
@@ -799,6 +803,29 @@ fn dispatch(args: &Args) -> i32 {
     }
 }
 
+/// `--asset-path`：一次运行用的额外资源搜索路径。
+///
+/// 多个目录用 `:` 分隔（Windows 用 `;`），与 `PATH` 的写法一致——`Args` 的旗标表是
+/// "一个旗标一个值"，所以这里不复用重复旗标。空项忽略；相对路径以场景目录为基准
+/// （与 `assets.search_paths` 同一套规则），顺序排在场景声明之后。
+fn asset_paths_from_args(args: &Args) -> Vec<std::path::PathBuf> {
+    let Some(list) = args.flag_str("--asset-path") else {
+        return Vec::new();
+    };
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    list.split(sep)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+/// 把 `--asset-path` 记进文档与进程级（进程级那份保证"命令内部又 from_file 一次"的
+/// 路径也看得到旗标）。
+fn apply_asset_paths(args: &Args, doc: &mut SceneDoc) {
+    doc.extra_asset_paths = asset_paths_from_args(args);
+}
+
 fn load_scene(args: &Args, path: &str, started: Instant) -> Result<SceneDoc, i32> {
     match SceneDoc::from_file(path) {
         Ok(doc) => {
@@ -812,6 +839,7 @@ fn load_scene(args: &Args, path: &str, started: Instant) -> Result<SceneDoc, i32
                 // `--camera <名字>`：把命名相机搬到 `camera` 段上——下游（apply_camera、
                 // 渲染报告）只看 `camera`，所以这里换一次就够，不必改渲染路径。
                 let mut doc = doc;
+                apply_asset_paths(args, &mut doc);
                 if let Some(name) = args.flag_str("--camera") {
                     if let Err(message) = doc.select_camera(name) {
                         return Err(fail(

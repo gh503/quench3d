@@ -4593,3 +4593,72 @@ fn scene_relative_model_paths_do_not_depend_on_the_working_directory() {
         "错误要列出找过哪里：{msg}"
     );
 }
+
+/// `--asset-path`：一次运行用的额外资源搜索路径（不改场景文件）。
+///
+/// 与 `assets.search_paths` 的区别是"谁的约定"：搜索路径写进场景是这份场景自己的规矩，
+/// `--asset-path` 是"这一次运行"的临时补充（渲染农场、CI、临时素材目录）。
+/// 多个目录用 `:` 分隔（与 PATH 一致）。这条测试不需要显卡。
+#[test]
+fn cli_asset_path_flag_resolves_assets_without_touching_the_scene() {
+    let dir = temp_dir("cli_asset_path");
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        lib.join("tri.obj"),
+        "o tri\nv 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3\n",
+    )
+    .unwrap();
+    let scene = write_scene(
+        &dir,
+        "level.json",
+        serde_json::json!({
+            "objects": [ { "name": "球", "shape": { "type": "sphere", "radius": 0.4 },
+                           "position": [0, 3, 0], "body": "dynamic" } ],
+            "models": [ { "path": "tri.obj", "collide": true } ],
+            "simulate": { "steps": 2, "dt": 0.016 }
+        }),
+    );
+
+    // 不写搜索路径、不加旗标 → 找不到（确认这条测试真的在测旗标）
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "没有搜索路径时应当报找不到模型");
+
+    // 加旗标 → 找得到；顺带确认场景文件**没被改写**（旗标不是写进场景的）
+    let before = std::fs::read(&scene).unwrap();
+    let r = run(&[
+        "simulate",
+        scene.to_str().unwrap(),
+        "--asset-path",
+        lib.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        r.code,
+        0,
+        "加上 --asset-path 应当找得到模型：{:?}",
+        r.json()
+    );
+    assert_eq!(
+        std::fs::read(&scene).unwrap(),
+        before,
+        "旗标只影响这一次运行，不该改场景文件"
+    );
+
+    // 多个目录用 `:` 分隔；不存在的那些只是多试一次，不影响结果
+    let bogus = dir.join("nope");
+    let list = format!("{}:{}", bogus.display(), lib.display());
+    let r = run(&[
+        "simulate",
+        scene.to_str().unwrap(),
+        "--asset-path",
+        &list,
+        "--json",
+    ]);
+    assert_eq!(
+        r.code,
+        0,
+        "`:` 分隔的列表里只要有一个命中就行：{:?}",
+        r.json()
+    );
+}

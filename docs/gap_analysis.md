@@ -448,7 +448,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 8 | ✅ | **实例 / 模板复用** | 渲染器支持实例化（`InstanceDesc`，renderer.rs:87；绘制入口 renderer.rs:992） | 堆 1000 个箱子 = JSON 里 1000 份重复描述；agent 生成大场景时 token 直接爆。**格式侧已补**（2026-10-18 第 26 轮）：`templates` + `objects[].template` + `objects[].instances[]`。仍缺：外部场景引用（跨文件 include） |
 | 9 | ✅ | **行为 / 时间轴** | `SimulateDoc` 只有 `steps`/`dt`（:464-470）；而 CLI 有 `--trace` / `--bodies` / `--layout` / `--no-sleep` 等参数（runner.rs 里 trace 12 处命中，scene_doc.rs 里 0 处） | 「第 60 步给球一个冲量」「记录这个物体的轨迹」在场景文件里表达不了 → **agent 从 `schema` 看到的能力 < CLI 实际能力** |
 | 10 | ✅ | **正交相机 / 多相机 / 裁剪面** | `CameraDoc` 只有 `fov_deg`（:416） | 平面图、CAD 视图、分屏、像素风做不了 |
-| 11 | ✅ 2026-10-19（第 44 轮） | ~~`models[].path` 是裸路径~~ **已修 + 已加资源库**：`assets.search_paths`（场景级搜索路径，相对路径以场景目录为基准）；贴图与模型**共用同一套候选**（场景目录 → `assets.search_paths` → 当前工作目录 → 引擎搜索路径），validate 与渲染也一致；找不到时错误里列出找过的位置。**修掉的 bug**：模型以前不走场景目录，`models[].path: "chair.glb"` 在工作目录≠场景目录时直接失败（贴图却正常），validate 用的还是第三套规则。**仍缺**：跨文件 include/prefab（见 #13）、资源索引与去重报告 | 素材复用要靠相对路径约定 |
+| 11 | ✅ 2026-10-19（第 44~45 轮） | ~~`models[].path` 是裸路径~~ **已修 + 已加资源库**：`assets.search_paths`（场景级搜索路径，相对路径以场景目录为基准）；贴图与模型**共用同一套候选**（场景目录 → `assets.search_paths` → 当前工作目录 → 引擎搜索路径），validate 与渲染也一致；找不到时错误里列出找过的位置。**修掉的 bug**：模型以前不走场景目录，`models[].path: "chair.glb"` 在工作目录≠场景目录时直接失败（贴图却正常），validate 用的还是第三套规则。**运行时可加**：`--asset-path a:b`（只影响这一次运行，不改场景文件）；**仍缺**：跨文件 include/prefab（见 #13）、资源索引与去重报告 | 素材复用要靠相对路径约定 |
 | 12 | **机器可读 schema** | `quench3d schema` 输出的是手写示例 + 文字（schema.rs:16-42） | agent 拿不到 JSON Schema 做程序化校验/补全，只能事后 `validate` |
 | 13 | **多文件组合（include / prefab / variant）** | 无（全仓无命中） | 大场景不能拆分复用 |
 | 14 | **单位与轴向写进文件** | 约定在 README:430 与 schema 文字里，文件本身没有 | 与外部工具交换时需要口头约定 |

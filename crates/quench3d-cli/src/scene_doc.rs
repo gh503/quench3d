@@ -199,6 +199,12 @@ pub struct SceneDoc {
     /// 时是 `None`，解析退化为"相对当前工作目录 + 引擎搜索路径"。
     #[serde(skip)]
     pub base_dir: Option<PathBuf>,
+    /// CLI 用 `--asset-path` 给的额外搜索路径（**不参与序列化**，也不会写回场景文件）。
+    ///
+    /// 与 `assets.search_paths` 同样处理，只是排在它们**之后**：命令行是"这一次运行"的
+    /// 临时补充，场景文件才是这份场景自己的约定。相对路径同样以场景目录为基准。
+    #[serde(skip)]
+    pub extra_asset_paths: Vec<PathBuf>,
 }
 
 /// 世界级物理参数。
@@ -639,6 +645,7 @@ impl Default for SceneDoc {
             templates: BTreeMap::new(),
             models: Vec::new(),
             assets: None,
+            extra_asset_paths: Vec::new(),
             joints: Vec::new(),
             actions: Vec::new(),
             probes: Vec::new(),
@@ -1008,6 +1015,18 @@ pub struct ObjectDoc {
 
 fn default_true() -> bool {
     true
+}
+
+/// `--asset-path` 的进程级存放处。
+///
+/// 为什么不只放在 `SceneDoc` 上：命令实现里还有**自己再 `from_file` 一次**的地方
+/// （多输出渲染、内部校验…），逐个传参总会漏掉一处，而漏掉的表现是"旗标有时不生效"——
+/// 最难查的那种。这里放一份，`asset_candidates` 无条件读它。
+static CLI_ASSET_PATHS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// 登记 `--asset-path`（只应由 CLI 入口调用一次；重复调用会被忽略）。
+pub fn set_cli_asset_paths(paths: Vec<PathBuf>) {
+    let _ = CLI_ASSET_PATHS.set(paths);
 }
 
 /// 资源搜索路径。
@@ -2103,9 +2122,9 @@ impl SceneDoc {
 
     /// 把场景内的资源相对路径展开成候选路径，按解析优先级排列。
     ///
-    /// 顺序：绝对路径原样 → `场景文件所在目录/rel` → `工作目录/rel` →
-    /// 引擎的标准搜索路径（可执行文件旁、`QUENCH3D_ASSET_PATH` 等，
-    /// 见 `quench3d::assets::resolve_path`）。去重后返回。
+    /// 顺序：绝对路径原样 → `场景文件所在目录/rel` → `assets.search_paths` 展开 →
+    /// `--asset-path` 展开 → `工作目录/rel` → 引擎的标准搜索路径（可执行文件旁、
+    /// `QUENCH3D_ASSET_PATH` 等，见 `quench3d::assets::resolve_path`）。去重后返回。
     pub fn asset_candidates(&self, rel: &str) -> Vec<PathBuf> {
         let raw = std::path::Path::new(rel);
         if raw.is_absolute() {
@@ -2134,6 +2153,26 @@ impl SceneDoc {
                 };
                 push(dir.join(raw));
             }
+        }
+        // `--asset-path`（CLI）：排在场景自己声明的搜索路径之后，理由见字段注释。
+        // 进程级那份与字段那份都算上（去重由 push 负责），这样"命令内部又 from_file
+        // 了一次"的路径也不会漏掉旗标。
+        for sp in self.extra_asset_paths.iter().chain(
+            CLI_ASSET_PATHS
+                .get()
+                .map(|v| v.iter())
+                .into_iter()
+                .flatten(),
+        ) {
+            let dir = if sp.is_absolute() {
+                sp.clone()
+            } else {
+                match &self.base_dir {
+                    Some(base) => base.join(sp),
+                    None => sp.clone(),
+                }
+            };
+            push(dir.join(raw));
         }
         push(raw.to_path_buf());
         if let Ok(resolved) = quench3d::assets::resolve_path(rel) {
@@ -5218,6 +5257,44 @@ mod tests {
         let round = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
         assert!(round.assets.is_none());
         assert!(!doc.to_json_pretty().contains("search_paths"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_asset_paths_are_tried_after_the_scene_ones() {
+        let dir = std::env::temp_dir().join(format!("quench3d_cli_assets_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let scene = dir.join("level.json");
+        std::fs::write(
+            &scene,
+            serde_json::to_string(&json!({
+                "assets": { "search_paths": ["from_scene"] },
+                "models": [ { "path": "robot.obj" } ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut doc = SceneDoc::from_file(&scene).unwrap();
+        doc.extra_asset_paths = vec![PathBuf::from("from_cli"), PathBuf::from("/abs/dir")];
+        let c = doc.model_candidates(std::path::Path::new("robot.obj"));
+        assert_eq!(c[0], dir.join("robot.obj"), "场景目录优先：{c:?}");
+        assert_eq!(c[1], dir.join("from_scene").join("robot.obj"), "{c:?}");
+        assert_eq!(
+            c[2],
+            dir.join("from_cli").join("robot.obj"),
+            "CLI 的排在场景声明之后（相对路径以场景目录为基准）：{c:?}"
+        );
+        assert_eq!(
+            c[3],
+            PathBuf::from("/abs/dir").join("robot.obj"),
+            "绝对路径原样：{c:?}"
+        );
+        // 不写 --asset-path 时这一个键不会被序列化出来（老场景逐字节不变）
+        let plain = SceneDoc::from_file(&scene).unwrap();
+        assert!(plain.extra_asset_paths.is_empty());
+        let round = SceneDoc::from_json(&plain.to_json_pretty()).unwrap();
+        assert!(round.extra_asset_paths.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
