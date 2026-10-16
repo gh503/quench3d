@@ -29,7 +29,9 @@
     布局测试断言了三个字段的字节偏移与总大小（1312）。
   - WGSL：`pbr.wgsl` 的聚光分支里，只有"这一盏就是投影灯"才采样；
     深度偏移 / 法线偏移全部由 uniform 传进来（不在着色器里写死数字），
-    3x3 PCF 与太阳**共用同一份** `pcf_3x3`（贴图作为参数传入）。
+    3x3 PCF 与太阳**共用同一份** `pcf_3x3`（贴图作为参数传入），采样用
+    `textureSampleCompareLevel`：D3D/FXC 不允许非一致控制流里出现带隐式梯度的采样
+    （深度图只有 1 级 mip，LOD 0 与隐式 LOD 结果完全相同）。
   - 场景格式：`SpotLightDoc.cast_shadows`（`Option<bool>`，不写 = `false`）；
     校验：>1 盏要求投影时警告并写明**实际用的是哪一盏**（`lighting.spot_lights[i].cast_shadows`），
     被 8 盏局部光名额挤掉时单独警告（那盏灯既不照明也不投影）。

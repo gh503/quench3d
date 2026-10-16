@@ -770,7 +770,7 @@ simulate_report_includes_an_event_stream`（物体名、步号单调、sleep 只
 （第 51 轮编辑器级联 UI + 修文档计数之后是 **480** 个测试、wasm 11879728 字节，七段全绿。）
 （第 52 轮编辑器接上 bloom/fxaa/ssao 之后是 **481** 个测试、wasm 11882544 字节，七段全绿。）
 （第 53 轮编辑器局部光 UI + 修默认场景/载入路径光照不对称之后是 **483** 个测试、wasm 11903880 字节，七段全绿。）
-（第 54 轮聚光灯阴影之后是 **497** 个测试、wasm 11913540 字节，七段全绿。）
+（第 54 轮聚光灯阴影之后是 **498** 个测试、wasm 11914308 字节，七段全绿。）
 
 ## 21. 第 22 轮：物理材质 —— 静摩擦 + 摩擦/恢复的合成规则（gap #22）
 
@@ -1172,3 +1172,35 @@ GPU 层是 `tools/probe_spot_shadow.py`：10 张图、14 条断言，全部是�
 **没做的**（同上，见 readiness §12.6.5）：只有一盏聚光灯能投影、点光源仍然不投影（要立方体阴影图）、
 没有级联聚光阴影、半透明物体不参与阴影；编辑器里那个"投影"勾选框是按代码与 CPU 往返测试验收的，
 **这一轮没有人在真实窗口里点过它**。
+
+## 47. 只有 Windows 腿才会报的 WGSL 错误（第 54 轮）
+
+聚光灯阴影提交并推上去之后，CI 的 `test (windows-latest)` 红了：12 个 CLI e2e 测试失败
+（`bloom_is_wired_to_the_renderer`、`mcp_over_stdio_handshake_list_and_call`、
+`movie_records_deterministic_frame_sequence`…… 看上去毫不相干）。真实原因只有一个：
+
+```
+In Device::create_render_pipeline, label = 'quench3d-opaque'
+  Internal error in ShaderStages(FRAGMENT) shader: FXC D3DCompile error (Unspecified error (0x80004005)):
+quench3d-pbr(168,34-84): warning X3570: gradient instruction used in a loop with varying iteration
+```
+
+`pcf_3x3` 里用的是 `textureSampleCompare`（要算**隐式梯度**），而它既在循环里、
+又被聚光灯那段 `if (i == 投影灯)` 包着。**"非一致控制流里不许有隐式梯度采样"是 D3D/FXC 的硬限制**：
+Windows 上 FXC 直接编译失败，于是整个不透明管线建不出来 —— 所有要渲一帧的 e2e 测试全部被带崩
+（**"12 个测试红了"不等于"12 个 bug"**；CI 给你的失败清单只是"谁最先撞上这个管线"）。
+
+修法：换成 **`textureSampleCompareLevel`**（naga 生成 HLSL 的 `SampleCmpLevelZero`，
+不带梯度）。深度图只有 1 级 mip，LOD 0 与隐式 LOD 结果本来就应该完全相同 ——
+实测也确实完全相同（探针数字一字未变：偏移仍 +35.7 px、暗区仍 3470 px）。
+注释写在采样点旁边（`pbr.wgsl` 的 `pcf_3x3`），防止以后有人"顺手改回 `textureSampleCompare`"。
+
+两条教训：
+
+1. **本地渲得出正确的图 ≠ 这套 WGSL 在所有后端都编得过。** 第 49 轮立的规矩是
+   "改过 WGSL 就必须真渲一遍"——它证明的是**本机 Vulkan 上的运行时行为**，
+   证明不了**可编译性**。SPIR-V 与 MSL 对"隐式梯度在非一致控制流里"是宽容的（不诊断），
+   只有 FXC 会拒绝。这两件事得分开验。
+2. **五条腿里 windows 不是形式**。门禁（Linux）与本地 GPU 探针都抓不到这一类问题：
+   门禁跑的是 Vulkan，wasm 腿只编 wasm32、不编译 D3D。**WGSL 一改，必须去看 windows 腿**；
+   这也是为什么"推上去并确认五条腿全绿"是闭环的一部分，而不是可选项。

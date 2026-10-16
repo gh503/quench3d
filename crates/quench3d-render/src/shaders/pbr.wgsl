@@ -110,12 +110,19 @@ fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> v
 // 贴图作为参数传进来（而不是写死 `shadow_map`）：聚光灯用的是**另一张**深度图，
 // 写死的话聚光那条路会拿自己的 uv 去采平行光的图 —— 采到的是"别的深度"，
 // 表现为整片区域半明半暗（本机探针第一版就是这么发现的：无遮挡物时 79% 的受光像素被压暗）。
+//
+// **必须用 `textureSampleCompareLevel`（= HLSL 的 `SampleCmpLevelZero`），不要改回
+// `textureSampleCompare`**：后者要算隐式梯度，而这里是在循环里、又被聚光灯那段的
+// `if (i == 投影灯)` 包着。Windows/D3D 走 FXC 编译，FXC 对"非一致控制流里的隐式梯度采样"
+// 是**硬报错**（X3570 → D3DCompile 0x80004005），整个 fragment shader 编译失败、
+// 所有要吃 GPU 的 CLI 测试在 Windows 腿全红；Linux/macOS 走 SPIR-V/MSL 都不报错，
+// 所以本地门禁抓不到。深度图没有 mip（`mip_level_count: 1`），LOD 0 与隐式 LOD 结果完全相同。
 fn pcf_3x3(tex: texture_depth_2d, uv: vec2<f32>, depth: f32, texel: f32) -> f32 {
     var sum = 0.0;
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let offset = vec2<f32>(f32(x), f32(y)) * texel;
-            sum = sum + textureSampleCompare(tex, shadow_sampler, uv + offset, depth);
+            sum = sum + textureSampleCompareLevel(tex, shadow_sampler, uv + offset, depth);
         }
     }
     return sum / 9.0;

@@ -3007,6 +3007,31 @@ mod tests {
         assert_eq!(std::mem::size_of::<crate::mesh::Vertex>() % 4, 0);
     }
 
+    /// WGSL 源码级守卫：阴影 PCF 里不许用**带隐式梯度**的比较采样。
+    ///
+    /// 为什么是"扫文本"而不是编译一遍：D3D 的 FXC 只在 Windows 上跑，本地（Linux/Vulkan）
+    /// 与 wasm 腿都不会报这个错。第 54 轮就是 `pcf_3x3` 里用了 `textureSampleCompare`，
+    /// 本地门禁全绿、Windows 腿 12 个 e2e 测试全红（`X3570` → `D3DCompile 0x80004005`：
+    /// 非一致控制流里不许有隐式梯度采样）。深度图只有 1 级 mip，
+    /// `textureSampleCompareLevel` 的 LOD 0 与隐式 LOD 完全等价，所以这条禁令没有代价。
+    /// 细节见 `docs/overnight_report.md` §47。
+    #[test]
+    fn wgsl_shadow_pcf_avoids_implicit_gradient_sampling() {
+        // 匹配的是**带左括号**的 `textureSampleCompare(`：`textureSampleCompareLevel(`
+        // 中间夹着 "Level"，不含这个子串，所以不会误伤。
+        for (name, src) in [("pbr.wgsl", PBR_WGSL), ("shadow.wgsl", SHADOW_WGSL)] {
+            assert!(
+                !src.contains("textureSampleCompare("),
+                "{name} 用了带隐式梯度的 textureSampleCompare（请换成 textureSampleCompareLevel：见 pcf_3x3 注释）"
+            );
+        }
+        // 正向确认：Level 变体确实还在用。少了这条，"整个函数被删掉"也会让上面的断言通过。
+        assert!(
+            PBR_WGSL.contains("textureSampleCompareLevel("),
+            "PCF 的 Level 比较采样不见了：要么阴影被删了，要么改成了别的写法"
+        );
+    }
+
     #[test]
     fn frame_uniform_layout_matches_wgsl() {
         use std::mem::{offset_of, size_of};
