@@ -112,6 +112,15 @@ pub fn matrices(
     split_far: &[f32],
     tile_texels: f32,
 ) -> Vec<Mat4> {
+    // 每一段**用自己的 2*radius 深度范围**（`shadow_matrix_with_map_size` 里
+    // 正交远平面 = 2*radius + depth_range = 4*radius）。这有意为之：
+    //
+    // 归一化深度的尺度 ≈ 1/(4r)，而这一级的纹素在世界里的大小 ≈ 2r/tile，
+    // 两者相除 r 就消掉了 —— 所以**一个固定的归一化 bias（`frame.params.y`）
+    // 在每一级都恰好等于固定的纹素数**（1/(2*tile) × bias）。这正是单级与多级
+    // 能共用同一个 bias 常量的原因，也是它不会"近处自阴影"的原因。
+    // `one_normalized_bias_is_the_same_number_of_texels_in_every_cascade` 钉着这条不变式；
+    // 谁要是把这里改成"各级共用同一个深度范围"，那条测试会立刻红。
     let corners = frustum_corners(inv_view_proj);
     let mut out = Vec::with_capacity(split_far.len());
     let mut prev = near;
@@ -198,6 +207,63 @@ mod tests {
     }
 
     /// 验收判据：每一级的包围盒必须罩住**它自己那一段**视锥。
+    #[test]
+    fn one_normalized_bias_is_the_same_number_of_texels_in_every_cascade() {
+        use crate::light::DirectionalLight;
+        let cam = camera();
+        let sun = DirectionalLight::default();
+        let inv = cam.view_projection().inverse();
+        let splits = splits(cam.near, cam.far, 4, 0.5);
+        let corners = frustum_corners(&inv);
+        let tile = 1024.0f32;
+        let ms = matrices(&sun, &inv, cam.near, cam.far, &splits, tile);
+
+        // 每一级：正交远平面 = 2*radius + depth_range = 4*radius（`shadow_matrix_with_map_size`），
+        // 近平面 0.05。于是"1 单位归一化深度"在世界里 = far - near，
+        // 而这一级的纹素在世界里 = 2*radius/tile。两者之比_r 会被消掉。
+        let mut per_texel = Vec::new();
+        let mut prev = cam.near;
+        for (i, d) in splits.iter().enumerate() {
+            let slice = slice_corners(&corners, cam.near, cam.far, prev, *d);
+            let (c, radius) = bounding_sphere(&slice);
+            let depth_extent = 4.0 * radius - 0.05;
+            let texel_world = 2.0 * radius / tile;
+            per_texel.push(texel_world / depth_extent);
+            // 顺带用矩阵自身核一遍深度尺度：沿光线挪 1 米，归一化深度变化的倒数就是深度范围
+            let dir = sun.direction.normalize_or_zero();
+            let a = ms[i] * Vec4::new(c.x, c.y, c.z, 1.0);
+            let b = ms[i] * Vec4::new(c.x - dir.x, c.y - dir.y, c.z - dir.z, 1.0);
+            let measured_extent = 1.0 / (a.z - b.z).abs();
+            assert!(
+                (measured_extent - depth_extent).abs() / depth_extent < 1e-3,
+                "第 {i} 级的深度范围与推导不符：矩阵 {measured_extent:.3}，推导 {depth_extent:.3}"
+            );
+            prev = *d;
+        }
+        // 各级之间的相等是**近似**的：正交近平面 0.05 米让比值变成
+        // 1/(2*tile) * 1/(1 - 0.05/(4r))，r 越小的那级偏大一点（最近一级约百分之几）。
+        // 不为了"精确"去改这个公式——重要的是各级**几乎相同**，所以一个 bias 常量
+        // 在各级都约等于同一个纹素数。容差 3% 就是照着这个偏差定的。
+        for (i, v) in per_texel.iter().enumerate() {
+            let rel = (v - per_texel[0]).abs() / per_texel[0];
+            assert!(
+                rel < 0.03,
+                "第 {i} 级每个纹素对应的归一化深度与第 0 级差 {:.1}%（{per_texel:?}）：\
+                 同一个 bias 常量在各段会变成不同的纹素数",
+                rel * 100.0
+            );
+        }
+        // 极限值就是 1/(2*tile)：与切分、相机、半径都无关（r 被消掉了）
+        let expect = 1.0 / (2.0 * tile);
+        let rel = (per_texel[0] - expect).abs() / expect;
+        assert!(
+            rel < 0.03,
+            "期望约 {expect}，实际 {}（差 {:.1}%）",
+            per_texel[0],
+            rel * 100.0
+        );
+    }
+
     #[test]
     fn each_cascade_box_contains_its_own_slice() {
         let mut cam = camera();

@@ -600,7 +600,7 @@ quench3d::write_png(&image, "out.png")?;
 | `physics_playground` | 完整沙盒：堆叠、斜面、生成刚体、射线拾取、调试绘制；桌面/Web 共用 | `cargo run -p quench3d --example physics_playground` |
 | `headless` | 无窗口集成验证：240 步物理 + 渲染出图，并断言不穿地/无 NaN | `cargo run -p quench3d --example headless` |
 | `offline_render` | 渲染特性回归：天空、网格、阴影、地面逐个开关并统计像素 | `cargo run -p quench3d-render --example offline_render` |
-| `shadow_probe` | 阴影诊断：自阴影检测 + 阴影方向与解析落点对比（误差 < 1px） | `cargo run -p quench3d-render --example shadow_probe` |
+| `shadow_probe` | 阴影诊断：自阴影检测 + 阴影方向与解析落点对比（误差 < 1px）+ **级联 sweep**（1~4 级 × 远/近/深景，打印半影比例与纹素足迹） | `cargo run -p quench3d-render --example shadow_probe` |
 | `events` | 事件总线：接触开始/结束 · 传感器进出 · 睡眠/唤醒 · 关节断裂（报告里按物体名输出） | `cargo test -p quench3d-cli --test cli_e2e -- simulate_report_includes_an_event_stream` |
 | `joints` | 5 种关节：铰链门（速度马达 + **位置伺服**）、垂直滑块（轴向限位）、弹簧、焊接、球窝摆（**锥形限位**），以及**断裂阈值**与"关节两端不互相碰撞" | `cargo run -p quench3d --example joints` |
 | `model_viewer` | 模型加载：glTF/GLB/OBJ+MTL，轨道相机对准模型；`--collide` 把模型变成静态三角网格碰撞体（丢球验证） | `cargo run -p quench3d --example model_viewer` |
@@ -1064,7 +1064,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 470 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 472 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1187,7 +1187,7 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（没有 GPU �
 cargo run -p quench3d --example headless                     # 240 步物理 + 出图 + 断言不穿地/无 NaN
 F3D_JOINTS_HEADLESS=1 cargo run -p quench3d --example joints  # 关节自检 + 出图
 F3D_MODEL_HEADLESS=1 cargo run -p quench3d --example model_viewer  # 模型加载 + 碰撞体 + 丢球断言
-cargo run -p quench3d-render --example shadow_probe           # 自阴影 + 阴影方向（误差 < 1px）
+cargo run -p quench3d-render --example shadow_probe           # 自阴影 + 阴影方向（误差 < 1px）+ 级联 sweep
 cargo run -p quench3d-render --example offline_render         # 天空/网格/阴影/地面逐项开关比对
 node tools/check_web.mjs                                     # Web 产物自检（页面 import + wasm 实例化）
 ```

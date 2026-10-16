@@ -153,7 +153,7 @@
 | S6-T3 | 可嵌入 CI / 容器 | 固定版本安装、离线运行、启动开销小 | CLI 启动开销 ≈0.04 ms [自报]；`install_cli.sh`/`.ps1`；无官方容器镜像 |
 | S6-Q1 | 吞吐 | 启动 < 50ms；可给"N 场景/小时"与 P95 单命令耗时预算 | 有 `bench` 与吞吐数据（9~10 万刚体·步/秒）；无 P95 端到端预算表 |
 | S6-Q2 | 契约演进 | schema 带版本、向后兼容策略、**错误码可细分到程序可分支** | `error.kind` 只有 invalid/env/io/scene 四类，agent 分不出"模型路径不存在"与"字段非法"，只能读自由文本 → 未过 |
-| S6-Q3 | 质量门禁 | 负向用例（坏输入必须失败且退出码正确）+ golden 产物 + 产物合法性校验 | 470 个测试、CI 全绿、有负向用例与像素 digest；**单帧 `render` 无 golden，CI 只查 PNG 头 8 字节 + 大小** |
+| S6-Q3 | 质量门禁 | 负向用例（坏输入必须失败且退出码正确）+ golden 产物 + 产物合法性校验 | 472 个测试、CI 全绿、有负向用例与像素 digest；**单帧 `render` 无 golden，CI 只查 PNG 头 8 字节 + 大小** |
 | S6-C1 | 生态互操作 | ffmpeg/USD/Python/Blender 无头/资产库可组合；格式转换链完整 | ffmpeg 明确交由外部（正确取舍）；USD ❌、Python 绑定 ❌；MCP stdio 可被 agent 调用（差异化强项） |
 | S6-C2 | 编排 | 任务队列、锁、重试、缓存；无状态可重入 | `--no-clobber` 提供了最小锁语义；无队列/重试/缓存层 |
 | S6-H1 | 可复现构建 | 锁定工具链 + `Cargo.lock` + `--locked` + 依赖审计进 CI | `Cargo.lock` 已入库；**无 `rust-toolchain.toml`、`--locked` 与 `cargo doc` 未进 CI、无 `deny.toml`/SBOM** → **未过** |
