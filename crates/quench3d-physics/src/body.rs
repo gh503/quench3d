@@ -15,6 +15,71 @@ pub enum BodyType {
     Kinematic,
 }
 
+/// 碰撞过滤分组（层 / 掩码）。
+///
+/// 一对刚体**只有互相"看得上"才会产生接触**：
+/// `A.memberships & B.filter != 0 && B.memberships & A.filter != 0`。
+/// 两个条件都要满足（对称），所以"我想碰你、你不想碰我"的结果是**不碰**。
+///
+/// 缺省是"都在**第 0 层**、和所有层碰"（`memberships = 1 << 0`、`filter = ALL`），
+/// 也就是**不设置就等于没有这个功能**——老场景逐位不变。
+///
+/// 注意 `memberships` 缺省**不是** `ALL`：`ALL` 表示"32 个层都是我的成员"，
+/// 那样一个只想碰第 5 层的过滤体（`filter = 1 << 5`）反而会把它当成同类。
+/// 想要"在所有层里"就显式用 [`InteractionGroups::all`]。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InteractionGroups {
+    /// 自己属于哪些层（位掩码）。
+    pub memberships: u32,
+    /// 愿意和哪些层碰（位掩码）。
+    pub filter: u32,
+}
+
+impl InteractionGroups {
+    /// 所有位（32 层都在内）。
+    pub const ALL: u32 = u32::MAX;
+    /// 不碰任何东西的分组（`filter = 0`）。
+    pub const NONE: Self = Self {
+        memberships: Self::ALL,
+        filter: 0,
+    };
+
+    /// 显式给出成员层与过滤层。
+    #[inline]
+    pub const fn new(memberships: u32, filter: u32) -> Self {
+        Self {
+            memberships,
+            filter,
+        }
+    }
+
+    /// 只在第 `layer` 层，且和所有层碰。
+    #[inline]
+    pub const fn layer(layer: u8) -> Self {
+        Self {
+            memberships: 1u32 << (layer & 31),
+            filter: Self::ALL,
+        }
+    }
+
+    /// 一对刚体是否互相参与碰撞。
+    #[inline]
+    pub const fn interacts(self, other: Self) -> bool {
+        (self.memberships & other.filter) != 0 && (other.memberships & self.filter) != 0
+    }
+}
+
+impl Default for InteractionGroups {
+    /// 第 0 层 + 和所有层碰（**不是** `memberships = ALL`，见类型文档）。
+    #[inline]
+    fn default() -> Self {
+        Self {
+            memberships: 1,
+            filter: Self::ALL,
+        }
+    }
+}
+
 /// 世代句柄：对象销毁后自增世代，旧句柄随即失效。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BodyHandle {
@@ -29,6 +94,12 @@ impl BodyHandle {
     #[inline]
     pub const fn new(index: u32, generation: u32) -> Self {
         Self { index, generation }
+    }
+
+    /// 槽位下标（同一槽位被复用后世代会变）。
+    #[inline]
+    pub const fn index(self) -> u32 {
+        self.index
     }
 }
 
@@ -78,6 +149,20 @@ pub struct RigidBody {
     pub gravity_scale: f32,
     /// 上层挂载数据（例如实体 id）。
     pub user_data: u64,
+    /// 碰撞过滤分组（缺省"和所有层碰"）。
+    pub groups: InteractionGroups,
+    /// 传感器（触发区）：参与接触检测与事件，但**不产生任何冲量**。
+    ///
+    /// 用它做"有人/物进入这个区域"的探测。传感器不会唤醒睡眠体（否则一个巨大的
+    /// 触发区会把整个世界唤醒），这是刻意的取舍。
+    pub sensor: bool,
+    /// 是否对这一个刚体开启连续碰撞检测（CCD）。
+    ///
+    /// 实现是**中心射线 TOI**：每子步从刚体中心沿这一步的位移方向打一条射线，
+    /// 命中就把朝表面的法向位移截到接触点前（切向保留）。不是精确 TOI：
+    /// 只扫中心线、没有旋转扫掠，极快 + 极薄仍可能漏（见文档）。
+    /// 代价是每个开了 CCD 的物体每子步一次射线查询，与速度无关。
+    pub ccd: bool,
 
     /// 质量。
     pub(crate) mass: f32,
@@ -348,6 +433,9 @@ pub struct BodyBuilder {
     gravity_scale: f32,
     user_data: u64,
     allow_sleep: bool,
+    groups: InteractionGroups,
+    sensor: bool,
+    ccd: bool,
 }
 
 impl BodyBuilder {
@@ -367,6 +455,9 @@ impl BodyBuilder {
             gravity_scale: 1.0,
             user_data: 0,
             allow_sleep: true,
+            groups: InteractionGroups::default(),
+            sensor: false,
+            ccd: false,
         }
     }
 
@@ -496,6 +587,36 @@ impl BodyBuilder {
         self
     }
 
+    /// 碰撞过滤分组。
+    pub fn groups(mut self, groups: InteractionGroups) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    /// 只在第 `layer` 层，且和所有层碰。
+    pub fn layer(mut self, layer: u8) -> Self {
+        self.groups.memberships = 1u32 << (layer & 31);
+        self
+    }
+
+    /// 只和 `filter` 掩码里的层碰。
+    pub fn collides_with(mut self, filter: u32) -> Self {
+        self.groups.filter = filter;
+        self
+    }
+
+    /// 传感器（触发区）：参与接触检测与事件，但不产生冲量。
+    pub fn sensor(mut self, sensor: bool) -> Self {
+        self.sensor = sensor;
+        self
+    }
+
+    /// 开启连续碰撞检测（中心射线 TOI）。
+    pub fn ccd(mut self, ccd: bool) -> Self {
+        self.ccd = ccd;
+        self
+    }
+
     /// 构建刚体。
     pub fn build(self) -> RigidBody {
         let mut body_type = self.body_type;
@@ -540,6 +661,9 @@ impl BodyBuilder {
             angular_damping: self.angular_damping,
             gravity_scale: self.gravity_scale,
             user_data: self.user_data,
+            groups: self.groups,
+            sensor: self.sensor,
+            ccd: self.ccd,
             mass,
             inv_mass,
             inertia_local: inertia,

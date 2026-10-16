@@ -110,7 +110,14 @@ pub struct ContactPair {
     /// 代表接触位置。
     pub point: Vec3,
     /// 本步累计法向冲量大小。
+    ///
+    /// 传感器（`sensor: true`）参与的接触永远不产生冲量，这里恒为 0。
     pub impulse: f32,
+    /// 这一对里是否有传感器。
+    ///
+    /// 传感器对**只做检测、不做求解**（不产生冲量、不唤醒睡眠体），
+    /// 但仍出现在 [`crate::PhysicsWorld::contacts`] 与传感器事件里。
+    pub sensor: bool,
 }
 
 #[cfg(test)]

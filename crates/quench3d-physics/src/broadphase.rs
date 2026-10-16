@@ -14,6 +14,7 @@
 //!   查找方式变了，但**候选对集合与顺序完全不变**（单元集合一样、输出照样排序去重），
 //!   所以物理结果是逐位可复现的。
 
+use crate::body::InteractionGroups;
 use quench3d_math::*;
 
 /// 参与宽相的代理。
@@ -33,6 +34,11 @@ pub(crate) struct Proxy {
     pub sleeping: bool,
     /// 是否全局代理（半空间）。
     pub global: bool,
+    /// 碰撞过滤分组。
+    ///
+    /// 放在宽相而不是窄相：不碰的一对物体连候选对都不该产生，
+    /// 否则"过滤掉 90% 的物体"在宽相之后仍然是 O(对数) 的窄相开销。
+    pub groups: InteractionGroups,
 }
 
 /// 空间哈希宽相（所有缓冲跨步复用，稳态零分配）。
@@ -346,6 +352,10 @@ fn try_pair(proxies: &[Proxy], i: u32, j: u32, out: &mut Vec<(u32, u32)>) {
     if pa.sleeping && pb.sleeping {
         return;
     }
+    // 分组不互相匹配 → 跳过（对称：两边都要愿意）
+    if !pa.groups.interacts(pb.groups) {
+        return;
+    }
     // AABB 相交测试：半空间的 AABB 为无穷，`intersects` 恒为真。
     if !pa.aabb.intersects(&pb.aabb) {
         return;
@@ -366,10 +376,15 @@ mod tests {
     use super::*;
 
     fn proxy(index: u32, c: Vec3, half: f32) -> Proxy {
+        proxy_groups(index, c, half, InteractionGroups::default())
+    }
+
+    fn proxy_groups(index: u32, c: Vec3, half: f32, groups: InteractionGroups) -> Proxy {
         Proxy {
             index,
             aabb: Aabb::from_center_half_extents(c, Vec3::splat(half)),
             movable: true,
+            groups,
             sleeping: false,
             global: false,
         }
@@ -519,6 +534,31 @@ mod tests {
         want.dedup();
         assert!(!want.is_empty(), "这个场景本来应该有配对");
         assert_eq!(got, want, "宽相结果与暴力枚举不一致");
+    }
+
+    #[test]
+    fn groups_filter_pairs_before_narrowphase() {
+        // 两个重叠的代理，但分组互不匹配 → 连候选对都不产生
+        // （A 只在第 0 层且只碰第 0 层；B 只在第 1 层且只碰第 1 层）
+        let a = proxy_groups(0, Vec3::ZERO, 1.0, InteractionGroups::new(1 << 0, 1 << 0));
+        let b = proxy_groups(1, Vec3::ZERO, 1.0, InteractionGroups::new(1 << 1, 1 << 1));
+        let mut bp = Broadphase::new();
+        let mut out = Vec::new();
+        bp.compute_pairs(&[a, b], &mut out);
+        assert!(out.is_empty(), "互不匹配的分组不该产生候选对：{out:?}");
+
+        // 单边愿意也不行（对称匹配）：A（第 0 层）愿意碰第 0 层的 B，
+        // 但 B（第 1 层）只愿意碰第 0 层 —— 于是 B 的 filter 不含 A 的成员层 → 不碰
+        let a = proxy_groups(0, Vec3::ZERO, 1.0, InteractionGroups::new(1 << 0, 1 << 0));
+        let b = proxy_groups(1, Vec3::ZERO, 1.0, InteractionGroups::new(1 << 1, 1 << 0));
+        bp.compute_pairs(&[a, b], &mut out);
+        assert!(out.is_empty(), "A 想碰 B 但 B 不想碰 A → 不碰");
+
+        // 双方都匹配 → 正常产生（回归：过滤不能把正常的对也滤掉）
+        let a = proxy_groups(0, Vec3::ZERO, 1.0, InteractionGroups::layer(3));
+        let b = proxy_groups(1, Vec3::ZERO, 1.0, InteractionGroups::layer(3));
+        bp.compute_pairs(&[a, b], &mut out);
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

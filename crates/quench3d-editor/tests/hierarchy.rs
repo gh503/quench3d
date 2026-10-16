@@ -314,3 +314,56 @@ fn dropped_parent_relation_is_reported() {
     // 丢掉父子关系之后，文件仍然读得回来（没有悬空引用）。
     scene_io::load_into_engine(&mut engine, &saved.json).expect("存出来的必须能读回");
 }
+
+/// 碰撞过滤 / 传感器 / CCD：编辑器没有编辑界面，但**存盘往返不能把字段吃掉**。
+///
+/// 这条是"看起来能用、其实悄悄丢数据"的典型：装载时字段进了物理刚体，
+/// 导出时如果照着编辑器的模型重写，就会全变成缺省值。
+#[test]
+fn export_preserves_sensors_filters_and_ccd() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::default();
+    let text = r#"{
+      "format": "quench3d.scene", "version": 2, "name": "filter",
+      "objects": [
+        { "name": "触发区", "shape": { "type": "box", "size": [2, 2, 2] },
+          "position": [0, 1, 0], "body": "static", "sensor": true },
+        { "name": "墙", "shape": { "type": "box", "size": [0.2, 2, 2] },
+          "position": [3, 1, 0], "body": "static", "collision_layer": 5,
+          "collides_with": [0, 5] },
+        { "name": "子弹", "shape": { "type": "sphere", "radius": 0.1 },
+          "position": [0, 5, 0], "body": "dynamic", "ccd": true,
+          "collision_layer": 2, "collides_with": [7] }
+      ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景必须能装载");
+
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("必须能导出");
+    // 用**场景格式自己的解析器**读回来：既验证文本合法，也能按字段检查（不靠字符串匹配）
+    let back = quench3d_cli::scene_doc::SceneDoc::from_json(&saved.json)
+        .expect("导出的文本必须能被场景格式解析回来");
+    let find = |name: &str| {
+        back.objects
+            .iter()
+            .find(|o| o.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("导出结果里没有 {name}"))
+    };
+
+    let sensor = find("触发区");
+    assert_eq!(sensor.sensor, Some(true), "传感器标记丢了");
+    assert_eq!(sensor.collision_layer, None, "第 0 层是缺省值，不该写出来");
+    assert_eq!(sensor.collides_with, None, "碰所有层是缺省值，不该写出来");
+
+    let wall = find("墙");
+    assert_eq!(wall.collision_layer, Some(5), "碰撞层丢了");
+    let mut mask = wall.collides_with.clone().expect("掩码丢了");
+    mask.sort_unstable();
+    assert_eq!(mask, vec![0, 5]);
+
+    let bullet = find("子弹");
+    assert_eq!(bullet.ccd, Some(true), "CCD 标记丢了");
+    assert_eq!(bullet.collision_layer, Some(2));
+    assert_eq!(bullet.collides_with, Some(vec![7]));
+}

@@ -10,7 +10,7 @@
 //! 两条路径共用 [`build_world`]：物理世界先独立建好（可以在没有 GPU 的机器上跑），
 //! 渲染时再把它交给引擎，可视物体按名字与刚体关联。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -135,6 +135,9 @@ pub struct SimReport {
     /// 区域探针的观测结果（场景里没写 `probes` 时这个字段不出现）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probes: Vec<ProbeReport>,
+    /// 传感器的观测结果（场景里没有 `sensor: true` 的物体时这个字段不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensors: Vec<SensorReport>,
     /// 非致命提示。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -231,6 +234,9 @@ pub struct RenderReport {
     /// 区域探针的观测结果（场景里没写 `probes` 时这个字段不出现）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probes: Vec<ProbeReport>,
+    /// 传感器的观测结果（场景里没有 `sensor: true` 的物体时这个字段不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensors: Vec<SensorReport>,
     /// 仿真报告（配置了步进时才有）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulate: Option<SimReport>,
@@ -372,6 +378,9 @@ pub struct MovieReport {
     /// 区域探针的观测结果（场景里没写 `probes` 时这个字段不出现）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probes: Vec<ProbeReport>,
+    /// 传感器的观测结果（场景里没有 `sensor: true` 的物体时这个字段不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensors: Vec<SensorReport>,
     /// 首帧记录。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_frame: Option<MovieFrame>,
@@ -524,6 +533,36 @@ pub struct ProbeReport {
     pub bodies: Vec<ProbeHit>,
 }
 
+/// 一个传感器里某个刚体的进入/离开记录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorHit {
+    /// 刚体名。
+    pub name: String,
+    /// 首次进入的步号（0 = 仿真开始时就在里面）。
+    pub enter_step: u32,
+    /// 最近一次离开的步号（缺省 = 结束时还在里面）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_step: Option<u32>,
+    /// 累计在里面的步数。
+    pub steps_inside: u32,
+    /// 进入次数（出去又进来算两次）。
+    pub entries: u32,
+}
+
+/// 一个传感器的观测结果（`objects[].sensor = true` 的物体）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorReport {
+    /// 传感器名。
+    pub name: String,
+    /// 结束时里面是否还有东西。
+    pub occupied: bool,
+    /// 结束时仍在里面的刚体名（按名字排序）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inside: Vec<String>,
+    /// 进过里面的刚体（按名字排序）。
+    pub bodies: Vec<SensorHit>,
+}
+
 /// 单个探针里单个刚体的运行时状态。
 #[derive(Debug, Clone, Default)]
 struct ProbeState {
@@ -575,6 +614,12 @@ struct PreparedAction {
 pub struct Script {
     actions: Vec<PreparedAction>,
     probes: Vec<ProbeRuntime>,
+    /// 传感器的观测状态：`传感器名 → (对方名 → 状态)`。
+    ///
+    /// 状态类型直接复用探针的 `ProbeState`（字段完全一样，`max_speed` 不用）。
+    sensors: BTreeMap<String, BTreeMap<String, ProbeState>>,
+    /// 句柄 → 名字（事件里给的是句柄，报告要用名字）。
+    names: HashMap<BodyHandle, String>,
     step: u32,
 }
 
@@ -654,16 +699,63 @@ impl Script {
             });
         }
 
+        // 句柄 → 名字：传感器事件给的是句柄，报告要用名字。
+        // 没登记名字的刚体（理论上不会有：物体都过 handles）用一个稳定的兜底名。
+        let names: HashMap<BodyHandle, String> =
+            handles.iter().map(|(n, h)| (*h, n.clone())).collect();
+
+        let mut sensors: BTreeMap<String, BTreeMap<String, ProbeState>> = BTreeMap::new();
+        for (n, h) in handles.iter() {
+            if world.body(*h).is_some_and(|b| b.sensor) {
+                sensors.insert(n.clone(), BTreeMap::new());
+            }
+        }
+
         Ok(Self {
             actions,
             probes,
+            sensors,
+            names,
             step: 0,
         })
     }
 
     /// 是否什么都没配（此时 [`Script::step`] 就是纯粹的物理步进）。
+    ///
+    /// 传感器也算"配了"：它虽然不写世界，但要靠 [`Script::step`] 采事件，
+    /// 谁要是拿这个函数去跳过 `Script`，传感器报告就会空掉。
     pub fn is_empty(&self) -> bool {
-        self.actions.is_empty() && self.probes.is_empty()
+        self.actions.is_empty() && self.probes.is_empty() && self.sensors.is_empty()
+    }
+
+    /// 汇总传感器报告（传感器按名字排序，刚体按名字排序，输出稳定）。
+    pub fn sensor_report(&self) -> Vec<SensorReport> {
+        self.sensors
+            .iter()
+            .map(|(name, states)| {
+                let inside: Vec<String> = states
+                    .iter()
+                    .filter(|(_, s)| s.inside)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                let bodies = states
+                    .iter()
+                    .map(|(n, s)| SensorHit {
+                        name: n.clone(),
+                        enter_step: s.enter_step,
+                        exit_step: s.exit_step,
+                        steps_inside: s.steps_inside,
+                        entries: s.entries,
+                    })
+                    .collect();
+                SensorReport {
+                    name: name.clone(),
+                    occupied: !inside.is_empty(),
+                    inside,
+                    bodies,
+                }
+            })
+            .collect()
     }
 
     /// 采样第 0 步（仿真开始前）的探针状态。
@@ -708,8 +800,9 @@ impl Script {
         }
     }
 
-    /// 只读地采集探针状态。
+    /// 只读地采集探针与传感器状态。
     fn observe(&mut self, world: &PhysicsWorld) {
+        self.observe_sensors(world);
         if self.probes.is_empty() {
             return;
         }
@@ -742,6 +835,51 @@ impl Script {
                     }
                     (false, false) => {}
                 }
+                if state.inside {
+                    state.steps_inside += 1;
+                }
+            }
+        }
+    }
+
+    /// 采集传感器状态：用引擎给出的**进入/离开事件**驱动（句柄带世代校验）。
+    ///
+    /// `steps_inside` 靠"本步是否 inside"累计（不是靠事件数），所以停在里面的期间
+    /// 也会一直累加——与探针报告的语义一致。
+    fn observe_sensors(&mut self, world: &PhysicsWorld) {
+        if self.sensors.is_empty() {
+            return;
+        }
+        let step = self.step;
+        for e in world.sensor_events() {
+            let sensor = self
+                .names
+                .get(&e.sensor)
+                .cloned()
+                .unwrap_or_else(|| format!("#{}", e.sensor.index()));
+            let other = self
+                .names
+                .get(&e.other)
+                .cloned()
+                .unwrap_or_else(|| format!("#{}", e.other.index()));
+            let Some(states) = self.sensors.get_mut(&sensor) else {
+                continue;
+            };
+            let state = states.entry(other.clone()).or_default();
+            if e.started {
+                if state.entries == 0 {
+                    state.enter_step = step;
+                }
+                state.entries += 1;
+                state.exit_step = None;
+                state.inside = true;
+            } else {
+                state.exit_step = Some(step);
+                state.inside = false;
+            }
+        }
+        for states in self.sensors.values_mut() {
+            for state in states.values_mut() {
                 if state.inside {
                     state.steps_inside += 1;
                 }
@@ -990,6 +1128,33 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if let Some(allow) = o.allow_sleep {
             builder = builder.can_sleep(allow);
         }
+        // 碰撞过滤（层 / 掩码）：缺省"全都在第 0 层、和所有层碰"，
+        // 也就是不写这些字段 = 和以前逐位相同。
+        let groups = match (o.collision_layer, &o.collides_with) {
+            (None, None) => quench3d::physics::InteractionGroups::default(),
+            (layer, mask) => {
+                let memberships = match layer {
+                    Some(l) if l <= 31 => 1u32 << l,
+                    // 越界值已经在校验里报错；这里兜底成第 0 层，别 panic
+                    _ => 1u32,
+                };
+                let filter = match mask {
+                    Some(list) => list
+                        .iter()
+                        .filter(|l| **l <= 31)
+                        .fold(0u32, |acc, l| acc | (1u32 << l)),
+                    None => quench3d::physics::InteractionGroups::ALL,
+                };
+                quench3d::physics::InteractionGroups::new(memberships, filter)
+            }
+        };
+        builder = builder.groups(groups);
+        if o.sensor == Some(true) {
+            builder = builder.sensor(true);
+        }
+        if o.ccd == Some(true) {
+            builder = builder.ccd(true);
+        }
         let handle = world.add_builder(builder);
         let name = object_name(doc, i);
         handles.insert(name.clone(), handle);
@@ -1170,6 +1335,7 @@ pub fn summarize(build: &WorldBuild, steps: u32, dt: f32) -> SimReport {
 
     SimReport {
         probes: Vec::new(),
+        sensors: Vec::new(),
         steps,
         dt,
         gravity: arr(build.world.gravity()),
@@ -1264,6 +1430,7 @@ pub fn run_simulate_traced(
 
     let mut report = summarize(&build, steps, dt);
     report.probes = script.report();
+    report.sensors = script.sensor_report();
     let trajectories = traced
         .into_iter()
         .map(|t| summarize_trace(t.name, t.shape.to_string(), t.samples, truncated))
@@ -1837,9 +2004,11 @@ pub fn run_render(
         script.step(&mut build.world, doc.simulate.dt);
     }
     let probes = script.report();
+    let sensors = script.sensor_report();
     let sim = if doc.simulate.steps > 0 {
         let mut rep = summarize(&build, doc.simulate.steps, doc.simulate.dt);
         rep.probes.clone_from(&probes);
+        rep.sensors.clone_from(&sensors);
         Some(rep)
     } else {
         None
@@ -1861,6 +2030,7 @@ pub fn run_render(
             objects: 0,
             camera_position: [0.0; 3],
             probes,
+            sensors,
             simulate: sim,
             dry_run: true,
             would_write: vec![output.display().to_string()],
@@ -1941,6 +2111,7 @@ pub fn run_render(
         objects: scene_objects,
         camera_position,
         probes,
+        sensors,
         simulate: sim,
         dry_run: false,
         would_write: Vec::new(),
@@ -2264,6 +2435,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             objects: 0,
             camera_position: [0.0; 3],
             probes: script.report(),
+            sensors: script.sensor_report(),
             first_frame: None,
             last_frame: None,
             ffmpeg: String::new(),
@@ -2450,6 +2622,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         objects: scene_objects,
         camera_position,
         probes: game.script.report(),
+        sensors: game.script.sensor_report(),
         first_frame: rows.first().cloned(),
         last_frame: rows.last().cloned(),
         ffmpeg,

@@ -247,6 +247,29 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             mass: body.filter(|b| b.is_dynamic()).map(|b| b.mass()),
             allow_sleep: body.map(|b| b.can_sleep()),
             visible: object.visible,
+            // 碰撞过滤 / 传感器 / CCD：编辑器目前**没有编辑界面**，但导出时从刚体上读回来，
+            // 这样"载入场景 → 保存"不会把这些字段悄悄丢掉。
+            collision_layer: body.and_then(|b| {
+                // 格式里一层就是一个位；取最低位（编辑器里不会出现多位成员的情况）。
+                // 第 0 层是缺省值，省略不写，免得给每个物体都加一个 "collision_layer": 0。
+                let m = b.groups.memberships;
+                let layer = if m == 0 { 0 } else { m.trailing_zeros() as u8 };
+                if layer == 0 {
+                    None
+                } else {
+                    Some(layer)
+                }
+            }),
+            collides_with: body.and_then(|b| {
+                let f = b.groups.filter;
+                if f == quench3d::physics::InteractionGroups::ALL {
+                    None
+                } else {
+                    Some((0..32u8).filter(|i| f & (1u32 << i) != 0).collect())
+                }
+            }),
+            sensor: body.map(|b| b.sensor).filter(|s| *s),
+            ccd: body.map(|b| b.ccd).filter(|c| *c),
         });
         exported.push((index, out.objects.len() - 1));
     }

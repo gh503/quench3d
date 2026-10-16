@@ -177,6 +177,21 @@ impl PhaseTimings {
     }
 }
 
+/// 传感器事件（一次子步内传感器重叠集合的变化）。
+///
+/// 只在**变化的那一子步**产生：物体进入触发区报一条 `started: true`，
+/// 离开报一条 `started: false`；停在里面的期间不重复报。
+/// 两个都是传感器的一对只报一条，`sensor` 取槽位小的那个。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SensorEvent {
+    /// 传感器本体。
+    pub sensor: BodyHandle,
+    /// 进入/离开它的那个刚体。
+    pub other: BodyHandle,
+    /// `true` = 进入，`false` = 离开。
+    pub started: bool,
+}
+
 pub struct PhysicsWorld {
     bodies: Vec<BodySlot>,
     free: Vec<u32>,
@@ -194,6 +209,12 @@ pub struct PhysicsWorld {
     accumulator: f32,
     /// 最近一次子步的接触对（公开只读）。
     contacts: Vec<ContactPair>,
+    /// 本子步里所有「涉及传感器」的接触对（已按 (a, b) 排序）。
+    sensor_pairs: Vec<(u32, u32)>,
+    /// 上一子步的传感器接触对（用来做进入/离开差分）。
+    sensor_pairs_prev: Vec<(u32, u32)>,
+    /// 本子步的传感器事件（进入/离开）。
+    sensor_events: Vec<SensorEvent>,
     manifolds: Vec<ManifoldEntry>,
     cache: ContactCache,
     contact_solver: ContactSolver,
@@ -322,6 +343,9 @@ impl PhysicsWorld {
             fixed_dt: DEFAULT_FIXED_DT,
             accumulator: 0.0,
             contacts: Vec::new(),
+            sensor_pairs: Vec::new(),
+            sensor_pairs_prev: Vec::new(),
+            sensor_events: Vec::new(),
             manifolds: Vec::new(),
             cache: ContactCache::default(),
             contact_solver: ContactSolver::default(),
@@ -455,6 +479,9 @@ impl PhysicsWorld {
 
     /// 移除所有刚体与关节。
     pub fn clear(&mut self) {
+        self.sensor_pairs.clear();
+        self.sensor_pairs_prev.clear();
+        self.sensor_events.clear();
         self.bodies.clear();
         self.joints.clear();
         self.free.clear();
@@ -528,6 +555,16 @@ impl PhysicsWorld {
     /// 最近一次子步的接触对。
     pub fn contacts(&self) -> &[ContactPair] {
         &self.contacts
+    }
+
+    /// 本子步的传感器事件（进入/离开）。停在里面不动时是空的。
+    pub fn sensor_events(&self) -> &[SensorEvent] {
+        &self.sensor_events
+    }
+
+    /// 本子步里所有涉及传感器的接触对 `(传感器, 对方)`（按槽位排序）。
+    pub fn sensor_pairs(&self) -> &[(u32, u32)] {
+        &self.sensor_pairs
     }
 
     /// 向场景发射射线，返回最近命中。
@@ -766,6 +803,9 @@ impl PhysicsWorld {
                 b.pseudo_angular_velocity = view.pseudo_ang;
             }
         }
+        // 9.5 CCD：开了 `ccd` 的刚体，先做一次扫掠，把这一步朝墙的那部分位移截在接触点。
+        // 放在位置积分**之前**：改的是速度，位置积分照旧只按速度走一步（见 `apply_ccd`）。
+        self.apply_ccd(dt);
         // 10. 位置积分
         solver::integrate_positions(&mut self.bodies, dt);
         lap!(writeback_us);
@@ -824,9 +864,11 @@ impl PhysicsWorld {
         let mut manifolds = std::mem::take(&mut self.manifolds);
         let mut contacts = std::mem::take(&mut self.contacts);
         let mut wake = std::mem::take(&mut self.wake_list);
+        let mut sensor_pairs = std::mem::take(&mut self.sensor_pairs);
         manifolds.clear();
         contacts.clear();
         wake.clear();
+        sensor_pairs.clear();
 
         // --- 代理 ---
         self.proxies.clear();
@@ -851,6 +893,7 @@ impl PhysicsWorld {
                     && !b.is_sleeping(),
                 sleeping: b.is_sleeping(),
                 global,
+                groups: b.groups,
             });
         }
 
@@ -867,7 +910,7 @@ impl PhysicsWorld {
         for k in 0..self.pairs.len() {
             let (ia, ib) = self.pairs[k];
             let (ia, ib) = (ia as usize, ib as usize);
-            let manifold = {
+            let (manifold, sensor_pair) = {
                 let a = match self.bodies.get(ia).and_then(|s| s.body.as_ref()) {
                     Some(a) => a,
                     None => continue,
@@ -876,12 +919,36 @@ impl PhysicsWorld {
                     Some(b) => b,
                     None => continue,
                 };
-                narrowphase::collide_shapes(&a.shape, &a.transform, &b.shape, &b.transform)
+                // 分组过滤在宽相已经做过一遍；这里再查一次是因为调用方可以直接改
+                // `body.groups`（宽相用的是本子步开头的快照，中间改了要以当前值为准）。
+                if !a.groups.interacts(b.groups) {
+                    continue;
+                }
+                (
+                    narrowphase::collide_shapes(&a.shape, &a.transform, &b.shape, &b.transform),
+                    a.sensor || b.sensor,
+                )
             };
             let m = match manifold {
                 Some(m) => m,
                 None => continue,
             };
+
+            contacts.push(ContactPair {
+                a: BodyHandle::new(ia as u32, self.bodies[ia].generation),
+                b: BodyHandle::new(ib as u32, self.bodies[ib].generation),
+                normal: m.points[0].normal,
+                point: m.points[0].position,
+                impulse: 0.0,
+                sensor: sensor_pair,
+            });
+
+            // 传感器：只进接触表与事件，**不进求解器**（不产生冲量），
+            // 也不参与唤醒——一个巨大的触发区不该把整个世界唤醒。
+            if sensor_pair {
+                sensor_pairs.push((ia as u32, ib as u32));
+                continue;
+            }
 
             let mut entry = ManifoldEntry {
                 a: ia,
@@ -889,13 +956,6 @@ impl PhysicsWorld {
                 points: SmallVec::new(),
             };
             entry.points.extend_from_slice(&m.points);
-            contacts.push(ContactPair {
-                a: BodyHandle::new(ia as u32, self.bodies[ia].generation),
-                b: BodyHandle::new(ib as u32, self.bodies[ib].generation),
-                normal: m.points[0].normal,
-                point: m.points[0].position,
-                impulse: 0.0,
-            });
             manifolds.push(entry);
 
             // 唤醒：接触对方在运动 → 唤醒睡眠体。
@@ -932,11 +992,150 @@ impl PhysicsWorld {
             }
         }
 
+        // 传感器事件：本子步与上一子步的重叠集合做差分（两边都已按槽位排序）。
+        self.sensor_pairs_prev.sort_unstable();
+        self.sensor_pairs_prev.dedup();
+        self.sensor_events.clear();
+        {
+            let (mut i, mut j) = (0usize, 0usize);
+            while i < sensor_pairs.len() || j < self.sensor_pairs_prev.len() {
+                let cur = sensor_pairs.get(i).copied();
+                let prev = self.sensor_pairs_prev.get(j).copied();
+                match (cur, prev) {
+                    (Some(c), Some(p)) if c == p => {
+                        i += 1;
+                        j += 1;
+                    }
+                    (Some(c), Some(p)) if c < p => {
+                        self.push_sensor_event(c, true);
+                        i += 1;
+                    }
+                    (Some(_), Some(_)) => {
+                        // 上一子步有、这一子步没有 → 离开
+                        self.push_sensor_event(self.sensor_pairs_prev[j], false);
+                        j += 1;
+                    }
+                    (Some(c), None) => {
+                        self.push_sensor_event(c, true);
+                        i += 1;
+                    }
+                    (None, Some(_)) => {
+                        self.push_sensor_event(self.sensor_pairs_prev[j], false);
+                        j += 1;
+                    }
+                    (None, None) => break,
+                }
+            }
+        }
+        std::mem::swap(&mut self.sensor_pairs_prev, &mut sensor_pairs);
+
         self.manifolds = manifolds;
         self.contacts = contacts;
         self.wake_list = wake;
         if self.phase_timing {
             self.phase_timings.manifolds += self.manifolds.len() as u64;
+        }
+    }
+
+    /// 连续碰撞检测（CCD）：对开了 `ccd` 的动态刚体，把这一步的位移截在"撞上之前"。
+    ///
+    /// 做法（**不是**全局子步细分）：
+    /// 1. 取这一步的位移 `motion = v * dt`，方向 `dir = motion / |motion|`；
+    /// 2. 从刚体中心沿 `dir` 打一条**中心射线**（[`PhysicsWorld::raycast_filtered`]，
+    ///    排除自己、分组不匹配的、以及传感器），最多 `|motion| + reach`，其中
+    ///    `reach = Shape::support(dir)·dir` 是"中心到表面在运动方向上的距离"
+    ///    （球是半径、盒是各轴投影和，凸形状上精确）；
+    /// 3. 中心还能走多远就是 `hit.distance - reach`；把 `motion` 里**朝表面**的那一部分
+    ///    截到这里，切向部分原样保留，再把截过的 `motion / dt` 写回速度。
+    ///
+    /// 这样位置积分之后，刚体正好停在接触点前（不会穿过去），而沿着墙面的滑动不受影响；
+    /// 下一子步窄相会正常生成接触，冲量由求解器给（恢复系数、摩擦都照旧生效）。
+    /// 代价是**每个开了 CCD 的刚体每子步一次射线查询**，与它的速度无关。
+    /// 边界：只扫中心线（擦着角过去可能漏）、没有旋转扫掠，"极快 + 极薄"仍可能漏——见文档。
+    fn apply_ccd(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        // 先收集（这一阶段只读 `self`），避免边遍历边改
+        let mut updates: Vec<(usize, Vec3)> = Vec::new();
+        for (i, slot) in self.bodies.iter().enumerate() {
+            let Some(b) = &slot.body else { continue };
+            if !b.ccd || b.body_type != BodyType::Dynamic || b.is_sleeping() {
+                continue;
+            }
+            let motion = b.linear_velocity * dt;
+            let total = motion.length();
+            if !total.is_finite() || total <= 0.0 {
+                continue;
+            }
+            let self_handle = BodyHandle::new(i as u32, slot.generation);
+            let groups = b.groups;
+            let dir = motion / total;
+            // 中心到表面在**运动方向**上的距离（凸形状上精确：球是半径、盒是各轴投影和）。
+            // 用它把"射线打到表面"换算成"中心还能走多远"。
+            let reach = b.shape.support(dir).dot(dir).max(0.0);
+            let filter = |handle: BodyHandle| -> bool {
+                handle != self_handle
+                    && self
+                        .body(handle)
+                        .is_some_and(|other| !other.sensor && other.groups.interacts(groups))
+            };
+            // 为什么不用保守推进扫掠（`shape_cast`）：它按"到任意方向最近物体的距离"推进，
+            // 贴着地面滑行的子弹会被脚下的地面一直拖着（每步只推进地面距离那么远），
+            // 而且一旦最近的是"擦身而过"的物体，返回的命中就不该拦——试过，
+            // 加了地面之后子弹照样穿墙（见 sim_tests 的同名回归用例）。
+            // 中心射线只报告**沿运动方向**的命中，没有这个问题，而且一次查询就够。
+            let Some(hit) = self.raycast_filtered(b.transform.position, dir, total + reach, filter)
+            else {
+                continue;
+            };
+            let travel = (hit.distance - reach).clamp(0.0, total);
+            let n = hit.normal;
+            // 朝表面运动的法向分量（负 = 正在靠近）
+            let mn = motion.dot(n);
+            if mn >= -1e-6 {
+                // 掠过的情形：没有再往表面里走，不用管
+                continue;
+            }
+            // 只允许靠近 `travel` 这么多：`mn` 与 `-travel` 取"更靠外"的那个
+            let mn_clamped = mn.max(-travel);
+            let motion_new = motion - n * (mn - mn_clamped);
+            if (motion_new - motion).length_squared() > 0.0 {
+                updates.push((i, motion_new / dt));
+            }
+        }
+        for (i, v) in updates {
+            if let Some(b) = self.bodies[i].body.as_mut() {
+                b.linear_velocity = v;
+            }
+        }
+    }
+
+    /// 记录一条传感器事件（句柄带世代校验；槽位已经空掉的直接跳过）。
+    fn push_sensor_event(&mut self, pair: (u32, u32), started: bool) {
+        let (ia, ib) = (pair.0 as usize, pair.1 as usize);
+        if let (Some(sa), Some(sb)) = (self.bodies.get(ia), self.bodies.get(ib)) {
+            if sa.body.is_none() || sb.body.is_none() {
+                return;
+            }
+            // 两个都是传感器时只报一条，`sensor` 取 a
+            let sensor_is_a = sa.body.as_ref().is_some_and(|b| b.sensor);
+            let (sensor, other) = if sensor_is_a {
+                (
+                    BodyHandle::new(pair.0, sa.generation),
+                    BodyHandle::new(pair.1, sb.generation),
+                )
+            } else {
+                (
+                    BodyHandle::new(pair.1, sb.generation),
+                    BodyHandle::new(pair.0, sa.generation),
+                )
+            };
+            self.sensor_events.push(SensorEvent {
+                sensor,
+                other,
+                started,
+            });
         }
     }
 

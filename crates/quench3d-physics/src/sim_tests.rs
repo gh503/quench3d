@@ -5,7 +5,7 @@
 
 use quench3d_math::*;
 
-use crate::body::BodyBuilder;
+use crate::body::{BodyBuilder, InteractionGroups};
 use crate::contact::ContactPair;
 use crate::joints::Joint;
 use crate::shape::Shape;
@@ -1157,4 +1157,295 @@ fn kinematic_body_at_rest_does_not_wake_sleepers() {
         w.body(target).unwrap().is_sleeping(),
         "不动的运动学体不该阻止旁边的箱子入睡"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 13. 碰撞过滤、传感器、CCD
+// ---------------------------------------------------------------------------
+
+/// 分组不匹配的一对刚体**连接触都不产生**，动了的那一个会穿过去。
+#[test]
+fn groups_filter_contacts_between_layers() {
+    // 地面只在第 0 层、且只碰第 2 层；盒子在第 1 层、愿意碰所有层。
+    // 盒子愿意没用——地面不愿意，这一对就是不碰（对称匹配）。
+    let mut w2 = PhysicsWorld::new();
+    let _ground = w2.add_body(
+        BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y })
+            .layer(0)
+            .collides_with(1 << 2) // 只和第 2 层碰
+            .build(),
+    );
+    let b2 = w2.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .position(vec3(0.0, 0.5, 0.0))
+        .layer(1)
+        .collides_with(InteractionGroups::ALL)
+        .build(),
+    );
+    for _ in 0..60 {
+        w2.step(DT);
+    }
+    let y = w2.body(b2).unwrap().position().y;
+    assert!(
+        y < -1.0,
+        "分组不匹配时盒子应当穿过地面掉下去，实际停在 y = {y}"
+    );
+    assert!(
+        w2.contacts().is_empty(),
+        "分组不匹配的一对不该产生接触：{:?}",
+        w2.contacts().len()
+    );
+
+    // 对照组：同层且都愿意 → 停在半高上（回归：过滤不能把正常碰撞也滤掉）
+    let mut w3 = PhysicsWorld::new();
+    let _ground = w3.add_body(
+        BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y })
+            .layer(0)
+            .build(),
+    );
+    let b3 = w3.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .position(vec3(0.0, 0.5, 0.0))
+        .layer(0)
+        .build(),
+    );
+    for _ in 0..30 {
+        w3.step(DT);
+    }
+    let y = w3.body(b3).unwrap().position().y;
+    assert!((y - 0.5).abs() < 0.05, "对照组应当停在 y ≈ 0.5，实际 {y}");
+    assert_all_finite(&w3, "分组对照组");
+}
+
+#[test]
+fn interaction_groups_are_symmetric() {
+    let a = InteractionGroups::new(1 << 0, 1 << 1);
+    let b = InteractionGroups::new(1 << 1, 1 << 0);
+    assert!(a.interacts(b) && b.interacts(a));
+    // 单边愿意 → 不碰：c（第 2 层）愿意碰所有层，但 a 的 filter 里没有第 2 层
+    let c = InteractionGroups::new(1 << 2, InteractionGroups::ALL);
+    assert!(!a.interacts(c) && !c.interacts(a));
+    // 缺省 = 全都在同一层且都愿意
+    assert!(InteractionGroups::default().interacts(InteractionGroups::default()));
+    // filter = 0 什么都不碰
+    assert!(!InteractionGroups::NONE.interacts(InteractionGroups::default()));
+}
+
+/// 传感器：只报"进入/离开"，不产生任何冲量，物体直接穿过去。
+#[test]
+fn sensor_reports_enter_and_leave_without_impulse() {
+    let mut w = PhysicsWorld::with_gravity(vec3(0.0, -9.81, 0.0));
+    // 传感器是静态的薄盒子（触发区），摆在 y = 0 处
+    let sensor = w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: vec3(1.0, 0.1, 1.0),
+        })
+        .position(vec3(0.0, 0.0, 0.0))
+        .sensor(true)
+        .build(),
+    );
+    // 从上方自由落体穿过它
+    let faller = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.2),
+        })
+        .position(vec3(0.0, 1.5, 0.0))
+        .build(),
+    );
+    let mut entered = false;
+    let mut left = false;
+    let mut max_impulse = 0.0f32;
+    for _ in 0..120 {
+        w.step(DT);
+        for e in w.sensor_events() {
+            assert_eq!(e.sensor, sensor, "事件里的传感器句柄不对");
+            assert_eq!(e.other, faller);
+            if e.started {
+                entered = true;
+            } else {
+                left = true;
+            }
+        }
+        for c in w.contacts() {
+            if c.sensor {
+                max_impulse = max_impulse.max(c.impulse);
+            }
+        }
+    }
+    assert!(entered, "物体穿过传感器时应当报一次进入");
+    assert!(left, "物体离开传感器时应当报一次离开");
+    assert_eq!(max_impulse, 0.0, "传感器不该产生任何冲量");
+    let y = w.body(faller).unwrap().position().y;
+    assert!(y < -2.0, "物体应当毫无阻碍地穿过传感器，实际停在 y = {y}");
+    // 进去过又出来了，稳态下不该再有事件
+    assert!(
+        w.sensor_events().is_empty(),
+        "物体已经离开，不该还在报事件：{:?}",
+        w.sensor_events()
+    );
+    assert!(w.sensor_pairs().is_empty());
+    assert_all_finite(&w, "传感器");
+}
+
+/// 传感器不唤醒睡眠体（一个巨大的触发区不该把整个世界叫醒）。
+#[test]
+fn sensor_does_not_wake_sleeping_bodies() {
+    let mut w = PhysicsWorld::new();
+    // 地面上放一个盒子，等它睡着
+    let _ground = add_ground(&mut w, 0.5, 0.0);
+    let box_h = add_box(&mut w, 0.5, vec3(0.0, 0.5, 0.0), 0.5, 0.0);
+    for _ in 0..600 {
+        w.step(DT);
+    }
+    assert!(w.body(box_h).unwrap().is_sleeping(), "前提：盒子先得睡着");
+    // 运动学传感器扫过它
+    let sensor = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: vec3(0.5, 0.5, 0.5),
+        })
+        .position(vec3(-3.0, 0.5, 0.0))
+        .linear_velocity(vec3(2.0, 0.0, 0.0))
+        .sensor(true)
+        .build(),
+    );
+    for _ in 0..60 {
+        w.step(DT);
+    }
+    let _ = sensor;
+    assert!(
+        w.body(box_h).unwrap().is_sleeping(),
+        "传感器经过时不该把睡着的盒子叫醒"
+    );
+}
+
+/// CCD 贴着地面滑行时也得挡住薄墙（回归：保守推进扫掠会被脚下的地面"拖住"）。
+///
+/// 这个用例是真正的坑：没有地面时扫掠能找到墙，加了地面之后——地面永远在正下方
+/// 0.1 米、"最近物体"永远是地面，扫掠每步只推进 0.1 米，而且返回的"命中"是地面
+/// （法线与运动垂直 → 不该拦），于是子弹把墙穿了过去。现在用中心射线，只报
+/// **沿运动方向**的命中，一次查询就够。
+#[test]
+fn ccd_works_while_skimming_a_ground_plane() {
+    let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+    // 地面：无限半空间，就在子弹正下方 0.2 米
+    w.add_body(
+        BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y })
+            .position(Vec3::ZERO)
+            .build(),
+    );
+    w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: vec3(0.05, 2.0, 2.0),
+        })
+        .position(vec3(-5.0, 0.2, 0.0))
+        .build(),
+    );
+    let ball = w.add_body(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+            .position(vec3(-10.0, 0.2, 0.0))
+            .linear_velocity(vec3(600.0, 0.0, 0.0))
+            .gravity_scale(0.0)
+            .ccd(true)
+            .build(),
+    );
+    for _ in 0..30 {
+        w.step(DT);
+    }
+    let x = w.body(ball).unwrap().position().x;
+    assert!(
+        x <= -5.0,
+        "贴着地面滑行的 CCD 子弹必须被薄墙拦住，实际 x = {x}"
+    );
+}
+
+/// CCD 也要遵守碰撞分组：分组不匹配的墙，扫掠时就得当作不存在。
+#[test]
+fn ccd_respects_collision_groups() {
+    let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+    // 墙只在第 5 层、且只碰第 5 层；子弹在第 0 层 → 互相不碰
+    let _wall = w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: vec3(0.05, 2.0, 2.0),
+        })
+        .position(vec3(-9.0, 0.0, 0.0))
+        .layer(5)
+        .collides_with(1 << 5)
+        .build(),
+    );
+    let ball = w.add_body(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+            .position(vec3(-14.0, 0.0, 0.0))
+            .linear_velocity(vec3(600.0, 0.0, 0.0))
+            .gravity_scale(0.0)
+            .ccd(true)
+            .build(),
+    );
+    for _ in 0..30 {
+        w.step(DT);
+    }
+    let x = w.body(ball).unwrap().position().x;
+    assert!(
+        x > 0.0,
+        "CCD 不该被分组不匹配的墙拦住（说明扫掠没查分组），实际 x = {x}"
+    );
+}
+
+/// CCD：高速小球撞薄墙——不开会穿过去，开了会停在墙前（并且之后不穿模）。
+#[test]
+fn ccd_stops_a_fast_body_at_a_thin_wall() {
+    // 薄墙：0.1 厚（半厚 0.05），立在 x = 0
+    let make = |ccd: bool| {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let wall = w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: vec3(0.05, 2.0, 2.0),
+            })
+            .position(vec3(0.0, 0.0, 0.0))
+            .build(),
+        );
+        let ball = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(vec3(-5.0, 0.0, 0.0))
+                .linear_velocity(vec3(600.0, 0.0, 0.0))
+                .ccd(ccd)
+                .build(),
+        );
+        (w, wall, ball)
+    };
+
+    // ① 不开 CCD：一步 10 米，直接跳到墙的另一边（墙只有 0.1 厚）
+    let (mut w, _wall, ball) = make(false);
+    w.step(DT);
+    let x_no_ccd = w.body(ball).unwrap().position().x;
+    assert!(
+        x_no_ccd > 0.15,
+        "前提：不开 CCD 时这一步应当已经穿过薄墙（一步 10 米），实际 x = {x_no_ccd}"
+    );
+
+    // ② 开 CCD：停在墙的 -x 一侧（球心 ≤ 墙面 - 半径 = -0.15）
+    let (mut w2, _wall2, ball2) = make(true);
+    for _ in 0..10 {
+        w2.step(DT);
+    }
+    let x_ccd = w2.body(ball2).unwrap().position().x;
+    assert!(
+        x_ccd <= -0.14,
+        "开了 CCD 不该穿墙，实际 x = {x_ccd}（墙面在 -0.05，球半径 0.1）"
+    );
+    assert!(
+        x_ccd >= -0.6,
+        "开了 CCD 也不该在离墙半米外就停下（说明扫掠把速度截得太狠），实际 x = {x_ccd}"
+    );
+    assert_all_finite(&w2, "CCD");
+
+    // ③ 长时间跑下去也不能穿过去（每一步都扫）
+    for _ in 0..240 {
+        w2.step(DT);
+    }
+    let x_late = w2.body(ball2).unwrap().position().x;
+    assert!(x_late <= -0.14, "跑 4 秒后仍然不该穿墙，实际 x = {x_late}");
 }

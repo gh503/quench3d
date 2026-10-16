@@ -452,6 +452,31 @@ pub struct ObjectDoc {
     /// 是否可见，缺省 true。
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// 碰撞层（0~31），缺省 0。
+    ///
+    /// 一层是一个位；只有**双方都愿意**才会产生碰撞（见 `collides_with`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collision_layer: Option<u8>,
+    /// 愿意和哪些层碰（层号列表），缺省"所有层"。
+    ///
+    /// 判断是**对称**的：`A` 愿意碰 `B` 且 `B` 也愿意碰 `A` 才碰。
+    /// 写空数组 `[]` 表示谁也不碰（穿透一切，但仍参与传感器事件）。
+    /// 只影响**物理**：射线检测与拾取不看这一项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collides_with: Option<Vec<u8>>,
+    /// 传感器（触发区），缺省 false。
+    ///
+    /// 传感器照常参与接触检测与事件（`sensor_events` / 报告里的"进入/离开"），
+    /// 但**不产生任何冲量**，别的物体直接穿过去。需要 `body` 不为 `"visual"`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor: Option<bool>,
+    /// 连续碰撞检测（CCD），缺省 false。
+    ///
+    /// 给"高速小物体"用：每子步做一次形状扫掠，把这一步朝障碍物的位移截在接触点，
+    /// 因此不会一步跨过薄墙。代价是每子步一次扫掠（与速度无关）。
+    /// 需要 `body` 是 `"dynamic"`；它是保守推进式的近似，不是精确 TOI。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccd: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -1727,6 +1752,107 @@ impl SceneDoc {
                     "物体没有刚体，速度不会生效",
                 ));
             }
+            // 碰撞过滤：层号只有 0~31（掩码是 32 位）
+            if let Some(layer) = o.collision_layer {
+                if layer > 31 {
+                    out.push(
+                        Diagnostic::error(
+                            format!("{p}.collision_layer"),
+                            format!("碰撞层 {layer} 超出范围（0~31）"),
+                        )
+                        .with_hint("层号对应 32 位掩码的一位，最多 32 层"),
+                    );
+                }
+            }
+            if let Some(mask) = &o.collides_with {
+                for (k, layer) in mask.iter().enumerate() {
+                    if *layer > 31 {
+                        out.push(Diagnostic::error(
+                            format!("{p}.collides_with[{k}]"),
+                            format!("层号 {layer} 超出范围（0~31）"),
+                        ));
+                    }
+                }
+                let mut seen = mask.clone();
+                seen.sort_unstable();
+                let before = seen.len();
+                seen.dedup();
+                if seen.len() != before {
+                    out.push(Diagnostic::warn(
+                        format!("{p}.collides_with"),
+                        "层号有重复，重复项没有额外作用",
+                    ));
+                }
+                if mask.is_empty() {
+                    out.push(
+                        Diagnostic::warn(
+                            format!("{p}.collides_with"),
+                            "空列表 = 谁也不碰：这个物体会穿过所有东西",
+                        )
+                        .with_hint("想让它和所有层碰就删掉本字段"),
+                    );
+                }
+                if o.body == BodyKind::None {
+                    out.push(Diagnostic::warn(
+                        format!("{p}.collides_with"),
+                        "物体没有刚体，碰撞过滤不会生效",
+                    ));
+                }
+                // 只和自己那一层碰是常见写法；但若连自己那层都不含，容易看漏
+                if let Some(layer) = o.collision_layer {
+                    if !mask.contains(&layer) {
+                        out.push(Diagnostic::warn(
+                            format!("{p}.collides_with"),
+                            format!("列表里不含自己的层 {layer}，它不会和同层物体碰撞"),
+                        ));
+                    }
+                }
+            }
+            // 传感器：必须是刚体，且密度/质量/none 之类会静默失效的字段要说清楚
+            if o.sensor == Some(true) {
+                if o.body == BodyKind::None {
+                    out.push(
+                        Diagnostic::error(
+                            format!("{p}.sensor"),
+                            "传感器需要刚体（body 是 \"none\" 的物体不参与物理）",
+                        )
+                        .with_hint("写成 \"static\"（固定触发区）或 \"dynamic\"（跟着动的触发区）"),
+                    );
+                }
+                if o.density.is_some() || o.mass.is_some() {
+                    out.push(Diagnostic::warn(
+                        &p,
+                        "传感器不产生冲量，密度/质量对它没有意义",
+                    ));
+                }
+                if o.restitution.is_some() || o.friction.is_some() {
+                    out.push(Diagnostic::warn(
+                        &p,
+                        "传感器不产生冲量，恢复系数/摩擦对它没有意义",
+                    ));
+                }
+                if o.shape.kind == ShapeKind::Plane {
+                    out.push(Diagnostic::warn(
+                        format!("{p}.sensor"),
+                        "无限半空间当传感器：整个空间永远在里面，事件只在开始时报一次",
+                    ));
+                }
+            }
+            // CCD：只对动态刚体有意义
+            if o.ccd == Some(true) {
+                if o.body != BodyKind::Dynamic {
+                    out.push(Diagnostic::warn(
+                        format!("{p}.ccd"),
+                        format!("body 是 {:?}，CCD 只对 dynamic 生效，会被忽略", o.body),
+                    ));
+                }
+                if matches!(o.shape.kind, ShapeKind::Plane) {
+                    out.push(Diagnostic::warn(
+                        format!("{p}.ccd"),
+                        "无限半空间不需要 CCD（它不会动）",
+                    ));
+                }
+            }
             // scale 是渲染专用的：碰撞形状取 shape 里的原始尺寸，这里放大会静默对不上
             if o.scale.is_some() && o.body != BodyKind::None {
                 out.push(
@@ -2863,6 +2989,86 @@ mod tests {
 
         // 字段名拼错要报未知字段，而不是静默忽略
         assert!(SceneDoc::from_json(r#"{"objects":[],"lighting":{"fxaa":{"knee":1.0}}}"#).is_err());
+    }
+
+    #[test]
+    fn collision_filter_sensor_and_ccd_validation() {
+        // 不写 = 和以前一样（序列化不该冒出新字段）
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[{"name":"a","body":"dynamic","velocity":[1,0,0]}]}"#,
+        )
+        .unwrap();
+        let o = &doc.objects[0];
+        assert!(o.collision_layer.is_none() && o.collides_with.is_none());
+        assert!(o.sensor.is_none() && o.ccd.is_none());
+        let json = serde_json::to_string(&doc).unwrap();
+        for key in ["collision_layer", "collides_with", "sensor", "ccd"] {
+            assert!(!json.contains(key), "缺省时不该序列化出 {key}");
+        }
+
+        // 层号越界是错误；重复层是警告
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[{"name":"a","body":"static","collision_layer":32,"collides_with":[0,0,40]}]}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "objects[0].collision_layer" && d.severity == Severity::Error));
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "objects[0].collides_with[2]" && d.severity == Severity::Error));
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "objects[0].collides_with" && d.severity == Severity::Warning));
+
+        // 空列表 = 谁也不碰（警告）；不含自己那一层（警告）
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[{"name":"a","body":"static","collision_layer":3,"collides_with":[]}]}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(diags.iter().any(|d| d.path == "objects[0].collides_with"));
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[{"name":"a","body":"static","collision_layer":3,"collides_with":[1]}]}"#,
+        )
+        .unwrap();
+        assert!(doc
+            .validate()
+            .iter()
+            .any(|d| d.path == "objects[0].collides_with" && d.severity == Severity::Warning));
+
+        // 传感器：没有刚体是错误；带密度/摩擦是警告
+        let doc = SceneDoc::from_json(r#"{"objects":[{"name":"a","sensor":true}]}"#).unwrap();
+        assert!(doc
+            .validate()
+            .iter()
+            .any(|d| d.path == "objects[0].sensor" && d.severity == Severity::Error));
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[{"name":"a","body":"static","sensor":true,"density":500,"friction":0.1}]}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "objects[0]" && d.severity == Severity::Warning));
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+
+        // CCD：只对 dynamic 有意义
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[{"name":"a","body":"static","ccd":true},{"name":"b","body":"dynamic","ccd":true}]}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "objects[0].ccd" && d.severity == Severity::Warning));
+        assert!(!diags.iter().any(|d| d.path == "objects[1].ccd"));
+
+        // 拼错字段名要报未知字段
+        assert!(
+            SceneDoc::from_json(r#"{"objects":[{"name":"a","body":"static","layer":1}]}"#).is_err()
+        );
     }
 
     #[test]

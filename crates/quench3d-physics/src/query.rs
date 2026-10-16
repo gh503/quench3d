@@ -151,6 +151,20 @@ pub(crate) fn shape_cast_world(
     from: &Transform,
     motion: Vec3,
 ) -> Option<RaycastHit> {
+    shape_cast_world_filtered(world, shape, from, motion, &|_, _| true)
+}
+
+/// 带过滤的形状扫掠（CCD 用：必须能排除"自己"）。
+///
+/// `filter(句柄, 刚体)` 返回 `false` 的刚体完全不参与这次扫掠——
+/// 自扫掠不排除自己的话，第一步就会在距离 0 处"命中自己"。
+pub(crate) fn shape_cast_world_filtered(
+    world: &PhysicsWorld,
+    shape: &Shape,
+    from: &Transform,
+    motion: Vec3,
+    filter: &dyn Fn(BodyHandle, &RigidBody) -> bool,
+) -> Option<RaycastHit> {
     if !motion.is_finite() || matches!(shape, Shape::Plane { .. }) {
         return None;
     }
@@ -165,6 +179,9 @@ pub(crate) fn shape_cast_world(
         let mut min_d = total - travelled;
         let mut closest: Option<(BodyHandle, DistanceResult)> = None;
         for (handle, body) in world.bodies() {
+            if !filter(handle, body) {
+                continue;
+            }
             let r = distance_to_body(shape, &cur, body);
             if r.distance <= TOUCH {
                 closest = Some((handle, r));

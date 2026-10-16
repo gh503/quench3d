@@ -112,9 +112,9 @@
 | 关节 | PhysX / Jolt | 固定 / 球 / 铰链 / 距离 / 滑块 共 5 种（`joints.rs:34-118`）；铰链有马达与角度限位、滑块有轴向限位；**滑块无马达、无独立弹簧类型**（距离关节用 stiffness/damping 兼作） | 🟡 |
 | 查询 | 全部 | 射线（`world.rs:534`）、过滤射线、形状投射（`:553`）、球体重叠（`query.rs:60`） | ✅ |
 | 接触信息 | Unity / Godot | 接触对可读、带法向冲量（`contact.rs:103`、`world.rs:972`）；**无接触事件/回调/接触 ID** | 🟠 |
-| 触发器（sensor） | 全部 | 无 | ❌ |
-| 碰撞过滤（层/掩码） | 全部 | 无（只有射线的谓词过滤） | ❌ |
-| CCD | PhysX / Jolt | 无 | ❌ |
+| 触发器（sensor） | 全部 | `objects[].sensor` + `PhysicsWorld::sensor_events()`（进入/离开，每步轮询；不唤醒睡眠体、无回调总线） | 🟡 |
+| 碰撞过滤（层/掩码） | 全部 | `objects[].collision_layer` / `collides_with`（对称匹配，宽相即过滤；射线/查询不看过滤） | 🟡 |
+| CCD | PhysX / Jolt | `objects[].ccd`：每子步一次中心射线 + 只截法向位移（**非**精确 TOI、只扫中心线、无旋转扫掠） | 🟡 |
 | 求解器可配 | 全部 | `SolverConfig`（速度/位置迭代、松弛、warm start、Baumgarte、slop）可配（`solver.rs:24-72`） | ✅ |
 | 睡眠 | 全部 | 有 | ✅ |
 | 确定性 | 高要求仿真 | 同机确定、跨线程数确定（有测试）；**跨平台/跨编译器边界未声明、无测试**（→ H5） | 🟠 |
@@ -456,6 +456,34 @@
 
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
+
+### 8.4 「碰撞过滤 + 传感器事件 + CCD」怎么落的（第 18 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-physics --lib`（6 个新用例，不需要显卡）、
+> `cargo test -p quench3d-cli --lib collision_filter`、`--test cli_e2e simulate_reports_sensors`、
+> `cargo test -p quench3d-editor --test hierarchy export_preserves`。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 引擎（过滤） | `InteractionGroups { memberships, filter }` + `Proxy.groups` | 过滤放在**宽相**而不是窄相：不配对的连候选对都不产生。判据对称 `A.mem & B.filter && B.mem & A.filter` |
+| 引擎（传感器） | `RigidBody::sensor` + `sensor_pairs` / `sensor_events` | 传感器对**不进 `manifolds`**（于是求解器、热启动、island、并行路径全都不用改），只进 `contacts` 与事件；也**不唤醒睡眠体** |
+| 引擎（CCD） | `RigidBody::ccd` + `apply_ccd(dt)`（位置积分前） | 中心射线（`raycast_filtered` + `Shape::support(dir)·dir`）→ 只把**法向**位移截到命中点，切向保留 → 位置积分照旧跑。不是精确 TOI |
+| 场景格式 | `objects[].collision_layer` / `collides_with` / `sensor` / `ccd` | 缺省全不写 = 与以前逐位相同；层号越界/空掩码/传感器缺刚体/CCD 非 dynamic 都有校验 |
+| CLI | `simulate` / `render` / `movie` 三条报告都新增 `sensors[]` | 复用探针的 `ProbeState` 语义（`enter_step` / `exit_step` / `steps_inside` / `entries`），按名字排序保证输出稳定 |
+| 编辑器 | 传感器接触画青色 + 导出从刚体读回四个字段 | 没有编辑界面，但**不会静默丢字段**（往返用例钉住） |
+
+**踩过的坑（都留在注释里）**：① `InteractionGroups::default()` 一开始是 `memberships = ALL`，
+于是"只想碰第 5 层的墙"会把缺省物体当成第 5 层同类——缺省必须是"第 0 层"；
+② CCD 的查询第一版**没查分组**，测试里那颗子弹被它"看不见"的墙拦住了（现在 `apply_ccd`
+把分组、传感器、自己都排除）；③ CCD 的第一版实现是**保守推进扫掠**，在**贴着地面滑行**时
+会被脚下的地面拖住——"最近物体"永远是地面，扫掠每步只推进地面那么远，而且它返回的命中
+就是地面（法线与运动垂直，本不该拦），所以加了地面之后子弹照样穿墙。现在换成中心射线，
+只报**沿运动方向**的命中，一次查询就够；④ 传感器的"停在里面"不能靠事件累加步数
+（事件只在变化时出现），得靠"本步是否 inside"。
+
+**没做（诚实边界）**：没有回调/事件总线（每步轮询 `sensor_events()`）；
+传感器不唤醒睡眠体，所以"睡眠体被别人从触发区里搬走"不会报离开；
+过滤只作用于物理（查询不看分组）；CCD 无旋转扫掠、动态×动态只有"两边都开才扫"的语义。
 
 ### 8.3 「后处理 FXAA + SSAO」怎么落的（第 17 轮，已跑门禁）
 

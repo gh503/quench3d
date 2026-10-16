@@ -391,7 +391,14 @@ impl Engine {
         }
         if self.debug.physics_contacts {
             for c in self.world.contacts() {
-                lines.contact_point(c.point, c.normal, 0.08, Vec4::new(1.0, 0.6, 0.1, 1.0));
+                // 传感器（触发区）的接触不是真的"碰上"：用青色区分，免得看着像穿了模
+                // （它本来就不产生冲量，物体确实会穿过去）。
+                let color = if c.sensor {
+                    Vec4::new(0.2, 0.85, 1.0, 1.0)
+                } else {
+                    Vec4::new(1.0, 0.6, 0.1, 1.0)
+                };
+                lines.contact_point(c.point, c.normal, 0.08, color);
             }
         }
         if self.debug.velocities {

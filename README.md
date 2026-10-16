@@ -383,6 +383,22 @@ if let Some(hit) = world.raycast(origin, dir, 100.0) {
 for c in world.contacts() {
     println!("{:?} <-> {:?} 法线 {:?} 冲量 {}", c.a, c.b, c.normal, c.impulse);
 }
+
+// 碰撞过滤（层/掩码，**对称**：双方都愿意才碰）、传感器（触发区）、CCD
+world.add_builder(
+    BodyBuilder::r#static(Shape::Box { half_extents: Vec3::splat(0.5) })
+        .layer(3)                 // 自己在第 3 层
+        .collides_with(1 << 0)    // 只和第 0 层碰
+        .sensor(true)             // 触发区：报事件，不产生冲量
+);
+world.add_builder(
+    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+        .linear_velocity(Vec3::X * 300.0)
+        .ccd(true)                // 高速小物体：每子步一条中心射线，不穿薄墙
+);
+for e in world.sensor_events() {  // 只在进入/离开的那一子步有内容
+    println!("{} {:?} {:?}", if e.started { "进入" } else { "离开" }, e.sensor, e.other);
+}
 ```
 
 关节（5 种）：`Fixed`（焊接）、`Ball`（球窝）、`Hinge`（铰链，带限位与马达）、
@@ -1289,7 +1305,10 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 
 ## 9. 已知限制
 
-* 物理：半隐式欧拉积分（自由落体 1 秒位置误差约 1.6%）；无 CCD（极快小物体可能隧穿）；
+* 物理：半隐式欧拉积分（自由落体 1 秒位置误差约 1.6%）；CCD 是**中心射线 TOI**
+  （每子步从刚体中心沿这一步的位移方向打一条射线，命中就把朝表面的法向位移截到
+  `命中距离 - 中心到表面的距离`）——不是精确 TOI、不做旋转扫掠、只扫中心线
+  （擦着角过去可能漏），极快 + 极薄也仍可能漏；
   圆柱/凸包之间走 GJK+EPA 单点流形，静置稳定性弱于盒-盒；
   island 划分 + 整岛休眠/唤醒 + 多岛 `std::thread` 并行求解都已具备，
   但**关节不参与并行**（每个迭代里接触并行、关节串行），wasm 上是单线程路径；
@@ -1339,6 +1358,17 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   （AO 直接在后处理里算完就用）。表现是接触处有轻微颗粒（16 抽样 + 交错梯度噪声），
   以及掠射角下的平坦地面可能暗 1~2 个色阶；要更干净需要加一张 AO 目标 + 双边模糊。
 * SSAO 需要采样深度，所以深度格式是 `Depth32Float`（`Depth24Plus` 不可采样）。
+* `simulate` / `render` / `movie` 的报告里，`sensor: true` 的物体会以 `sensors[]` 出现
+  （每个进过它的刚体一条：`enter_step` / `exit_step` / `steps_inside` / `entries`）。
+* 物理的碰撞过滤/传感器/CCD 都有**边界**：过滤是**对称**的（`A` 愿意碰 `B` 且 `B`
+  也愿意才碰）、只作用于**物理**（射线/拾取/`overlap` 查询不看分组）；
+  传感器**不唤醒睡眠体**（巨大的触发区不该叫醒整个世界），事件是**每步轮询**
+  `sensor_events()`，没有回调/事件总线，也不保证"睡眠体从里面被搬走"能报离开；
+  CCD 是"中心射线 + 只截**法向**位移"（切向保留，所以沿墙滑行不受影响），
+  没有旋转扫掠、只扫中心线，动态×动态只有"两边都开才互相拦"的语义，
+  极快 + 极薄（一步能跨过整个物体）仍可能漏。
+* 编辑器**没有**碰撞层/传感器/CCD 的编辑界面（面板里还看不到），但它不会吃掉这些字段：
+  导出时从物理刚体上读回来（有往返用例钉住）。
 * FXAA 是 console/低质量档（没有子像素锯齿消除），且在**线性**空间混合、只在判断边缘时
   转成 sRGB 亮度——和 FXAA 原版"整条都在 gamma 空间"略有差别，见 `fxaa.wgsl` 顶部注释。
 

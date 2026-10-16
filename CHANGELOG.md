@@ -31,6 +31,41 @@
   带刚体拒绝、版本 1 被拒）、`cargo test -p quench3d-editor --test hierarchy`
   （7 个集成用例：父链装配、拖父带子、改父不跳位、成环被挡、删父不跳位、存盘往返、丢父上报）。
 
+- **物理：碰撞过滤（层/掩码）、传感器事件、CCD**，三项都能从场景文件配、CLI 能验证。
+  * `objects[].collision_layer`（0~31，缺省 0）+ `objects[].collides_with`（层号列表，
+    缺省所有层；`[]` = 谁也不碰）。判断**对称**：`A` 愿意碰 `B` 且 `B` 也愿意碰 `A` 才碰。
+    过滤在**宽相**就生效（不配对的连候选对都不产生），CCD 扫掠也遵守它。
+    **只作用于物理**：射线/拾取/overlap 查询不看分组（边界写进 README §9）。
+  * `objects[].sensor`（触发区）：照常进 `contacts()` 与进入/离开事件，但**不产生任何冲量**
+    （不进求解器，也**不唤醒睡眠体**——一个巨大的触发区不该叫醒整个世界）。
+    引擎侧 `PhysicsWorld::sensor_events()` / `sensor_pairs()`，`ContactPair` 新增 `sensor` 字段；
+    CLI 的 `simulate` / `render` / `movie` 三条报告都新增 `sensors[]`（谁的 `enter_step` /
+    `exit_step` / `steps_inside` / `entries`，按名字排序，输出稳定；`render` 里内嵌的
+    `simulate` 报告同样带着）。事件是**每步轮询**式，没有回调/事件总线。
+  * `objects[].ccd`（只对 dynamic 生效）：每子步从刚体中心沿这一步的位移方向打一条
+    **中心射线**（排除自己、传感器、分组不匹配的刚体），命中距离减去"中心到表面在运动
+    方向上的距离"（`Shape::support(dir)·dir`，凸形状上精确）就是中心还能走多远，
+    于是只把这一步**朝表面**的法向位移截到那里（切向保留，所以沿墙滑行不受影响）。
+    一开始用的是"保守推进扫掠"（`shape_cast`），**贴着地面滑行的子弹会被脚下的地面拖住**
+    （每步只推进地面距离那么远，而且返回的"命中"是地面——法线与运动垂直，不该拦），
+    加地面之后子弹照样穿墙；这条坑有专门的回归用例（`ccd_works_while_skimming_a_ground_plane`）。
+    **不是**精确 TOI：只扫中心线（擦角可能漏）、无旋转扫掠，极快 + 极薄仍可能漏；
+    代价是每子步一次射线查询，与速度无关。
+  * 缺省语义：三个字段都不写 = 与加这个功能之前**逐位相同**（`InteractionGroups::default()`
+    是"第 0 层 + 碰所有层"，不是 `memberships = ALL`——后者会让"只想碰第 5 层的过滤体"
+    把缺省物体当成同类）。
+  * 编辑器：没有编辑界面，但**导出不会吃掉这些字段**（从物理刚体读回来，有往返用例钉住）；
+    F5 接触点里传感器接触画成**青色**，与真实碰撞区分。
+  验证：`cargo test -p quench3d-physics --lib`（6 个新用例：分组对称匹配与穿透、
+  传感器进入/离开且零冲量、传感器不唤醒睡眠体、CCD 停住高速球、CCD 遵守分组）、
+  `cargo test -p quench3d-cli --lib collision_filter`（格式与校验：层号越界/重复/空掩码、
+  传感器缺刚体是 error、CCD 非 dynamic 是 warning）、
+  `cargo test -p quench3d-cli --test cli_e2e simulate_reports_sensors`（端到端：报告里有
+  传感器的进入/离开且落体穿过触发区、薄墙分组不匹配时子弹连 CCD 都拦不住、
+  同一颗子弹不开 CCD 一步跨过薄墙而开了 CCD 停在墙前，以及 render / movie 两条路径
+  也带上了 `sensors[]`）、
+  `cargo test -p quench3d-editor --test hierarchy export_preserves`（存盘往返不丢字段）。
+
 - **SSAO（屏幕空间环境光遮蔽）**。`lighting.ssao`（**不写 = 关闭**，像素与关闭时逐位相同；
   写 `{}` 就是打开），参数 `radius`（米，缺省 0.75）/ `bias`（缺省 0.025）/
   `strength`（缺省 1.0）/ `samples`（缺省 16，1~64）；CLI、`validate`、编辑器视口面板

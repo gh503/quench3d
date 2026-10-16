@@ -112,7 +112,7 @@ pub fn schema() -> Value {
                     { "name": "--dry-run", "type": "flag", "required": false, "description": "只校验 + 跑物理 + 采探针，不初始化 GPU、不写任何文件（渲染统计全为 0，报告里给 would_write）" },
                     { "name": "--no-clobber", "type": "flag", "required": false, "description": "输出已存在就报错（退出码 2，error.kind = output_exists，带 path 与 hint）而不是覆盖；多 agent 并行时用" }
                 ],
-                "output": "{ output, width, height, bytes, draw_calls, instances, triangles, culled, shadow_instances, lines, objects, camera_position, probes[]?, simulate?, dry_run?, would_write[]?, elapsed_ms }",
+                "output": "{ output, width, height, bytes, draw_calls, instances, triangles, culled, shadow_instances, lines, objects, camera_position, probes[]?, sensors[]?, simulate?, dry_run?, would_write[]?, elapsed_ms }",
                 "examples": [
                     "quench3d render scene.json --json",
                     "quench3d render scene.json --out small.png --width 640 --height 400",
@@ -138,7 +138,7 @@ pub fn schema() -> Value {
                     { "name": "--dry-run", "type": "flag", "required": false, "description": "只校验 + 跑物理，不渲染、不建帧目录、不写 trace；报告里 digest 为空串并给出 would_write" },
                     { "name": "--no-clobber", "type": "flag", "required": false, "description": "单文件输出或帧目录已存在（非空）就报错，而不是覆盖/续录；要续录就别加这个开关" }
                 ],
-                "output": "{ frames_dir, encoder, output, trace, frames, skipped, fps, duration, steps_per_frame, dt, total_steps, warmup_frames, width, height, bytes, digest, objects, camera_position, probes[]?, first_frame?, last_frame?, ffmpeg, notes, dry_run?, would_write[]?, elapsed_ms }",
+                "output": "{ frames_dir, encoder, output, trace, frames, skipped, fps, duration, steps_per_frame, dt, total_steps, warmup_frames, width, height, bytes, digest, objects, camera_position, probes[]?, sensors[]?, first_frame?, last_frame?, ffmpeg, notes, dry_run?, would_write[]?, elapsed_ms }",
                 "notes": "帧数与时长由物理步决定、与墙钟无关；同一场景两次录制 digest 相同（换编码器也不改变 digest）。--encoder png 时 ffmpeg 字段给出编码命令：ffmpeg -framerate N -i frames/frame_%05d.png -c:v libx264 -crf 18 -pix_fmt yuv420p movie.mp4；gif/apng 时该字段为空串，可直接播放，notes 里会提示格式限制（如 GIF 的 10 ms 延迟粒度）",
                 "examples": [
                     "quench3d movie scene.json --frames 120 --frames-dir frames --json",
@@ -160,7 +160,7 @@ pub fn schema() -> Value {
                     { "name": "--dry-run", "type": "flag", "required": false, "description": "配 --render 用时：只校验 + 跑物理，不渲染不写盘。单独用（没有 --render）会报错——simulate 本身不写任何文件" },
                     { "name": "--no-clobber", "type": "flag", "required": false, "description": "配 --render 用时生效：渲染输出已存在就报错" }
                 ],
-                "output": "{ steps, dt, gravity, bodies, dynamic, sleeping, contacts, joints, nan_bodies, lowest_y, max_speed, states[], probes[]?, warnings[], trajectories[]? }",
+                "output": "{ steps, dt, gravity, bodies, dynamic, sleeping, contacts, joints, nan_bodies, lowest_y, max_speed, states[], probes[]?, sensors[]?, warnings[], trajectories[]? }（sensors 是 objects[].sensor = true 的触发区观测：谁的 enter_step/exit_step/steps_inside/entries，按名字排序，输出稳定）",
                 "trajectory_fields": "name, shape, samples[{step,time,position,speed,displacement,tilt_deg,asleep}], start, end, min, max, fall, rise, travel, path_length, max_speed, max_tilt_deg, tilt_meaningful, tipped_over, last_motion_step",
                 "examples": [
                     "quench3d simulate scene.json --steps 600 --json",
@@ -329,6 +329,10 @@ pub fn scene_grammar() -> Value {
             "mass": "直接给质量（kg），覆盖 density×体积",
             "allow_sleep": "false 时永不自动睡眠（缺省 true）",
             "visible": "缺省 true",
+            "collision_layer": "碰撞层 0~31，缺省 0",
+            "collides_with": "愿意碰的层号列表，缺省所有层；判断是**对称**的（双方都愿意才碰），[] 表示谁也不碰",
+            "sensor": "true = 触发区：照常报进入/离开，但不产生冲量（别的物体穿过去）；需要 body 不为 none",
+            "ccd": "true = 连续碰撞检测（每子步从中心往前打一条射线，把这一步的位移截在命中点）；只对 dynamic 生效",
             "note": "linear/angular_damping、gravity_scale、mass、allow_sleep、angular_velocity 只对 body=dynamic 生效"
         },
         "model": {
@@ -441,7 +445,12 @@ pub fn system_prompt() -> String {
   - velocity: [x,y,z] 初始速度, angular_velocity: [x,y,z]（弧度/秒）
   - linear_damping / angular_damping（≥0，缺省 0）, gravity_scale（缺省 1，0 表示失重）
   - mass（kg，覆盖 density×体积）, allow_sleep: false（永不自动睡眠）
-  - 上面这些物理参数只对 body: "dynamic" 生效
+  - collision_layer: 0~31（缺省 0）, collides_with: [层号...]（缺省所有层；**对称**匹配，
+    A 愿意碰 B 且 B 也愿意碰 A 才碰；[] = 谁也不碰）
+  - sensor: true（触发区：照常进 contacts 与"进入/离开"报告，但不产生任何冲量）
+  - ccd: true（连续碰撞检测：每子步从刚体中心沿运动方向打一条射线，把这一步的位移截在
+    命中点；高速小物体不会一步穿过薄墙。没有旋转扫掠，只扫中心线——擦角可能漏。只对 dynamic 生效）
+  - 上面这些物理参数（mass/gravity_scale/damping/allow_sleep/angular_velocity/ccd）只对 body: "dynamic" 生效
 - joints: 数组，每项：{ type: "fixed"|"ball"|"hinge"|"distance"|"slider", a: 物体名, b: 物体名,
            axis: [x,y,z]（**各自刚体的局部轴**，缺省 [0,1,0]）, limits: [min,max]（铰链弧度 / 滑块米）,
            anchor_a / anchor_b: [x,y,z]（关节在两端的**局部**连接点，做门轴/悬臂时错开它们）,

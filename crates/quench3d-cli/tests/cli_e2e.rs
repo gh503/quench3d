@@ -2521,3 +2521,163 @@ fn meaningless_output_flags_are_rejected() {
     assert_eq!(r.code, 0, "{} {}", r.stdout, r.stderr);
     assert!(!out.exists(), "simulate --render --dry-run 也不许写盘");
 }
+
+/// 碰撞过滤 / 传感器 / CCD 端到端：三个功能都要能从**场景文件**走到报告里。
+#[test]
+fn simulate_reports_sensors_and_respects_layers_and_ccd() {
+    let dir = temp_dir("filter_sensor_ccd");
+    let scene = dir.join("probe.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "objects": [
+            { "name": "触发区", "shape": { "type": "box", "size": [3, 0.4, 3] },
+              "position": [0, 0, 0], "body": "static", "sensor": true },
+            { "name": "落体", "shape": { "type": "box", "size": [0.4, 0.4, 0.4] },
+              "position": [0, 3, 0], "body": "dynamic" },
+            { "name": "薄墙", "shape": { "type": "box", "size": [0.1, 4, 4] },
+              "position": [-9, 0, 0], "body": "static", "collision_layer": 5,
+              "collides_with": [5] },
+            { "name": "子弹", "shape": { "type": "sphere", "radius": 0.1 },
+              "position": [-14, 0, 0], "body": "dynamic", "ccd": true,
+              "velocity": [600, 0, 0], "gravity_scale": 0 }
+          ],
+          "simulate": { "steps": 120, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let data = r.json();
+    let sim = &data["data"];
+
+    // ① 传感器：落体穿过触发区 → 报告里有进入与离开
+    let sensors = sim["sensors"].as_array().expect("应当有 sensors 报告");
+    let s = sensors
+        .iter()
+        .find(|s| s["name"] == "触发区")
+        .expect("触发区应当在报告里");
+    assert_eq!(s["occupied"], false, "结束时落体应当已经离开");
+    let hit = s["bodies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "落体")
+        .expect("落体应当进过触发区");
+    assert_eq!(hit["entries"], 1);
+    assert!(hit["steps_inside"].as_u64().unwrap() > 0);
+    assert!(
+        hit["exit_step"].is_u64(),
+        "离开时应当记下 exit_step：{hit:?}"
+    );
+
+    // ② 传感器不产生冲量：落体一路掉下去（不被触发区挡住）
+    let states = sim["states"].as_array().unwrap();
+    let faller = states.iter().find(|b| b["name"] == "落体").unwrap();
+    assert!(
+        faller["position"][1].as_f64().unwrap() < -3.0,
+        "落体应当穿过触发区继续下落：{faller:?}"
+    );
+
+    // ③ 分组过滤：薄墙只和第 5 层碰、子弹在第 0 层 → 子弹直接穿过去
+    // （注意 CCD 也要遵守分组：否则高速物体会被它"看不到"的墙拦住）
+    let bullet = states.iter().find(|b| b["name"] == "子弹").unwrap();
+    let x = bullet["position"][0].as_f64().unwrap();
+    assert!(
+        x > 0.0,
+        "薄墙只在自己的层、不碰第 0 层，子弹应当穿过去，实际 x = {x}"
+    );
+
+    // ④ CCD 对照：同一颗子弹，墙愿意碰、但不开 CCD → 一步 10 米直接跳过薄墙
+    let scene2 = dir.join("no_ccd.json");
+    std::fs::write(
+        &scene2,
+        r#"{
+          "objects": [
+            { "name": "薄墙", "shape": { "type": "box", "size": [0.1, 4, 4] },
+              "position": [0, 0, 0], "body": "static" },
+            { "name": "子弹", "shape": { "type": "sphere", "radius": 0.1 },
+              "position": [-5, 0, 0], "body": "dynamic",
+              "velocity": [600, 0, 0], "gravity_scale": 0 }
+          ],
+          "simulate": { "steps": 1, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+    let r2 = run(&["simulate", scene2.to_str().unwrap(), "--json"]);
+    assert_eq!(r2.code, 0);
+    let x2 = r2.json()["data"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "子弹")
+        .unwrap()["position"][0]
+        .as_f64()
+        .unwrap();
+    assert!(x2 > 0.15, "不开 CCD 时应当穿过去，实际 x = {x2}");
+
+    // ⑤ 开 CCD 的同一场景：停在墙前
+    let scene3 = dir.join("with_ccd.json");
+    let text = std::fs::read_to_string(&scene2).unwrap().replace(
+        "\"body\": \"dynamic\"",
+        "\"body\": \"dynamic\", \"ccd\": true",
+    );
+    std::fs::write(&scene3, text).unwrap();
+    let r3 = run(&["simulate", scene3.to_str().unwrap(), "--json"]);
+    assert_eq!(r3.code, 0);
+    let x3 = r3.json()["data"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "子弹")
+        .unwrap()["position"][0]
+        .as_f64()
+        .unwrap();
+    assert!(x3 <= -0.14, "开了 CCD 不该穿墙，实际 x = {x3}");
+
+    // ⑥ render / movie 这两条路径也会带上传感器报告（字段与 simulate 一致）。
+    // 为什么值得钉：报告是三条路各写一遍的，只接一条就等于"换个命令就看不见了"。
+    let png = dir.join("out.png");
+    let r4 = run(&[
+        "render",
+        scene.to_str().unwrap(),
+        "--dry-run",
+        "--out",
+        png.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r4.code, 0, "stdout: {} stderr: {}", r4.stdout, r4.stderr);
+    let d4 = r4.json();
+    assert_eq!(d4["data"]["sensors"][0]["name"], "触发区", "{d4}");
+    assert_eq!(
+        d4["data"]["simulate"]["sensors"][0]["name"], "触发区",
+        "内嵌的 simulate 报告也要带上：{d4}"
+    );
+
+    let gif = dir.join("out.gif");
+    let r5 = run(&[
+        "movie",
+        scene.to_str().unwrap(),
+        "--frames",
+        "3",
+        "--steps-per-frame",
+        "20",
+        "--encoder",
+        "gif",
+        "--out",
+        gif.to_str().unwrap(),
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(r5.code, 0, "stdout: {} stderr: {}", r5.stdout, r5.stderr);
+    let d5 = r5.json();
+    assert_eq!(d5["data"]["sensors"][0]["name"], "触发区", "{d5}");
+    assert!(
+        d5["data"]["sensors"][0]["bodies"][0]["steps_inside"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "逐帧路径也要能看见在里面待了多久：{d5}"
+    );
+}
