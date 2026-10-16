@@ -1637,8 +1637,8 @@ CI（`.github/workflows/ci.yml`）按腿给这个变量：
 
 | 腿 | `QUENCH3D_GPU_TESTS` | 为什么 |
 |---|---|---|
-| `test (ubuntu-latest)` | `1` | 覆盖不能丢；这条腿真的能建出上下文 |
-| `test (macos-latest)` | `1` | 同上（Metal） |
+| `test (ubuntu-latest)` | `1` | 覆盖不能丢；开关按"**这条腿的属性**"给，而不是按平台。**实测 ubuntu-latest 没有适配器**，所以这两条断言在该腿上是空的（见 52.6 ⑦）—— 这与改动**之前**完全一样，没有丢覆盖，而是"本来就是 0" |
+| `test (macos-latest)` | `1` | 同上；实测真的建出了上下文（Metal，0.22s / 0.17s）—— 这两条测试在 CI 里的实际断言覆盖来自这条腿 |
 | `test (windows-latest)` | `0` | 没有 GPU，建上下文 = 原生崩溃 |
 
 `tools/gate.sh`（本地门禁）默认 `1`（本机有显卡，覆盖不能丢）；没有显卡的机器用
@@ -1726,6 +1726,19 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 —— **与上一轮逐字节相同**（新 helper 在 wasm 侧是死代码，被裁掉了）：这个开关没有给
 Web 产物带来任何体积代价。门禁步骤标题现在会印出 `QUENCH3D_GPU_TESTS=1`。
 
+**⑦ 上线实测：CI run `38955064316` @ `2a0f0db`，`attempt = 1`，五条腿全绿**
+
+| 腿 | 结果 | 这两条测试在日志里的实测原文 |
+|---|---|---|
+| `test (windows-latest)` | ✅ **首跑绿** | `Running tests\model_instances.rs (target\debug\deps\model_instances-8259af2638c9b300.exe)` → `test result: ok. 5 passed; 0 failed; … finished in 0.00s`；`Running tests\backend_fallback.rs (…\backend_fallback-8cfe002d8085f3e7.exe)` → `test result: ok. 7 passed; 0 failed; … finished in 0.00s`。两个**可执行文件名与上一轮崩溃的那两个逐字符相同**（`model_instances-8259af2638c9b300.exe` / `backend_fallback-8cfe002d8085f3e7.exe`），全日志里 `process didn't exit successfully` 与 `STATUS_ACCESS_VIOLATION` 出现 **0 次** |
+| `test (ubuntu-latest)` | ✅ | `Running tests/model_instances.rs` → `ok. 5 passed … 0.00s`；`Running tests/backend_fallback.rs` → `ok. 7 passed … 0.00s`。**0.00s 说明走的是内层"没有可用的 GPU"分支** —— 同一条腿的 CLI 冒烟也打印 `本机没有可用 GPU，渲染按约定返回退出码 3`。即：目标**真的在跑**（5 条 / 7 条都执行），但这几条 GPU 断言在 ubuntu 上仍是空的（改动前也一样） |
+| `test (macos-latest)` | ✅ | `ok. 5 passed … 0.22s`（`model_instances`）、`ok. 7 passed … 0.17s`（`backend_fallback`）→ **真的建出了上下文**（Metal），断言真的跑了 |
+| `wasm32-unknown-unknown` | ✅ | — |
+| `msrv (1.90)` | ✅ | — |
+
+另外：那条**不需要显卡的守卫测试在 windows 腿上也真的跑了**且绿
+（`test gpu_gate_builds_nothing_unless_explicitly_enabled ... ok`）—— 机制本身在没有 GPU 的平台上也被验证过一次。
+
 ### 52.7 边界（没做的、没验证的）
 
 1. **本机没有无 GPU 的 Windows 环境，复现不了那次原生崩溃**。本机是 Linux + 有 GPU；
@@ -1742,3 +1755,8 @@ Web 产物带来任何体积代价。门禁步骤标题现在会印出 `QUENCH3D
 3. **windows 腿上这几条测试的覆盖永久是 0**（runner 没有 GPU，本来也测不了）。
    本轮做的是"把 0 覆盖写成 0 覆盖并留下可读原因"，不是"把 0 覆盖变成有覆盖"。
    要真有覆盖只能换一台带 GPU 的 Windows（或自托管 runner）。
+4. **ubuntu 腿上的这几条断言实际上也是空的**（52.6 ⑦ 实测 0.00s + 同腿 CLI 冒烟报"没有可用 GPU"）。
+   本轮**没有**在 ubuntu 腿装软件光栅（llvmpipe / lavapipe）—— 那是"把 0 覆盖变成有覆盖"的
+   下一步，要单独验证（装上之后 wgpu 真的拿得到适配器吗？断言在软件光栅上成立吗？）。
+   本轮的目标只是"别再制造无法诊断的假红、别丢已有覆盖"，所以不把两件事混在一起。
+   CI 里真有断言覆盖的是 macOS 腿（Metal）与本机（Linux + GPU）。

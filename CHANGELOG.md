@@ -25,6 +25,12 @@
   可见跳过原因；设了 → 0.14s / 0.96s、真的在真上下文上过）；不需要显卡的守卫测试
   `gpu_gate_builds_nothing_unless_explicitly_enabled` + **三条变异红-绿**
   （开关恒 `true` → 红；判定内核去掉拦截 → 红；打开开关时改坏断言 → 红，改回 → 绿）。
+  **上线实测**：CI run `38955064316` @ `2a0f0db`，`attempt = 1`，五腿全绿 ——
+  `test (windows-latest)` **首跑绿**（同一 target 的可执行文件名
+  `model_instances-8259af2638c9b300.exe` / `backend_fallback-8cfe002d8085f3e7.exe` 上一轮报
+  `0xc0000005`，这一轮 `test result: ok. 5 passed` / `ok. 7 passed`，全日志
+  `STATUS_ACCESS_VIOLATION` 出现 0 次）；ubuntu 的两个 target `0.00s`（该 runner 真的没有适配器，
+  走的是内层"没有可用的 GPU"分支），macOS `0.22s` / `0.17s`（真的建出了 Metal 上下文）。
   判据、为什么不选 `cfg!(windows)` / known-flake、以及边界（其余"真建上下文"的测试二进制
   仍是欠账）见 `docs/overnight_report.md` §52 与 `docs/production_readiness.md` §11。
 

@@ -1565,6 +1565,7 @@ CI 的 **windows 腿不再被"创建真实 wgpu 上下文"的测试打死**（`0
 | 5 | **守卫测试不需要显卡、也不碰进程环境变量** | `gpu_gate_builds_nothing_unless_explicitly_enabled` 直接喂判定内核的 flag（改环境变量会污染同进程的其它测试） | 已落地，且**变异验证**过 2 条（开关恒 `true` → 红；内核去掉拦截 → 红；改回 → 绿） |
 | 6 | **按腿给开关，不写死平台** | `ci.yml`：ubuntu / macOS = `"1"`，windows = `"0"`；`tools/gate.sh` 本机默认 `1`（`QUENCH3D_GPU_TESTS=0 tools/gate.sh` 可关） | 已落地；`cfg!(windows)` 这类写法被明确拒绝（会让本地 Windows 开发者丢覆盖） |
 | 7 | **开关不下沉进 `GpuContext::headless`** | 那是 CLI `render` / `movie` 的生产路径，被测试开关影响等于让所有人渲染不出来（默认关） | 已明确拒绝 |
+| 8 | **上线实测**：run `38955064316` @ `2a0f0db`，`attempt = 1` | 五腿全绿；`test (windows-latest)` **首跑绿**（同一 target 可执行文件名 `model_instances-8259af2638c9b300.exe` / `backend_fallback-8cfe002d8085f3e7.exe` 上一轮报 `0xc0000005`，这一轮 `ok. 5 passed` / `ok. 7 passed`；全日志 `STATUS_ACCESS_VIOLATION` 0 次）。ubuntu 两 target `0.00s`（内层"没有可用的 GPU"分支），macOS `0.22s` / `0.17s`（真建出 Metal 上下文） | 已落地 |
 
 ### 11.3 不变量（钉住的、可复核的）
 
@@ -1589,5 +1590,11 @@ CI 的 **windows 腿不再被"创建真实 wgpu 上下文"的测试打死**（`0
   "windows 不再崩"只能由 CI 的 windows 腿首跑结果证明（本机只能证明"开关真的控制着建不建"）。
 - **windows 腿这几条测试的覆盖本来就是 0**（runner 没有 GPU）：本轮是把"0 覆盖"写成
   "0 覆盖 + 可读原因"，不是把 0 变成有。要真有覆盖只能换带 GPU 的 Windows / 自托管 runner。
+- **ubuntu 腿上的这几条断言实际也是空的**（实测 `0.00s`；同一腿的 CLI 冒烟打印
+  `本机没有可用 GPU，渲染按约定返回退出码 3`）：ubuntu-latest 没有适配器，内层的
+  "没有可用的 GPU → `return`"会接住它。CI 里**真的**在断言的是 macOS 腿（Metal，0.22s / 0.17s）
+  与本机。要补 ubuntu 的覆盖得在 CI 装软件光栅（llvmpipe / lavapipe）**并另行验证**
+  （适配器能不能拿到、断言在软件光栅上是否成立）—— 本轮目标只是"不再制造无法诊断的假红、
+  不丢已有覆盖"，没把两件事混在一起。
 - **没有加"下次自动检查其它二进制"的门禁**：那需要一份"哪些测试会建上下文"的清单，
   而清单本身会腐烂（第 50 轮"白名单是有毒的"就是这个教训）。
