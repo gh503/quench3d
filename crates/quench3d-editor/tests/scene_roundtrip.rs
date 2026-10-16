@@ -812,3 +812,61 @@ fn compound_bodies_export_as_shapes_without_duplicating_parts() {
         "文档里不该出现 `名字#序号` 这种伪物体"
     );
 }
+
+/// 模板 + 实例：编辑器能装载，但**存回时会摊平成具体物体**。
+///
+/// 这是有意的取舍：编辑器没有"模板/实例"的界面概念，引擎里那三个副本是三个真物体。
+/// 摊平不改变行为（位置、数量、物理都对），只是文件变长——所以这里把"摊平"这件事
+/// 钉成一条明确的测试，而不是让它作为"用户某天发现文件变长了"的惊喜。
+#[test]
+fn templates_and_instances_are_flattened_on_save() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+
+    let text = r#"{
+      "ground": { "size": 20 },
+      "templates": { "块": { "shape": { "type": "box", "size": [1, 0.4, 1] }, "body": "dynamic" } },
+      "objects": [
+        { "name": "塔", "template": "块",
+          "instances": [ { "position": [0, 0.2, 0] },
+                         { "position": [0, 0.6, 0] },
+                         { "position": [3, 0.2, 0] } ] } ]
+    }"#;
+    let (count, _) = scene_io::load_into_engine(&mut engine, text).expect("导入必须成功");
+    // 三个副本 + 地面（`ground` 字段也会建一个可视平面）
+    assert_eq!(count, 4, "三个副本该变成三个物体（外带地面）");
+    for name in ["塔#1", "塔#2", "塔#3"] {
+        let index = engine
+            .scene
+            .find(name)
+            .unwrap_or_else(|| panic!("该有 {name}"));
+        assert!(
+            engine.scene.objects[index].body.is_some(),
+            "{name} 该带刚体（模板里的 body: dynamic）"
+        );
+    }
+
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    assert!(
+        !saved.json.contains("\"instances\"") && !saved.json.contains("\"templates\""),
+        "编辑器存回时摊平 instances（有意取舍，不是丢数据）：\n{}",
+        saved.json
+    );
+    let parsed = SceneDoc::from_json(&saved.json).expect("解析必须成功");
+    let names: Vec<String> = parsed
+        .objects
+        .iter()
+        .filter_map(|o| o.name.clone())
+        .collect();
+    for name in ["塔#1", "塔#2", "塔#3"] {
+        assert!(names.contains(&name.to_string()), "{names:?}");
+    }
+    assert!(
+        !SceneDoc::has_errors(&parsed.validate()),
+        "{:?}",
+        parsed.validate()
+    );
+}

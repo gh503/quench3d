@@ -277,6 +277,10 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         };
         out.objects.push(ObjectDoc {
             name: Some(name),
+            // 编辑器不做模板/实例的界面：装载时已经展开成具体物体，导出就是具体物体
+            // （行为一致，只是文件变长——测试 `templates_and_instances_are_flattened_on_save` 钉住）
+            template: None,
+            instances: None,
             shape: shape_field,
             shapes: shapes_field,
             parent: None, // 循环之后再补：那时才知道父物体有没有被导出

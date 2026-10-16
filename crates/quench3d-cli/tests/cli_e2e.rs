@@ -3720,3 +3720,83 @@ fn compound_shapes_stand_on_their_own_legs() {
         table["displacement"]
     );
 }
+
+/// 模板 + 实例：一段描述摆出多个独立刚体，端到端（展开 → 物理 → 报告）。
+#[test]
+fn templates_and_instances_make_several_independent_bodies() {
+    let dir = temp_dir("templates");
+    let scene = dir.join("stack.json");
+    let text = r#"{
+      "ground": { "size": 20 },
+      "templates": {
+        "块": { "shape": { "type": "box", "size": [1.0, 0.4, 1.0] },
+                "body": "dynamic", "restitution": 0.0, "friction": 0.8 }
+      },
+      "objects": [
+        { "name": "塔", "template": "块",
+          "instances": [ { "position": [0, 0.2, 0] },
+                         { "position": [0, 0.6, 0] },
+                         { "position": [0, 1.0, 0] } ] }
+      ],
+      "simulate": { "steps": 240, "dt": 0.0166667 }
+    }"#;
+    std::fs::write(&scene, text).unwrap();
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let dat = r.json();
+    let sim = &dat["data"];
+    // 一份描述 → 三个**独立**刚体（不是共享一个刚体，也不是 GPU 实例化）
+    assert_eq!(sim["dynamic"], 3, "三个副本该是三个独立动态刚体：{sim}");
+
+    let states = sim["states"].as_array().unwrap();
+    let y_of = |name: &str| -> f64 {
+        states
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("报告里该有 {name}: {sim}"))["position"][1]
+            .as_f64()
+            .unwrap()
+    };
+    // 名字缺省 `名字#序号`；三层箱子各自站在该在的高度（穿模/塌陷会立刻看出来）
+    for (name, want) in [("塔#1", 0.2), ("塔#2", 0.6), ("塔#3", 1.0)] {
+        let y = y_of(name);
+        assert!((y - want).abs() < 0.12, "{name} 该停在 y≈{want}，实际 {y}");
+    }
+    // 三个副本都是独立物体：报告里名字各不相同，且各自的位移都很小（只是落到接触）
+    let names: Vec<&str> = states
+        .iter()
+        .map(|s| s["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        names.iter().filter(|n| n.starts_with("塔#")).count(),
+        3,
+        "{names:?}"
+    );
+
+    // 关节/动作按名字引用实例（`塔#2` 是真实存在的刚体名）
+    let pushed = dir.join("push.json");
+    std::fs::write(
+        &pushed,
+        text.replace(
+            "\"simulate\"",
+            r#""actions": [ { "type": "velocity", "target": "塔#3", "at_step": 30, "value": [2, 0, 0] } ],
+      "simulate""#,
+        )
+        .as_str(),
+    )
+    .unwrap();
+    let r2 = run(&["simulate", pushed.to_str().unwrap(), "--json"]);
+    assert_eq!(r2.code, 0, "stderr: {}", r2.stderr);
+    let moved = r2.json()["data"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "塔#3")
+        .cloned()
+        .unwrap()["position"][0]
+        .as_f64()
+        .unwrap();
+    // 顶上那个副本被推走（下面的两层还在原处）——"实例名是真实的刚体名"的证据
+    assert!(moved > 0.1, "被推的副本该往 +x 走，实际 x = {moved}");
+}

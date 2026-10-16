@@ -299,6 +299,7 @@ pub fn scene_grammar() -> Value {
             },
             "ground": { "size": "f32 边长，缺省 40", "material": "材质名（可选）", "y": "f32 高度，缺省 0" },
             "materials": "名字 → 材质对象",
+            "templates": "名字 → 模板对象（字段集与物体完全相同）。物体写 `template: \"名字\"` 复用；物体自己写的字段覆盖模板；模板里写 name/parent/position/rotation_deg 没有意义（会有警告并被忽略）",
             "objects": "图元物体数组",
             "models": "外部模型数组（gltf/glb/obj）",
             "joints": "关节数组，用物体名连接",
@@ -339,6 +340,8 @@ pub fn scene_grammar() -> Value {
         "object": {
             "name": "名称（关节引用与报告都用它；缺省 objects[i]）",
             "shape": "形状对象，缺省 1×1×1 立方体；与 shapes **二选一**（两个都写报错）",
+            "template": "复用 templates 里的模板（物体显式字段覆盖模板）",
+            "instances": "一次摆多个副本：[{ name?, position?, rotation_deg?, scale? }]。每个副本是一个**独立物体/刚体**（不是共享刚体）；名字缺省 `本名#1`、`本名#2`…；只写一个且没写 name 时保持本名。引用它的关节/动作请写 `本名#序号`",
             "shapes": "复合形状（一个刚体多个 Shape）：[{ shape, position?, rotation_deg? }]，部件的 position/rotation_deg 是**相对刚体原点**的局部位姿；质量/质心/惯量按所有部件合成，碰撞/AABB/查询逐部件；【边界】部件形状不能是三角网模型；每对刚体最多保留 8 个接触点（取最深的）",
             "parent": "父物体名（objects[].name）；给了之后 position/rotation_deg 变成**相对父物体**的局部量（继承位置与朝向，**不继承缩放**）。带刚体的物体不能有父物体",
             "position": "[x, y, z]，缺省原点；有 parent 时是局部的",
@@ -473,8 +476,13 @@ pub fn system_prompt() -> String {
              alpha_cutoff: 0, alpha_blend: false, unlit: false, double_sided: false,
              base_color_texture: "a.png", normal_texture, metallic_roughness_texture, emissive_texture } }
   （贴图路径相对场景文件解析；alpha_cutoff 与 alpha_blend 同时给时裁剪优先）
+- templates: { 名字: { ...与物体相同的字段... } }   // 可复用的一段描述（省 token）
+  物体写 "template": "名字" 引用；物体自己写的字段覆盖模板
+  （模板里写 name/parent/position/rotation_deg 没有意义，会被忽略并警告）
 - objects: 数组，每项：
   - name: 字符串（关节引用与报告用它）
+  - template: 模板名（可选）；instances: [{position, rotation_deg, scale, name}]（可选）
+    一次摆多个副本 = 多个**独立**刚体；缺省名字 `本名#1`、`本名#2`…（只有一个副本时是本名）
   - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"plane"|"convex",
              size: [x,y,z]（box 的**边长**）, radius, half_height, normal, points }
   - parent: 父物体的 name（可选）。给了之后 position/rotation_deg 是**相对父物体**的
@@ -643,6 +651,8 @@ mod tests {
             "gravity",
             "ground",
             "materials",
+            "templates",
+            "instances",
             "objects",
             "shape",
             "body",

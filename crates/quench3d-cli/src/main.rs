@@ -1180,12 +1180,14 @@ fn trace_targets(args: &Args, doc: &quench3d_cli::scene_doc::SceneDoc) -> Vec<St
         }
     }
     if args.has("--trace-all") {
-        // 只跟踪会动的：静态地面/墙的轨迹没有意义
-        for (index, o) in doc.objects.iter().enumerate() {
+        // 只跟踪会动的：静态地面/墙的轨迹没有意义。
+        // 用**展开后**的文档：`instances` 摆出来的副本也是独立刚体，也该被跟踪。
+        let expanded = doc.expanded();
+        for (index, o) in expanded.objects.iter().enumerate() {
             if !matches!(o.body, quench3d_cli::scene_doc::BodyKind::Static)
                 && !matches!(o.body, quench3d_cli::scene_doc::BodyKind::None)
             {
-                let name = quench3d_cli::runner::object_name(doc, index);
+                let name = quench3d_cli::runner::object_name(&expanded, index);
                 if !names.contains(&name) {
                     names.push(name);
                 }

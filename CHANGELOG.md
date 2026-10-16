@@ -10,6 +10,25 @@
 
 ### 新增
 
+- **模板 + 实例：一段描述摆出很多物体**（gap #14）。以前堆 1000 个箱子就要在 JSON 里
+  写 1000 份重复描述——agent 生成大场景时 token 直接爆。
+  * `templates`: `{ "箱子": { "shape": {...}, "body": "dynamic", "material": "木头" } }`
+    （字段集与物体**完全相同**，包括复合形状 `shapes`）。
+  * `objects[].template`: 引用模板；**物体自己写的字段覆盖模板**。形状整体二选一
+    （物体写了 `shape`/`shapes` 就不取模板的形状）；模板里的
+    `name`/`parent`/`position`/`rotation_deg` 没有意义 → 警告并忽略。
+  * `objects[].instances`: `[ { name?, position?, rotation_deg?, scale? } ]` —— 每个副本是
+    一个**独立物体/刚体**（不是共享刚体，也不是 GPU 实例化），名字缺省 `本名#1`、`本名#2`…
+    （只有一个副本且没写 `name` 时保持本名，老场景的关节/动作引用不受影响）。
+  * 校验：模板不存在 / `instances` 空数组 / 展开后名字撞车 / 实例字段未知 = error；
+    未使用的模板、模板里写位置、副本数 > 64 = warning。展开后的下标才是
+    `objects[k]`（错误路径以展开后为准）。
+  验证：`cargo test -p quench3d-cli --lib -- templates_and_instances`、
+  `cargo test -p quench3d-cli --test cli_e2e -- templates_and_instances`、
+  `cargo test -p quench3d-editor --test scene_roundtrip -- templates_and_instances`。
+  **没做**：外部场景引用（`include` / 跨文件组装）——那属于资产路径（#11）；
+  编辑器装载能展开，但**存回时会摊平成具体物体**（行为一致、文件变长，测试钉住）。
+
 - **复合形状：一个刚体多个 Shape**（gap #12）。桌子的"板 + 腿"、载具的底盘 + 车厢、
   角色的躯干 + 四肢碰撞体，以前只能拿多个刚体 + 关节硬拼（会晃、会漏、要调关节参数）。
   现在一个刚体就能带多个形状：

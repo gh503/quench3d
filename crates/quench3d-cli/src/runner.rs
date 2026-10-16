@@ -1071,10 +1071,7 @@ pub fn convex_bounds(points: &[[f32; 3]]) -> (Vec3, Vec3) {
 
 /// 物体名（缺省 `objects[i]`）。
 pub fn object_name(doc: &SceneDoc, index: usize) -> String {
-    doc.objects[index]
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("objects[{index}]"))
+    doc.object_name_at(index)
 }
 
 fn euler_quat(deg: Option<[f32; 3]>) -> Quat {
@@ -1089,6 +1086,10 @@ fn euler_quat(deg: Option<[f32; 3]>) -> Quat {
 
 /// 把文档里的物理内容建成一个独立世界（不需要 GPU）。
 pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
+    // 模板 + 实例在这里展开：这一步之后，下面的代码只看见"一个物体一份描述"，
+    // 不需要为 instances 写第二套装配逻辑（也就不会出现"CLI 一套、报告一套"的偏差）。
+    let expanded = doc.expanded();
+    let doc = &expanded;
     let mut world = PhysicsWorld::new();
     let mut handles = BTreeMap::new();
     let mut born = BTreeMap::new();
@@ -2007,6 +2008,8 @@ pub fn run_simulate_traced(
     trace: &[String],
     every: u32,
 ) -> Result<(SimReport, Vec<Trajectory>), RunError> {
+    let expanded = doc.expanded();
+    let doc = &expanded;
     let mut build = build_world(doc)?;
     let steps = doc.simulate.steps;
     let dt = doc.simulate.dt;
@@ -2201,6 +2204,9 @@ pub fn setup_visuals(
     doc: &SceneDoc,
     handles: &BTreeMap<String, BodyHandle>,
 ) -> Result<Vec<ModelInstance>, RunError> {
+    // 与 `build_world` 用同一套展开（名字必须一致，否则 handles 会对不上）
+    let expanded = doc.expanded();
+    let doc = &expanded;
     apply_lighting(engine, doc);
 
     // 材质（贴图按路径加载并按 (路径, 是否 sRGB) 缓存，多个材质共用一张图只上一次显存）

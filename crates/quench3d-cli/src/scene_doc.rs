@@ -138,6 +138,13 @@ pub struct SceneDoc {
     /// 图元物体。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<ObjectDoc>,
+    /// 模板：可复用的一段物体描述（`{ "箱子": { "shape": {...}, "body": "dynamic" } }`）。
+    ///
+    /// 用与物体**完全相同的字段集**承载（多一个字段都会是拼写错误的隐患）；
+    /// `name` / `parent` / `position` / `rotation_deg` 这几项在模板里没有意义，
+    /// 写了会得到一条警告并被忽略。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub templates: BTreeMap<String, ObjectDoc>,
     /// 外部模型文件（glTF/GLB/OBJ）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelDoc>,
@@ -268,6 +275,286 @@ fn default_version() -> u32 {
     VERSION
 }
 
+impl SceneDoc {
+    /// 物体名（缺省 `objects[i]`）。
+    pub fn object_name_at(&self, index: usize) -> String {
+        self.objects
+            .get(index)
+            .and_then(|o| o.name.clone())
+            .unwrap_or_else(|| format!("objects[{index}]"))
+    }
+
+    /// 展开模板与实例：返回一个新文档，其中每个实例都是**一个具体物体**。
+    ///
+    /// 展开规则（这三条是这一节的全部语义）：
+    /// 1. `objects[].template` 把模板的字段并进来，**物体自己写的字段赢**；
+    ///    物体只要写了 `shape` 或 `shapes` 中的任意一个，形状就整个用自己的
+    ///    （不把"模板的 shape + 物体的 shapes"拼在一起，那必然报错且没人想要）。
+    /// 2. `instances[k]` 的 `position` / `rotation_deg` / `scale` **覆盖**物体上的同名值
+    ///    （"每个副本差在哪"写在副本上），没写的沿用物体。
+    /// 3. 名字：实例写了 `name` 用它；只有一个实例且没写名字 → 用物体本名
+    ///    （这样关节/动作引用老名字仍然有效）；多个实例 → `本名#1`、`本名#2`…
+    ///
+    /// 名字重复、模板不存在这类问题由 [`SceneDoc::validate`] 报错；这里是"能展开就展开"，
+    /// 不 panic（漏掉模板 = 只展开物体自己的字段）。
+    pub fn expanded(&self) -> SceneDoc {
+        if self.templates.is_empty()
+            && self
+                .objects
+                .iter()
+                .all(|o| o.template.is_none() && o.instances.is_none())
+        {
+            return self.clone();
+        }
+        let mut out = self.clone();
+        out.templates.clear();
+        let mut objects: Vec<ObjectDoc> = Vec::with_capacity(self.objects.len());
+        for (i, o) in self.objects.iter().enumerate() {
+            let mut merged = match o.template.as_deref().and_then(|n| self.templates.get(n)) {
+                Some(t) => merge_object(o, t),
+                None => {
+                    let mut m = o.clone();
+                    m.template = None;
+                    m
+                }
+            };
+            match o.instances.as_deref() {
+                Some(list) if !list.is_empty() => {
+                    let base = self.object_name_at(i);
+                    for (k, inst) in list.iter().enumerate() {
+                        let mut copy = merged.clone();
+                        copy.instances = None;
+                        if inst.position.is_some() {
+                            copy.position = inst.position;
+                        }
+                        if inst.rotation_deg.is_some() {
+                            copy.rotation_deg = inst.rotation_deg;
+                        }
+                        if inst.scale.is_some() {
+                            copy.scale = inst.scale;
+                        }
+                        copy.name = Some(match (&inst.name, list.len()) {
+                            (Some(n), _) => n.clone(),
+                            (None, 1) => base.clone(),
+                            (None, _) => format!("{base}#{}", k + 1),
+                        });
+                        objects.push(copy);
+                    }
+                }
+                _ => {
+                    merged.instances = None;
+                    merged.name = Some(self.object_name_at(i));
+                    objects.push(merged);
+                }
+            }
+        }
+        out.objects = objects;
+        out
+    }
+}
+
+/// 模板合并（物体的显式字段赢）。字段与 [`ObjectDoc`] 一一对应，改这里时要一起看。
+fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
+    let o = object;
+    let t = template;
+    // 形状整体二选一（详见 `expanded` 的说明）
+    let (shape, shapes) = if o.shape.is_some() || o.shapes.is_some() {
+        (o.shape.clone(), o.shapes.clone())
+    } else {
+        (t.shape.clone(), t.shapes.clone())
+    };
+    ObjectDoc {
+        // 身份与位姿不继承模板：模板只描述"这类东西长什么样"
+        name: o.name.clone(),
+        template: None,
+        instances: None,
+        parent: o.parent.clone(),
+        position: o.position,
+        rotation_deg: o.rotation_deg,
+        shape,
+        shapes,
+        // `body` 的缺省值就是 `none`（纯显示），"没写"和"写 none"分不出来：
+        // 因此物体上的 `none` 覆盖不了模板的 dynamic —— 要覆盖就显式写别的刚体类型。
+        body: if o.body == BodyKind::None {
+            t.body
+        } else {
+            o.body
+        },
+        material: o.material.clone().or_else(|| t.material.clone()),
+        density: o.density.or(t.density),
+        restitution: o.restitution.or(t.restitution),
+        friction: o.friction.or(t.friction),
+        static_friction: o.static_friction.or(t.static_friction),
+        friction_combine: o.friction_combine.or(t.friction_combine),
+        restitution_combine: o.restitution_combine.or(t.restitution_combine),
+        velocity: o.velocity.or(t.velocity),
+        angular_velocity: o.angular_velocity.or(t.angular_velocity),
+        linear_damping: o.linear_damping.or(t.linear_damping),
+        angular_damping: o.angular_damping.or(t.angular_damping),
+        gravity_scale: o.gravity_scale.or(t.gravity_scale),
+        mass: o.mass.or(t.mass),
+        allow_sleep: o.allow_sleep.or(t.allow_sleep),
+        // 可见性取"与"：模板说不可见就不会被物体默认的 true 翻回来
+        visible: o.visible && t.visible,
+        scale: o.scale.or(t.scale),
+        collision_layer: o.collision_layer.or(t.collision_layer),
+        collides_with: o.collides_with.clone().or_else(|| t.collides_with.clone()),
+        sensor: o.sensor.or(t.sensor),
+        ccd: o.ccd.or(t.ccd),
+    }
+}
+
+impl SceneDoc {
+    /// 模板与实例的**结构**检查（不检查物体字段本身，那些在展开后的文档上做）。
+    fn validate_template_layer(&self) -> Vec<Diagnostic> {
+        let mut out = Vec::new();
+        // 模板自身：不能带身份/位姿字段
+        for (name, t) in &self.templates {
+            let p = format!("templates.{name}");
+            if t.name.is_some() {
+                out.push(Diagnostic::warn(
+                    format!("{p}.name"),
+                    "模板里的 name 没有意义（名字属于物体/实例），会被忽略",
+                ));
+            }
+            if t.parent.is_some() || t.position.is_some() || t.rotation_deg.is_some() {
+                out.push(Diagnostic::warn(
+                    &p,
+                    "模板里的 parent / position / rotation_deg 没有意义（模板只描述\"长什么样\"），会被忽略；位置请写在 instances 或物体上",
+                ));
+            }
+            if t.template.is_some() || t.instances.is_some() {
+                out.push(Diagnostic::warn(
+                    &p,
+                    "模板里不能再写 template / instances（模板不支持嵌套），会被忽略",
+                ));
+            }
+        }
+        // 物体：模板引用、实例表
+        for (i, o) in self.objects.iter().enumerate() {
+            let p = format!("objects[{i}]");
+            if let Some(t) = &o.template {
+                if !self.templates.contains_key(t) {
+                    let mut known: Vec<&str> = self.templates.keys().map(|k| k.as_str()).collect();
+                    known.sort_unstable();
+                    let hint = if known.is_empty() {
+                        "这个场景还没有 templates 一节".to_string()
+                    } else {
+                        format!("已定义的模板：{}", known.join("、"))
+                    };
+                    out.push(
+                        Diagnostic::error(format!("{p}.template"), format!("找不到模板 `{t}`"))
+                            .with_hint(hint),
+                    );
+                }
+            }
+            match o.instances.as_deref() {
+                Some([]) => out.push(Diagnostic::error(
+                    format!("{p}.instances"),
+                    "instances 不能是空数组（要么删掉，要么至少写一个副本）",
+                )),
+                Some(list) => {
+                    // 实例多起来是实打实的物理开销（每个副本一个独立刚体，不是 GPU 实例化）
+                    if list.len() > 64 {
+                        out.push(Diagnostic::warn(
+                            format!("{p}.instances"),
+                            format!(
+                                "{} 个副本会变成 {} 个独立刚体（每个都参与物理），确认这是想要的",
+                                list.len(),
+                                list.len()
+                            ),
+                        ));
+                    }
+                    for (k, inst) in list.iter().enumerate() {
+                        let ip = format!("{p}.instances[{k}]");
+                        if let Some(v) = &inst.position {
+                            if !finite3(v) {
+                                out.push(Diagnostic::error(
+                                    format!("{ip}.position"),
+                                    "实例位置必须是有限数",
+                                ));
+                            }
+                        }
+                        if let Some(v) = &inst.rotation_deg {
+                            if !finite3(v) {
+                                out.push(Diagnostic::error(
+                                    format!("{ip}.rotation_deg"),
+                                    "实例欧拉角必须是有限数",
+                                ));
+                            }
+                        }
+                        if let Some(v) = &inst.scale {
+                            if !finite3(v) || v.iter().any(|x| *x <= 0.0) {
+                                out.push(Diagnostic::error(
+                                    format!("{ip}.scale"),
+                                    "实例缩放必须有限且为正",
+                                ));
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        // 未使用的模板
+        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+        for o in &self.objects {
+            if let Some(t) = o.template.as_deref() {
+                *used.entry(t).or_insert(0) += 1;
+            }
+        }
+        for name in self.templates.keys() {
+            if !used.contains_key(name.as_str()) {
+                out.push(Diagnostic::warn(
+                    format!("templates.{name}"),
+                    "这个模板没有被任何物体引用（白写一节；确认不是漏了 template 字段）",
+                ));
+            }
+        }
+        // 展开后的名字必须唯一：实例名字缺省是 `本名#序号`，与本名或别的物体可能撞车
+        let expanded = self.expanded();
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for (k, o) in expanded.objects.iter().enumerate() {
+            let name = o.name.clone().unwrap_or_else(|| format!("objects[{k}]"));
+            *seen.entry(name).or_insert(0) += 1;
+        }
+        let mut dups: Vec<&String> = seen
+            .iter()
+            .filter(|(_, n)| **n > 1)
+            .map(|(k, _)| k)
+            .collect();
+        dups.sort();
+        for d in dups {
+            let mut where_: Vec<String> = Vec::new();
+            for (i, o) in self.objects.iter().enumerate() {
+                let base = self.object_name_at(i);
+                if o.instances.as_deref().is_some_and(|l| !l.is_empty()) {
+                    for (k, inst) in o.instances.as_deref().unwrap_or(&[]).iter().enumerate() {
+                        let n = match (&inst.name, o.instances.as_deref().map(|l| l.len())) {
+                            (Some(n), _) => n.clone(),
+                            (None, Some(1)) => base.clone(),
+                            (None, _) => format!("{base}#{}", k + 1),
+                        };
+                        if &n == d {
+                            where_.push(format!("objects[{i}].instances[{k}]"));
+                        }
+                    }
+                } else if &base == d {
+                    where_.push(format!("objects[{i}]"));
+                }
+            }
+            out.push(
+                Diagnostic::error(
+                    where_.first().cloned().unwrap_or_else(|| "objects".into()),
+                    format!("名字 `{d}` 重复（实例展开后每个物体的名字必须唯一）"),
+                )
+                .with_hint("给副本写 name，或改掉重名的物体"),
+            );
+        }
+        out
+    }
+}
+
 impl Default for SceneDoc {
     fn default() -> Self {
         Self {
@@ -279,6 +566,7 @@ impl Default for SceneDoc {
             ground: None,
             materials: BTreeMap::new(),
             objects: Vec::new(),
+            templates: BTreeMap::new(),
             models: Vec::new(),
             joints: Vec::new(),
             actions: Vec::new(),
@@ -499,10 +787,41 @@ impl ObjectDoc {
     }
 }
 
+/// 一个实例的局部位姿（`objects[].instances[]`）。
+///
+/// 只写"每个副本差在哪"：位置、朝向、显示缩放，可选名字。
+/// 没写的字段沿用物体（或模板）上的值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceDoc {
+    /// 这个实例的名字，缺省 `名字#序号`（只有一个实例时就是物体本名）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 位置（米）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f32; 3]>,
+    /// 欧拉角（**度**，XYZ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<[f32; 3]>,
+    /// 显示缩放。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<[f32; 3]>,
+}
+
 /// 一个图元物体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectDoc {
+    /// 复用 `templates` 里的模板（物体自己写的字段**覆盖**模板）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// 一次摆多个副本（每个副本一个独立物体/刚体）。
+    ///
+    /// 这是"把同一段描述写 N 遍"的替代品：JSON 短、token 省，**语义上仍然是 N 个
+    /// 独立物体**（各自一个刚体、各自参与物理），不是共享同一个刚体。
+    /// 名字缺省 `名字#1`、`名字#2`…；只写一个实例且没写 `name` 时保持物体本名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instances: Option<Vec<InstanceDoc>>,
     /// 名称（关节引用、报告输出都靠它），缺省自动编号。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1313,6 +1632,13 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     check_section::<SimulateDoc>(map.get("simulate"), "simulate", &mut out);
     check_section::<RenderDoc>(map.get("render"), "render", &mut out);
 
+    // 模板段：字段集与物体完全相同（用同一个检查器，路径 `templates.名`）
+    check_section::<BTreeMap<String, ObjectDoc>>(map.get("templates"), "templates", &mut out);
+    if let Some(items) = map.get("templates").and_then(|v| v.as_object()) {
+        for (name, item) in items {
+            check_object(item, &format!("templates.{name}"), &mut out);
+        }
+    }
     // 数组段：先确认是数组，再逐个元素检查（路径带下标）
     check_array::<ObjectDoc>(map.get("objects"), "objects", &mut out);
     if let Some(items) = map.get("objects").and_then(|v| v.as_array()) {
@@ -1435,6 +1761,30 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     check_field::<f32>(map, "mass", path, out);
     check_field::<bool>(map, "allow_sleep", path, out);
     check_field::<bool>(map, "visible", path, out);
+    check_field::<String>(map, "template", path, out);
+    if let Some(instances) = map.get("instances") {
+        if let Some(list) = instances.as_array() {
+            for (k, inst) in list.iter().enumerate() {
+                let ip = format!("{path}.instances[{k}]");
+                let Some(imap) = inst.as_object() else {
+                    out.push(Diagnostic::error(
+                        ip.clone(),
+                        "实例必须是对象 { position?, rotation_deg?, scale?, name? }",
+                    ));
+                    continue;
+                };
+                check_field::<String>(imap, "name", &ip, out);
+                check_field::<[f32; 3]>(imap, "position", &ip, out);
+                check_field::<[f32; 3]>(imap, "rotation_deg", &ip, out);
+                check_field::<[f32; 3]>(imap, "scale", &ip, out);
+            }
+        } else {
+            out.push(Diagnostic::error(
+                format!("{path}.instances"),
+                "instances 必须是数组",
+            ));
+        }
+    }
     // 逐字段都通过时再整体检查一次，专门用来抓「未知字段」这类问题
     if out.len() == before {
         check_at::<ObjectDoc>(item, path, out);
@@ -1650,6 +2000,20 @@ impl SceneDoc {
 
     /// 语义校验；返回全部诊断（含警告），调用方自行判断是否有 `Error`。
     pub fn validate(&self) -> Vec<Diagnostic> {
+        // 有模板/实例时：先在**声明的**文档上做结构检查（引用、实例、名字、未用模板），
+        // 再把其余一切交给展开后的文档验一遍。这样每条问题只报一次，
+        // 而物体字段/材质/关节那些检查一个字都不用改。
+        // 注意：展开之后 `objects[k]` 的下标是**展开后**的下标（instances 会变成多个物体）。
+        if !self.templates.is_empty()
+            || self
+                .objects
+                .iter()
+                .any(|o| o.template.is_some() || o.instances.is_some())
+        {
+            let mut out = self.validate_template_layer();
+            out.extend(self.expanded().validate());
+            return out;
+        }
         let mut out = Vec::new();
 
         // --- 规模上限：宁可给一条明确诊断，也不要跑到内存耗尽 / 卡死 ---
@@ -4464,6 +4828,108 @@ mod tests {
         )
         .unwrap();
         assert!(!SceneDoc::has_errors(&ok.validate()));
+    }
+
+    #[test]
+    fn templates_and_instances_expand_validate_and_round_trip() {
+        let json = r#"{
+          "templates": {
+            "箱子": { "shape": { "type": "box", "size": [0.5, 0.5, 0.5] },
+                      "body": "dynamic", "material": "木头", "density": 500 },
+            "没用": { "shape": { "type": "sphere" }, "position": [9, 9, 9] }
+          },
+          "materials": { "木头": { "color": [0.8, 0.6, 0.35] } },
+          "objects": [
+            { "name": "堆", "template": "箱子",
+              "instances": [ { "position": [0, 0.25, 0] },
+                             { "position": [0, 0.75, 0], "rotation_deg": [0, 15, 0] },
+                             { "name": "顶箱", "position": [0, 1.5, 0] } ] },
+            { "name": "重箱", "template": "箱子", "density": 2000, "position": [1, 0.25, 0] } ] }"#;
+        let doc = SceneDoc::from_json(json).unwrap();
+        let diags = doc.validate();
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+        let msgs: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("没有被任何物体引用")),
+            "用不到的模板该有警告：{msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("模板里的 parent / position")),
+            "模板里写位置该有警告：{msgs:?}"
+        );
+
+        // 展开：三个副本 + 一个单独物体
+        let ex = doc.expanded();
+        let names: Vec<String> = ex.objects.iter().map(|o| o.name.clone().unwrap()).collect();
+        assert_eq!(names, vec!["堆#1", "堆#2", "顶箱", "重箱"]);
+        assert!(ex.templates.is_empty(), "展开后不该还留着模板");
+        assert!(ex.objects.iter().all(|o| o.instances.is_none()));
+        // 模板字段被继承：形状、刚体类型、材质、密度
+        let first = &ex.objects[0];
+        assert_eq!(first.primary_shape().kind, ShapeKind::Box);
+        assert_eq!(first.primary_shape().size, Some([0.5, 0.5, 0.5]));
+        assert_eq!(first.body, BodyKind::Dynamic);
+        assert_eq!(first.material.as_deref(), Some("木头"));
+        assert_eq!(first.density, Some(500.0));
+        assert_eq!(first.position, Some([0.0, 0.25, 0.0]));
+        // 实例自己的朝向
+        assert_eq!(ex.objects[1].rotation_deg, Some([0.0, 15.0, 0.0]));
+        // 物体显式字段赢模板：密度 2000
+        assert_eq!(ex.objects[3].density, Some(2000.0));
+        assert_eq!(ex.objects[3].position, Some([1.0, 0.25, 0.0]));
+        // 展开后的文档自身必须干净（名字/字段都具体了），且不该再有模板层诊断
+        let ex_diags = ex.validate();
+        assert!(!SceneDoc::has_errors(&ex_diags), "{ex_diags:?}");
+
+        // 单个实例、没写 name：保持物体本名（关节/动作引用老名字仍然有效）
+        let one = SceneDoc::from_json(
+            r#"{ "templates": { "t": { "body": "static" } },
+                 "objects": [ { "name": "墙", "template": "t",
+                                "instances": [ { "position": [0, 0, 0] } ] } ] }"#,
+        )
+        .unwrap();
+        assert!(!SceneDoc::has_errors(&one.validate()));
+        let ex_one = one.expanded();
+        assert_eq!(ex_one.objects.len(), 1);
+        assert_eq!(ex_one.objects[0].name.as_deref(), Some("墙"));
+        assert_eq!(ex_one.objects[0].body, BodyKind::Static);
+
+        // 往返：`templates` 与 `instances` 原样保留（模板不是"装载时展开一次就丢"的东西）
+        let round = doc.to_json_pretty();
+        assert!(round.contains("\"templates\""), "{round}");
+        assert!(round.contains("\"instances\""), "{round}");
+        let back = SceneDoc::from_json(&round).unwrap();
+        assert_eq!(back.expanded().objects.len(), 4);
+
+        // 错误①：引用了不存在的模板
+        let unknown =
+            SceneDoc::from_json(r#"{ "objects": [ { "name": "甲", "template": "没有这个" } ] }"#)
+                .unwrap();
+        let d = unknown.validate();
+        assert!(SceneDoc::has_errors(&d), "{d:?}");
+        assert!(d.iter().any(|x| x.message.contains("找不到模板")), "{d:?}");
+        // 错误②：空实例表
+        let empty =
+            SceneDoc::from_json(r#"{ "objects": [ { "name": "乙", "instances": [] } ] }"#).unwrap();
+        assert!(SceneDoc::has_errors(&empty.validate()));
+        // 错误③：展开后名字撞车
+        let dup = SceneDoc::from_json(
+            r#"{ "objects": [
+                 { "name": "箱", "instances": [ {}, {} ] },
+                 { "name": "箱#2" } ] }"#,
+        )
+        .unwrap();
+        let d = dup.validate();
+        assert!(
+            d.iter().any(|x| x.message.contains("重复")),
+            "名字撞车必须报错：{d:?}"
+        );
+        // 实例里的未知字段要报错
+        assert!(SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "丙", "instances": [ { "scale2": [1, 1, 1] } ] } ] }"#
+        )
+        .is_err());
     }
 
     #[test]

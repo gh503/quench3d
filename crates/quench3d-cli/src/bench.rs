@@ -271,15 +271,17 @@ fn measure_trace(steps: u32) -> Option<TraceCost> {
     let without = started.elapsed().as_secs_f64() * 1000.0;
 
     // 跟踪所有物体（含地面），因此每条轨迹都会按采样上限被自动抽稀
-    let names: Vec<String> = (0..doc.objects.len())
-        .map(|i| runner::object_name(&doc, i))
+    // 展开模板/实例后的名字（副本也是独立刚体）
+    let expanded = doc.expanded();
+    let names: Vec<String> = (0..expanded.objects.len())
+        .map(|i| runner::object_name(&expanded, i))
         .collect();
     let started = Instant::now();
     let (_, trajectories) = runner::run_simulate_traced(&doc, &names, 1).ok()?;
     let with = started.elapsed().as_secs_f64() * 1000.0;
     let samples: usize = trajectories.iter().map(|t| t.samples.len()).sum();
     Some(TraceCost {
-        scene: format!("内置示例（{} 个刚体）", doc.objects.len()),
+        scene: format!("内置示例（{} 个刚体）", expanded.objects.len()),
         without_trace_ms: without,
         with_trace_ms: with,
         overhead_percent: if without > 0.0 {
