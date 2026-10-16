@@ -27,7 +27,7 @@ use crate::joints::{Joint, JointEntry, JointHandle, JointImpulses, JointSolver};
 use crate::narrowphase;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::parallel::ParallelLayout;
-use crate::query;
+use crate::query::{self, QueryFilter, ShapeDistance};
 use crate::shape::Shape;
 use crate::solver::{self, BodyView, ContactCache, ContactSolver, ManifoldEntry, SolverConfig};
 
@@ -220,6 +220,9 @@ pub struct PhysicsWorld {
     contact_solver: ContactSolver,
     joint_solver: JointSolver,
     broadphase: Broadphase,
+    /// 世界内容版本号：任何会改变"查询结果"的操作（增删刚体、可变访问、步进）
+    /// 都 +1。查询索引靠它判断自己是不是过期了（见 `query_index`）。
+    version: u64,
     proxies: Vec<Proxy>,
     pairs: Vec<(u32, u32)>,
     wake_list: Vec<u32>,
@@ -351,6 +354,7 @@ impl PhysicsWorld {
             contact_solver: ContactSolver::default(),
             joint_solver: JointSolver::default(),
             broadphase: Broadphase::new(),
+            version: 0,
             proxies: Vec::new(),
             pairs: Vec::new(),
             wake_list: Vec::new(),
@@ -404,6 +408,7 @@ impl PhysicsWorld {
 
     /// 添加刚体，返回句柄。
     pub fn add_body(&mut self, body: RigidBody) -> BodyHandle {
+        self.version += 1;
         if let Some(index) = self.free.pop() {
             let slot = &mut self.bodies[index as usize];
             slot.body = Some(body);
@@ -425,6 +430,7 @@ impl PhysicsWorld {
 
     /// 移除刚体；成功时返回被移除的刚体。
     pub fn remove_body(&mut self, handle: BodyHandle) -> Option<RigidBody> {
+        self.version += 1;
         let slot = self.bodies.get_mut(handle.index as usize)?;
         if slot.generation != handle.generation {
             return None;
@@ -455,7 +461,11 @@ impl PhysicsWorld {
     }
 
     /// 可变访问刚体。
+    ///
+    /// 会让 [`PhysicsWorld::version`] +1：拿到 `&mut` 之后刚体可能被搬到任何地方，
+    /// 已经建好的查询索引（[`PhysicsWorld::build_query_index`]）必须当作过期。
     pub fn body_mut(&mut self, handle: BodyHandle) -> Option<&mut RigidBody> {
+        self.version += 1;
         let slot = self.bodies.get_mut(handle.index as usize)?;
         if slot.generation != handle.generation {
             return None;
@@ -479,6 +489,7 @@ impl PhysicsWorld {
 
     /// 移除所有刚体与关节。
     pub fn clear(&mut self) {
+        self.version += 1;
         self.sensor_pairs.clear();
         self.sensor_pairs_prev.clear();
         self.sensor_events.clear();
@@ -586,6 +597,73 @@ impl PhysicsWorld {
         query::raycast_world(self, origin, dir, max_distance, &filter)
     }
 
+    /// 带过滤（[`QueryFilter`]：层掩码 + 是否含传感器）的射线检测。
+    ///
+    /// 与 [`PhysicsWorld::raycast_filtered`] 的区别：那个收的是闭包，可以按句柄
+    /// 任意过滤；这个收的是格式/玩法层里表达得出来的过滤条件。
+    pub fn raycast_in(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_distance: f32,
+        filter: QueryFilter,
+    ) -> Option<RaycastHit> {
+        self.raycast_filtered(origin, dir, max_distance, |h| {
+            self.body(h).is_some_and(|b| filter.accepts(b))
+        })
+    }
+
+    /// 射线检测，返回 `max_distance` 内的**所有**命中（距离升序，平局按槽位下标）。
+    pub fn raycast_all(&self, origin: Vec3, dir: Vec3, max_distance: f32) -> Vec<RaycastHit> {
+        self.raycast_all_filtered(origin, dir, max_distance, QueryFilter::default())
+    }
+
+    /// 带过滤的"所有命中"射线检测。
+    pub fn raycast_all_filtered(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_distance: f32,
+        filter: QueryFilter,
+    ) -> Vec<RaycastHit> {
+        query::raycast_all_filtered(self, origin, dir, max_distance, filter)
+    }
+
+    /// 任意形状重叠查询（结果按槽位下标升序）。
+    pub fn overlap_shape(&self, shape: &Shape, transform: &Transform) -> Vec<BodyHandle> {
+        query::overlap_shape_filtered(self, shape, transform, QueryFilter::default())
+    }
+
+    /// 带过滤的任意形状重叠查询。
+    pub fn overlap_shape_filtered(
+        &self,
+        shape: &Shape,
+        transform: &Transform,
+        filter: QueryFilter,
+    ) -> Vec<BodyHandle> {
+        query::overlap_shape_filtered(self, shape, transform, filter)
+    }
+
+    /// 查询形状与某个刚体的最近距离（相交时为 0）。
+    pub fn distance_to(
+        &self,
+        shape: &Shape,
+        transform: &Transform,
+        handle: BodyHandle,
+    ) -> Option<ShapeDistance> {
+        query::distance_to_body_handle(self, shape, transform, handle)
+    }
+
+    /// 世界内容版本号（增删刚体 / 可变访问 / 步进都会 +1）。
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// 建查询索引（快照）。详见 [`crate::QueryIndex`]。
+    pub fn build_query_index(&self) -> crate::QueryIndex {
+        crate::QueryIndex::build(self)
+    }
+
     /// 保守推进形状投射。
     pub fn shape_cast(&self, shape: &Shape, from: &Transform, motion: Vec3) -> Option<RaycastHit> {
         query::shape_cast_world(self, shape, from, motion)
@@ -610,6 +688,8 @@ impl PhysicsWorld {
             self.fixed_dt = DEFAULT_FIXED_DT;
         }
         self.accumulator += dt;
+        // 子步会改变变换：查询索引到此为止必须重建
+        self.version = self.version.wrapping_add(1);
         let mut steps = 0usize;
         while self.accumulator >= self.fixed_dt && steps < MAX_SUBSTEPS {
             let h = self.fixed_dt;

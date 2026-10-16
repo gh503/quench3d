@@ -53,6 +53,10 @@ const VALUE_FLAGS: &[&str] = &[
     "--frames-dir",
     "--steps-per-frame",
     "--encoder",
+    "--ray",
+    "--overlap",
+    "--mask",
+    "--max",
 ];
 
 #[derive(Debug)]
@@ -650,6 +654,129 @@ fn dispatch(args: &Args) -> i32 {
                 Err(e) => fail(args, "simulate", ErrorInfo::from_run(&e), started),
             }
         }
+        "query" => {
+            let started = Instant::now();
+            let Some(path) = args.positional.first() else {
+                return missing(
+                    args,
+                    "query",
+                    "需要场景文件路径",
+                    "quench3d query scene.json --ray 0,5,0,0,-1,0",
+                );
+            };
+            let doc = match load_scene(args, path, started) {
+                Ok(d) => d,
+                Err(code) => return code,
+            };
+            let kind = match parse_query_kind(args) {
+                Ok(k) => k,
+                Err(msg) => {
+                    return fail(
+                        args,
+                        "query",
+                        ErrorInfo::new("invalid", msg).hint(
+                            "--ray 形如 0,5,0,0,-1,0（起点+方向）；--overlap 形如 box:1,2,1@0,1,0 或 sphere:0.5@0,1,0",
+                        ),
+                        started,
+                    )
+                }
+            };
+            // query 一个字节都不写：写文件相关的开关在这里没有意义，
+            // 悄悄忽略它们是这个项目最不想要的失败模式。
+            if args.has("--out") || args.has("--no-clobber") || args.has("--dry-run") {
+                return fail(
+                    args,
+                    "query",
+                    ErrorInfo::new(
+                        "invalid",
+                        "query 只读不写：--out / --no-clobber / --dry-run 在它这里没有意义",
+                    )
+                    .hint("要落盘结果请用 shell 重定向（stdout 是单行 JSON）"),
+                    started,
+                );
+            }
+            let all = args.has("--all");
+            if all && matches!(kind, runner::QueryKind::Overlap { .. }) {
+                return fail(
+                    args,
+                    "query",
+                    ErrorInfo::new(
+                        "invalid",
+                        "--all 只对 --ray 有意义：重叠查询本来就返回全部命中",
+                    )
+                    .hint("去掉 --all，或改用 --ray"),
+                    started,
+                );
+            }
+            let mask = match args.flag_parse::<u32>("--mask") {
+                Ok(Some(m)) => m,
+                Ok(None) => u32::MAX,
+                Err(e) => {
+                    return fail(
+                        args,
+                        "query",
+                        ErrorInfo::new(
+                            "invalid",
+                            format!("--mask 不是合法的 32 位无符号整数：{e}"),
+                        )
+                        .hint("层掩码，例如 --mask 5 表示第 0 层与第 2 层"),
+                        started,
+                    )
+                }
+            };
+            let max_distance = match args.flag_parse::<f32>("--max") {
+                Ok(Some(m)) if m.is_finite() && m > 0.0 => m,
+                Ok(Some(m)) => {
+                    return fail(
+                        args,
+                        "query",
+                        ErrorInfo::new("invalid", format!("--max 必须是正数：{m}")),
+                        started,
+                    )
+                }
+                Ok(None) => runner::DEFAULT_QUERY_MAX,
+                Err(e) => {
+                    return fail(
+                        args,
+                        "query",
+                        ErrorInfo::new("invalid", format!("--max 不是合法数字：{e}")),
+                        started,
+                    )
+                }
+            };
+            let steps = match args.flag_parse::<u32>("--steps") {
+                Ok(Some(n)) => n,
+                Ok(None) => 0,
+                Err(e) => {
+                    return fail(
+                        args,
+                        "query",
+                        ErrorInfo::new("invalid", format!("--steps 不是合法步数：{e}"))
+                            .hint("--steps N：先跑 N 步物理再查询（缺省 0，按场景初始状态查）"),
+                        started,
+                    )
+                }
+            };
+            match runner::run_query(
+                &doc,
+                &kind,
+                runner::QueryOptions {
+                    mask,
+                    sensors: !args.has("--no-sensors"),
+                    max_distance,
+                    all,
+                    steps,
+                    use_index: args.has("--index"),
+                },
+            ) {
+                Ok(report) => {
+                    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+                    let human = query_human(&report);
+                    finish(args, "query", Ok(value), started, |_| print!("{human}"))
+                }
+                Err(e) => fail(args, "query", ErrorInfo::from_run(&e), started),
+            }
+        }
         "ask" => cmd_ask(args),
         "chat" => cmd_chat(args),
         "mcp" => {
@@ -941,6 +1068,104 @@ fn movie_options(
         encoder,
         output,
     })
+}
+
+/// 解析 `--ray` / `--overlap`。
+fn parse_query_kind(args: &Args) -> Result<runner::QueryKind, String> {
+    let ray = args.flag_str("--ray");
+    let overlap = args.flag_str("--overlap");
+    match (ray, overlap) {
+        (Some(_), Some(_)) => Err("--ray 与 --overlap 只能给一个".into()),
+        (None, None) => Err("需要 --ray（射线）或 --overlap（形状重叠）之一".into()),
+        (Some(text), None) => runner::parse_ray_query(text),
+        (None, Some(text)) => runner::parse_overlap_query(text),
+    }
+}
+
+/// `query` 的人可读输出。
+fn query_human(report: &runner::QueryReport) -> String {
+    let mut out = match report.query.as_str() {
+        "overlap" => format!(
+            "查询      : 重叠 {} 在 ({:.3},{:.3},{:.3}){}，最远 {:.3}
+",
+            report.shape.clone().unwrap_or_default(),
+            report.at.map(|a| a[0]).unwrap_or(0.0),
+            report.at.map(|a| a[1]).unwrap_or(0.0),
+            report.at.map(|a| a[2]).unwrap_or(0.0),
+            match report.rotation_deg {
+                Some(r) if r != [0.0, 0.0, 0.0] =>
+                    format!("，旋转 ({:.1},{:.1},{:.1})°", r[0], r[1], r[2]),
+                _ => String::new(),
+            },
+            report.max_distance,
+        ),
+        _ => format!(
+            "查询      : 射线 从 ({:.3},{:.3},{:.3}) 朝 ({:.3},{:.3},{:.3})，最远 {:.3}
+",
+            report.origin.map(|o| o[0]).unwrap_or(0.0),
+            report.origin.map(|o| o[1]).unwrap_or(0.0),
+            report.origin.map(|o| o[2]).unwrap_or(0.0),
+            report.direction.map(|o| o[0]).unwrap_or(0.0),
+            report.direction.map(|o| o[1]).unwrap_or(0.0),
+            report.direction.map(|o| o[2]).unwrap_or(0.0),
+            report.max_distance,
+        ),
+    };
+    out.push_str(&format!(
+        "过滤      : 层掩码 0x{:08x} · {}
+",
+        report.mask,
+        if report.include_sensors {
+            "含传感器"
+        } else {
+            "不含传感器"
+        }
+    ));
+    out.push_str(&format!(
+        "刚体      : {}（本次检查 {} 个{}{}）
+",
+        report.bodies,
+        report.tested,
+        if report.indexed {
+            "，查询索引"
+        } else {
+            ""
+        },
+        if report.fallback {
+            "，索引过期已回退线性扫描"
+        } else {
+            ""
+        }
+    ));
+    out.push_str(&format!(
+        "命中      : {}
+",
+        report.count
+    ));
+    for h in &report.hits {
+        out.push_str(&format!(
+            "  {:<14} {:<9} 距离 {:>8.3}  点 ({:>7.3},{:>7.3},{:>7.3})  法线 ({:>6.3},{:>6.3},{:>6.3})  层 {}{}
+",
+            h.name,
+            h.kind,
+            h.distance,
+            h.point[0],
+            h.point[1],
+            h.point[2],
+            h.normal[0],
+            h.normal[1],
+            h.normal[2],
+            h.layer,
+            if h.sensor { " 传感器" } else { "" }
+        ));
+    }
+    for w in &report.warnings {
+        out.push_str(&format!(
+            "警告      : {w}
+"
+        ));
+    }
+    out
 }
 
 /// 解析 `--trace` / `--trace-all` 指定的刚体名。

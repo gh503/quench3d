@@ -13,7 +13,7 @@
 //! | `resources/list` | 返回空列表（本服务器只提供工具） |
 //!
 //! 工具一览：`quench3d_schema`、`quench3d_doctor`、`quench3d_info`、`quench3d_validate`、
-//! `quench3d_render`、`quench3d_simulate`、`quench3d_ask`。
+//! `quench3d_render`、`quench3d_simulate`、`quench3d_query`、`quench3d_ask`。
 //!
 //! 关键设计：场景既可以传**文件路径**，也可以**直接内联 JSON 对象**——agent 通常是
 //! 现生成场景，不该被迫先落盘。`quench3d_render` 会同时返回文本报告与 base64 PNG
@@ -79,7 +79,8 @@ impl McpServer {
                     "title": "Quench3D 3D 引擎 / 物理仿真"
                 },
                 "instructions": "用 quench3d_schema 读取完整能力清单；场景可以内联 JSON 或文件路径。\
-                                 推荐流程：quench3d_schema → quench3d_validate → quench3d_render/quench3d_simulate。"
+                                 推荐流程：quench3d_schema → quench3d_validate → quench3d_render/quench3d_simulate；\
+                                 想知道射线或某块区域里有什么，用 quench3d_query（不需要 GPU，只读）。"
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tool_definitions() })),
@@ -346,6 +347,105 @@ impl McpServer {
                             "structuredContent": serde_json::to_value(&report).unwrap_or(Value::Null),
                             "isError": false
                         }))
+                    }
+                    Err(e) => Ok(error_result(&ErrorInfo::from_run(&e))),
+                }
+            }
+            "quench3d_query" => {
+                let doc = match scene_from_args(args) {
+                    Ok(d) => d,
+                    Err(info) => return Ok(error_result(&info)),
+                };
+                let kind = match (arg_str(args, "ray"), arg_str(args, "overlap")) {
+                    (Some(_), Some(_)) => {
+                        return Ok(error_result(&ErrorInfo::new(
+                            "invalid",
+                            "ray 与 overlap 只能给一个（二者选其一）",
+                        )))
+                    }
+                    (None, None) => {
+                        return Ok(error_result(&ErrorInfo::new(
+                            "invalid",
+                            "需要 ray（如 0,5,0,0,-1,0）或 overlap（如 box:1,2,1@0,1,0）之一",
+                        )))
+                    }
+                    (Some(text), None) => match crate::runner::parse_ray_query(&text) {
+                        Ok(k) => k,
+                        Err(msg) => return Ok(error_result(&ErrorInfo::new("invalid", msg))),
+                    },
+                    (None, Some(text)) => match crate::runner::parse_overlap_query(&text) {
+                        Ok(k) => k,
+                        Err(msg) => return Ok(error_result(&ErrorInfo::new("invalid", msg))),
+                    },
+                };
+                let mask = args
+                    .get("mask")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .unwrap_or(u32::MAX);
+                let sensors = args
+                    .get("sensors")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let max_distance = args
+                    .get("max_distance")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as f32)
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(crate::runner::DEFAULT_QUERY_MAX);
+                let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+                let steps = args.get("steps").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                match crate::runner::run_query(
+                    &doc,
+                    &kind,
+                    crate::runner::QueryOptions {
+                        mask,
+                        sensors,
+                        max_distance,
+                        all,
+                        steps,
+                        use_index: false,
+                    },
+                ) {
+                    Ok(report) => {
+                        let mut text = format!(
+                            "{}：命中 {} 个（刚体 {}，检查过 {} 个）\n",
+                            match report.query.as_str() {
+                                "overlap" => format!(
+                                    "重叠查询 {} @ {:?}",
+                                    report.shape.clone().unwrap_or_default(),
+                                    report.at.unwrap_or([0.0; 3])
+                                ),
+                                _ => format!(
+                                    "射线查询 {:?} → {:?}",
+                                    report.origin.unwrap_or([0.0; 3]),
+                                    report.direction.unwrap_or([0.0; 3])
+                                ),
+                            },
+                            report.count,
+                            report.bodies,
+                            report.tested
+                        );
+                        for h in &report.hits {
+                            text.push_str(&format!(
+                                "- {}（{}）距离 {:.3} 点 ({:.3},{:.3},{:.3}) 法线 ({:.3},{:.3},{:.3}) 层 {}{}\n",
+                                h.name,
+                                h.kind,
+                                h.distance,
+                                h.point[0],
+                                h.point[1],
+                                h.point[2],
+                                h.normal[0],
+                                h.normal[1],
+                                h.normal[2],
+                                h.layer,
+                                if h.sensor { " 传感器" } else { "" }
+                            ));
+                        }
+                        Ok(structured_result(
+                            &text,
+                            serde_json::to_value(&report).unwrap_or(Value::Null),
+                        ))
                     }
                     Err(e) => Ok(error_result(&ErrorInfo::from_run(&e))),
                 }
@@ -750,6 +850,22 @@ fn annotate_tools(tools: &mut [Value]) {
                     ("warnings", "array"),
                 ]),
             ),
+            "quench3d_query" => (
+                true,
+                false,
+                false,
+                true,
+                props(&[
+                    ("query", "string"),
+                    ("count", "integer"),
+                    ("hits", "array"),
+                    ("bodies", "integer"),
+                    ("tested", "integer"),
+                    ("indexed", "boolean"),
+                    ("fallback", "boolean"),
+                    ("warnings", "array"),
+                ]),
+            ),
             "quench3d_render" => (
                 false,
                 true,
@@ -917,6 +1033,26 @@ fn raw_tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "quench3d_query",
+            "title": "几何查询：射线 / 形状重叠（不需要 GPU，只读）",
+            "description": "在场景上做一次查询，不改动场景、不渲染。ray 给 \"ox,oy,oz,dx,dy,dz\"（配合 all 返回沿路的全部命中，按距离升序；缺省只给最近的一个）；overlap 给 \"sphere:0.5\" / \"box:1,2,1\" / \"capsule:0.6,0.3\" / \"cylinder:0.5,0.5\" / \"plane:0,1,0\"，可接 @x,y,z 与 ~rx,ry,rz（度）。层过滤是单向的（mask 只看被查方在不在掩码里）；sensors=false 可排除触发区。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scene": { "description": "场景对象或 JSON 字符串", "type": ["object", "string"] },
+                    "scene_path": { "type": "string" },
+                    "ray": { "type": "string", "description": "射线：ox,oy,oz,dx,dy,dz（与 overlap 二选一）" },
+                    "overlap": { "type": "string", "description": "形状重叠：sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / plane:0,1,0，可接 @x,y,z 与 ~rx,ry,rz（度）" },
+                    "all": { "type": "boolean", "description": "ray 返回全部命中（缺省 false，只给最近的一个）；对 overlap 无意义" },
+                    "mask": { "type": "integer", "description": "层掩码（单向判据），缺省 4294967295 全查" },
+                    "sensors": { "type": "boolean", "description": "是否把传感器（触发区）算作可命中，缺省 true" },
+                    "max_distance": { "type": "number", "description": "最远距离（ray）/ 距离上限（overlap 只报距离不超过它的刚体），缺省 10000" },
+                    "steps": { "type": "integer", "description": "先跑这么多步物理再查（缺省 0：按场景初始状态查）" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "quench3d_ask",
             "title": "用自然语言生成场景",
             "description": "调用 OpenAI 兼容的大模型（本地 Ollama / llama.cpp / LM Studio / vLLM 或云端）把自然语言需求变成场景 JSON，并给出校验结果。",
@@ -1072,6 +1208,7 @@ mod tests {
             "quench3d_info",
             "quench3d_validate",
             "quench3d_simulate",
+            "quench3d_query",
         ];
         for n in read_only {
             let t = by_name(n);
@@ -1095,18 +1232,27 @@ mod tests {
         assert_eq!(t["annotations"]["idempotentHint"], false, "ask 不幂等");
         assert_eq!(
             tools.len(),
-            8,
+            9,
             "工具数量变了就要同步这份断言：{}",
             tools.len()
         );
         // 幂等的：仿真/渲染的确定性
-        for n in ["quench3d_simulate", "quench3d_render", "quench3d_movie"] {
+        for n in [
+            "quench3d_simulate",
+            "quench3d_query",
+            "quench3d_render",
+            "quench3d_movie",
+        ] {
             assert_eq!(by_name(n)["annotations"]["idempotentHint"], true, "{n}");
         }
         // outputSchema 要给出真字段，而不是空壳
         assert!(
             by_name("quench3d_simulate")["outputSchema"]["properties"]["states"].is_object(),
             "simulate 的 outputSchema 应当包含 states"
+        );
+        assert!(
+            by_name("quench3d_query")["outputSchema"]["properties"]["hits"].is_object(),
+            "query 的 outputSchema 应当包含 hits"
         );
     }
 

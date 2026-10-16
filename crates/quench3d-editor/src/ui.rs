@@ -1288,7 +1288,7 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.label("重置：回到基线（位置 / 朝向 / 速度）");
             ui.add_space(6.0);
             ui.label(RichText::new("显示与其它").strong());
-            ui.label("F3 网格 · F4 阴影 · F5 接触点（传感器是青色） · F6 包围盒");
+            ui.label("F3 网格 · F4 阴影 · F5 接触点（传感器是青色） · F6 包围盒 · F7 查询探针（相机中心射线打到什么）");
             ui.label("Esc：退出");
         });
     doc.show_help = open;

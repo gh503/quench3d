@@ -10,7 +10,8 @@
 //! * [`joints`]：固定 / 球铰 / 铰链 / 距离 / 滑块约束；
 //! * [`world`]：物理世界与固定步长主循环；
 //! * [`SmallVec`]：内联小向量（热路径零分配的关键工具）；
-//! * [`query`]：球重叠与形状投射；
+//! * [`query`]：射线 / 任意形状重叠 / 形状投射 + [`QueryFilter`]；
+//! * [`query_index`]：查询加速结构（快照式空间哈希网格）；
 //! * [`character`]：角色控制器（移动并滑动）。
 
 #![forbid(unsafe_code)]
@@ -30,6 +31,7 @@ mod narrowphase;
 #[cfg(not(target_arch = "wasm32"))]
 mod parallel;
 mod query;
+mod query_index;
 mod shape;
 #[cfg(test)]
 mod sim_tests;
@@ -49,6 +51,7 @@ pub use joints::*;
 #[allow(unused_imports)]
 pub use narrowphase::*;
 pub use query::*;
+pub use query_index::*;
 pub use shape::*;
 pub use small_vec::SmallVec;
 pub use solver::*;

@@ -169,6 +169,27 @@ pub fn schema() -> Value {
                 ]
             },
             {
+                "name": "query",
+                "summary": "在场景上做一次几何查询（射线 / 任意形状重叠），不需要 GPU、不改动场景",
+                "args": [
+                    { "name": "scene", "type": "path", "required": true, "description": "场景 JSON 路径" },
+                    { "name": "--ray", "type": "string", "required": false, "description": "射线：ox,oy,oz,dx,dy,dz（与 --overlap 二选一）" },
+                    { "name": "--overlap", "type": "string", "required": false, "description": "形状重叠：sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / plane:0,1,0，可接 @x,y,z 与 ~rx,ry,rz（度，XYZ 序）" },
+                    { "name": "--all", "type": "flag", "required": false, "description": "射线返回全部命中（按距离升序）；缺省只返回最近的一个。对 --overlap 无意义，给了会报错" },
+                    { "name": "--mask", "type": "u32", "required": false, "description": "层掩码（单向：只看被查方在不在掩码里），缺省 u32::MAX 全查" },
+                    { "name": "--no-sensors", "type": "flag", "required": false, "description": "不把传感器（触发区）算作可命中；缺省算" },
+                    { "name": "--max", "type": "f32", "required": false, "description": "最远距离（射线）/距离上限（重叠只报距离不超过它的刚体），缺省 10000" },
+                    { "name": "--steps", "type": "u32", "required": false, "description": "先跑这么多步物理再查（缺省 0：按场景初始状态查）" },
+                    { "name": "--index", "type": "flag", "required": false, "description": "用查询加速结构（快照网格）代替线性扫描；结果完全一致，报告里的 tested 会变小" }
+                ],
+                "output": "{ query, origin?, direction?, shape?, at?, rotation_deg?, max_distance, mask, include_sensors, hits[{name, kind, distance, point, normal, layer, sensor}], count, bodies, tested, indexed, fallback, warnings[] }",
+                "examples": [
+                    "quench3d query scene.json --ray 0,5,0,0,-1,0 --json",
+                    "quench3d query scene.json --ray 0,1,0,1,0,0 --all --no-sensors",
+                    "quench3d query scene.json --overlap \"box:2,1,2@0,1,0~0,45,0\""
+                ]
+            },
+            {
                 "name": "example",
                 "summary": "输出一个可直接运行的示例场景 JSON（写入文件或标准输出）",
                 "args": [
@@ -204,7 +225,7 @@ pub fn schema() -> Value {
                     { "name": "--model", "type": "string", "required": false, "description": "模型名" },
                     { "name": "--max-rounds", "type": "u32", "required": false, "description": "工具往返上限，缺省 6" }
                 ],
-                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate"],
+                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate", "quench3d_query"],
                 "output": "{ prompt, answer, rounds, usage, tools[{name,ok,arguments,summary}], result }",
                 "examples": [
                     "quench3d chat \"三层箱子塔五秒后还在原地吗\" --json",
@@ -234,7 +255,7 @@ pub fn schema() -> Value {
                 "summary": "以 MCP（Model Context Protocol）服务器方式运行，通过 stdio 暴露上述工具给支持 MCP 的 agent",
                 "args": [],
                 "protocol": "JSON-RPC 2.0 / MCP，方法：initialize, tools/list, tools/call, ping",
-                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate", "quench3d_ask"],
+                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate", "quench3d_query", "quench3d_ask"],
                 "examples": ["quench3d mcp"]
             }
         ],
@@ -498,6 +519,10 @@ pub fn system_prompt() -> String {
    并各自用不同的 --out / --frames-dir。
 9. 想让物体动起来，优先用 actions（定时）或 velocity/angular_velocity（初始）；
    想判断"有没有经过某处"，用 probes 而不是靠人眼数帧。
+10. 想"打一条射线看路上有什么"或"这个盒子附近有什么"，用 query：
+   `quench3d query scene.json --ray 0,5,0,0,-1,0 --all`（射线，全部命中按距离升序）、
+   `quench3d query scene.json --overlap "box:2,1,2@0,1,0"`（任意形状重叠）。
+   层过滤是**单向**的（--mask 只看被查方在不在掩码里），触发区用 --no-sensors 排除。
 
 只输出 JSON，第一个字符必须是 `{`。"#
     .to_string()
@@ -514,8 +539,8 @@ mod tests {
         let cmds = s["commands"].as_array().unwrap();
         let names: Vec<&str> = cmds.iter().map(|c| c["name"].as_str().unwrap()).collect();
         for expected in [
-            "schema", "doctor", "info", "validate", "render", "simulate", "example", "ask", "chat",
-            "bench", "mcp",
+            "schema", "doctor", "info", "validate", "render", "simulate", "query", "example",
+            "ask", "chat", "bench", "mcp",
         ] {
             assert!(names.contains(&expected), "能力清单缺少命令 {expected}");
         }

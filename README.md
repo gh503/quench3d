@@ -376,10 +376,27 @@ let body = world.add_builder(
 world.step(1.0 / 60.0);              // 定步长
 world.step_with_accumulator(dt);     // 引擎内部按 fixed_dt 拆分子步（最多 8 步）
 
-// 查询
+// 查询：最近一条射线 / 沿路所有命中 / 任意形状重叠 / 到某个刚体的最近距离
 if let Some(hit) = world.raycast(origin, dir, 100.0) {
     println!("命中 {:?} 于 {:?}，距离 {}", hit.handle, hit.point, hit.distance);
 }
+for hit in world.raycast_all(origin, dir, 100.0) {          // 距离升序，平局按槽位
+    println!("沿路命中 {:?} 距离 {}", hit.handle, hit.distance);
+}
+// 层过滤是**单向**的（只看被查方在不在掩码里，与物理碰撞的对称判据不同）
+let filter = QueryFilter::default().mask(0b101).sensors(false);
+let all = world.raycast_all_filtered(origin, dir, 100.0, filter);
+let overlapping = world.overlap_shape(&Shape::Box { half_extents: Vec3::splat(0.5) },
+                                      &Transform::from_translation(p));
+if let Some(hit) = world.raycast_in(origin, dir, 100.0, filter) { /* 同一条判据的最近命中 */ }
+
+// 一帧里查很多次时：索引按帧重建一次（快照），查询只走射线经过的格子；
+// 世界动过（version 变了）它会自动回退到线性扫描——结果永远一致，只是不快。
+let index = world.build_query_index();
+if let Some(hit) = index.raycast(&world, origin, dir, 100.0, QueryFilter::default()) {
+    println!("索引命中 {:?}", hit.handle);
+}
+if index.is_stale(&world) { /* 该重建了（上一步 step 之后必然为真） */ }
 for c in world.contacts() {
     println!("{:?} <-> {:?} 法线 {:?} 冲量 {}", c.a, c.b, c.normal, c.impulse);
 }
@@ -524,6 +541,7 @@ quench3d schema --json                   # 能力清单：命令、参数、场�
 | `info <模型>` | glTF/GLB/OBJ：网格、材质、贴图、顶点、三角形、包围盒 | 否 |
 | `validate <场景>` | 校验场景，返回全部诊断（带 JSON 路径） | 否 |
 | `simulate <场景>` | 只跑物理，报告每个刚体的位置 / 速度 / 位移 / 休眠 / 接触，可按 `--trace` 采集轨迹 | 否 |
+| `query <场景>` | 几何查询：`--ray` 射线（`--all` 给沿路全部命中）/ `--overlap` 任意形状重叠，可配层掩码与传感器开关 | 否 |
 | `render <场景>` | 无窗口渲染成 PNG（可先步进物理） | 是 |
 | `movie <场景>` | 录制仿真视频：PNG 序列 + `trace.jsonl`（附编码命令），或 `--encoder gif\|apng` 直接出单文件 | 是 |
 | `example` | 输出可直接运行的示例场景 JSON | 否 |
@@ -538,7 +556,16 @@ quench3d simulate scene.json --steps 600 --json
 quench3d simulate scene.json --trace-all --json            # 附带每条轨迹的结论
 quench3d render scene.json --out scene.png --width 960 --height 600
 quench3d movie scene.json --frames 300 --frames-dir frames   # 录 5 秒（60fps，1 步/帧）
+quench3d query scene.json --ray 0,5,0,0,-1,0 --json          # 这条射线上有什么（最近一个）
+quench3d query scene.json --ray 0,1,0,1,0,0 --all --mask 5   # 沿路全部命中，只看第 0/2 层
+quench3d query scene.json --overlap "box:2,1,2@0,1,0~0,45,0" # 斜 45° 的探针盒罩住了谁
 ```
+
+`query` 是**只读**的：不渲染、不写盘、不需要显卡，`data` 里有 `hits[]`（名字 / 类型 /
+距离 / 点 / 法线 / 层 / 是否传感器）与 `tested`（本次实际检查了几个刚体）。
+层掩码是**单向**判据（只看被查方在不在掩码里），触发区用 `--no-sensors` 排除；
+`--steps N` 可以先跑 N 步物理再查（"落地之后那个箱子在哪"），
+`--index` 换用查询加速结构（单次查询反而更贵，见 §9 边界）。
 
 **仿真视频（`movie`）**：逐帧推进物理并渲染。两条路：PNG 序列交给 `ffmpeg`，
 或者用**内置纯 Rust 编码器**直接出 GIF/APNG（不装任何外部工具）：
@@ -823,7 +850,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ```
 
 暴露的工具：`quench3d_schema`、`quench3d_doctor`、`quench3d_info`、`quench3d_validate`、
-`quench3d_render`、`quench3d_movie`、`quench3d_simulate`、`quench3d_ask`。
+`quench3d_render`、`quench3d_movie`、`quench3d_simulate`、`quench3d_query`、`quench3d_ask`。
 
 四个对 agent 特别有用的细节：
 
@@ -1369,6 +1396,17 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   极快 + 极薄（一步能跨过整个物体）仍可能漏。
 * 编辑器**没有**碰撞层/传感器/CCD 的编辑界面（面板里还看不到），但它不会吃掉这些字段：
   导出时从物理刚体上读回来（有往返用例钉住）。
+* 查询的层过滤是**单向**的（`QueryFilter::mask` / `--mask` 只看被查方在不在掩码里），
+  与物理碰撞的对称判据**故意不同**：查询是"我问你答"，只有提问方有立场。
+  另外 `QueryFilter::sensors` 缺省为 `true`（触发区也是几何体），想排除要显式关掉。
+* `QueryIndex` 是**快照**：它只在"每帧重建一次、帧内查很多次"这个用法下才划算；
+  世界一动（`add_body` / `remove_body` / `body_mut` / `step` 都会 +1 版本号）它就过期，
+  此时查询**自动回退**到线性扫描（结果永远一致、不会有静默错答），
+  `is_stale()` / CLI 报告里的 `fallback` 是给你看的信号。
+  加速结构只对**射线**与**重叠**生效；`shape_cast`（保守推进）仍然线性。
+* `quench3d query` 一次只做一次查询，且默认走线性扫描（`--index` 才建索引）：
+  单次查询建索引是净亏（建表 O(N) 比扫描还贵）。要省就一次进程里批量查——
+  目前 CLI 不提供批量查询，MCP/引擎 API 里可以自己循环。
 * FXAA 是 console/低质量档（没有子像素锯齿消除），且在**线性**空间混合、只在判断边缘时
   转成 sRGB 亮度——和 FXAA 原版"整条都在 gamma 空间"略有差别，见 `fxaa.wgsl` 顶部注释。
 

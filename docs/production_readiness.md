@@ -457,6 +457,34 @@
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
 
+### 8.5 「查询补全 + 查询加速结构」怎么落的（第 19 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-physics --lib`（6 个新用例，不需要显卡）、
+> `cargo test -p quench3d-physics --doc`、`cargo test -p quench3d --lib center_probe`、
+> `cargo test -p quench3d-cli --test cli_e2e query_`、`cargo test -p quench3d-cli --lib -- mcp`。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| 引擎（补全） | `raycast_all_filtered` / `overlap_shape_filtered` / `distance_to` / `QueryFilter` | 排序规则钉死（距离升序、平局按槽位下标）→ 与"取第一个"的 `raycast` 逐位一致；`overlap_sphere` 改成 `overlap_shape` 的一层壳，不再有两份实现 |
+| 引擎（加速） | `QueryIndex`（`build_query_index()`）+ `PhysicsWorld::version` | 网格策略与**宽相共用同一份** `pick_cell_size` / `spread_into_cells`；射线 3D DDA 只测经过的单元，重叠只扫探针 AABB 的单元；超大物体/半空间升级成"全局代理"（每次查询都测）保证不漏 |
+| 引擎（正确性） | 版本号 + 自动回退 | `add_body` / `remove_body` / `body_mut` / `clear` / `step*` 都 `version += 1`；`QueryIndex` 记下建表时的版本，**过期就回退线性扫描**（结果永远一致，report 里 `fallback` / `is_stale()` 是信号） |
+| 场景格式 | **没有新字段** | 查询不是场景内容；`--mask` 与 `objects[].collision_layer` 是同一套层号（单向 vs 对称的区别写进了 schema 与 README） |
+| CLI | `query` 子命令（`--ray` / `--overlap` / `--all` / `--mask` / `--no-sensors` / `--max` / `--steps` / `--index`） | 报告里 `tested` 是"实际检查了几个刚体"（加速的可见证据）；`--dry-run` / `--no-clobber` / `--out` **明确报错**而不是悄悄忽略 |
+| MCP | 新增 `quench3d_query`（只读 / 幂等 / 不出网） | 与 CLI 共用 `runner::parse_ray_query` / `parse_overlap_query`，语法不会漂移 |
+| 编辑器 | F7「查询探针」（相机中心射线：命中画红箭头 + 绿色法线） | `center_probe(camera, world, max)` 是纯函数（离线用例钉住）；画线本身没法离线验证（诚实边界） |
+
+**踩过的坑**：① `broadphase.compute_pairs` 在 `proxies.len() < 2` 或"没有可动体"时**直接 return**，
+网格根本没建——想复用它当查询索引会踩到"静态场景查不到东西"，所以 `QueryIndex` 自带一份网格
+（策略共用、状态独立）；② 一个刚体的 AABB 会覆盖多个单元，射线会重复测同一个刚体 →
+命中要按 `(距离, 句柄)` 去重（排序后相邻，`dedup_by_key`），否则 `--all` 会出现重复条目；
+③ 相机射线的**起点在近裁剪面上**（不是相机位置），断言"距离 = 8 - 0.5"会差 0.1，用例里
+写成 `起点.z - 0.5`；④ `--dry-run` 这类开关如果不显式拒绝，就会被参数解析静默吞掉。
+
+**没做（诚实边界）**：`shape_cast`（保守推进）仍然线性、没有加速；CLI 一次进程只做一次查询
+（单次建索引是净亏，批量查询要自己写 API 循环）；索引是**快照**（世界一动就回退，
+没有增量更新）；没有"射线穿透多个物体并返回所有命中点"的变体（`raycast_all` 每个刚体只给最近的一点）；
+查询仍然**不看物理分组**（`QueryFilter::mask` 是单向判据，这是设计而非缺失）。
+
 ### 8.4 「碰撞过滤 + 传感器事件 + CCD」怎么落的（第 18 轮，已跑门禁）
 
 > **状态：已实施**。验证：`cargo test -p quench3d-physics --lib`（6 个新用例，不需要显卡）、

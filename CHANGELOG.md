@@ -10,6 +10,37 @@
 
 ### 新增
 
+- **查询补全 + 查询加速结构**。以前只有"最近一条射线"和"球形重叠"，而且都是 O(N) 线性扫描。
+  * 引擎：`raycast_all` / `raycast_all_filtered`（返回最远距离内的**所有**命中，按距离升序、
+    平局按槽位下标，输出确定）、`overlap_shape` / `overlap_shape_filtered`（**任意形状**探针：
+    盒 / 球 / 胶囊 / 圆柱 / 半空间，含旋转位姿）、`distance_to(shape, transform, handle)`
+    给"查询形状到某个刚体的最近距离 + 两侧最近点 + 法线"。
+  * `QueryFilter { mask, sensors }`：**单向**判据（只看被查方在不在掩码里，不像物理碰撞要
+    双方都愿意），`sensors: false` 可把触发区排除在外。
+  * `QueryIndex`（`PhysicsWorld::build_query_index()`）：与宽相同一套策略的均匀空间哈希网格
+    （同一份 `pick_cell_size` / `spread_into_cells`），射线用 3D DDA 只走经过的单元、
+    重叠只扫探针 AABB 覆盖的单元，超大物体与半空间升级成"全局代理"保证不漏。
+    它是**快照**：世界动过（`PhysicsWorld::version()` 变了，增删刚体/`body_mut`/`step` 都会 +1）
+    查询就**自动回退到线性扫描**，结果永远正确、`is_stale()` / 报告里的 `fallback` 会告诉你。
+    已有用例逐条对比索引路径与线性路径的命中（句柄、距离、点），并断言确实少检查了刚体。
+  * CLI `quench3d query`：`--ray ox,oy,oz,dx,dy,dz` / `--overlap "box:1,2,1@0,1,0~0,45,0"`、
+    `--all`、`--mask`、`--no-sensors`、`--max`、`--steps`（先跑物理再查）、`--index`。
+    报告里有 `hits[]`（名字/类型/距离/点/法线/层/是否传感器）、`bodies`、`tested`
+    （**实际检查了几个刚体**，索引路径的证据）、`indexed`、`fallback`。
+    `--dry-run` / `--no-clobber` / `--out` 一律**报错**（query 只读不写，悄悄忽略参数更糟）。
+  * MCP 新增 `quench3d_query` 工具（只读、幂等、不出网），参数与 CLI 同一套语法。
+  * 编辑器 F7 "查询探针"：相机中心那条射线打到什么就画红箭头 + 绿色法线
+    （走的就是 `PhysicsWorld::raycast`；`center_probe` 是纯函数，有离线用例）。
+  验证：`cargo test -p quench3d-physics --lib`（**不需要显卡**，6 个新用例：`raycast_all`
+  的距离升序/上限截断/退化输入、任意形状重叠与 `overlap_sphere` 一致、单向层掩码与传感器开关、
+  索引 vs 线性逐条一致且确实更省、过期自动回退且结果跟着世界走、横跨多单元的大物体与掩码）、
+  `cargo test -p quench3d-physics --doc`（`QueryIndex` 文档里的例子真的跑）、
+  `cargo test -p quench3d --lib center_probe`（编辑器探针：命中距离/法线/看旁边为空/距离上限）、
+  `cargo test -p quench3d-cli --test cli_e2e query_`（端到端：最近命中、`--all` 两条按距离升序、
+  `--no-sensors`、`--mask 8` 单向过滤、`--index` 与线性一致、重叠命中且距离为 0、
+  旋转探针盒真的生效、`--max` 截断、`--steps` 先跑物理再查，以及 9 条错误路径都被拒）、
+  `cargo test -p quench3d-cli --lib mcp`（工具清单 9 个、query 只读/幂等/outputSchema 有 hits）。
+
 - **场景层级（父子变换）+ 场景格式 v2**。`objects[].parent` 用**父物体的名字**引用，
   给了它之后 `position` / `rotation_deg` 就是**相对父物体**的局部量：父物体一动，子物体跟着走。
   覆盖范围：引擎（`SceneObject::parent`、`Scene::world_transform` / `set_world_transform` /

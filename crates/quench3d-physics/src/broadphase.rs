@@ -191,19 +191,7 @@ impl Broadphase {
                 self.sizes.push(m);
             }
         }
-        if self.sizes.is_empty() {
-            self.cell_size = 1.0;
-        } else {
-            // 不稳定排序即可：相等的边长不可区分，选中值不变，但不会分配临时缓冲。
-            self.sizes
-                .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-            // 取 25 分位：少量超大物体（地板网格）不应把整个网格撑大。
-            let idx = self.sizes.len() / 4;
-            // 倍率取 2：典型物体大致占一个单元。这个倍率还没有做过严格的
-            // 配对 A/B（见 README 8.4 的说明），是一个已知可调的旋钮。
-            self.cell_size = clamp(self.sizes[idx] * 2.0, 0.05, 1.0e4);
-        }
-        let inv_cell = 1.0 / self.cell_size;
+        self.cell_size = pick_cell_size(&mut self.sizes);
 
         // --- 展开成 (单元键, 代理下标) ---
         self.scratch.clear();
@@ -213,41 +201,10 @@ impl Broadphase {
                 self.globals.push(i);
                 continue;
             }
-            let min = p.aabb.min * inv_cell;
-            let max = p.aabb.max * inv_cell;
-            let mut lo = [0i32; 3];
-            let mut hi = [0i32; 3];
-            let mins = [min.x, min.y, min.z];
-            let maxs = [max.x, max.y, max.z];
-            let mut span = 1i64;
-            for k in 0..3 {
-                let a = (mins[k] as f64).floor() as f32;
-                let b = (maxs[k] as f64).floor() as f32;
-                if !a.is_finite() || !b.is_finite() {
-                    lo[k] = i32::MAX;
-                    hi[k] = i32::MIN;
-                    continue;
-                }
-                lo[k] = clamp_i32(a);
-                hi[k] = clamp_i32(b);
-                if k == 0 {
-                    span = hi[k] as i64 - lo[k] as i64 + 1;
-                } else {
-                    span *= hi[k] as i64 - lo[k] as i64 + 1;
-                }
-            }
-            if span > MAX_CELLS_PER_PROXY {
+            if !spread_into_cells(&p.aabb, self.cell_size, i as u32, &mut self.scratch) {
                 // 超大物体：升级为全局代理（与其他所有代理做 AABB 测试），
                 // 保证不漏检；代价是与场景规模成线性。
                 self.globals.push(i);
-                continue;
-            }
-            for x in lo[0]..=hi[0] {
-                for y in lo[1]..=hi[1] {
-                    for z in lo[2]..=hi[2] {
-                        self.scratch.push(((x, y, z), i as u32));
-                    }
-                }
             }
         }
 
@@ -325,6 +282,74 @@ fn hash_key(key: (i32, i32, i32)) -> usize {
     h = h.wrapping_mul(0x7FEB_352D);
     h ^= h >> 15;
     h as usize
+}
+
+/// 由 AABB 最长边样本选单元边长（25 分位 × 2，钳到 `[0.05, 1e4]`）。
+///
+/// 宽相与 [`crate::query_index::QueryIndex`] 共用同一套策略：两边的网格形状一致，
+/// "宽相里配得上对的两个物体，查询时也该在彼此的候选里"这件事才不需要额外推理。
+///
+/// 取 25 分位而不是中位数：少量超大物体（地板网格）不该把整个网格撑大。
+pub(crate) fn pick_cell_size(sizes: &mut [f32]) -> f32 {
+    if sizes.is_empty() {
+        return 1.0;
+    }
+    // 不稳定排序即可：相等的边长不可区分，选中值不变。
+    sizes.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+    let idx = sizes.len() / 4;
+    // 倍率取 2：典型物体大致占一个单元。这个倍率还没有做过严格的
+    // 配对 A/B（见 README 8.4 的说明），是一个已知可调的旋钮。
+    clamp(sizes[idx] * 2.0, 0.05, 1.0e4)
+}
+
+/// 把一个 AABB 铺进它覆盖的所有单元。
+///
+/// 返回 `false` 表示覆盖的单元数超过 [`MAX_CELLS_PER_PROXY`]（超大物体）：
+/// 调用方应当把它当"全局代理"，每个查询都测一遍，保证不漏检。
+///
+/// AABB 非有限时返回 `true` 但一个单元都不铺——与宽相原有行为一致
+/// （坐标是 NaN 的刚体在宽相里是"看不见"的）。
+pub(crate) fn spread_into_cells<T: Copy>(
+    aabb: &Aabb,
+    cell_size: f32,
+    value: T,
+    scratch: &mut Vec<((i32, i32, i32), T)>,
+) -> bool {
+    let inv_cell = 1.0 / cell_size;
+    let min = aabb.min * inv_cell;
+    let max = aabb.max * inv_cell;
+    let mut lo = [0i32; 3];
+    let mut hi = [0i32; 3];
+    let mins = [min.x, min.y, min.z];
+    let maxs = [max.x, max.y, max.z];
+    let mut span = 1i64;
+    for k in 0..3 {
+        let a = (mins[k] as f64).floor() as f32;
+        let b = (maxs[k] as f64).floor() as f32;
+        if !a.is_finite() || !b.is_finite() {
+            lo[k] = i32::MAX;
+            hi[k] = i32::MIN;
+            continue;
+        }
+        lo[k] = clamp_i32(a);
+        hi[k] = clamp_i32(b);
+        if k == 0 {
+            span = hi[k] as i64 - lo[k] as i64 + 1;
+        } else {
+            span *= hi[k] as i64 - lo[k] as i64 + 1;
+        }
+    }
+    if span > MAX_CELLS_PER_PROXY {
+        return false;
+    }
+    for x in lo[0]..=hi[0] {
+        for y in lo[1]..=hi[1] {
+            for z in lo[2]..=hi[2] {
+                scratch.push(((x, y, z), value));
+            }
+        }
+    }
+    true
 }
 
 #[inline]

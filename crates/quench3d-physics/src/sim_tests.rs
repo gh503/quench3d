@@ -8,6 +8,7 @@ use quench3d_math::*;
 use crate::body::{BodyBuilder, InteractionGroups};
 use crate::contact::ContactPair;
 use crate::joints::Joint;
+use crate::query::QueryFilter;
 use crate::shape::Shape;
 use crate::world::PhysicsWorld;
 
@@ -1448,4 +1449,350 @@ fn ccd_stops_a_fast_body_at_a_thin_wall() {
     }
     let x_late = w2.body(ball2).unwrap().position().x;
     assert!(x_late <= -0.14, "跑 4 秒后仍然不该穿墙，实际 x = {x_late}");
+}
+
+// ---------------------------------------------------------------------------
+// 6b. 查询补全（所有命中 / 任意形状重叠 / 层过滤）与查询加速结构
+// ---------------------------------------------------------------------------
+
+/// 沿 +X 摆三个盒子：`raycast_all` 要按距离升序给全，`raycast` 只给最近的。
+#[test]
+fn raycast_all_reports_every_hit_in_order() {
+    let mut w = PhysicsWorld::new();
+    let a = add_box(&mut w, 0.5, vec3(2.0, 0.0, 0.0), 0.5, 0.0);
+    let b = add_box(&mut w, 0.5, vec3(5.0, 0.0, 0.0), 0.5, 0.0);
+    let c = add_box(&mut w, 0.5, vec3(8.0, 0.0, 0.0), 0.5, 0.0);
+    let origin = vec3(-5.0, 0.0, 0.0);
+
+    let all = w.raycast_all(origin, Vec3::X, 100.0);
+    assert_eq!(all.len(), 3, "三个盒子都该被命中：{all:?}");
+    assert_eq!(
+        all.iter().map(|h| h.handle).collect::<Vec<_>>(),
+        vec![a, b, c],
+        "必须按距离升序（也就是摆放顺序）"
+    );
+    for (i, hit) in all.iter().enumerate() {
+        let expected = 6.5 + 3.0 * i as f32;
+        assert!(
+            (hit.distance - expected).abs() < 1e-3,
+            "第 {i} 个命中距离应为 {expected}，实际 {}",
+            hit.distance
+        );
+    }
+    // `raycast` 与 `raycast_all().first()` 必须一致
+    let nearest = w.raycast(origin, Vec3::X, 100.0).expect("应命中");
+    assert_eq!(nearest.handle, a);
+    assert!((nearest.distance - all[0].distance).abs() < 1e-6);
+
+    // 距离上限要截断
+    let near_only = w.raycast_all(origin, Vec3::X, 7.0);
+    assert_eq!(near_only.len(), 1, "7 米内只有第一个盒子：{near_only:?}");
+    // 反方向什么都没有
+    assert!(w.raycast_all(origin, Vec3::NEG_X, 100.0).is_empty());
+    // 退化输入不 panic
+    assert!(w.raycast_all(origin, Vec3::ZERO, 100.0).is_empty());
+    assert!(w.raycast_all(origin, Vec3::X, -1.0).is_empty());
+    assert!(w
+        .raycast_all(Vec3::splat(f32::NAN), Vec3::X, 10.0)
+        .is_empty());
+}
+
+/// 任意形状重叠：不只是球；结果按槽位升序（与线性遍历一致）。
+#[test]
+fn overlap_shape_supports_boxes_and_ordering() {
+    let mut w = PhysicsWorld::new();
+    let a = add_box(&mut w, 0.5, vec3(0.0, 0.0, 0.0), 0.5, 0.0);
+    let b = add_box(&mut w, 0.5, vec3(1.5, 0.0, 0.0), 0.5, 0.0);
+    let c = add_box(&mut w, 0.5, vec3(9.0, 0.0, 0.0), 0.5, 0.0);
+
+    // 一个 2.2 米宽的探针盒：盖住 a 与 b，碰不到 c
+    let probe = Shape::Box {
+        half_extents: Vec3::new(1.1, 0.6, 0.6),
+    };
+    let hits = w.overlap_shape(&probe, &Transform::from_translation(vec3(0.7, 0.0, 0.0)));
+    assert_eq!(hits, vec![a, b], "应命中前两个盒子且按槽位升序");
+    assert!(!hits.contains(&c));
+
+    // 球探针与 `overlap_sphere`（老 API）结果一致——两者现在走同一条实现
+    let probe = Shape::Sphere { radius: 1.0 };
+    let t = Transform::from_translation(vec3(0.0, 0.0, 0.0));
+    assert_eq!(
+        w.overlap_shape(&probe, &t),
+        crate::overlap_sphere(&w, vec3(0.0, 0.0, 0.0), 1.0)
+    );
+
+    // 非法输入
+    assert!(w
+        .overlap_shape(&probe, &Transform::from_translation(Vec3::splat(f32::NAN)))
+        .is_empty());
+}
+
+/// 层掩码是**单向**的：只看被查方是不是掩码里的层；传感器可以按需排除。
+#[test]
+fn query_filter_masks_by_layer_and_sensors() {
+    let mut w = PhysicsWorld::new();
+    let layer0 = add_box(&mut w, 0.5, vec3(2.0, 0.0, 0.0), 0.5, 0.0);
+    let layer1 = w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .position(vec3(5.0, 0.0, 0.0))
+        .layer(1)
+        .build(),
+    );
+    let trigger = w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .position(vec3(8.0, 0.0, 0.0))
+        .layer(2)
+        .sensor(true)
+        .build(),
+    );
+    let origin = vec3(-5.0, 0.0, 0.0);
+
+    let all: Vec<_> = w
+        .raycast_all(origin, Vec3::X, 100.0)
+        .into_iter()
+        .map(|h| h.handle)
+        .collect();
+    assert_eq!(all, vec![layer0, layer1, trigger], "缺省不过滤");
+
+    let only1: Vec<_> = w
+        .raycast_all_filtered(origin, Vec3::X, 100.0, QueryFilter::default().mask(1 << 1))
+        .into_iter()
+        .map(|h| h.handle)
+        .collect();
+    assert_eq!(only1, vec![layer1], "只查第 1 层");
+
+    // 单向：掩码里给"两个层"，两个都算；不像物理那样要双方都愿意
+    let both: Vec<_> = w
+        .raycast_all_filtered(origin, Vec3::X, 100.0, QueryFilter::default().mask(0b11))
+        .into_iter()
+        .map(|h| h.handle)
+        .collect();
+    assert_eq!(both, vec![layer0, layer1]);
+
+    // 排除传感器
+    let no_sensor: Vec<_> = w
+        .raycast_all_filtered(
+            origin,
+            Vec3::X,
+            100.0,
+            QueryFilter::default().sensors(false),
+        )
+        .into_iter()
+        .map(|h| h.handle)
+        .collect();
+    assert_eq!(no_sensor, vec![layer0, layer1]);
+
+    // 掩码为 0：什么都不查
+    assert!(w
+        .raycast_all_filtered(origin, Vec3::X, 100.0, QueryFilter::default().mask(0))
+        .is_empty());
+    // `raycast_in` 与 `raycast_all_filtered` 的第一个一致
+    let hit = w
+        .raycast_in(origin, Vec3::X, 100.0, QueryFilter::default().mask(1 << 1))
+        .expect("应命中第 1 层");
+    assert_eq!(hit.handle, layer1);
+}
+
+/// 加速结构：结果与线性扫描**逐条一致**，而且确实少测了刚体。
+#[test]
+fn query_index_matches_linear_scan() {
+    let mut w = PhysicsWorld::new();
+    // 6×6×3 的静态盒阵（留出空隙），外加一个半空间地面与一个大地板盒
+    let mut expected = Vec::new();
+    for ix in 0..6 {
+        for iz in 0..6 {
+            for iy in 0..3 {
+                let pos = vec3(
+                    -7.5 + ix as f32 * 3.0,
+                    1.0 + iy as f32 * 2.5,
+                    -7.5 + iz as f32 * 3.0,
+                );
+                expected.push(
+                    w.add_body(
+                        BodyBuilder::r#static(Shape::Box {
+                            half_extents: Vec3::splat(0.6),
+                        })
+                        .position(pos)
+                        .build(),
+                    ),
+                );
+            }
+        }
+    }
+    add_ground(&mut w, 0.5, 0.0);
+    // 一个横跨很多单元的大盒子（会自动升级成"全局代理"）
+    w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: vec3(40.0, 0.05, 40.0),
+        })
+        .position(vec3(0.0, -0.5, 0.0))
+        .build(),
+    );
+
+    let index = w.build_query_index();
+    assert!(!index.is_stale(&w), "刚建好的索引不该是过期的");
+    assert_eq!(index.len(), w.body_count());
+    assert!(index.cells() > 0, "静态场景也要铺出单元来");
+
+    let filter = QueryFilter::default();
+    let rays = [
+        (vec3(0.0, 5.0, 0.0), vec3(0.0, -1.0, 0.0)),
+        (vec3(0.0, 1.0, -20.0), vec3(0.0, 0.0, 1.0)),
+        (vec3(-20.0, 3.0, 0.0), Vec3::X),
+        (vec3(0.0, 0.3, 0.0), Vec3::X),
+        (vec3(3.0, 1.0, 3.0), vec3(1.0, 1.0, 1.0)),
+    ];
+    let mut pruned_somewhere = false;
+    for (origin, dir) in rays {
+        let linear_all = w.raycast_all(origin, dir, 60.0);
+        let fast = index.raycast_detailed(&w, origin, dir, 60.0, filter, true);
+        assert!(!fast.fallback, "索引是新的，不该回退");
+        assert_eq!(
+            fast.hits.len(),
+            linear_all.len(),
+            "命中数不一致：origin={origin:?} dir={dir:?}\n线性={linear_all:?}\n索引={:?}",
+            fast.hits
+        );
+        for (a, b) in fast.hits.iter().zip(linear_all.iter()) {
+            assert_eq!(a.handle, b.handle, "句柄顺序不一致");
+            assert!((a.distance - b.distance).abs() < 1e-4);
+            assert!((a.point - b.point).length() < 1e-3);
+        }
+        // 最近命中也得一致
+        let linear_one = w.raycast(origin, dir, 60.0);
+        let fast_one = index.raycast(&w, origin, dir, 60.0, filter);
+        assert_eq!(
+            linear_one.map(|h| h.handle),
+            fast_one.map(|h| h.handle),
+            "最近命中不一致"
+        );
+        if fast.tested < w.body_count() {
+            pruned_somewhere = true;
+        }
+    }
+    assert!(
+        pruned_somewhere,
+        "至少有一条射线该少测几个刚体，否则说明索引根本没起作用"
+    );
+
+    // 任意形状重叠也要一致（球 + 盒两种探针）
+    for (shape, at) in [
+        (Shape::Sphere { radius: 2.0 }, vec3(0.0, 1.0, 0.0)),
+        (
+            Shape::Box {
+                half_extents: vec3(3.0, 0.5, 3.0),
+            },
+            vec3(-3.0, 1.2, 0.0),
+        ),
+    ] {
+        let t = Transform::from_translation(at);
+        let linear = w.overlap_shape(&shape, &t);
+        let fast = index.overlap_shape_detailed(&w, &shape, &t, filter);
+        assert!(!fast.fallback);
+        assert_eq!(fast.handles, linear, "重叠结果不一致（at={at:?}）");
+        assert!(!linear.is_empty(), "这个探针本来就该命中东西");
+    }
+}
+
+/// 索引是快照：世界动过它就过期，此时**自动回退**到线性扫描（结果仍然正确）。
+#[test]
+fn query_index_falls_back_when_stale() {
+    let mut w = PhysicsWorld::new();
+    let ball = add_box(&mut w, 0.5, vec3(2.0, 0.0, 0.0), 0.5, 0.0);
+    let index = w.build_query_index();
+    assert!(index
+        .raycast(
+            &w,
+            vec3(-5.0, 0.0, 0.0),
+            Vec3::X,
+            100.0,
+            QueryFilter::default()
+        )
+        .is_some());
+
+    // 把球挪走（`body_mut` 会让版本号 +1）
+    w.body_mut(ball).unwrap().transform.position = vec3(2.0, 50.0, 0.0);
+    assert!(index.is_stale(&w), "动过之后索引必须自知过期");
+    let stale = index.raycast_detailed(
+        &w,
+        vec3(-5.0, 0.0, 0.0),
+        Vec3::X,
+        100.0,
+        QueryFilter::default(),
+        true,
+    );
+    assert!(stale.fallback, "过期索引必须回退到线性扫描");
+    assert!(
+        stale.hits.is_empty(),
+        "球已经不在射线上了：{:?}",
+        stale.hits
+    );
+
+    // 重建之后又走索引路径，结果与线性一致
+    let index = w.build_query_index();
+    assert!(!index.is_stale(&w));
+    let fresh = index.raycast_detailed(
+        &w,
+        vec3(-5.0, 0.0, 0.0),
+        Vec3::X,
+        100.0,
+        QueryFilter::default(),
+        true,
+    );
+    assert!(!fresh.fallback);
+    assert_eq!(
+        fresh.hits,
+        w.raycast_all(vec3(-5.0, 0.0, 0.0), Vec3::X, 100.0)
+    );
+
+    // `step` 也会让索引过期（子步改了变换）
+    let index = w.build_query_index();
+    w.step(DT);
+    assert!(index.is_stale(&w), "步进之后索引必须过期");
+}
+
+/// 索引也要处理"单个刚体横跨很多单元"与掩码过滤。
+#[test]
+fn query_index_handles_multi_cell_bodies_and_masks() {
+    let mut w = PhysicsWorld::new();
+    // 一块很长的地板：横跨无数单元（超过单个代理的单元上限 → 全局代理）
+    w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: vec3(30.0, 0.1, 30.0),
+        })
+        .position(vec3(0.0, -1.0, 0.0))
+        .build(),
+    );
+    let target = w.add_body(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .position(vec3(4.0, 0.4, 0.0))
+        .layer(3)
+        .build(),
+    );
+    let index = w.build_query_index();
+    assert!(index.globals() >= 1, "超大地板该升级成全局代理");
+    assert_eq!(index.len(), 2);
+
+    // 从上往下打：先撞到 layer 3 的盒子，再撞地板
+    let origin = vec3(4.0, 20.0, 0.0);
+    let down = vec3(0.0, -1.0, 0.0);
+    let all = index.raycast_all(&w, origin, down, 100.0, QueryFilter::default());
+    assert_eq!(all.len(), 2, "地板与盒子都该命中：{all:?}");
+    assert_eq!(all[0].handle, target, "最近的应是盒子");
+    assert_eq!(all, w.raycast_all(origin, down, 100.0));
+
+    // 只看第 3 层：地板（第 0 层）被过滤掉
+    let filtered = index.raycast_all(&w, origin, down, 100.0, QueryFilter::default().mask(1 << 3));
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].handle, target);
+    assert_eq!(
+        filtered,
+        w.raycast_all_filtered(origin, down, 100.0, QueryFilter::default().mask(1 << 3))
+    );
 }

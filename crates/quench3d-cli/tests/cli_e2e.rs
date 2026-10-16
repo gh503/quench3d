@@ -2681,3 +2681,291 @@ fn simulate_reports_sensors_and_respects_layers_and_ccd() {
         "逐帧路径也要能看见在里面待了多久：{d5}"
     );
 }
+
+#[test]
+fn query_rays_overlaps_filters_and_flags() {
+    let dir = temp_dir("query");
+    let scene = dir.join("q.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "objects": [
+            { "name": "地面", "shape": { "type": "box", "size": [40, 0.2, 40] },
+              "position": [0, -0.1, 0], "body": "static" },
+            { "name": "墙", "shape": { "type": "box", "size": [0.4, 3, 10] },
+              "position": [4, 1.5, 0], "body": "static" },
+            { "name": "触发区", "shape": { "type": "box", "size": [2, 1, 2] },
+              "position": [9, 1, 0], "body": "static", "sensor": true, "collision_layer": 3 },
+            { "name": "球", "shape": { "type": "sphere", "radius": 0.5 },
+              "position": [0, 6, 0], "body": "dynamic" }
+          ],
+          "simulate": { "steps": 60, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+    let path = scene.to_str().unwrap();
+
+    // ① 射线：只给最近的一个
+    let r = run(&["query", path, "--ray", "0,1,0,1,0,0", "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let d = r.json();
+    assert_eq!(d["command"], "query");
+    let data = &d["data"];
+    assert_eq!(data["query"], "ray");
+    assert_eq!(data["count"], 1, "缺省只返回最近命中：{data}");
+    assert_eq!(data["hits"][0]["name"], "墙");
+    assert!((data["hits"][0]["distance"].as_f64().unwrap() - 3.8).abs() < 1e-3);
+    assert!(data["hits"][0]["normal"][0].as_f64().unwrap() < -0.9);
+    assert_eq!(data["bodies"], 4);
+    assert_eq!(data["indexed"], false);
+
+    // ② --all：墙 + 触发区（按距离升序），传感器被标出来
+    let r = run(&["query", path, "--ray", "0,1,0,1,0,0", "--all", "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let data = r.json()["data"].clone();
+    assert_eq!(data["count"], 2, "{data}");
+    assert_eq!(data["hits"][0]["name"], "墙");
+    assert_eq!(data["hits"][1]["name"], "触发区");
+    assert_eq!(data["hits"][1]["sensor"], true);
+    assert_eq!(data["hits"][1]["layer"], 3);
+
+    // ③ --no-sensors：只剩墙
+    let data = run(&[
+        "query",
+        path,
+        "--ray",
+        "0,1,0,1,0,0",
+        "--all",
+        "--no-sensors",
+        "--json",
+    ])
+    .json()["data"]
+        .clone();
+    assert_eq!(data["count"], 1, "{data}");
+    assert_eq!(data["hits"][0]["name"], "墙");
+
+    // ④ --mask：单向层过滤，只查第 3 层
+    let data = run(&[
+        "query",
+        path,
+        "--ray",
+        "0,1,0,1,0,0",
+        "--all",
+        "--mask",
+        "8",
+        "--json",
+    ])
+    .json()["data"]
+        .clone();
+    assert_eq!(data["count"], 1, "{data}");
+    assert_eq!(data["hits"][0]["name"], "触发区");
+
+    // ⑤ --index：与线性路径逐条一致
+    let fast = run(&[
+        "query",
+        path,
+        "--ray",
+        "0,1,0,1,0,0",
+        "--all",
+        "--index",
+        "--json",
+    ]);
+    assert_eq!(fast.code, 0, "stderr: {}", fast.stderr);
+    let fd = fast.json()["data"].clone();
+    assert_eq!(fd["indexed"], true);
+    assert_eq!(fd["fallback"], false);
+    assert_eq!(fd["count"], 2, "索引路径要和 ② 一样给出两条命中：{fd}");
+    assert_eq!(fd["hits"][0]["name"], "墙");
+    assert_eq!(fd["hits"][1]["name"], "触发区");
+
+    // ⑥ 重叠：3×3×3 的探针盒罩住墙与地面（相交 → 距离 0）
+    let r = run(&["query", path, "--overlap", "box:3,3,3@3,1,0", "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let data = r.json()["data"].clone();
+    assert_eq!(data["query"], "overlap");
+    assert_eq!(data["shape"], "box 3,3,3");
+    assert_eq!(data["at"], serde_json::json!([3.0, 1.0, 0.0]));
+    assert!(data["count"].as_u64().unwrap() >= 2, "{data}");
+    let names: Vec<&str> = data["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"墙"), "{names:?}");
+    assert!(names.contains(&"地面"), "{names:?}");
+    for h in data["hits"].as_array().unwrap() {
+        assert_eq!(h["distance"], 0.0, "相交时距离应当是 0：{h}");
+    }
+
+    // ⑦ 带旋转的薄探针盒：45° 斜着插进墙里（验证旋转真的生效）
+    let data = run(&[
+        "query",
+        path,
+        "--overlap",
+        "box:1,0.1,0.1@4,1.5,0~0,0,45",
+        "--json",
+    ])
+    .json()["data"]
+        .clone();
+    assert_eq!(data["rotation_deg"], serde_json::json!([0.0, 0.0, 45.0]));
+    assert_eq!(data["count"], 1, "{data}");
+    assert_eq!(data["hits"][0]["name"], "墙");
+
+    // ⑧ 距离上限：把探针放大到能"够到"球（球在 6 米高，探针在 3 米处）
+    let near = run(&[
+        "query",
+        path,
+        "--overlap",
+        "box:1,1,1@3,1,0",
+        "--max",
+        "1.5",
+        "--json",
+    ])
+    .json()["data"]
+        .clone();
+    let far = run(&[
+        "query",
+        path,
+        "--overlap",
+        "box:1,1,1@3,1,0",
+        "--max",
+        "100",
+        "--json",
+    ])
+    .json()["data"]
+        .clone();
+    assert!(
+        far["count"].as_u64().unwrap() >= near["count"].as_u64().unwrap(),
+        "放宽 --max 不该减少命中：near={near} far={far}"
+    );
+    assert_eq!(far["max_distance"], 100.0);
+
+    // ⑨ --steps：先跑物理再查（球落到地面附近）
+    let data = run(&[
+        "query",
+        path,
+        "--ray",
+        "0,0.2,0,0,-1,0",
+        "--all",
+        "--steps",
+        "90",
+        "--json",
+    ])
+    .json()["data"]
+        .clone();
+    let names: Vec<&str> = data["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"球"), "球落地后应当被射线打到：{data}");
+    assert!(names.contains(&"地面"), "{data}");
+    // 不步进时球还在 6 米高，y=0.2 的射线打不到它
+    let data =
+        run(&["query", path, "--ray", "0,0.2,0,0,-1,0", "--all", "--json"]).json()["data"].clone();
+    let names: Vec<&str> = data["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["地面"], "{data}");
+}
+
+#[test]
+fn query_rejects_bad_flags_instead_of_ignoring_them() {
+    let dir = temp_dir("query_bad");
+    let scene = dir.join("q.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "objects": [
+            { "name": "地面", "shape": { "type": "box", "size": [10, 0.2, 10] },
+              "position": [0, -0.1, 0], "body": "static" }
+          ]
+        }"#,
+    )
+    .unwrap();
+    let path = scene.to_str().unwrap();
+
+    // 两个查询方式都给
+    let r = run(&[
+        "query",
+        path,
+        "--ray",
+        "0,1,0,0,-1,0",
+        "--overlap",
+        "sphere:1@0,1,0",
+        "--json",
+    ]);
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    assert_eq!(r.json()["error"]["kind"], "invalid");
+
+    // 一个都不给
+    let r = run(&["query", path, "--json"]);
+    assert_eq!(r.code, 2);
+    assert_eq!(r.json()["error"]["kind"], "invalid");
+
+    // --all 对重叠没有意义
+    let r = run(&[
+        "query",
+        path,
+        "--overlap",
+        "sphere:1@0,1,0",
+        "--all",
+        "--json",
+    ]);
+    assert_eq!(r.code, 2);
+    assert!(r.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--all"));
+
+    // 射线数字个数不对 / 方向是零向量
+    let r = run(&["query", path, "--ray", "0,1,0,0,-1", "--json"]);
+    assert_eq!(r.code, 2);
+    let r = run(&["query", path, "--ray", "0,1,0,0,0,0", "--json"]);
+    assert_eq!(r.code, 2);
+    assert!(r.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("零向量"));
+
+    // 形状语法错误
+    let r = run(&["query", path, "--overlap", "torus:1", "--json"]);
+    assert_eq!(r.code, 2);
+    let r = run(&["query", path, "--overlap", "box:1,2", "--json"]);
+    assert_eq!(r.code, 2);
+    let r = run(&["query", path, "--overlap", "sphere:0.5@0,1", "--json"]);
+    assert_eq!(r.code, 2);
+
+    // query 不写盘：写文件相关的开关一律拒绝（而不是悄悄忽略）
+    for flag in ["--dry-run", "--no-clobber"] {
+        let r = run(&["query", path, "--ray", "0,1,0,0,-1,0", flag, "--json"]);
+        assert_eq!(r.code, 2, "{flag} 应当被拒绝：{}", r.stdout);
+    }
+    let out = dir.join("x.json");
+    let r = run(&[
+        "query",
+        path,
+        "--ray",
+        "0,1,0,0,-1,0",
+        "--out",
+        out.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 2);
+    assert!(!out.exists(), "被拒绝的 query 不该写文件");
+
+    // 场景不存在
+    let r = run(&[
+        "query",
+        dir.join("nope.json").to_str().unwrap(),
+        "--ray",
+        "0,1,0,0,-1,0",
+        "--json",
+    ]);
+    assert_ne!(r.code, 0);
+}

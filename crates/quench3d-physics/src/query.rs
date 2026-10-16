@@ -13,7 +13,7 @@ use crate::shape::Shape;
 use crate::world::{PhysicsWorld, RaycastHit};
 
 /// 判定「接触」的距离阈值。
-const TOUCH: f32 = 1e-4;
+pub(crate) const TOUCH: f32 = 1e-4;
 /// 形状投射的最大推进次数。
 const MAX_CAST_ITERATIONS: usize = 64;
 /// 球体步进的最大次数。
@@ -21,15 +21,15 @@ const MAX_MARCH_ITERATIONS: usize = 48;
 
 /// 距离查询结果：查询形状上的点、对方形状上的点、距离、A→B 法线。
 #[derive(Clone, Copy, Debug)]
-struct DistanceResult {
-    point_a: Vec3,
-    point_b: Vec3,
-    distance: f32,
-    normal: Vec3,
+pub(crate) struct DistanceResult {
+    pub(crate) point_a: Vec3,
+    pub(crate) point_b: Vec3,
+    pub(crate) distance: f32,
+    pub(crate) normal: Vec3,
 }
 
 /// 查询形状与单个刚体的距离（半空间解析处理，其余走 GJK）。
-fn distance_to_body(shape: &Shape, t: &Transform, body: &RigidBody) -> DistanceResult {
+pub(crate) fn distance_to_body(shape: &Shape, t: &Transform, body: &RigidBody) -> DistanceResult {
     if let Shape::Plane { normal } = body.shape {
         let n = body
             .transform
@@ -56,17 +56,86 @@ fn distance_to_body(shape: &Shape, t: &Transform, body: &RigidBody) -> DistanceR
     }
 }
 
+/// 查询过滤：**单向**判据（与物理碰撞的对称判据不同）。
+///
+/// 物理那边要"双方都愿意才碰"（`A.memberships & B.filter` 且 `B.memberships & A.filter`）；
+/// 查询是"我问你答"，只有提问的一方有立场，所以只看被查的刚体：
+/// `body.memberships & mask != 0` 就参与。
+///
+/// 缺省是"所有层、含传感器"——不设置就等于没有过滤，与老行为一致。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryFilter {
+    /// 层掩码：只查**成员层**与之相交的刚体（缺省 `u32::MAX`）。
+    pub mask: u32,
+    /// 是否把传感器（触发区）算作可命中（缺省 `true`——触发区也是几何体，
+    /// 想知道"这条射线经不经过拾取区"是常见需求）。
+    pub sensors: bool,
+}
+
+impl Default for QueryFilter {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            mask: u32::MAX,
+            sensors: true,
+        }
+    }
+}
+
+impl QueryFilter {
+    /// 只查这些层。
+    #[inline]
+    pub const fn mask(mut self, mask: u32) -> Self {
+        self.mask = mask;
+        self
+    }
+
+    /// 是否把传感器算作可命中。
+    #[inline]
+    pub const fn sensors(mut self, sensors: bool) -> Self {
+        self.sensors = sensors;
+        self
+    }
+
+    /// 这个刚体参不参与本次查询。
+    #[inline]
+    pub fn accepts(&self, body: &RigidBody) -> bool {
+        (body.groups.memberships & self.mask) != 0 && (self.sensors || !body.sensor)
+    }
+}
+
 /// 球形重叠查询：返回与球体相交（或相切）的所有刚体句柄。
 pub fn overlap_sphere(world: &PhysicsWorld, center: Vec3, radius: f32) -> Vec<BodyHandle> {
+    overlap_shape_filtered(
+        world,
+        &Shape::Sphere { radius },
+        &Transform::from_translation(center),
+        QueryFilter::default(),
+    )
+}
+
+/// 任意形状重叠查询：返回与 `shape`（放在 `transform`）相交或相切的所有刚体句柄。
+///
+/// 按槽位下标升序（与线性扫描的遍历顺序一致），结果确定。
+pub fn overlap_shape_filtered(
+    world: &PhysicsWorld,
+    shape: &Shape,
+    transform: &Transform,
+    filter: QueryFilter,
+) -> Vec<BodyHandle> {
     let mut out = Vec::new();
-    if !center.is_finite() || !radius.is_finite() || radius < 0.0 {
+    if !transform.position.is_finite() || !transform.rotation.is_finite() {
         return out;
     }
-    let probe = Shape::Sphere { radius };
-    let pt = Transform::from_translation(center);
-    let probe_aabb = Aabb::from_center_half_extents(center, Vec3::splat(radius));
+    let probe_aabb = shape
+        .local_aabb()
+        .transformed_conservative(&transform.matrix());
     for (handle, body) in world.bodies() {
-        if !matches!(body.shape, Shape::Plane { .. }) {
+        if !filter.accepts(body) {
+            continue;
+        }
+        // 半空间没有有限 AABB，只能直接算距离（`distance_to_body` 对它是解析的）。
+        if !matches!(body.shape, Shape::Plane { .. }) && probe_aabb.is_valid() {
             let aabb = body
                 .shape
                 .local_aabb()
@@ -75,11 +144,98 @@ pub fn overlap_sphere(world: &PhysicsWorld, center: Vec3, radius: f32) -> Vec<Bo
                 continue;
             }
         }
-        let r = distance_to_body(&probe, &pt, body);
-        if r.distance <= TOUCH {
+        if distance_to_body(shape, transform, body).distance <= TOUCH {
             out.push(handle);
         }
     }
+    out
+}
+
+/// 两个形状之间的最近距离（查询形状 → 刚体）。
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeDistance {
+    /// 最近距离（相切或相交时为 0）。
+    pub distance: f32,
+    /// 查询形状上的点。
+    pub point: Vec3,
+    /// 对方刚体上的点。
+    pub other_point: Vec3,
+    /// 查询形状 → 刚体的单位法线。
+    pub normal: Vec3,
+}
+
+/// 查询形状与某个刚体的最近距离（刚体句柄失效时返回 `None`）。
+pub fn distance_to_body_handle(
+    world: &PhysicsWorld,
+    shape: &Shape,
+    transform: &Transform,
+    handle: BodyHandle,
+) -> Option<ShapeDistance> {
+    let body = world.body(handle)?;
+    if !transform.position.is_finite() || !transform.rotation.is_finite() {
+        return None;
+    }
+    let r = distance_to_body(shape, transform, body);
+    Some(ShapeDistance {
+        distance: r.distance,
+        point: r.point_a,
+        other_point: r.point_b,
+        normal: r.normal,
+    })
+}
+
+/// 射线检测，返回**所有**在 `max_distance` 内命中的刚体（按距离升序，平局按槽位下标）。
+///
+/// 与 [`PhysicsWorld::raycast`] 的区别：那个只给最近的一条。做"这条线上都有什么"
+/// （视线遮挡、子弹穿透、agent 观察场景）时需要全部。
+pub fn raycast_all_filtered(
+    world: &PhysicsWorld,
+    origin: Vec3,
+    dir: Vec3,
+    max_distance: f32,
+    filter: QueryFilter,
+) -> Vec<RaycastHit> {
+    let mut out = Vec::new();
+    if !origin.is_finite() || !dir.is_finite() || !max_distance.is_finite() || max_distance <= 0.0 {
+        return out;
+    }
+    let d = dir.normalize_or_zero();
+    if d.length_squared() < 0.5 {
+        return out;
+    }
+    for (handle, body) in world.bodies() {
+        if !filter.accepts(body) {
+            continue;
+        }
+        if !matches!(body.shape, Shape::Plane { .. }) {
+            let aabb = body
+                .shape
+                .local_aabb()
+                .transformed_conservative(&body.transform.matrix());
+            match aabb.intersect_ray(origin, d) {
+                Some(t) if t <= max_distance => {}
+                _ => continue,
+            }
+        }
+        if let Some((t, n)) = ray_shape(&body.shape, &body.transform, origin, d, max_distance) {
+            if t.is_finite() && t >= 0.0 && t <= max_distance {
+                let normal = if n.dot(d) > 0.0 { -n } else { n };
+                out.push(RaycastHit {
+                    handle,
+                    point: origin + d * t,
+                    normal,
+                    distance: t,
+                });
+            }
+        }
+    }
+    // 距离升序；完全同距时按槽位下标（`raycast` 取第一个，于是两者一致）。
+    out.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then_with(|| a.handle.index().cmp(&b.handle.index()))
+    });
     out
 }
 
@@ -231,7 +387,7 @@ pub(crate) fn shape_cast_world_filtered(
 // ---------------------------------------------------------------------------
 
 /// 射线与形状求交，返回 `(距离, 外观法线)`。
-fn ray_shape(
+pub(crate) fn ray_shape(
     shape: &Shape,
     t: &Transform,
     origin: Vec3,

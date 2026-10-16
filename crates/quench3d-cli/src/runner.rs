@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use quench3d::physics::{BodyType, PhysicsWorld};
+use quench3d::physics::{BodyType, PhysicsWorld, QueryFilter, Shape};
 use quench3d::prelude::*;
 use quench3d::render::RenderStats;
 use serde::{Deserialize, Serialize};
@@ -1350,6 +1350,487 @@ pub fn summarize(build: &WorldBuild, steps: u32, dt: f32) -> SimReport {
         states,
         warnings,
     }
+}
+
+/// `query` 的缺省最远距离。
+///
+/// 不用无穷大：射线走查是按距离截断的，无穷大会把"射线出了场景还在走格子"变成
+/// 十万步空转。10000 米对常规场景足够远，要更远就显式给 `--max`。
+pub const DEFAULT_QUERY_MAX: f32 = 10_000.0;
+
+/// 一次查询的命中。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryHit {
+    /// 刚体名（与 `simulate.states[].name` 一致）。
+    pub name: String,
+    /// `static` / `dynamic` / `kinematic`。
+    pub kind: String,
+    /// 沿射线的距离（重叠查询为 0）。
+    pub distance: f32,
+    /// 命中点（重叠查询是查询形状上离该刚体最近的点；相交时是接触点）。
+    pub point: [f32; 3],
+    /// 命中处的法线（射线查询朝向来者；重叠查询是"查询形状 → 刚体"的方向）。
+    pub normal: [f32; 3],
+    /// 碰撞层（0~31，`collision_layer` 的解码）。
+    pub layer: u8,
+    /// 是不是传感器（触发区）。
+    pub sensor: bool,
+}
+
+impl QueryHit {
+    fn from_hit(
+        name: String,
+        body: &quench3d::physics::RigidBody,
+        hit: &quench3d::physics::RaycastHit,
+    ) -> Self {
+        Self {
+            name,
+            kind: body_kind_name(body),
+            distance: hit.distance,
+            point: [hit.point.x, hit.point.y, hit.point.z],
+            normal: [hit.normal.x, hit.normal.y, hit.normal.z],
+            layer: layer_of(body),
+            sensor: body.sensor,
+        }
+    }
+}
+
+/// 一小串逗号分隔的浮点数。
+fn parse_floats(text: &str) -> Result<Vec<f32>, String> {
+    text.split(',')
+        .map(|p| {
+            p.trim()
+                .parse::<f32>()
+                .map_err(|e| format!("`{}` 不是数字：{e}", p.trim()))
+        })
+        .collect()
+}
+
+/// `0,5,0,0,-1,0` → 起点 + 方向（CLI 的 `--ray` 与 MCP 的 `ray` 共用这一份解析）。
+pub fn parse_ray_query(text: &str) -> Result<QueryKind, String> {
+    let v = parse_floats(text)?;
+    if v.len() != 6 {
+        return Err(format!(
+            "ray 需要 6 个数（ox,oy,oz,dx,dy,dz），收到 {}",
+            v.len()
+        ));
+    }
+    let origin = Vec3::new(v[0], v[1], v[2]);
+    let direction = Vec3::new(v[3], v[4], v[5]);
+    if !origin.is_finite() {
+        return Err("ray 的起点不是有限数".into());
+    }
+    if !direction.is_finite() || direction.length_squared() < 1e-12 {
+        return Err("ray 的方向必须是零向量以外".into());
+    }
+    Ok(QueryKind::Ray { origin, direction })
+}
+
+/// `box:1,2,1@0,1,0~0,45,0` → 形状 + 位姿（CLI 的 `--overlap` 与 MCP 的 `overlap` 共用）。
+pub fn parse_overlap_query(text: &str) -> Result<QueryKind, String> {
+    let (head, pose) = match text.split_once('@') {
+        Some((h, p)) => (h, p),
+        None => (text, ""),
+    };
+    let (at_text, rot_text) = match pose.split_once('~') {
+        Some((a, r)) => (a, r),
+        None => (pose, ""),
+    };
+    let Some((kind, params)) = head.split_once(':') else {
+        return Err(format!(
+            "`{head}` 缺少形状：写成 sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / plane:0,1,0"
+        ));
+    };
+    let nums = parse_floats(params)?;
+    if !nums.iter().all(|n| n.is_finite()) {
+        return Err(format!("overlap 参数里 {kind} 的形状尺寸不是有限数"));
+    }
+    let (shape, canonical) = match kind.trim() {
+        "sphere" => {
+            if nums.len() != 1 || nums[0] <= 0.0 {
+                return Err("sphere 需要 1 个正数半径：sphere:0.5".into());
+            }
+            (
+                Shape::Sphere { radius: nums[0] },
+                format!("sphere {}", nums[0]),
+            )
+        }
+        "box" => {
+            if nums.len() != 3 || nums.iter().any(|n| *n <= 0.0) {
+                return Err("box 需要 3 个正数半长：box:1,2,1".into());
+            }
+            (
+                Shape::Box {
+                    half_extents: Vec3::new(nums[0], nums[1], nums[2]),
+                },
+                format!("box {},{},{}", nums[0], nums[1], nums[2]),
+            )
+        }
+        "capsule" => {
+            if nums.len() != 2 || nums[0] <= 0.0 || nums[1] <= 0.0 {
+                return Err("capsule 需要 2 个正数（半高, 半径）：capsule:0.6,0.3".into());
+            }
+            (
+                Shape::Capsule {
+                    half_height: nums[0],
+                    radius: nums[1],
+                },
+                format!("capsule {},{}", nums[0], nums[1]),
+            )
+        }
+        "cylinder" => {
+            if nums.len() != 2 || nums[0] <= 0.0 || nums[1] <= 0.0 {
+                return Err("cylinder 需要 2 个正数（半高, 半径）：cylinder:0.5,0.5".into());
+            }
+            (
+                Shape::Cylinder {
+                    half_height: nums[0],
+                    radius: nums[1],
+                },
+                format!("cylinder {},{}", nums[0], nums[1]),
+            )
+        }
+        "plane" => {
+            if nums.len() != 3 {
+                return Err("plane 需要 3 个数（法线）：plane:0,1,0".into());
+            }
+            let normal = Vec3::new(nums[0], nums[1], nums[2]);
+            if normal.length_squared() < 1e-12 {
+                return Err("plane 的法线不能是零向量".into());
+            }
+            (
+                Shape::Plane { normal },
+                format!("plane {},{},{}", nums[0], nums[1], nums[2]),
+            )
+        }
+        other => {
+            return Err(format!(
+                "不认识的形状 `{other}`：支持 sphere / box / capsule / cylinder / plane"
+            ))
+        }
+    };
+    let at = if at_text.trim().is_empty() {
+        Vec3::ZERO
+    } else {
+        let v = parse_floats(at_text)?;
+        if v.len() != 3 {
+            return Err(format!("位置需要 3 个数（@x,y,z），收到 {}", v.len()));
+        }
+        Vec3::new(v[0], v[1], v[2])
+    };
+    let rotation = if rot_text.trim().is_empty() {
+        Vec3::ZERO
+    } else {
+        let v = parse_floats(rot_text)?;
+        if v.len() != 3 {
+            return Err(format!(
+                "旋转需要 3 个角度（~x,y,z，单位度），收到 {}",
+                v.len()
+            ));
+        }
+        Vec3::new(v[0], v[1], v[2])
+    };
+    if !at.is_finite() || !rotation.is_finite() {
+        return Err("overlap 的位置/旋转不是有限数".into());
+    }
+    Ok(QueryKind::Overlap {
+        shape,
+        text: canonical,
+        at,
+        rotation,
+    })
+}
+
+/// 查询报告（`quench3d query`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryReport {
+    /// `ray` 或 `overlap`。
+    pub query: String,
+    /// 射线起点（重叠查询不出现）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<[f32; 3]>,
+    /// 射线方向（重叠查询不出现）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<[f32; 3]>,
+    /// 查询形状的文字描述，例如 `box 1,2,1`（射线查询不出现）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// 查询形状的位置。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f32; 3]>,
+    /// 查询形状的旋转（欧拉角，度）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<[f32; 3]>,
+    /// 最远距离（射线与重叠都用它截断）。
+    pub max_distance: f32,
+    /// 层掩码（查询是**单向**判据：只看被查方在不在掩码里）。
+    pub mask: u32,
+    /// 是否把传感器算作可命中。
+    pub include_sensors: bool,
+    /// 命中，按距离升序（重叠查询按刚体名排序）。
+    pub hits: Vec<QueryHit>,
+    /// 命中数（= `hits.len()`，省得 agent 自己数）。
+    pub count: usize,
+    /// 场景里的刚体总数。
+    pub bodies: usize,
+    /// 本次查询逐个检查过的候选刚体数（用 `--index` 时会明显小于总数）。
+    pub tested: usize,
+    /// 是否用了查询加速结构。
+    pub indexed: bool,
+    /// 索引过期而回退到线性扫描（用 `--index` 时可能出现）。
+    pub fallback: bool,
+    /// 非致命提示。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// 查询参数（CLI 解析出来的那一层）。
+#[derive(Debug, Clone)]
+pub enum QueryKind {
+    /// 射线：起点 + 方向。
+    Ray {
+        /// 起点。
+        origin: Vec3,
+        /// 方向（内部会归一化）。
+        direction: Vec3,
+    },
+    /// 任意形状重叠：形状 + 位姿。
+    Overlap {
+        /// 探针形状。
+        shape: Shape,
+        /// 形状的文字描述（进报告，便于 agent 复现）。
+        text: String,
+        /// 探针位置。
+        at: Vec3,
+        /// 探针欧拉角（度，XYZ 序）。
+        rotation: Vec3,
+    },
+}
+
+/// 刚体类型名。
+fn body_kind_name(body: &quench3d::physics::RigidBody) -> String {
+    match body.body_type {
+        BodyType::Dynamic => "dynamic",
+        BodyType::Static => "static",
+        BodyType::Kinematic => "kinematic",
+    }
+    .to_string()
+}
+
+/// 刚体所在的最低位（`collision_layer` 的解码；多成员时取最低位）。
+fn layer_of(body: &quench3d::physics::RigidBody) -> u8 {
+    let m = body.groups.memberships;
+    if m == 0 {
+        0
+    } else {
+        m.trailing_zeros() as u8
+    }
+}
+
+/// 查询选项（CLI 与 MCP 共用同一套语义）。
+#[derive(Debug, Clone, Copy)]
+pub struct QueryOptions {
+    /// 层掩码（**单向**判据），缺省全查。
+    pub mask: u32,
+    /// 是否把传感器算作可命中，缺省 `true`。
+    pub sensors: bool,
+    /// 射线的最远距离 / 重叠的距离上限。
+    pub max_distance: f32,
+    /// 射线是否返回全部命中（缺省只给最近的一个）。
+    pub all: bool,
+    /// 先跑这么多步物理再查（缺省 0：按场景初始状态查）。
+    pub steps: u32,
+    /// 是否用查询加速结构（快照网格）。
+    pub use_index: bool,
+}
+
+impl Default for QueryOptions {
+    fn default() -> Self {
+        Self {
+            mask: u32::MAX,
+            sensors: true,
+            max_distance: DEFAULT_QUERY_MAX,
+            all: false,
+            steps: 0,
+            use_index: false,
+        }
+    }
+}
+
+/// 在场景上做一次查询（不需要 GPU）。
+///
+/// `options.steps > 0` 时先跑这么多步物理再查（"落到地上的东西到底在哪" 这种问题）。
+pub fn run_query(
+    doc: &SceneDoc,
+    kind: &QueryKind,
+    options: QueryOptions,
+) -> Result<QueryReport, RunError> {
+    let QueryOptions {
+        mask,
+        sensors: include_sensors,
+        max_distance,
+        all,
+        steps,
+        use_index,
+    } = options;
+    let mut build = build_world(doc)?;
+    if steps > 0 {
+        let dt = doc.simulate.dt;
+        let mut script = Script::new(doc, &build.world, &build.handles)?;
+        script.begin(&build.world);
+        for _ in 0..steps {
+            script.step(&mut build.world, dt);
+        }
+    }
+    let world = &build.world;
+    let names: std::collections::HashMap<BodyHandle, String> =
+        build.handles.iter().map(|(n, h)| (*h, n.clone())).collect();
+    let name_of = |h: BodyHandle| -> String {
+        names
+            .get(&h)
+            .cloned()
+            .unwrap_or_else(|| format!("#{}", h.index()))
+    };
+    let filter = QueryFilter {
+        mask,
+        sensors: include_sensors,
+    };
+
+    let mut warnings = Vec::new();
+    let index = if use_index {
+        Some(world.build_query_index())
+    } else {
+        None
+    };
+    let mut base = QueryReport {
+        query: String::new(),
+        origin: None,
+        direction: None,
+        shape: None,
+        at: None,
+        rotation_deg: None,
+        max_distance,
+        mask,
+        include_sensors,
+        hits: Vec::new(),
+        count: 0,
+        bodies: world.body_count(),
+        tested: 0,
+        indexed: use_index,
+        fallback: false,
+        warnings: Vec::new(),
+    };
+
+    let (hits, tested, fallback): (Vec<QueryHit>, usize, bool) = match kind {
+        QueryKind::Ray { origin, direction } => {
+            base.query = "ray".into();
+            base.origin = Some([origin.x, origin.y, origin.z]);
+            base.direction = Some([direction.x, direction.y, direction.z]);
+            let from_hits = |list: &[quench3d::physics::RaycastHit]| -> Vec<QueryHit> {
+                list.iter()
+                    .filter_map(|h| {
+                        world
+                            .body(h.handle)
+                            .map(|b| QueryHit::from_hit(name_of(h.handle), b, h))
+                    })
+                    .collect()
+            };
+            match &index {
+                Some(idx) => {
+                    let out =
+                        idx.raycast_detailed(world, *origin, *direction, max_distance, filter, all);
+                    (from_hits(&out.hits), out.tested, out.fallback)
+                }
+                None if all => (
+                    from_hits(&world.raycast_all_filtered(
+                        *origin,
+                        *direction,
+                        max_distance,
+                        filter,
+                    )),
+                    world.body_count(),
+                    false,
+                ),
+                None => {
+                    let one = world.raycast_filtered(*origin, *direction, max_distance, |h| {
+                        world.body(h).is_some_and(|b| filter.accepts(b))
+                    });
+                    let list: Vec<quench3d::physics::RaycastHit> = one.into_iter().collect();
+                    (from_hits(&list), world.body_count(), false)
+                }
+            }
+        }
+        QueryKind::Overlap {
+            shape,
+            text,
+            at,
+            rotation,
+        } => {
+            base.query = "overlap".into();
+            base.shape = Some(text.clone());
+            base.at = Some([at.x, at.y, at.z]);
+            base.rotation_deg = Some([rotation.x, rotation.y, rotation.z]);
+            let transform = Transform::new(
+                *at,
+                Quat::from_euler_xyz(
+                    rotation.x.to_radians(),
+                    rotation.y.to_radians(),
+                    rotation.z.to_radians(),
+                ),
+                Vec3::ONE,
+            );
+            let (handles, tested, fallback) = match &index {
+                Some(idx) => {
+                    let out = idx.overlap_shape_detailed(world, shape, &transform, filter);
+                    (out.handles, out.tested, out.fallback)
+                }
+                None => (
+                    world.overlap_shape_filtered(shape, &transform, filter),
+                    world.body_count(),
+                    false,
+                ),
+            };
+            let mut hits: Vec<QueryHit> = Vec::new();
+            for handle in handles {
+                let Some(body) = world.body(handle) else {
+                    continue;
+                };
+                let Some(d) = world.distance_to(shape, &transform, handle) else {
+                    continue;
+                };
+                // `--max` 对重叠查询是"距离上限"：相交（距离 0）的永远报，
+                // 只是附近的按距离截断。`tested` 仍是"检查过几个"。
+                if d.distance > max_distance {
+                    continue;
+                }
+                hits.push(QueryHit {
+                    name: name_of(handle),
+                    kind: body_kind_name(body),
+                    distance: d.distance,
+                    point: [d.point.x, d.point.y, d.point.z],
+                    normal: [d.normal.x, d.normal.y, d.normal.z],
+                    layer: layer_of(body),
+                    sensor: body.sensor,
+                });
+            }
+            // 重叠查询按名字排序（射线按距离，重叠没有"先后"）
+            hits.sort_by(|a, b| a.name.cmp(&b.name));
+            (hits, tested, fallback)
+        }
+    };
+
+    if let Some(idx) = &index {
+        if idx.is_stale(world) {
+            warnings
+                .push("查询索引是在跑物理之前建的，已经过期（本次结果由线性扫描保证正确）".into());
+        }
+    }
+    base.hits = hits;
+    base.count = base.hits.len();
+    base.tested = tested;
+    base.fallback = fallback;
+    base.warnings = warnings;
+    Ok(base)
 }
 
 /// 只跑物理（不需要 GPU）。

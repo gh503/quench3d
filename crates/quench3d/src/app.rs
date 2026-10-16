@@ -82,6 +82,8 @@ pub struct DebugOptions {
     pub velocities: bool,
     /// 绘制每个动态刚体的包围盒。
     pub body_bounds: bool,
+    /// 从相机中心打一条射线，画出命中的位置与法线（"我看的这块是什么"）。
+    pub query_probe: bool,
     /// 是否启用（总开关）。
     pub enabled: bool,
 }
@@ -93,9 +95,23 @@ impl Default for DebugOptions {
             physics_contacts: false,
             velocities: false,
             body_bounds: false,
+            query_probe: false,
             enabled: true,
         }
     }
+}
+
+/// 查询探针的最远距离（米）。
+pub const QUERY_PROBE_MAX: f32 = 500.0;
+
+/// 相机中心射线的最近命中（编辑器 F7 的查询探针；纯函数，便于离线测试）。
+pub fn center_probe(
+    camera: &Camera,
+    world: &PhysicsWorld,
+    max_distance: f32,
+) -> Option<quench3d_physics::RaycastHit> {
+    let ray = camera.ndc_ray(Vec2::ZERO);
+    world.raycast(ray.origin, ray.dir, max_distance)
 }
 
 /// 引擎：持有 GPU 上下文、渲染器、场景、物理世界与输入状态。
@@ -370,6 +386,9 @@ impl Engine {
         if self.input.key_pressed(KeyCode::F6) {
             self.debug.body_bounds = !self.debug.body_bounds;
         }
+        if self.input.key_pressed(KeyCode::F7) {
+            self.debug.query_probe = !self.debug.query_probe;
+        }
         if self.input.key_pressed(KeyCode::KeyP) {
             self.paused = !self.paused;
         }
@@ -385,6 +404,15 @@ impl Engine {
         if !self.debug.enabled {
             return;
         }
+        // 查询探针的结果先算好：后面 `lines` 借了 `self.renderer` 的可变引用，
+        // 那时就不能再读 `self.camera()` / `self.world` 了。
+        let probe = if self.debug.query_probe {
+            let camera = self.camera();
+            let ray = camera.ndc_ray(Vec2::ZERO);
+            Some((ray, center_probe(&camera, &self.world, QUERY_PROBE_MAX)))
+        } else {
+            None
+        };
         let lines = &mut self.renderer.lines;
         if self.debug.axes {
             lines.world_axes(3.0, 0.35);
@@ -421,6 +449,28 @@ impl Engine {
                     lines.aabb(
                         &body.world_aabb().grown(0.002),
                         Vec4::new(0.2, 1.0, 0.4, 0.32),
+                    );
+                }
+            }
+        }
+        if let Some((ray, hit)) = probe {
+            // 相机中心那一条射线打到什么：命中的位置画红箭头、法线画绿箭头。
+            // 与 CLI 的 `quench3d query --ray`、MCP 的 quench3d_query 是同一条查询路径。
+            match hit {
+                Some(hit) => {
+                    lines.arrow(ray.origin, hit.point, Vec4::new(1.0, 0.25, 0.3, 0.95));
+                    lines.arrow(
+                        hit.point,
+                        hit.point + hit.normal * 0.4,
+                        Vec4::new(0.4, 1.0, 0.5, 0.95),
+                    );
+                }
+                None => {
+                    // 没打到：画一条灰线示意"看的方向"，长度=探测距离上限
+                    lines.arrow(
+                        ray.origin,
+                        ray.origin + ray.dir * QUERY_PROBE_MAX,
+                        Vec4::new(0.6, 0.6, 0.6, 0.5),
                     );
                 }
             }
@@ -1363,6 +1413,48 @@ pub fn render_sequence_with_game<G: Game>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 查询探针：相机中心看什么就查到什么（F7 依赖它）。
+    #[test]
+    fn center_probe_hits_what_the_camera_looks_at() {
+        use quench3d_math::vec3;
+        use quench3d_physics::{BodyBuilder, Shape};
+        let mut world = PhysicsWorld::new();
+        let target = world.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            })
+            .position(vec3(0.0, 0.0, 0.0))
+            .build(),
+        );
+        let mut camera = Camera::perspective(1.0);
+        camera.position = vec3(0.0, 0.0, 8.0);
+        camera.look_at(Vec3::ZERO);
+        let hit = center_probe(&camera, &world, QUERY_PROBE_MAX).expect("正对着盒子，应该打到");
+        assert_eq!(hit.handle, target);
+        // 注意：射线起点在近裁剪面上（不是相机位置），所以距离是"起点到 z=0.5 的盒面"
+        let start = camera.ndc_ray(Vec2::ZERO).origin;
+        assert!(
+            (hit.distance - (start.z - 0.5)).abs() < 1e-3,
+            "距离 {}（起点 z={}）",
+            hit.distance,
+            start.z
+        );
+        assert!((hit.point.z - 0.5).abs() < 1e-3, "命中点 {:?}", hit.point);
+        assert!(
+            hit.normal.dot(Vec3::Z) > 0.9,
+            "法线朝相机：{:?}",
+            hit.normal
+        );
+
+        // 看旁边（+X）：这条线上什么都没有
+        camera.look_at(vec3(50.0, 0.0, 8.0));
+        assert!(center_probe(&camera, &world, QUERY_PROBE_MAX).is_none());
+        // 距离上限比命中距离短：也应当什么都没有
+        camera.look_at(Vec3::ZERO);
+        assert!(center_probe(&camera, &world, 3.0).is_none());
+        assert!(center_probe(&camera, &world, 100.0).is_some());
+    }
 
     /// 帧数/时长/帧率的口径必须自洽：视频时长 = 帧数 × 每帧步数 × 步长。
     #[test]
