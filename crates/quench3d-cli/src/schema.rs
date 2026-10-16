@@ -288,7 +288,7 @@ pub fn scene_grammar() -> Value {
         "note": "所有字段都有缺省值，`{}` 就是合法场景",
         "top_level": {
             "format": "字符串，缺省 quench3d.scene",
-            "version": "整数，当前 2（版本 2 起 parent 生效；不兼容版本 1）",
+            "version": "整数，当前 2（版本 2 起 parent 生效）。版本 1 的文件：把 version 改成 2 即可——没有 parent 时语义完全一样",
             "name": "场景名（可选）",
             "gravity": "[x, y, z]，缺省 [0, -9.81, 0]",
             "physics": {
@@ -462,7 +462,314 @@ pub fn scene_grammar() -> Value {
     })
 }
 
-/// 给大模型看的系统提示：把场景语法讲清楚，并要求只输出 JSON。
+/// 机器可读的 JSON Schema（draft 2020-12）：给编辑器补全、CI 校验、agent 程序化检查用。
+///
+/// **手写 + 一致性测试**（不引 `schemars` 之类的新依赖）：`json_schema_matches_the_source`
+/// 会拿 `scene_doc.rs` 的结构体字段名与这里声明的属性名逐项对账——加字段忘了改这里会红。
+/// 分工要说清楚：**schema 管"结构"**（哪些键、嵌套长什么样、`additionalProperties: false`），
+/// **`quench3d validate` 管"语义"**（数值范围、互斥、交叉引用）。所以这里的值类型是宽松的
+/// （`true` = 任意），不要把"schema 过了"当成"场景能跑"。
+pub fn json_schema() -> Value {
+    fn def(fields: &[&str]) -> Value {
+        let mut props = serde_json::Map::new();
+        for f in fields {
+            props.insert((*f).to_string(), Value::Bool(true));
+        }
+        json!({ "type": "object", "additionalProperties": false, "properties": props })
+    }
+    fn with_type(mut d: Value, ty: Value) -> Value {
+        d["properties"]["type"] = ty;
+        d
+    }
+    let mut defs = serde_json::Map::new();
+    defs.insert(
+        "vec3".into(),
+        json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3,
+                "description": "[x, y, z]" }),
+    );
+    for (name, variants) in [
+        (
+            "bodyKind",
+            ["none", "static", "dynamic", "kinematic"].as_slice(),
+        ),
+        (
+            "shapeKind",
+            ["box", "sphere", "capsule", "cylinder", "plane", "convex"].as_slice(),
+        ),
+        (
+            "jointKind",
+            ["fixed", "ball", "hinge", "distance", "slider"].as_slice(),
+        ),
+        (
+            "actionKind",
+            [
+                "impulse",
+                "impulse_at_point",
+                "torque_impulse",
+                "velocity",
+                "angular_velocity",
+                "force",
+                "teleport",
+                "wake",
+            ]
+            .as_slice(),
+        ),
+        ("probeShapeKind", ["sphere", "box"].as_slice()),
+        (
+            "combineRule",
+            ["geometric_mean", "average", "min", "max", "multiply"].as_slice(),
+        ),
+    ] {
+        defs.insert(name.into(), json!({ "type": "string", "enum": variants }));
+    }
+    defs.insert(
+        "shape".into(),
+        with_type(
+            def(&["type", "size", "radius", "half_height", "normal", "points"]),
+            json!({ "$ref": "#/$defs/shapeKind" }),
+        ),
+    );
+    defs.insert(
+        "shapePart".into(),
+        def(&["shape", "position", "rotation_deg"]),
+    );
+    defs.insert(
+        "instance".into(),
+        def(&["name", "position", "rotation_deg", "scale"]),
+    );
+    defs.insert(
+        "object".into(),
+        def(&[
+            "name",
+            "template",
+            "instances",
+            "shape",
+            "shapes",
+            "parent",
+            "position",
+            "rotation_deg",
+            "scale",
+            "material",
+            "body",
+            "density",
+            "restitution",
+            "friction",
+            "static_friction",
+            "friction_combine",
+            "restitution_combine",
+            "velocity",
+            "angular_velocity",
+            "linear_damping",
+            "angular_damping",
+            "gravity_scale",
+            "mass",
+            "allow_sleep",
+            "visible",
+            "collision_layer",
+            "collides_with",
+            "sensor",
+            "ccd",
+        ]),
+    );
+    defs.insert(
+        "material".into(),
+        def(&[
+            "color",
+            "metallic",
+            "roughness",
+            "emissive",
+            "alpha",
+            "emissive_color",
+            "uv_scale",
+            "base_color_texture",
+            "normal_texture",
+            "metallic_roughness_texture",
+            "emissive_texture",
+            "normal_scale",
+            "alpha_cutoff",
+            "alpha_blend",
+            "unlit",
+            "double_sided",
+        ]),
+    );
+    defs.insert(
+        "ground".into(),
+        def(&["size", "material", "y", "friction", "restitution"]),
+    );
+    defs.insert(
+        "model".into(),
+        def(&[
+            "path",
+            "position",
+            "rotation_deg",
+            "scale",
+            "collide",
+            "friction",
+        ]),
+    );
+    defs.insert(
+        "coneLimit".into(),
+        def(&["half_angle_deg", "axis_a", "axis_b"]),
+    );
+    defs.insert(
+        "joint".into(),
+        with_type(
+            def(&[
+                "type",
+                "a",
+                "b",
+                "axis",
+                "anchor_a",
+                "anchor_b",
+                "limits",
+                "rest_length",
+                "stiffness",
+                "damping",
+                "motor_velocity",
+                "motor_max_impulse",
+                "motor_target_deg",
+                "motor_stiffness",
+                "motor_damping",
+                "cone_limit",
+                "break_force",
+                "break_torque",
+                "collide_connected",
+            ]),
+            json!({ "$ref": "#/$defs/jointKind" }),
+        ),
+    );
+    defs.insert(
+        "action".into(),
+        with_type(
+            def(&[
+                "type",
+                "target",
+                "at_step",
+                "at_time",
+                "value",
+                "point",
+                "position",
+                "rotation_deg",
+                "steps",
+            ]),
+            json!({ "$ref": "#/$defs/actionKind" }),
+        ),
+    );
+    // 探针的形状字段叫 `shape`（不是 `type`）：`{ "shape": "sphere" | "box" }`
+    let mut probe = def(&["name", "shape", "position", "radius", "size", "watch"]);
+    probe["properties"]["shape"] = json!({ "$ref": "#/$defs/probeShapeKind" });
+    defs.insert("probe".into(), probe);
+    defs.insert(
+        "camera".into(),
+        def(&[
+            "position",
+            "look_at",
+            "fov_deg",
+            "distance",
+            "yaw_deg",
+            "pitch_deg",
+            "near",
+            "far",
+            "orthographic_height",
+            "frame_scene",
+        ]),
+    );
+    defs.insert(
+        "pointLight".into(),
+        def(&["position", "color", "intensity", "radius"]),
+    );
+    defs.insert("fog".into(), def(&["color", "density"]));
+    defs.insert("shadowQuality".into(), def(&["strength", "radius"]));
+    defs.insert("skyColors".into(), def(&["zenith", "horizon", "ground"]));
+    defs.insert(
+        "ssao".into(),
+        def(&["enabled", "radius", "bias", "strength", "samples"]),
+    );
+    defs.insert(
+        "fxaa".into(),
+        def(&["enabled", "edge_threshold", "edge_threshold_min"]),
+    );
+    defs.insert("bloom".into(), def(&["enabled", "intensity", "threshold"]));
+    defs.insert(
+        "lighting".into(),
+        def(&[
+            "preset",
+            "sun_direction",
+            "sun_intensity",
+            "ambient",
+            "exposure",
+            "sky",
+            "grid",
+            "shadows",
+            "fog",
+            "shadow_quality",
+            "sky_colors",
+            "point_lights",
+            "bloom",
+            "fxaa",
+            "ssao",
+        ]),
+    );
+    defs.insert(
+        "physics".into(),
+        def(&[
+            "friction_combine",
+            "restitution_combine",
+            "static_friction_speed",
+        ]),
+    );
+    defs.insert("simulate".into(), def(&["steps", "dt"]));
+    defs.insert(
+        "render".into(),
+        def(&["output", "width", "height", "msaa", "enabled"]),
+    );
+    defs.insert(
+        "scene".into(),
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "description": "quench3d.scene：一个自包含的 3D 场景 / 物理实验描述",
+            "properties": {
+                "format": { "const": "quench3d.scene" },
+                "version": { "type": "integer", "minimum": 1,
+                             "description": "当前 2；版本 1 的文件只有 objects[].parent 不生效" },
+                "name": { "type": "string" },
+                "gravity": { "$ref": "#/$defs/vec3" },
+                "physics": { "$ref": "#/$defs/physics" },
+                "ground": { "$ref": "#/$defs/ground" },
+                "materials": { "type": "object",
+                               "additionalProperties": { "$ref": "#/$defs/material" } },
+                "templates": { "type": "object",
+                               "additionalProperties": { "$ref": "#/$defs/object" },
+                               "description": "可复用的物体描述；objects[].template 引用它" },
+                "objects": { "type": "array", "items": { "$ref": "#/$defs/object" } },
+                "models": { "type": "array", "items": { "$ref": "#/$defs/model" } },
+                "joints": { "type": "array", "items": { "$ref": "#/$defs/joint" } },
+                "actions": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+                "probes": { "type": "array", "items": { "$ref": "#/$defs/probe" } },
+                "camera": { "$ref": "#/$defs/camera" },
+                "lighting": { "$ref": "#/$defs/lighting" },
+                "simulate": { "$ref": "#/$defs/simulate" },
+                "render": { "$ref": "#/$defs/render" }
+            }
+        }),
+    );
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/gh503/quench3d/scene-v2.schema.json",
+        "title": "quench3d.scene v2",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "allOf": [ { "$ref": "#/$defs/scene" } ],
+        "$defs": defs
+    })
+}
+
+/// 给大模型看的**系统提示**：把场景格式讲清楚（字段、单位、边界）。
+///
+/// 与 [`schema`] / [`json_schema`] 保持同一份事实：字段名靠
+/// `system_prompt_mentions_every_top_level_scene_field` 测试盯着。
 pub fn system_prompt() -> String {
     r#"你是 Quench3D 引擎的场景生成器。用户会用自然语言描述一个 3D 场景或物理实验，
 你只输出一个 JSON 对象（不要解释、不要 Markdown 代码块以外的文字），格式是 quench3d.scene v2。
@@ -641,6 +948,209 @@ mod tests {
         let joints = g["joint"]["type"].as_array().unwrap();
         for k in ["fixed", "ball", "hinge", "distance", "slider"] {
             assert!(joints.iter().any(|v| v == k), "语法缺少关节 {k}");
+        }
+    }
+
+    /// 从 `scene_doc.rs` 源码里抽结构体字段：`(JSON 名, 是否 #[serde(skip)])`。
+    ///
+    /// 直接读源码是有意的——这样"结构体改了但 schema 没改"一定会在测试里红，
+    /// 而不是等到用户发现编辑器补全少了字段。
+    fn struct_fields(src: &str, name: &str) -> Vec<(String, bool)> {
+        let head = format!("pub struct {name} {{");
+        let start = src
+            .find(&head)
+            .unwrap_or_else(|| panic!("源码里没有 {name}"))
+            + head.len();
+        let rest = &src[start..];
+        let body = &rest[..rest.find("\n}").expect("结构体没有结束")];
+        let mut out = Vec::new();
+        let mut rename: Option<String> = None;
+        let mut skip = false;
+        for line in body.lines() {
+            let t = line.trim();
+            if t.starts_with("#[") {
+                if let Some(i) = t.find("rename = \"") {
+                    let s = &t[i + 10..];
+                    if let Some(j) = s.find('"') {
+                        rename = Some(s[..j].to_string());
+                    }
+                }
+                if t.contains("serde(skip)") {
+                    skip = true;
+                }
+                continue;
+            }
+            if let Some(r) = t.strip_prefix("pub ") {
+                if let Some(c) = r.find(':') {
+                    let rust_name = r[..c].trim().to_string();
+                    out.push((rename.take().unwrap_or(rust_name), skip));
+                    skip = false;
+                }
+            }
+        }
+        out
+    }
+
+    /// 从源码抽枚举变体名，并按其 `rename_all` 规则转成 JSON 里的字符串。
+    fn enum_variants(src: &str, name: &str) -> Vec<String> {
+        let head = format!("pub enum {name} {{");
+        let start = src.find(&head).unwrap_or_else(|| panic!("没有 {name}")) + head.len();
+        let before = &src[..start];
+        let rename_all = match before.rfind("rename_all = \"") {
+            Some(i) => {
+                let s = &before[i + 14..];
+                s[..s.find('"').unwrap()].to_string()
+            }
+            None => String::new(),
+        };
+        let rest = &src[start..];
+        let body = &rest[..rest.find("\n}").expect("枚举没有结束")];
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let t = line.trim().trim_end_matches(',');
+            if t.is_empty() || t.starts_with("///") || t.starts_with("//") || t.starts_with("#[") {
+                continue;
+            }
+            let ident = t.split(['(', ' ']).next().unwrap_or("");
+            if ident.is_empty() || !ident.chars().next().unwrap().is_ascii_uppercase() {
+                continue;
+            }
+            let json = match rename_all.as_str() {
+                "lowercase" => ident.to_lowercase(),
+                "snake_case" => {
+                    let mut s = String::new();
+                    for (i, c) in ident.chars().enumerate() {
+                        if c.is_ascii_uppercase() {
+                            if i > 0 {
+                                s.push('_');
+                            }
+                            s.push(c.to_ascii_lowercase());
+                        } else {
+                            s.push(c);
+                        }
+                    }
+                    s
+                }
+                _ => ident.to_string(),
+            };
+            out.push(json);
+        }
+        out
+    }
+
+    /// 机器可读 JSON Schema 必须与 `scene_doc.rs` 的结构体/枚举逐字段一致。
+    #[test]
+    fn json_schema_matches_the_source_structs() {
+        let src = include_str!("scene_doc.rs");
+        let js = json_schema();
+        let defs = js["$defs"].as_object().expect("要有 $defs");
+        for (sname, dname) in [
+            ("SceneDoc", "scene"),
+            ("ObjectDoc", "object"),
+            ("ShapeDoc", "shape"),
+            ("ShapePartDoc", "shapePart"),
+            ("InstanceDoc", "instance"),
+            ("MaterialDoc", "material"),
+            ("GroundDoc", "ground"),
+            ("ModelDoc", "model"),
+            ("JointDoc", "joint"),
+            ("ConeLimitDoc", "coneLimit"),
+            ("ActionDoc", "action"),
+            ("ProbeDoc", "probe"),
+            ("CameraDoc", "camera"),
+            ("LightingDoc", "lighting"),
+            ("PointLightDoc", "pointLight"),
+            ("FogDoc", "fog"),
+            ("ShadowQualityDoc", "shadowQuality"),
+            ("SkyColorsDoc", "skyColors"),
+            ("SsaoDoc", "ssao"),
+            ("FxaaDoc", "fxaa"),
+            ("BloomDoc", "bloom"),
+            ("PhysicsDoc", "physics"),
+            ("SimulateDoc", "simulate"),
+            ("RenderDoc", "render"),
+        ] {
+            let fields: Vec<String> = struct_fields(src, sname)
+                .into_iter()
+                .filter(|(_, skip)| !skip)
+                .map(|(n, _)| n)
+                .collect();
+            let props = defs[dname]["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{dname} 没有 properties"));
+            for f in &fields {
+                assert!(
+                    props.contains_key(f),
+                    "JSON Schema 的 {dname} 少了字段 `{f}`（结构体改了要同步改 schema）"
+                );
+            }
+            for k in props.keys() {
+                assert!(
+                    fields.contains(k),
+                    "JSON Schema 的 {dname} 多了字段 `{k}`（scene_doc.rs 里没有它）"
+                );
+            }
+        }
+        for (ename, dname) in [
+            ("BodyKind", "bodyKind"),
+            ("ShapeKind", "shapeKind"),
+            ("JointKind", "jointKind"),
+            ("ActionKind", "actionKind"),
+            ("ProbeShapeDoc", "probeShapeKind"),
+            ("CombineRuleDoc", "combineRule"),
+        ] {
+            let variants = enum_variants(src, ename);
+            let declared: Vec<String> = defs[dname]["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{dname} 没有 enum"))
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect();
+            assert_eq!(
+                variants, declared,
+                "枚举 {ename} 与 schema 的 {dname} 不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn json_schema_is_self_consistent() {
+        let js = json_schema();
+        assert_eq!(
+            js["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        let defs = js["$defs"].as_object().expect("要有 $defs");
+        // 每个 `$ref` 都必须指向存在的 def（写错名字会让编辑器静默失去补全）
+        fn walk(v: &Value, defs: &serde_json::Map<String, Value>) {
+            match v {
+                Value::Object(m) => {
+                    if let Some(Value::String(r)) = m.get("$ref") {
+                        let name = r.rsplit('/').next().unwrap_or("");
+                        assert!(defs.contains_key(name), "悬空 $ref: {r}");
+                    }
+                    for x in m.values() {
+                        walk(x, defs);
+                    }
+                }
+                Value::Array(a) => {
+                    for x in a {
+                        walk(x, defs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(&js, defs);
+        // 每个 def 都声明"不许有额外字段"（否则 schema 说合法、`validate` 说非法）
+        for (name, d) in defs {
+            if d["type"] == "object" {
+                assert_eq!(
+                    d["additionalProperties"],
+                    serde_json::json!(false),
+                    "{name} 应当 additionalProperties: false"
+                );
+            }
         }
     }
 

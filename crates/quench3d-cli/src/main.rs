@@ -164,7 +164,11 @@ fn dispatch(args: &Args) -> i32 {
         }
         "schema" => {
             let started = Instant::now();
-            let value = schema::schema();
+            let value = if args.has("--json-schema") {
+                schema::json_schema()
+            } else {
+                schema::schema()
+            };
             finish(args, "schema", Ok(value), started, |v| {
                 println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
             })

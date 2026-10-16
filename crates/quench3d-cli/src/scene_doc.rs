@@ -2072,10 +2072,23 @@ impl SceneDoc {
             );
         }
         if self.version != VERSION {
-            out.push(Diagnostic::error(
-                "version",
-                format!("不支持的版本 {}，当前支持 {VERSION}", self.version),
-            ));
+            let hint = if self.version < VERSION {
+                // 版本迁移策略（见 docs/gap_analysis.md #19）：1 → 2 的唯一差别是
+                // v2 起 `objects[].parent` 生效。**没有 parent 的文件语义完全一样**，
+                // 所以"迁移"就是把版本号改成 2 —— 不需要、也不该维护一个迁移器。
+                format!(
+                    "版本 1 → 2 的唯一差别是 `objects[].parent` 在 v2 才生效；                     文件里没有 parent 时语义完全一样，把 version 改成 {VERSION} 即可"
+                )
+            } else {
+                format!("这个文件比当前版本新：请升级 quench3d（当前支持 {VERSION}）")
+            };
+            out.push(
+                Diagnostic::error(
+                    "version",
+                    format!("不支持的版本 {}，当前支持 {VERSION}", self.version),
+                )
+                .with_hint(hint),
+            );
         }
         if let Some(g) = &self.gravity {
             if !finite3(g) {

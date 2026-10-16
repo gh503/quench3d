@@ -457,6 +457,23 @@
 顺带改掉的两处**已经说不通的旧话**：`scene_to_json` 的跳过提示不再说"位置改动不会写回模型引用"；
 README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模型只能作为静态物体存在"两句也已按现状改写。
 
+### 8.13 「机器可读 JSON Schema + 版本策略」怎么落的（第 27 轮，已跑门禁）
+
+> **状态：已实施**。验证：`cargo test -p quench3d-cli --lib -- json_schema`、
+> `cargo test -p quench3d-cli --test cli_e2e -- json_schema`。
+
+| 层 | 改动 | 关键点 |
+|---|---|---|
+| CLI | `quench3d schema --json-schema` | draft 2020-12；`$defs` 覆盖 24 个类型 + 6 个枚举，全部 `additionalProperties: false`（与 `validate` 的"未知字段 = 错误"一致）。不带 `--json` 时直接打印 schema（好 pipe 给编辑器/CI） |
+| 一致性 | `json_schema_matches_the_source_structs` | `include_str!("scene_doc.rs")` 读源码，抽 `pub` 字段（含 `#[serde(rename)]`、识别 `#[serde(skip)]`）与枚举变体（按 `rename_all` 折算），与 schema 的属性名/枚举值**双向**对账。加字段忘了改 schema、或 schema 里留了删掉的字段，都会红 |
+| 自洽 | `json_schema_is_self_consistent` | 每个 `$ref` 必须指向存在的 def（写错名字 = 编辑器静默失去补全）；每个 object def 必须 `additionalProperties: false`（否则 schema 说合法、`validate` 说非法） |
+| 版本 | `version` 诊断 + 文档 | 1 → 2 的唯一差别是 `objects[].parent` 生效，**没有 parent 的文件语义完全一样**，所以迁移 = 改版本号；未来版本给"请升级 quench3d"。**不做迁移器**：维护一份没人需要的重写逻辑比一条说清差别的诊断更贵 |
+
+**没做（诚实边界）**：schema 里的值大多是"任意"（`true`）——**范围/互斥/交叉引用仍以
+`quench3d validate` 为准**，别把"schema 校验通过"当成"场景能跑"；不生成 draft-07；
+不支持外部 `$ref`（单文件自包含）；`format`/`minimum` 这类断言只有少数几处（`vec3` 的三元组、
+枚举、`version` 的 `minimum`）；没有 `--json-schema --defs object` 之类的"只取一节"开关。
+
 ### 8.12 「模板 + 实例」怎么落的（第 25 轮，已跑门禁）
 
 > **状态：已实施**。验证：`cargo test -p quench3d-cli --lib -- templates_and_instances`、

@@ -10,6 +10,19 @@
 
 ### 新增
 
+- **`quench3d schema --json-schema`：机器可读的 JSON Schema**（draft 2020-12，gap #19）。
+  给编辑器补全、CI 校验、agent 程序化自检用：`$defs` 覆盖 scene/object/shape/shapePart/
+  instance/material/ground/model/joint/coneLimit/action/probe/camera/lighting/pointLight/
+  fog/shadowQuality/skyColors/ssao/fxaa/bloom/physics/simulate/render + 6 个枚举，
+  全部 `additionalProperties: false`（与 `validate` 的"未知字段 = 错误"一致）。
+  不带 `--json` 时直接打印 schema 本身（好 pipe 进文件）。
+  **分工说清楚：schema 管"结构"，`quench3d validate` 管"语义"**（数值范围、互斥、交叉引用）。
+  手写 + **一致性测试**（不引新依赖）：`json_schema_matches_the_source_structs` 会 `include_str!`
+  读 `scene_doc.rs`，逐字段对账 24 个结构体与 6 个枚举——加字段忘了改 schema 一定红。
+- **版本迁移策略**：版本 1 → 2 的唯一差别是 v2 起 `objects[].parent` 生效，**没有 parent 的
+  文件语义完全一样**，所以"迁移"就是把 `version` 改成 2；诊断里现在直接给出这句话
+  （未来版本的文件给出"请升级 quench3d"）。不做迁移器——那会维护一份没人需要的重写逻辑。
+
 - **模板 + 实例：一段描述摆出很多物体**（gap #14）。以前堆 1000 个箱子就要在 JSON 里
   写 1000 份重复描述——agent 生成大场景时 token 直接爆。
   * `templates`: `{ "箱子": { "shape": {...}, "body": "dynamic", "material": "木头" } }`

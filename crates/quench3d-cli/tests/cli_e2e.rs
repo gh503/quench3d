@@ -3800,3 +3800,62 @@ fn templates_and_instances_make_several_independent_bodies() {
     // 顶上那个副本被推走（下面的两层还在原处）——"实例名是真实的刚体名"的证据
     assert!(moved > 0.1, "被推的副本该往 +x 走，实际 x = {moved}");
 }
+
+/// `schema --json-schema`：机器可读的 JSON Schema（编辑器补全 / agent 自检用）。
+#[test]
+fn json_schema_is_machine_readable() {
+    // 不带 --json 时直接打印 schema 本身（好 pipe 进文件 / 编辑器配置）
+    let raw = run(&["schema", "--json-schema"]);
+    assert_eq!(raw.code, 0, "stderr: {}", raw.stderr);
+    assert!(
+        raw.stdout.trim_start().starts_with('{') && raw.stdout.contains("$defs"),
+        "不带 --json 应当直接给 schema 本身：{}",
+        raw.stdout.chars().take(80).collect::<String>()
+    );
+    let r = run(&["schema", "--json-schema", "--json"]);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let v = r.json();
+    assert_eq!(v["ok"], true);
+    let s = &v["data"];
+    assert_eq!(
+        s["$schema"], "https://json-schema.org/draft/2020-12/schema",
+        "必须是标准 draft：{s}"
+    );
+    assert_eq!(s["$defs"]["object"]["additionalProperties"], false);
+    assert_eq!(s["$defs"]["scene"]["additionalProperties"], false);
+    // 新增过的东西必须在里面（templates / instances / shapes 都是最近几轮加的）
+    let obj = &s["$defs"]["object"]["properties"];
+    for key in ["template", "instances", "shape", "shapes", "ccd", "sensor"] {
+        assert!(obj.get(key).is_some(), "object 少了 {key}：{obj}");
+    }
+    let scene = &s["$defs"]["scene"]["properties"];
+    for key in ["templates", "objects", "joints", "actions", "probes"] {
+        assert!(scene.get(key).is_some(), "scene 少了 {key}：{scene}");
+    }
+    // 枚举与校验器同一份事实
+    let kinds: Vec<&str> = s["$defs"]["shapeKind"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["box", "sphere", "capsule", "cylinder", "plane", "convex"]
+    );
+    let joints: Vec<&str> = s["$defs"]["jointKind"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert_eq!(joints, vec!["fixed", "ball", "hinge", "distance", "slider"]);
+
+    // 不带 flag 的老用法不变：还是那套人读的语法表
+    let g = run(&["schema", "--json"]).json();
+    assert!(
+        g["data"]["scene"]["object"]["shape"].is_string(),
+        "不带 flag 时应当还是语法说明：{}",
+        g["data"]
+    );
+}

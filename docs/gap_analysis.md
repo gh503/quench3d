@@ -578,7 +578,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
    并把 `axis` 的"世界轴"说法改成实际语义（或先明确"仅当两刚体未旋转时等于世界轴"）。
 5. **物理参数透出**：`angular_velocity` / `linear_damping` / `angular_damping` / `gravity_scale` / `mass`
    （引擎 body.rs:66-80,416-498 全都有，纯漏接）。
-6. **`quench3d schema --json-schema`**：输出机器可读 JSON Schema（先手写 + 加一致性测试，避免引依赖），
+6. ~~**`quench3d schema --json-schema`**~~ ✅ 2026-10-18 第 27 轮：手写 + `include_str!` 源码对账测试（不引依赖），
    让 agent 能程序化校验与补全，而不是只能事后 `validate`。
 
 ### 3.7 落地顺序建议（`scene.json` 相关）
@@ -626,7 +626,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 16 | 相机完整参数 + 多相机（正交 / near·far / 多输出） | 格式 |
 | 17 | ~~光照透出：点光源 / 天空 / 雾 / 阴影质量参数~~ ✅ 2026-10-17：点光源（本来就有）、雾（`lighting.fog`，不写 = 关闭）、阴影质量（`strength`/`radius`）、天空颜色（`sky_colors`）。**没做**：阴影贴图分辨率（渲染器构造参数）、点光/聚光阴影（#24）、线性雾的起止距离（引擎只有指数雾） | 格式 |
 | 18 | 物理参数透出：角速度 / 阻尼 / gravity_scale / mass / sleep | 格式 |
-| 19 | 机器可读 JSON Schema（`--json-schema`）+ 版本迁移策略 | 格式 |
+| 19 | ✅ 2026-10-18：`quench3d schema --json-schema`（draft 2020-12，`$defs` 24 个类型 + 6 个枚举，全部 `additionalProperties: false`；`include_str!` 源码对账测试保证与结构体同步）；版本策略写进 README 与 `version` 诊断（1→2 = 改版本号，无破坏性字段变化）。**没做**：外部 `$ref` / draft-07 兼容、`--json-schema` 的 `format`/`minimum` 等语义约束（那些仍以 `validate` 为准） | 格式 |
 | 20 | 接触特征 ID + 持久流形 + 接触余量 | 引擎 |
 | 21 | ~~查询补全 + 查询加速结构~~ ✅ 2026-10-17：`raycast_all` / 任意形状 `overlap_shape` / 单向 `QueryFilter`（mask + 传感器开关）/ `distance_to` + `QueryIndex` 快照网格（射线 3D DDA）；CLI `query`、MCP `quench3d_query`、编辑器 F7 查询探针。**没做**：`shape_cast` 仍线性、CLI 不做批量查询、索引是快照（世界一动就回退线性） | 引擎 |
 | 22 | ~~物理材质与 combine mode、静/动摩擦分离~~ ✅ 2026-10-17：`CombineRule`（5 条：几何平均/平均/取小/取大/相乘，摩擦缺省几何平均、恢复缺省取大 = 老行为）、`static_friction`（缺省跟随动摩擦）、世界级 `physics.{friction_combine,restitution_combine,static_friction_speed}` + 物体级覆盖、编辑器滑块与下拉。判定用**施力前**速度（否则静摩擦永远不生效）。**没做**：材质的各向异性/滚动摩擦、`friction_combine` 在两端都显式且不同时只有一条确定性优先级（取 slot 靠前者） | 引擎 |

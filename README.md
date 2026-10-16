@@ -857,6 +857,11 @@ NaN 刚体  : 0
   **每个副本是一个独立物体/刚体**：不是共享刚体，也不是 GPU 实例化——所以关节/动作要写
   `本名#序号`，副本多了就是真实的物理开销（>64 个给警告）。
   校验会拦：模板不存在、`instances: []`、展开后名字重复、实例里的未知字段。
+* 机器可读的 JSON Schema：`quench3d schema --json-schema`（draft 2020-12，可直接喂给
+  编辑器补全 / CI 校验 / agent 自检）。**schema 管"结构"（哪些键、嵌套、不许有额外字段），
+  `quench3d validate` 管"语义"（范围、互斥、交叉引用）**——schema 过了不等于场景能跑。
+  版本策略：当前格式版本 2；版本 1 的文件把 `version` 改成 2 即可（1→2 的唯一差别是
+  `objects[].parent` 在 v2 才生效，没有 parent 的文件语义完全一样）。
 * `objects[].shape` 与 `objects[].shapes` **二选一**：单形状用 `shape`（老写法不变），
   一个刚体多个形状用 `shapes: [ { shape, position?, rotation_deg? } ]`。
   部件的 `position` / `rotation_deg` 是**相对刚体原点**的局部位姿；两个都写、空数组、
@@ -1053,7 +1058,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 443 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 446 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1553,6 +1558,9 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   CCD 是"中心射线 + 只截**法向**位移"（切向保留，所以沿墙滑行不受影响），
   没有旋转扫掠、只扫中心线，动态×动态只有"两边都开才互相拦"的语义，
   极快 + 极薄（一步能跨过整个物体）仍可能漏。
+* **JSON Schema 的边界**：它是**手写**的（加了一致性测试，不引 `schemars` 这类依赖），
+  值类型宽松（多为"任意"）、不含 `format`/`minimum` 等语义约束；不支持外部 `$ref`、
+  不生成 draft-07 版本；编辑器补全要靠它自己解析 `$defs`。
 * **模板/实例的边界**：没有**外部场景引用**（跨文件 include 组装，与资产搜索路径同源）；
   模板不能嵌套模板；编辑器能装载、但**存回时把 `instances` 摊平**成具体物体
   （行为与数量不变，文件变长——有意取舍，测试钉住）；`instances` 只覆盖位置/朝向/缩放/名字。
