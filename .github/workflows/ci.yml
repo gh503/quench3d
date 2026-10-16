@@ -86,9 +86,14 @@ jobs:
         run: cargo doc --locked --no-deps --workspace
 
       - name: 全部测试
-        # 按腿给开关：有 GPU 的腿（ubuntu / macOS）显式打开"需要真实 wgpu 上下文"的
-        # 测试 —— 覆盖不能因为 CI 假红而丢；没有 GPU 的 windows 腿给 "0"，
-        # 那几条测试整条不执行（会打印可读的跳过原因），不再让进程被原生崩溃打死。
+        # 按腿给开关：**能建出 wgpu 上下文**的腿显式打开"需要真实 wgpu 上下文"的测试 ——
+        # 覆盖不能因为 CI 假红而丢；没有 GPU 的 windows 腿给 "0"，那几条测试整条不执行
+        # （会打印可读的跳过原因），不再让进程被原生崩溃打死。
+        # 注意"能建出上下文"是**实测出来的腿的属性**，不是平台的属性：
+        # 实测 macOS 能（Metal，0.22s / 0.17s），ubuntu-latest **不能**（没有适配器，
+        # 走内层"没有可用的 GPU"分支，0.00s）—— 见 docs/overnight_report.md §52.6 ⑦。
+        # 之所以仍然在 ubuntu 上打开：这条腿将来若提供了软件光栅/适配器，它自动就是真覆盖；
+        # 而 windows 那条腿无论怎样都不能打开（一建上下文就原生崩溃）。
         env:
           QUENCH3D_GPU_TESTS: ${{ matrix.gpu_tests }}
         run: cargo test --locked --workspace

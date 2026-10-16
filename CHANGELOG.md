@@ -16,8 +16,10 @@
   `process didn't exit successfully`。两次实测：run 38935053883（`model_instances`）与
   run 38931539230（`backend_fallback`），同 sha 重跑即绿。
   现在这类测试改成**显式 opt-in**：设 `QUENCH3D_GPU_TESTS=1` 才执行，否则**整条测试体不执行**
-  并打印可读的跳过原因（不是删断言、也不是体内 `if false`）；CI 只在**能建出上下文**的
-  ubuntu / macOS 腿上打开它（覆盖不丢），windows 腿给 `"0"`。
+  并打印可读的跳过原因（不是删断言、也不是体内 `if false`）；CI 在 ubuntu / macOS 腿上打开它，
+  windows 腿给 `"0"`。**实测只有 macOS 腿真建得出上下文**（Metal，0.22s / 0.17s）；
+  ubuntu-latest 没有适配器（0.00s，走内层"没有可用的 GPU"分支），所以那两条断言在 ubuntu 上
+  仍是空的 —— 这与改动前一致（"覆盖本来就是 0"，不是"这次丢了覆盖"）。
   本地 `tools/gate.sh` 默认打开（本机有显卡），没有显卡的机器用
   `QUENCH3D_GPU_TESTS=0 tools/gate.sh` 关掉。
   验证：`cargo test -p quench3d-render --test backend_fallback` 与
