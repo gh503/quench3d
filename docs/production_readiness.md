@@ -884,6 +884,21 @@ e2e `scene_relative_model_paths_do_not_depend_on_the_working_directory` 全程**
 `validate` 会先拦下来——所以 `resolve_model_path` 的报错路径在 CLI 上是第二道防线，
 留着是为了让引擎 API 的调用方也拿到同样的信息。
 
+### 13.3 帮助文本与守卫测试（第 47 轮）
+
+`--help` 是人和 agent 唯一能看 CLI 旗标的地方（`schema` 只描述命令与场景字段，不描述旗标）。
+第 45 轮加 `--asset-path` 时**忘了写帮助**，而且没有任何东西会提醒——直到这轮自查才发现
+`--camera` 也一直没写。现在把 `print_help` 的字面量抽成 `help_text() -> String`（为了可测），
+加一条守卫：每个 `VALUE_FLAGS` 里的旗标**要么在帮助里出现，要么进 `DEFERRED` 白名单**，
+且白名单里不许留已经写进帮助的项（白名单只能变短）。
+
+```bash
+cargo test -p quench3d-cli --bin quench3d -- every_valued_flag
+```
+
+白名单里现在有 `--scene`、`--device`、`--ray`、`--overlap`、`--mask`、`--max`——
+我**没有**给它们编帮助文本：不清楚语义就写文档比不写更糟。这是一份诚实的欠账清单。
+
 ### 13.2 `--asset-path`（第 45 轮）：旗标要登记在**进程级**
 
 搜索路径写进场景是"这份场景自己的规矩"；`--asset-path` 是"这一次运行"的补充（渲染农场、CI、
@@ -900,3 +915,9 @@ e2e `scene_relative_model_paths_do_not_depend_on_the_working_directory` 全程**
 CLI → 绝对路径原样；不写旗标时序列化里不出现该键）+ e2e
 `cli_asset_path_flag_resolves_assets_without_touching_the_scene`（不加旗标必失败、加了必成功、
 `:` 分隔列表里有一个命中即可、**场景文件逐字节未变**），两者都不需要显卡。
+
+**第 47 轮的自我打脸**：我给"旗标必须写进帮助"写的守卫测试，第一版用 `help.contains(flag)`
+判"提到了没有"——`--max` 是 `--max-rounds` 的前缀，于是白名单里的 `--max` 被判成
+"已经写进帮助"，守卫自己报错。修法是按词匹配（把子串后面的字符也看一眼：后面跟 `-`
+或字母数字就不算独立出现）。**守卫测试自己也会写错**，而它写错的方向通常是"过松"或"过严"：
+过松等于没有，过严会在无关的改动上乱叫——两种都得靠立刻跑一遍才知道。

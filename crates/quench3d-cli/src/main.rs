@@ -1717,8 +1717,9 @@ fn finish(
     }
 }
 
-fn print_help() {
-    println!(
+/// 帮助文本（抽成函数是为了让测试能钉住"旗标必须在帮助里出现"）。
+fn help_text() -> String {
+    format!(
         r#"quench3d {version} — 纯 Rust 3D 引擎的命令行工具（渲染 / 物理 / 模型 / 大模型）
 
 用法
@@ -1740,6 +1741,8 @@ fn print_help() {
 
 常用参数
   --out <路径>           覆盖 render.output
+  --camera <名字>        渲染 `cameras` 段里的命名相机（缺省用 `camera` 段那台）
+  --asset-path <目录>    额外资源搜索路径：多个用 `:` 分隔（Windows `;`），只影响这次运行
   --width/--height <n>   覆盖渲染尺寸
   --steps <n>            覆盖 simulate.steps
   --trace <名字[,名字]>  simulate 时跟踪这些刚体的轨迹（位置/速度/倾斜）
@@ -1784,7 +1787,11 @@ fn print_help() {
   quench3d chat                              # 交互模式
 "#,
         version = schema::VERSION
-    );
+    )
+}
+
+fn print_help() {
+    print!("{}", help_text());
 }
 
 #[cfg(test)]
@@ -1793,6 +1800,51 @@ mod tests {
 
     fn parse(v: &[&str]) -> Args {
         Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn every_valued_flag_is_in_help_or_explicitly_deferred() {
+        // 旗标加了、帮助里却没写 → 用户与 agent 只能靠猜（`schema` 目前不描述旗标）。
+        // 钉死规则：要么在帮助里出现，要么写进下面的白名单。
+        // 白名单是"已知没写"的**诚实清单，只应该变短**（这些多数是 query/bench 用的）。
+        const DEFERRED: &[&str] = &[
+            "--scene",
+            "--device",
+            "--ray",
+            "--overlap",
+            "--mask",
+            "--max",
+        ];
+        // 按"词"匹配，不能只看子串：`--max` 是 `--max-rounds` 的前缀，
+        // 用 contains 会把 `--max` 误判成"已经写进帮助"（这个误判正是第一版守卫的 bug）。
+        fn mentions(help: &str, flag: &str) -> bool {
+            help.match_indices(flag).any(|(i, _)| {
+                let rest = &help[i + flag.len()..];
+                !rest.starts_with('-')
+                    && !rest
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphanumeric())
+            })
+        }
+        let help = help_text();
+        let mut missing = Vec::new();
+        for flag in VALUE_FLAGS {
+            if !mentions(&help, flag) && !DEFERRED.contains(flag) {
+                missing.push(*flag);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "这些带值旗标既没写进 --help 也不在白名单里：{missing:?}"
+        );
+        // 白名单不许留已经写进帮助的项（白名单只能变短）
+        for flag in DEFERRED {
+            assert!(
+                !mentions(&help, flag),
+                "{flag} 已经写进帮助了，请从白名单里删掉"
+            );
+        }
     }
 
     #[test]

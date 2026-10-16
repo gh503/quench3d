@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **`--help` 补上 `--camera` 与 `--asset-path`**，并加守卫测试
+  `every_valued_flag_is_in_help_or_explicitly_deferred`：每个带值旗标要么写进帮助，
+  要么进"已知没写"白名单（白名单只允许变短；`--scene/--device/--ray/--overlap/--mask/--max`
+  仍在里面）。`schema` 目前不描述 CLI 旗标，帮助是人和 agent 唯一能看的地方，
+  之前"加了旗标忘记写帮助"没有任何东西拦得住。
+
 ### 新增
 
 - **`--asset-path <目录>`：一次运行用的额外资源搜索路径**（gap #11 的运行半）。多个目录用
