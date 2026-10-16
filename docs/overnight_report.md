@@ -478,6 +478,21 @@ CCD 只扫**中心线**（球擦着墙角过去、或细长物旋转扫过薄壁
 
 ---
 
+## 30. 第 31 轮：相机参数核对（gap #16 收窄成"只差多相机"）
+
+用第 29 轮定下的四问核对 gap #16：**正交投影**不是"格式里有字段"而已——
+`camera.orthographic_height` 真的被交给 `Projection::Orthographic`（`orthographic_rh`），
+`near`/`far` 进投影矩阵，`fov_deg`/`distance`/`yaw_deg`/`pitch_deg`/`frame_scene`
+也都齐；e2e `camera_clip_planes_and_orthographic_projection_are_wired` 同时钉住了
+"参数被采纳"和"`near > far` 要报错"两条路径。所以这一行从"一堆待做"收窄成**只差多相机/多输出**。
+
+**为什么不当场把多相机做了**：它不是加个字段——要同时动场景格式（`cameras[]` 或
+`render.outputs[]`，还要跟现有单个 `camera` 保持向后兼容）、渲染循环（每台相机各渲一遍、
+输出命名）、CLI 报告（多份 output/digest）三处，每一处都要有测试。塞进核对轮会变成
+"改一半"，比不做更糟。收窄 + 写清三处改动点，下一轮单独做。
+
+**验证**：本轮只动文档，仍跑满六段门禁（448 测试 0 失败、wasm 11,742,106 字节）。
+
 ## 29. 第 30 轮：接触余量（gap #20 第二条腿）
 
 接触余量（speculative margin）解决的是"高速物体在还没接触的那一帧里直接穿进去半个身位"：
