@@ -164,7 +164,7 @@
 | 许可与依赖审计 | 企业合规 | 无 `deny.toml` / SBOM / `cargo-audit` | ❌ |
 | 变更日志 | 全部 | **本轮**：`CHANGELOG.md` | ✅（本轮） |
 | 贡献指南 | 开源协作 | **本轮**：`CONTRIBUTING.md`（含门禁命令与验证配方） | ✅（本轮） |
-| 错误模型（可机读错误码） | 生产集成 | **本轮**：校验诊断每条都带稳定 `code`（17 个码，文档表 + schema + 系统提示三处同步，有对账测试）；顶层 `error.kind` 仍是粗粒度（`report.rs` 不在本轮围栏内）。详见 §8.15 | 🟡 |
+| 错误模型（可机读错误码） | 生产集成 | **本轮**：校验诊断每条都带稳定 `code`（**第 60 轮：18 个码**，文档表 + schema + 系统提示三处同步，有对账测试）；顶层 `error.kind` 仍是粗粒度（`report.rs` 不在本轮围栏内）。详见 §8.15 | 🟡 |
 | 文档完整度 | 全部 | README 1300+ 行、10 个示例；缺"色彩管理 / 单位轴向 / 确定性边界"三类**声明**（→ H1/H5/H6） | 🟡 |
 | 测试规模 | 全部 | 337 → **本轮 352**（+历史 6、+gizmo 单元 7、+往返 2），0 失败 | ✅（本轮） |
 | CI 矩阵 | 全部 | `test`（ubuntu / macOS / Windows）+ `wasm32-unknown-unknown` 四个 job，另有 Pages 工作流 | ✅ |
@@ -196,7 +196,7 @@
 | 库级 SDK | Unity/Unreal C++/C# | Rust crate 门面 `quench3d`（`Engine`/`World`/`Scene`），wasm 侧 `start()`/`on_scene_file()` | 有 | **已达标** | ✅ |
 | 自定义渲染 pass / 插件 | Unity SRP / Unreal RDG | **无**（`renderer.rs` 固定三步链，无 Pass trait / render graph） | 能插入一个自定义后处理并出图 | **2–4 人月** | ❌ |
 | 热重载（改脚本不重启） | Unity / Godot | 无 | 改脚本 1 秒内生效 | **1–2 人月** | ❌ |
-| 稳定错误码 | 生产集成 | **本轮**：**校验诊断**的 232 个出错点全部有稳定 `code`（17 个码，`docs/error_codes.md` + `quench3d schema --json` 的 `error_codes` + 系统提示三处同步，逐格对账测试）；运行期错误（`RunError`）与 `error.kind` 仍未细分 | 每个失败路径有稳定 code 且文档化 | 校验路径**已完成**；运行期错误剩余约 0.5 人月 | 🟡 |
+| 稳定错误码 | 生产集成 | **本轮**：**校验诊断**的 252 个出错点全部有稳定 `code`（**第 60 轮复核**：18 个码，`docs/error_codes.md` + `quench3d schema --json` 的 `error_codes` + 系统提示三处同步，逐格对账测试）；运行期错误（`RunError`）与 `error.kind` 仍未细分 | 每个失败路径有稳定 code 且文档化 | 校验路径**已完成**；运行期错误剩余约 0.5 人月 | 🟡 |
 
 **结论**：**没有脚本层**是"给 agent 用"这条定位上的真实缺口 —— 目前 agent 只能通过 CLI/MCP 的**离散命令**驱动，不能写"每步都对接触力做判断"这种逻辑。这是下一批里性价比很高的一项（不需要图形学）。
 
@@ -363,7 +363,7 @@
 3. 场景格式迁移器 + "v1 文件读进 v2"测试；
 4. 色彩管理（H1）与确定性边界（H5）、单位约定（H6）写成正式声明文档；
 5. ~~错误码：CLI 错误加稳定 `code` 字段。~~ ✅ **2026-10-19 第 55 轮**：**校验诊断**的
-   `diagnostics[].code` 已落地（17 个码 + 文档表 + schema + 系统提示 + 对账/稳定性测试 + 变异验证，
+   `diagnostics[].code` 已落地（第 60 轮：18 个码 + 文档表 + schema + 系统提示 + 对账/稳定性测试 + 变异验证，
    见 §8.15）。**仍缺**：顶层 `error.kind` 与运行期 `RunError` 的细分（要动 `report.rs`）。
 
 **第三晚（P2，编辑器体验闭环）**：
@@ -474,7 +474,7 @@ README 的 §1.1 与 §9 里"编辑器没有贴图/灯光编辑界面""导入模
 
 | 层 | 改动 | 关键点 |
 |---|---|---|
-| 数据 | `Diagnostic.code: ErrorCode`（`scene_doc.rs`） | `code` 说**性质**、`path` 说**位置**、`message` 只给人读。码表故意窄（17 个），不是"一条诊断一个码"——后者既不稳定也没法穷举。老 JSON 没有 `code` 时反序列化成兜底码 `invalid`（`#[serde(default)]` 向后兼容） |
+| 数据 | `Diagnostic.code: ErrorCode`（`scene_doc.rs`） | `code` 说**性质**、`path` 说**位置**、`message` 只给人读。码表故意窄（第 60 轮：18 个），不是"一条诊断一个码"——后者既不稳定也没法穷举。老 JSON 没有 `code` 时反序列化成兜底码 `invalid`（`#[serde(default)]` 向后兼容） |
 | 生成 | `define_error_codes!` 宏 | **一处声明**同时生成枚举、`ALL`、`TABLE` 与 `as_str`/`meaning`/`agent_action`。这样"加了变体忘了加总表"在结构上不可能（`as_str` 的 `match` 穷尽）；线上名字来自同一个字面量，不手写第二份 |
 | 分类 | `classify_serde_code` 挂在 `check_at` 这个**唯一出口** | 未知字段/类型不对/枚举拼错/缺字段全部从这里出去，所以字段级诊断不可能漏码。散在几十个 `check_*` 里各写一遍必漏 |
 | 调用点 | 232 个 `Diagnostic::error/warn` 全部改成 `error_code`/`warn_code` | 两参数的老构造器**保留**（围栏外的 `generate.rs` 测试夹具还在用），它给兜底码 `invalid` |
@@ -1514,7 +1514,7 @@ cargo check -p quench3d-editor            # 编辑器是 wasm+桌面双目标，
 |---|---|---|
 | 新增 `axis_a`/`axis_b`，**不写 = 回落 `axis`** | 老场景逐位不变（e2e 里钉了"只写 `axis`"与"两端显式抄同一根轴"的 `states` **逐字节相同**）；只写一端也合法，另一端回落 | "必须两端都写"会破坏所有已有场景；"`axis` 是两端缺省值 + 两端可覆盖"其实就是现在这条，只是文档要写清楚 |
 | **不**为"同时写了 `axis` 与 `axis_a/axis_b`"报 `ineffective` | `axis` 的语义就是"两端缺省轴"；两端都显式给时它自然不参与，不是"写了不生效" | 报了会误伤"两端都写了、另外留一根缺省轴"的合理写法 |
-| 新诊断**复用**三个已有码（`out_of_range` / `ineffective` / `suspicious_value`），不加新码 | 码表故意做得窄：码说**性质**、`path` 说位置。"零向量"就是 `out_of_range`，"写了不生效"就是 `ineffective`，"合法但很可能不是本意"就是 `suspicious_value` | 为"轴"单独造码会让码表膨胀、agent 也没法穷举；`docs/error_codes.md` 的覆盖计数因此不变（仍是 232 个调用点 / 17 个码） |
+| 新诊断**复用**三个已有码（`out_of_range` / `ineffective` / `suspicious_value`），不加新码 | 码表故意做得窄：码说**性质**、`path` 说位置。"零向量"就是 `out_of_range`，"写了不生效"就是 `ineffective`，"合法但很可能不是本意"就是 `suspicious_value` | 为"轴"单独造码会让码表膨胀、agent 也没法穷举；`docs/error_codes.md` 的覆盖计数因此不变（第 60 轮复核：252 个调用点 / 18 个码；这一轮新增的 18 个调用点全在 `include` 合并里，见 §14（第 60 轮）） |
 | 朝向差用各端物体的 `rotation_deg` 直接算，**不沿父链累乘** | 关节两端**必须有刚体**，而"带刚体的物体不能挂 `parent`"（`objects[].parent` 的校验已经拦死）→ 它们的 `rotation_deg` 就是世界朝向 | 沿父链累乘要再实现一份层级求解（顺序、成环、局部/世界语义），多一份实现就多一个漂移点；真要支持"带父链的关节端"时再抽公共函数（那要先放开"带刚体不能有父物体"） |
 | 阈值 **10°** | 两端朝向差 10° 以内，共用一根局部轴带来的轴间夹角误差在求解器增益下几乎看不出来；超过就该吵 | 阈值太小会对"故意轻微错开"的场景刷警告；太大（如 45°）会漏掉 20° 这种真错 |
 
@@ -1732,3 +1732,144 @@ CI 的 **windows 腿不再被"创建真实 wgpu 上下文"的测试打死**（`0
 不是任何断言；同一轮 windows/ubuntu 都是绿的。修法与完整证据见
 `docs/overnight_report.md` §54.8。**这条也说明：跨腿矩阵要留，一行只在一个平台上错的脚本
 单腿 CI 抓不到。**
+
+## 14. 第 60 轮：跨文件组合 `include`（gap #13 最后一件大件）—— 取舍 / 不变量 / 边界
+
+### 14.1 这一轮修的是什么（一句话）
+
+场景格式第一次能**拆成多个文件**：`include: ["parts/wall.json"]` 在装载时把片段合并成
+一份自包含文档（片段还能再 `include`），于是「一份材质/模板/关节组被多个场景复用」
+不必再复制粘贴 JSON，agent 生成大场景时也不用把同一段 token 反复吐出来。
+
+### 14.2 取舍（为什么这样做 / 为什么不那样做）
+
+| 选择 | 为什么 | 为什么不选另一条 |
+|---|---|---|
+| **装载期**合并成一份文档，而不是运行期"两份世界拼起来" | 合并之后所有既有路径（校验、`build_world`、探针、报告、编辑器导出）看到的都是一份普通文档，**没有第二套语义**；引擎侧一行都不用改 | 运行期拼接要在物理世界、渲染器、报告、探针各写一遍"来自哪份文件"，一处漏写就是静默丢内容 |
+| 片段只贡献**可合并的段**；具名表重名 = `duplicate_name` 错误 | 静默覆盖是最坏的形态（引用会挂到错的东西上，报告里还看不出）；错误信息给出**两份文件**的路径 | 后写覆盖先写：写场景的人看不到自己覆盖了什么；"重名给警告、后者赢"同样静默 |
+| 根独有的段（`ground`/`camera`/`lighting`/`simulate`/`render`/`gravity`/`physics`/`name`/`assets`）写在片段里 = `invalid_value` 错误 | 这些段只有一个实例，"谁赢"没有正确答案；宁可当场报错，也不做含糊的合并 | 让根的赢：片段作者以为自己的光照生效了（跑起来却不生效），与"写了不生效"是同一类坑 |
+| 数组按「**本文件自己的内容在前**，被包含的在后」追加 | 重名冲突永远报在"后并进来的那一份"（片段）上，读错误的人先看到 `include[0].materials.木` 而不是怀疑根文件；与自己写在前面的直觉一致 | 片段在前（我第一版就是）：同一个冲突会报在根文件的 `$.materials.木` 上并说"已在 parts/… 定义"——指向的却是根文件那一行，误导 |
+| 片段的**资源**相对路径按**片段自己的目录**重定基一次，`include` 路径本身不重定基 | 片段搬到别的目录时贴图跟着走；而 `include` 的路径语义是"相对于写这一行的文件"，重定基反而会指错 | 全部按根目录解析：片段不能自带资源目录（`parts/wall.json` + `parts/tex/…` 会找不到）；两套解析规则并存则是漂移之源 |
+| 同一个文件在一次解析里**只并入一次**（菱形包含），并且给一条 `ineffective` 警告 | 两次并入同一份片段必然重名报错（对用户是噪音），但静默跳过又违反"不静默"原则 → 跳过 + 说出来 | 并入两次：重名错误把"合法写法"变成"不可用"；静默跳过：用户以为摆了两份 |
+| 编辑器存盘时**内联**片段并清掉 `include`（而不是保留 `include` 或拒绝存盘） | 编辑器编辑的是合并后的世界，`objects` 会按引擎重建：保留 `include` → 下次载入重复并入；只清不合并 → 片段里的 `models`/`joints`/材质被丢掉。内联是唯一两条错法都不犯的解 | 拒绝存盘会毁掉「改一改再存」这条链；"另存为片段"是更大的功能（见 14.4 欠账） |
+
+### 14.3 不变量与守着它们的测试
+
+| 不变量 | 判据（都在 CI 上、都不需要显卡） |
+|---|---|
+| **不写 `include` = 行为逐字节不变** | `scene_doc.rs::include_tests::scenes_without_include_are_byte_identical`（`to_json_pretty` 字符串相等）；`cli_e2e.rs::scenes_without_include_are_unaffected`（退出码/诊断全同） |
+| **合并 == 手写一份单文件** | `cli_e2e.rs::include_split_scene_simulates_bit_identically_to_a_single_file`：多文件版与单文件版的 `states` 逐物体比 `position`/`rotation`（f32 位相同），外加 `lowest_y`/`max_speed`/`bodies` |
+| **片段内容不会在存盘时丢掉** | `quench3d-editor/tests/include_export.rs`：`export_base_doc` 合并后材质/物体/关节都在、`include` 为空、有一句"内联了谁"的说明；坏片段 → `Err`（拒绝写出一份丢内容的文件） |
+| **编辑器导出不会绕过合并** | 同文件的源码结构守卫：`scene_to_json` 必须走 `export_base_doc`，材质继承不许查未合并的底稿（两条都由变异红-绿验证：把导出改回 `loaded.clone()` → 红；材质继承改回 `doc.base_doc` → 红） |
+| **片段的资源路径按片段目录解析** | 单元测试断言重定基后的**路径字符串**正好是 `parts/tex/brick.png`；e2e 里贴图**只**放在片段目录（空操作重定基 → `asset_not_found`，变异验证过） |
+| **每个诊断都有稳定码** | `diagnostic_codes_are_stable_and_specific` 的覆盖集里加了 `include_cycle` 的真实触发（两个互相包含的文件），反向断言"覆盖集 == 码表 − `invalid`"（18 个码） |
+
+**变异验证**（都是"改坏 → 红 → 改回 → 绿"，实测）：① 重定基改空操作 → 单元 + e2e 各红一条；
+② 重名静默覆盖 → 单元红；③ 让 `merge_own` 搬运 `include`（模拟"将来顺手加了它"）→ 3 条红；
+④ 编辑器绕过 `export_base_doc` / 材质继承查未合并底稿 → 各红一条。
+
+### 14.4 边界与欠账（这一轮**没有**做的）
+
+- **`include` 是装载期的组合，不是运行期链接**：合并后引擎/报告里没有"片段"这个概念，
+  也没有 `variant`（同一份片段按场景覆盖字段）、没有条件包含、没有"覆盖根段"的写法。
+- **只有"资源路径"会重定基**，`include` 自己写的路径不重定基（它本来就是相对写这一行的文件的）。
+- **编辑器只能"装 + 存（内联）"**：没有"另存为片段"、没有片段面板；存盘会把片段内容复制进根文件
+  （片段文件本身不动）——文件会变长、之后的修改要在根文件里做，这一点会写进存盘报告。
+- **纯内存入口 `from_json`（浏览器/wasm）没有场景文件目录**：那里的 `include` 相对路径按工作目录
+  解析，浏览器里基本会失败。**这条没在真浏览器里验证过**（本轮只跑了 `check_web` 的构建/导入检查）。
+- **没有资源去重报告**：两份片段引同一张 4K 贴图，装载时会各自解析、渲染器也各上传一次；
+  "合并后一共用了哪些资源"没有报告（gap #11 的尾巴）。
+- **没有"片段里 include 深度/文件数"的规模报告**：只有 16 层上限与 `limit_exceeded`。
+- **跨文件重名的"物体"报在合并后的下标上**：`materials`/`templates`/`cameras` 重名会点名两份文件
+  （`include[0].materials.木`），但 `objects` 是数组、合并后没有来源信息，重名物体的诊断是
+  `objects[3].name`（有名字、没有文件）—— 见 `docs/error_codes.md` 的 `duplicate_name`。
+  想精确定位只能自己按 `include` 顺序数（这是明确的欠账）。
+- **`include` 与 `assets.search_paths` 的关系只覆盖到"候选顺序"**：片段自己的
+  `assets.search_paths` 是**错误**（根独有的段），所以片段不能声明自己的搜索路径 ——
+  它靠"资源路径按自己目录重定基"覆盖同一个需求。
+
+## 15. 第 61 轮：Wayland 上关窗口即 SIGSEGV —— 一个只有真跑 GUI 才看得见的析构顺序 bug
+
+### 15.1 症状（用户实测，本机真 NVIDIA 卡 + Wayland）
+
+`./target/debug/quench3d-editor` 启动一切正常（Vulkan 初始化成功、第一帧渲染成功），
+**用户主动关闭窗口**时进程 `SIGSEGV` 死掉：`segmentation fault (core dumped)`，退出码 **139**。
+**与 GPU、场景内容无关** —— 在 llvmpipe（软件 Vulkan）下同样复现。
+
+这条崩溃最讨厌的地方是：它落在**"正常退出"**这条路上。所以"跑起来没事、第一帧也对"
+这一整套既有验证完全骗过了它 —— 退出路径以前从未被真正走过。
+
+### 15.2 回溯（gdb，本机复现）
+
+```text
+Thread 20 "smithay-clipboa" received signal SIGSEGV, Segmentation fault.
+#0  libwayland-client.so.0
+#1  wl_proxy_destroy
+#2  wayland_backend::sys::client_impl::InnerBackend::destroy_object_inner  (src/sys/client_impl/mod.rs:561)
+#3  wayland_backend::sys::client_impl::InnerBackend::send_request           (src/sys/client_impl/mod.rs:774)
+#4  wayland_client::conn::Connection::send_request<ZwpPrimarySelectionDeviceManagerV1>
+#5  ZwpPrimarySelectionDeviceManagerV1::destroy
+#6  core::ptr::drop_glue<smithay_client_toolkit::primary_selection::PrimarySelectionManagerState>
+#8  core::ptr::drop_glue<smithay_clipboard::state::State>
+#9  smithay_clipboard::worker::worker_impl                                  (src/worker.rs:101)
+```
+
+### 15.3 根因：不是剪贴板坏了，是**析构顺序**错了
+
+每一环都能在源码里逐行核对，没有一处是猜的：
+
+| # | 事实 | 出处 |
+|---|---|---|
+| 1 | `EventLoop::run_app(self, app)` **按值吃掉** EventLoop（不是 `&self`） | `winit-0.30.13/src/event_loop.rs:264` |
+| 2 | 连接是 `EventLoop` 的字段 → winit 自己的 Wayland 连接在 `run_app` **内部**就析构了 | `platform_impl/linux/wayland/event_loop/mod.rs:69` |
+| 3 | 调用点 `event_loop.run_app(&mut EditorApp::new(config))?` 里的 `EditorApp` 是**临时值** → 要到整条语句结束才析构 → **晚于**连接 | `crates/quench3d-editor/src/app.rs` 的 `run()` |
+| 4 | `egui-winit` 只在 `RawDisplayHandle::Wayland` 时才建 `smithay-clipboard`，且用 `Backend::from_foreign_display(display)` 包住 winit 的裸 `wl_display*`（**不持有所有权、也不负责释放**） | `egui-winit-0.37.0/src/clipboard.rs`（`init_smithay_clipboard`）、`smithay-clipboard-0.7.3/src/lib.rs`（`Clipboard::new`） |
+| 5 | worker 线程析构 `PrimarySelectionManagerState` 时发 `destroy` 请求，并在 `wl_proxy_destroy` 里碰 `proxy->display` | `smithay-client-toolkit` + `wayland-backend` 的 `destroy_object_inner` |
+
+1+3 让"剪贴板析构"跑在"`wl_display` 已被 winit 释放"**之后**；4+5 让这一步真的去碰那个
+已经没了的 `wl_display` → 释放后使用。**崩溃点是 `worker.rs:101`（`State` 的析构），
+不是任何一行业务代码**，这也是为什么"看代码找 bug"很难找到它 —— 错的不是代码，是顺序。
+
+### 15.4 取舍
+
+| 选择 | 为什么 | 为什么不选另一条 |
+|---|---|---|
+| 在 `ApplicationHandler::exiting()` 里 `self.inner.take()`，把窗口/GPU/剪贴板**按序释放** | `exiting` 是 winit **唯一**保证"事件循环即将退出、但 Wayland 连接仍然有效"时回调的地方：后端在 `pump_events` 里派发 `Event::LoopExiting`（`platform_impl/linux/wayland/event_loop/mod.rs:231`），此刻 `self.connection` 仍在作用域内；其后紧跟一次 `roundtrip()`，winit 自己的注释就写着「如果应用刚丢掉窗口，得确保最后的请求发给了合成器」—— 在 `exiting` 里丢窗口**正是它设计的用法** | 不释放（什么都不做）：就是本 bug。放在 `run()` 返回之后释放：那时 EventLoop 已被吃掉、连接已死，做不到 |
+| 释放**只在 Wayland 触发**，判据 = `RawDisplayHandle::Wayland` | 判据与 `egui-winit` 决定"要不要建 `smithay-clipboard`"的判据**是同一个**，所以"要释放"与"有这个对象"严格等价；X11 下没有这个对象，也就没有这个顺序问题 | 无条件释放：实测会把 winit 0.30.13 X11 **既有的** `BadWindow` panic 从"多数 101"变成"必然 134(SIGABRT)"（基线 7 次 = 101×6/134×1；无条件释放 3 次 = 134×3）。既然 X11 上修不到任何东西，就不该去动它 |
+| 用**显示句柄**而不是环境变量判断后端 | `WAYLAND_DISPLAY`/`WAYLAND_SOCKET` 只反映 winit 的**选路**，嵌套合成器等场景下未必与实际句柄一致；显示句柄才是权威 | 读环境变量：多一条"判据与实际后端不一致"的失败路径，且与 `egui-winit` 的判据不同源 |
+| **不升级依赖**（否决 brief 的优先级 (a)） | 本仓库永远 `--offline`。离线能用的**只有** cargo 缓存里已有的 `.crate`：`smithay-clipboard` 只有 **0.7.3**（就是 `Cargo.lock` 里这个），`wayland-client` 只有 0.31.15、`wayland-backend` 只有 0.3.17、`smithay-client-toolkit` 只有 0.19.2/0.20.0。而且本地 registry **索引**里 `smithay-clipboard` 的最大版本就是 0.7.3（`wayland-client` 0.31.15 / `wayland-backend` 0.3.17 同样是索引里的最大版本）—— **索引里根本不存在更新的版本可升**。（本机无法联网复核上游最新版，`web_search` 端点不可用；但"缓存里没有"这一条已经足够判死 (a)。） | 改 `Cargo.toml`/`Cargo.lock` 指向一个缓存里不存在的版本：`--offline` 下直接构建失败 |
+| 不用 `std::process::exit(0)` 跳过析构（否决 brief 的 (c)） | winit 给了一个**正确的钩子**，就该用它。`process::exit` 是**绕过**这个顺序问题而不是修好它：它会让 GPU/Vulkan 一起失去正常拆解路径（连 `wgpu` 的 `Drop` 都不跑）；而且 `std::process::exit` 在 **wasm32 上不存在**，要多一层 `#[cfg(not(target_arch = "wasm32"))]` 门控（本 crate 的 `web_client` 就是 wasm 腿，门禁会编它） | 跳过析构："进程马上就结束了"听着有理，但它把"顺序错了"这件事**藏起来**了；下次再加一个持有裸 `wl_display*` 的依赖，同样的崩溃会以新的形状回来 |
+| **不捕获 / 不忽略 SIGSEGV** | 那是掩盖手段：真出了别的越界（渲染、物理、驱动）就再也看不见了，而"退出时崩"恰恰是最容易用 `signal(SIGSEGV, SIG_IGN)` 糊过去、也最不该糊的一类。本 bug 有明确的、可验证的正确修法，没有任何理由去掩盖 | 装 `SIGSEGV` handler：会把"内存错误"变成"随机行为"；而且 SIGSEGV 之后进程状态已不可信，继续跑等于掩盖 bug |
+
+### 15.5 不变量与守着它们的测试
+
+| 不变量 | 判据 |
+|---|---|
+| **关窗口 → 退出码 0，且没有 SIGSEGV** | 真跑 GUI（本机 Wayland）：同一配方修复前 139 / 修复后 0（复跑 4/4 全 0）；gdb 下修复后 `[Inferior 1 (process N) exited normally]`、`SIGSEGV` 出现 **0** 次 |
+| **自动退出钩子默认关闭** | `crates/quench3d-editor/tests/exit_hook.rs`（6 条，**不需要显卡**）：不设 / 空白 / `0` / 非数字 → 一律"不自动退出"；只有正整数才是毫秒数；解析是纯函数、可重复。另有真跑证据：不设 / `=0` / `=abc` 三种情况都跑满 `timeout`（退出码 124）= 确实没有自动退出 |
+| **钩子走的是"关窗口"那条路，不是另一条** | 钩子投的是**真的 `WindowEvent::CloseRequested`**（`handle_window_event` 里与用户点关闭按钮**同一个 match 分支**），不是直接调 `event_loop.exit()` |
+| **X11 的既有行为没被本次改动扰动** | 真关窗口（X11/XWayland，`xdotool windowclose` = 真的 `WM_DELETE_WINDOW`）：基线 7 次 = 101×6/134×1；加门控后 4 次 = **101×4**，且 `exiting` 的释放日志一次都没出现（门控确实为假） |
+| **变异红-绿** | 钩子解析两条变异：`0` 不再等于关闭 → `zero_means_off` **红**；默认不再关闭（`raw?` → `unwrap_or("3000")`）→ `unset_or_blank_means_off` **红**；还原 → **绿**（6 passed）。修复本身也做过变异：把 `exiting` 体摘成空实现 → 同一配方 **139 + SIGSEGV**；还原 → **0** |
+
+### 15.6 边界（没做的、没验证的）
+
+- **CI 覆盖不到这条路径**：所有 CI runner 都没有显示器/合成器，`cargo test` 里也拿不到
+  `WindowEvent::CloseRequested`。CI 能证的只有"wasm32 腿编得过、原生腿编得过、
+  不引入 clippy/测试回归"。**"关窗口 → 退出码 0"这件事只有真跑 GUI 能证** ——
+  这也是为什么要留下那个默认关闭的钩子（配方见 `docs/overnight_report.md` §56）。
+- **X11/XWayland 的关窗口 panic 没修，也没查根因**：`winit-0.30.13` X11 的
+  `BadWindow` panic（`event_processor.rs:1324` "Failed to unfocus input context"，
+  偶尔先在 `util/geometry.rs:188` 的 `TranslateCoordinates` 上炸），退出码 101 或 134。
+  这是**上游 winit 的缺陷**，与本次修复无关（基线就有），属于**明确的欠账**。
+  本次只做到"不去扰动它"，没有做到"修好它"。
+- **没验 X11 下"用户的真实点关闭按钮"之外的形式**：X11 侧我用的是
+  `xdotool windowclose`（发真的 `WM_DELETE_WINDOW`，与点关闭按钮同一条 X 协议），
+  没有在真 X11 会话里用鼠标手点。Wayland 侧用的是钩子投递的真 `CloseRequested`
+  （合成器发的就是这个事件），**没有**用鼠标手点 —— 手点在自动化里做不到。
+- **`smithay-clipboard` 的"裸 `wl_display*` 生命周期契约"仍然靠自觉**：
+  本次只是把析构挪到连接还活着的时候。`smithay-clipboard 0.7.3` 的 `Clipboard::new`
+  至今仍是 `unsafe fn` + "display 必须比 Clipboard 活得久"的调用方义务；
+  上游若哪天改了这个契约，这里需要跟着复核。
+- **没做**：给退出路径加一条"析构顺序"的通用守卫（比如断言 `exiting` 一定被调用过）。
+  现在的守卫是"真跑 + 日志行"，对自动化不够强 —— 但比"假装 CI 能覆盖"要好。
+

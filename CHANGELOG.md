@@ -54,6 +54,44 @@
 
 ### 新增
 
+- **场景可以拆成多个文件了（`include`）** —— gap #13「多文件组合 / 跨文件 prefab」，
+  这是 gap 分析里最后一件"格式层大件"。
+  以前一份场景只能是一个文件：材质、模板、关节组想被多个场景复用，只能复制粘贴 JSON；
+  agent 生成大场景时同一段描述要反复吐 token，改一处要改多处。
+  - **格式**（`crates/quench3d-cli/src/scene_doc.rs`）：顶层 `include: ["parts/wall.json", ...]`
+    （可选）。相对路径以**写这一行的那个文件**所在目录为基准，候选位置与贴图/模型同一套
+    （文件目录 → `assets.search_paths` → `--asset-path` → 工作目录 → 引擎搜索路径）；
+    片段可以再 `include`（最多 16 层）；**同一个文件在一次解析里只并入一次**（菱形包含会得到
+    一条 `ineffective` 警告，不是静默跳过）；成环 → 新码 `include_cycle`（消息里给完整链条）。
+  - **合并语义**：片段只能贡献**可合并的段** —— `materials`/`templates`/`cameras`
+    （具名表，**重名 = `duplicate_name` 错误**，消息里点名两份文件）与
+    `objects`/`models`/`joints`/`actions`/`probes`/`animations`（数组，按声明顺序追加：
+    **本文件自己的内容在前**，被包含的在后）。根独有的段（`ground`/`camera`/`lighting`/
+    `simulate`/`render`/`gravity`/`physics`/`name`/`assets`）写在片段里是 `invalid_value`
+    错误 —— 这些段只有一个实例，"谁赢"没有答案，宁可报错也不含糊合并。
+  - **片段里的资源相对路径按片段自己的目录重定基一次**（4 个贴图槽、`models[].path`），
+    所以 `parts/wall.json` 里的 `tex/brick.png` 指的是 `parts/tex/brick.png`，
+    片段搬到哪都跟着自己走；`include` 自己写的路径**不**重定基。
+  - **不写 `include` = 老行为逐字节不变**（`skip_serializing_if` + `#[serde(default)]`，
+    不读任何额外文件、不重定基任何路径；有测试钉住序列化字符串相同）。
+  - **可达性**：`validate` / `simulate` / `render` / `movie` / `ask` / MCP 全部自动生效
+    （CLI 在 `load_scene` 里合并一次，world 装配、探针、报告看到的都是同一份合并文档）；
+    编辑器能装载，存盘时把片段**内联**进根文件并清掉 `include`（存盘报告里说明内联了哪些文件 ——
+    编辑器编辑的是合并后的世界，保留 `include` 会重复并入，只清不合并会丢掉片段里的
+    `models`/`joints`/材质，两条都是静默错法）；JSON Schema、`scene_grammar()`、系统提示词三处同步。
+  - **验证**（都不需要显卡）：`cli_e2e.rs` 6 条 —— 其中 **多文件版与手写单文件版的 `states`
+    逐物体逐坐标位相同**（`position`/`rotation` 直接比 f32）；片段贴图**只**放在片段目录
+    （按根目录解析会找不到）；缺失/成环/重名/根独有段/片段内容错误各自的码与路径；
+    菱形包含只并入一次且给警告；跨文件 `templates` + `instances` 摆出 3 个刚体；
+    不写 `include` 的场景报告与退出码全同。`scene_doc.rs` 6 条单元测试（合并顺序、嵌套相对路径、
+    重定基后的**路径字符串**、幂等、五类失败、字节不变）；`quench3d-editor/tests/include_export.rs`
+    4 条（内联 + 清 `include` + 坏片段拒绝存盘 + 源码结构守卫，因为编辑器往返测试要真 GPU）。
+    **变异验证**：重定基改空操作 → 单元 + e2e 各红一条；重名静默覆盖 → 红；让合并搬运 `include`
+    → 3 条红；编辑器绕过合并 / 材质继承查未合并底稿 → 各红一条。
+  - **没做**（边界）：`variant`（按场景覆盖片段字段）、条件包含、资源去重报告、
+    编辑器的"另存为片段"；浏览器纯内存入口 `from_json` 没有场景文件目录（那里的 `include`
+    相对路径按工作目录解析，没在真浏览器里验证）。详见 `docs/production_readiness.md` §14。
+
 - **固定关节的参考姿态真正生效了（`joints[].frame_a` / `frame_b`）** —— gap #15 的第三段，
   也是最后一段接线。
   以前引擎的 `Joint::Fixed` 是**速度级**角约束：它锁的是"创建那一刻"的相对姿态，
@@ -310,6 +348,34 @@
   已记入 gap 列表，是下一项。
 
 ### 修复
+
+- **Wayland 上关闭编辑器窗口必崩（SIGSEGV / 退出码 139 / core dumped）**（用户实测，本机真显卡 + Wayland）。
+  进程在正常跑、第一帧也正常，**用户点窗口关闭按钮的那一刻**收到 `SIGSEGV`；回溯固定落在
+  `smithay-clipboard` 的 worker 线程上（`#9 smithay_clipboard::worker::worker_impl
+  src/worker.rs:101` → `#5 ZwpPrimarySelectionDeviceManagerV1::destroy` →
+  `#1 wl_proxy_destroy` → `libwayland-client`）。与 GPU、场景内容无关（软件 Vulkan 下同样复现）。
+  - 根因是**析构顺序**，不是剪贴板本身：`winit::EventLoop::run_app(self, app)` 是**按值吃掉**
+    EventLoop 的，于是 winit 自己的 Wayland 连接在 `run_app` **内部**就析构了；而调用点上
+    那个 `EditorApp` 是**临时值**，要到整条语句结束才析构 —— **晚于**连接。`egui-winit` 只在
+    Wayland 下才建 `smithay-clipboard`，它包的是 winit 的裸 `wl_display*`（不持有所有权），
+    worker 线程析构主选区管理器时那个 `wl_display` 已经没了 → 释放后使用。
+  - 修法：在 `ApplicationHandler::exiting()` 里把 `Inner`（窗口 / GPU / 剪贴板）按序释放 ——
+    这是 winit 唯一保证"事件循环即将退出、但连接仍然有效"的钩子。**只在 Wayland 触发**
+    （判据 = `RawDisplayHandle::Wayland`，正是 `egui-winit` 造那个对象的同一判据）。
+  - **没有**用"捕获 / 忽略 SIGSEGV"这类掩盖手段，也没有跳过析构。
+  - 新增**环境变量门控、默认关闭**的测试钩子 `QUENCH3D_EDITOR_EXIT_AFTER_MS=<毫秒>`：
+    窗口起来后再等 N 毫秒就投一个**真的 `WindowEvent::CloseRequested`**（= 用户点关闭按钮
+    的那条 match 分支），让这条"只有真跑 GUI 才会经过"的路径能被无人值守复现。
+    不设 / `=0` / 非法值一律**不自动退出**。
+  - 验证：同一配方，修复前 `EXIT_CODE=139` + gdb `Thread 20 "smithay-clipboa" received signal
+    SIGSEGV`；修复后 `EXIT_CODE=0` + gdb `exited normally`、`SIGSEGV` 出现 0 次（Wayland 复跑 4/4 全 0）。
+    解析逻辑有 6 条**不需要显卡**的守卫测试，两条变异（`0` 不再等于关闭 / 默认不再关闭）实测**红**，
+    还原后**绿**。配方、回溯、取舍与边界见
+    [docs/production_readiness.md](docs/production_readiness.md) §15 与
+    [docs/overnight_report.md](docs/overnight_report.md) §56。
+  - **顺带核实**：X11/XWayland 下关窗口**本来就**会 panic（`winit-0.30.13` X11 的
+    `BadWindow`，`event_processor.rs:1324`），基线 7 次跑出 101×6 / 134×1 —— 那是**另一个**
+    上游缺陷，本次**没有**修，也特意不让本次改动去扰动它。
 
 - **GL/WebGL2 上"建不出来的管线"：编辑器启动即 panic**（用户实测）。浏览器控制台原文：
   `Shader translation error for stage ShaderStages(FRAGMENT): WGSL \`textureLoad\` from depth textures is not supported in GLSL`

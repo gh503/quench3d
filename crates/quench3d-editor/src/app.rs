@@ -25,6 +25,44 @@ use quench3d::winit::keyboard::PhysicalKey;
 use quench3d::winit::window::{Window, WindowId};
 use std::sync::Arc;
 
+/// 自动退出钩子的环境变量名（**测试/调试专用**）。
+///
+/// 值是一个正整数毫秒数 `N`：窗口画起来之后再等 `N` 毫秒，编辑器就自动**投一个
+/// 真的 `WindowEvent::CloseRequested`** —— 与用户点关闭按钮时合成器发来的是**同一个
+/// 事件、同一个 match 分支**，所以它走的是同一条退出路径，而不是另写一条。
+///
+/// 存在的理由：退出路径**只有真跑 GUI 才会经过**（CI 上没有显示器、没有真 GPU），
+/// 而 `gdb -batch` 里没人能点关闭按钮 —— 这个钩子让「关窗口 → 退出」可以被
+/// 无人值守地复现（见 `docs/overnight_report.md` 的复现配方）。
+///
+/// 与仓库既有的 `QUENCH3D_GPU_TESTS` 同源：**环境变量显式 opt-in**。
+/// 默认关闭（不设这个变量 = 永远不自动退出），而且它**只影响退出时机**，
+/// 不影响退出路径本身、不影响渲染、不影响任何其它行为。
+#[cfg(not(target_arch = "wasm32"))]
+pub const EXIT_AFTER_MS_ENV: &str = "QUENCH3D_EDITOR_EXIT_AFTER_MS";
+
+/// 解析 [`EXIT_AFTER_MS_ENV`] 的值；`None`/空白/非数字/`0` → `None`（不自动退出）。
+///
+/// 为什么抽成纯函数：**不需要显卡就能测**。这段解析一旦错，无人值守的复现就会
+/// 失去意义 —— 要么永远不退出（跑满 `timeout`，看起来像「没崩」），要么起表过早
+/// （第一帧还没画完就退，根本没走到真正的退出析构）。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_exit_after_ms(raw: Option<&str>) -> Option<u64> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.parse::<u64>() {
+        Ok(ms) if ms > 0 => Some(ms),
+        // `0` 是「显式要求不自动退出」，不是错误，所以不告警。
+        Ok(_) => None,
+        Err(_) => {
+            log::warn!("{EXIT_AFTER_MS_ENV}={raw:?} 不是非负整数，忽略（不自动退出）");
+            None
+        }
+    }
+}
+
 /// 编辑器配置。
 #[derive(Clone, Debug)]
 pub struct EditorConfig {
@@ -474,6 +512,13 @@ fn install_fonts(ctx: &egui::Context) {
 pub struct EditorApp {
     config: EditorConfig,
     inner: Option<Inner>,
+    /// 自动退出钩子的等待毫秒数（`None` = 钩子关闭）。见 [`EXIT_AFTER_MS_ENV`]。
+    #[cfg(not(target_arch = "wasm32"))]
+    exit_after_ms: Option<u64>,
+    /// 钩子的截止时刻。第一帧画起来（`inner` 就绪）时才起表 —— 窗口创建与 GPU
+    /// 初始化在慢机器/软件 Vulkan 上可能要好几秒，从进程启动起表会算不准。
+    #[cfg(not(target_arch = "wasm32"))]
+    exit_deadline: Option<std::time::Instant>,
     #[cfg(target_arch = "wasm32")]
     pending: crate::PendingSlot,
 }
@@ -484,6 +529,10 @@ impl EditorApp {
         Self {
             config,
             inner: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            exit_after_ms: parse_exit_after_ms(std::env::var(EXIT_AFTER_MS_ENV).ok().as_deref()),
+            #[cfg(not(target_arch = "wasm32"))]
+            exit_deadline: None,
             #[cfg(target_arch = "wasm32")]
             pending: crate::new_pending_slot(),
         }
@@ -739,6 +788,109 @@ impl ApplicationHandler for EditorApp {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(inner) = self.inner.as_ref() {
             inner.window.request_redraw();
+        }
+        self.poll_exit_hook(_event_loop);
+    }
+
+    /// 事件循环即将退出 —— 在这里**按正确顺序**释放窗口 / GPU / 剪贴板。
+    ///
+    /// 这段看着多余，但删掉它编辑器关窗口必崩 SIGSEGV（退出码 139）。动之前请读完：
+    ///
+    /// **根因**：`winit::event_loop::EventLoop::run_app(self, app)` 是按值**吃掉**
+    /// EventLoop 的（`winit-0.30.13/src/event_loop.rs:264`）。于是 winit 自己的 Wayland
+    /// 连接在 `run_app` **内部**就析构了；而 `run()` 里的 `EditorApp` 是
+    /// `event_loop.run_app(&mut EditorApp::new(config))?` 里的**临时值**，要到整条语句
+    /// 结束才析构 —— 也就是**晚于** winit 的连接。`egui-winit` 的剪贴板
+    /// （`smithay-clipboard` 0.7.3，由 `egui-winit` 的 `clipboard` 特性拉进来）包的是
+    /// winit 那个 `wl_display*`（`Backend::from_foreign_display`，**不持有所有权**）。
+    /// 它的 worker 线程析构 `PrimarySelectionManagerState` 时会
+    /// `zwp_primary_selection_device_manager_v1.destroy()` → `wl_proxy_destroy(proxy)`，
+    /// 而 `proxy->display` 指向的 `wl_display` 已经被 winit `disconnect`/释放掉了 →
+    /// 释放后使用 → SIGSEGV。崩溃点固定是 worker.rs:101 的 `State` 析构。
+    ///
+    /// **为什么是这里**：`exiting` 是 winit 唯一保证「事件循环即将退出、但连接仍然有效」
+    /// 时回调的地方 —— Wayland 后端在 `pump_events` 里派发 `Event::LoopExiting`
+    /// （`platform_impl/linux/wayland/event_loop/mod.rs:231`），此时 `self.connection`
+    /// 还在作用域内；而且它之后紧接着一次 `roundtrip()`，winit 自己的注释就写着
+    /// 「如果应用刚刚丢掉窗口，得确保最后的请求发给了合成器」——
+    /// 也就是说「在 `exiting` 里丢窗口」正是它设计的用法。
+    ///
+    /// **为什么不用别的写法**：
+    /// * 升级依赖 —— 本仓库永远 `--offline`，而 cargo 缓存里 `smithay-clipboard` **只有
+    ///   `0.7.3`**（就是 `Cargo.lock` 里这个），本地 registry 索引里的**最大**版本也是
+    ///   `0.7.3` —— 离线根本没有可升的版本。见 `docs/production_readiness.md` §15.4。
+    /// * `std::process::exit(0)` 跳过析构 —— 是**绕过**而不是**修好**这个顺序问题：
+    ///   GPU/Vulkan 一起失去正常拆解路径；而且 `std::process::exit` 在 wasm32 上不存在，
+    ///   还得多一层 `#[cfg]` 门控。既然 winit 给了一个正确的钩子，就用这个。
+    /// * 捕获 / 忽略 SIGSEGV —— 明令禁止的掩盖手段：真出了别的越界就再也看不见了。
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if !self.needs_early_release() {
+            return;
+        }
+        if self.inner.take().is_some() {
+            log::info!(
+                "事件循环退出：已按序释放窗口/GPU/剪贴板（理由见 EditorApp::exiting 的注释）"
+            );
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl EditorApp {
+    /// 这次退出要不要在 `exiting` 里提前释放 `Inner`？
+    ///
+    /// **只有 Wayland 要。** 判据就是 `egui-winit` 自己造 `smithay-clipboard` 的判据：
+    /// 它只在拿到 [`RawDisplayHandle::Wayland`] 时才建那个对象
+    /// （`egui-winit-0.37.0/src/clipboard.rs` 的 `init_smithay_clipboard`），
+    /// 也才会去包 winit 的裸 `wl_display*`。X11 下根本没有这个对象，
+    /// 也就没有这个析构顺序问题。
+    ///
+    /// 反过来，**在 X11 上提前丢窗口是有代价的**：winit 0.30.13 的 X11 退出路径本身
+    /// 就带着一个与本次修复无关的 `BadWindow` panic（见 `docs/production_readiness.md`），
+    /// 提前在 `exiting` 里丢窗口会把它从"多数情况 panic 退出（101）"变成
+    /// "几乎必然二次 panic → abort（134）"。既然 X11 上修不到任何东西，
+    /// 就不要去动它的既有行为。
+    ///
+    /// 用**显示句柄**而不是环境变量来判断：`WAYLAND_DISPLAY`/`WAYLAND_SOCKET` 只反映
+    /// winit 的选路，嵌套合成器等场景下未必与实际句柄一致；显示句柄才是权威，
+    /// 而且和 `egui-winit` 用的是同一个值。
+    fn needs_early_release(&self) -> bool {
+        use quench3d::winit::raw_window_handle::{HasDisplayHandle as _, RawDisplayHandle};
+        let Some(inner) = self.inner.as_ref() else {
+            return false;
+        };
+        let window: &quench3d::winit::window::Window = inner.window.as_ref();
+        matches!(
+            window.display_handle().map(|handle| handle.as_raw()),
+            Ok(RawDisplayHandle::Wayland(_))
+        )
+    }
+
+    /// 自动退出钩子（见 [`EXIT_AFTER_MS_ENV`]）：窗口就绪后等够毫秒数，就往事件
+    /// 处理里**投一个真的 [`WindowEvent::CloseRequested`]**。
+    ///
+    /// 为什么不是直接 `event_loop.exit()`：投 `CloseRequested` 走的是**用户点窗口
+    /// 关闭按钮时合成器发来的那条一模一样的事件**、一模一样的 match 分支，
+    /// 所以这个钩子验证的不是"另一条路"，而是同一条路的无人值守版本。
+    ///
+    /// 默认关闭：没设环境变量时第一行就返回。
+    fn poll_exit_hook(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(ms) = self.exit_after_ms else {
+            return;
+        };
+        // 窗口还没起来（创建窗口 / GPU 初始化中）就不起表，否则慢机器上
+        // 「3 秒后退出」可能在第一帧之前就到点，等于没测到退出路径。
+        if self.inner.is_none() {
+            return;
+        }
+        let deadline = *self.exit_deadline.get_or_insert_with(|| {
+            std::time::Instant::now() + std::time::Duration::from_millis(ms)
+        });
+        if std::time::Instant::now() >= deadline {
+            // 只投一次：投完就把钩子关掉（否则每次 `about_to_wait` 都会再投一次）。
+            self.exit_after_ms = None;
+            log::info!("{EXIT_AFTER_MS_ENV}={ms}：自动投递 CloseRequested（= 点关闭按钮那条路）");
+            self.handle_window_event(event_loop, WindowEvent::CloseRequested);
         }
     }
 }
