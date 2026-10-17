@@ -867,4 +867,46 @@ mod anim_tests {
         let n = scene.apply_animation(&model, &[9999], &[], &player);
         assert_eq!(n, 0);
     }
+
+    /// 没有动画（或动画名对不上）时，`apply_animation` 必须是**严格无操作**。
+    ///
+    /// 这条守的是静态路径：模型一旦"带着一个播不了的动画名"（资产改名、编辑器存回旧名字），
+    /// 绝不能把几何挪到别处 —— 那会表现成"模型突然飞到原点"，而没有任何诊断。
+    #[test]
+    fn apply_animation_is_a_no_op_without_a_usable_clip() {
+        let mut model = pulley_model();
+        let mut scene = Scene::new();
+        let base = Transform::new(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY, Vec3::ONE);
+        let o = scene.add_named(0, 0, base, "滑轮");
+        let objects = [o];
+        let bases = [base];
+
+        // ① 模型里根本没有任何动画：玩家手里那条名字永远匹配不上
+        model.animations.clear();
+        let mut player = crate::assets::ModelAnimationPlayer {
+            animation: "转".into(),
+            duration: 1.0,
+            time: 0.3,
+            speed: 1.0,
+            looping: true,
+            finished: false,
+        };
+        let n = scene.apply_animation(&model, &objects, &bases, &player);
+        assert_eq!(n, 1, "下标合法就该算更新（只是矩阵是单位矩阵）");
+        assert_eq!(scene.objects[o].transform.position, base.position);
+        assert_eq!(scene.objects[o].transform.rotation, base.rotation);
+
+        // ② 动画在、但玩家要的名字不存在（资产改名/旧场景）：同样不许动
+        let model2 = pulley_model();
+        player.animation = "已经改名了".into();
+        player.time = 0.7;
+        let n = scene.apply_animation(&model2, &objects, &bases, &player);
+        assert_eq!(n, 1);
+        assert_eq!(scene.objects[o].transform.position, base.position);
+
+        // ③ `base` 比 `objects` 短：缺的那份用物体当前变换当基准，也不能 panic/NaN
+        let n = scene.apply_animation(&model2, &objects, &[], &model2.player("转").unwrap());
+        assert_eq!(n, 1);
+        assert!(scene.objects[o].transform.position.is_finite());
+    }
 }

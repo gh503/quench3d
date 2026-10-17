@@ -69,6 +69,9 @@
     越界下标跳过。这一步纯 CPU（`MeshId` 只是句柄），所以"动画到底动了什么"在没有显卡的
     测试里就能断言：t=0 不动、t=0.5 滑轮 +1 而静止物体一分不动、t=1（关掉循环）+2 而不是 +3。
     变异 2 组全红（组合时丢基础变换 / 在上一帧结果上累乘）。
+  - 另有一条**无操作不变量**：模型没有动画、或动画名对不上（资产改名/旧场景）时，
+    `apply_animation` 必须严格不动几何 —— 否则表现成"模型突然飞到原点"而没有任何诊断。
+    `base` 比 `objects` 短时用物体当前变换当基准，不 panic、不出 NaN。
   - `ModelAnimationPlayer`（`model.player(name)`）：纯 CPU 的**播放状态** —— `advance(dt)` 推时间
     （循环用 `rem_euclid`、不循环夹到时长并置 `finished`、`speed` 倍速、`duration <= 0` 不除零、
     `dt` 非法不产生 NaN），`mesh_matrices(&model)` 直接给出"每个网格片段该用的矩阵"。
