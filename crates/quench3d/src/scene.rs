@@ -164,6 +164,37 @@ impl Scene {
     }
 
     /// 物体数量。
+    /// 把某个模型动画播放器**当前帧**应用到它占用的物体上；返回真正更新的物体数。
+    ///
+    /// * `objects` 与 `model.meshes` 同序（就是 `add_model`/`spawn` 返回的下标）；
+    /// * `base` 是这些物体**创建时**的基础变换 —— 动画结果是 `base × 额外矩阵`，
+    ///   **不是**在上一帧结果上继续乘（那样会漂）；
+    /// * 越界下标跳过（不 panic）；没有动画的片段矩阵是单位矩阵 → 物体保持原样。
+    ///
+    /// 这一步是纯 CPU 的：`MeshId`/`MaterialId` 只是句柄，不需要 GPU 上下文，
+    /// 所以"动画到底动了什么"可以在没有显卡的测试里断言。
+    pub fn apply_animation(
+        &mut self,
+        model: &crate::assets::LoadedModel,
+        objects: &[usize],
+        base: &[Transform],
+        player: &crate::assets::ModelAnimationPlayer,
+    ) -> usize {
+        let mats = player.mesh_matrices(model);
+        let mut updated = 0;
+        for (mesh_index, &object) in objects.iter().enumerate() {
+            let Some(obj) = self.objects.get_mut(object) else {
+                continue;
+            };
+            let m = mats.get(mesh_index).copied().unwrap_or(Mat4::IDENTITY);
+            let base = base.get(mesh_index).copied().unwrap_or(obj.transform);
+            obj.transform = compose(base, &m);
+            updated += 1;
+        }
+        updated
+    }
+
+    /// 物体数量。
     pub fn len(&self) -> usize {
         self.objects.len()
     }
@@ -715,5 +746,125 @@ mod tests {
             .unwrap_or_else(|| panic!("尾物体应当还在，实际有 {}", scene.len()));
         assert!(tail_now < tail);
         assert_eq!(scene.len(), 2);
+    }
+}
+
+/// `基础变换 × 额外矩阵`：先把基础变换变成矩阵、乘上动画矩阵、再分解回 `Transform`。
+///
+/// 额外矩阵来自"动画后的节点世界 × 绑定姿态世界⁻¹"，是仿射变换（旋转 + 平移，
+/// 可能带缩放，但**不该有剪切**）。`Transform::from_matrix` 已经处理了分解
+/// （含零缩放保护），手写一遍只会多一处出错点。
+fn compose(base: Transform, m: &Mat4) -> Transform {
+    Transform::from_matrix(&(base.matrix() * *m))
+}
+
+#[cfg(test)]
+mod anim_tests {
+    use super::*;
+    use crate::assets::{
+        AnimatedProperty, AnimationTrack, Interpolation, LoadedAnimation, LoadedMesh, LoadedModel,
+        LoadedNode,
+    };
+    use quench3d_math::{Mat4, Quat};
+
+    /// 造一个 2 网格 / 2 节点的模型：节点 1 是"滑轮"，绑定姿态在 x=+2，
+    /// 动画 1 秒内把它从 x=2 移到 x=4。
+    fn pulley_model() -> LoadedModel {
+        let bind = Mat4::from_rotation_translation_scale(
+            Vec3::new(2.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::ONE,
+        );
+        LoadedModel {
+            nodes: vec![
+                LoadedNode::default(),
+                LoadedNode {
+                    name: "滑轮".into(),
+                    parent: Some(0),
+                    translation: Vec3::new(2.0, 0.0, 0.0),
+                    ..Default::default()
+                },
+            ],
+            meshes: vec![
+                LoadedMesh {
+                    node: Some(0),
+                    bind_inverse: Mat4::IDENTITY,
+                    ..Default::default()
+                },
+                LoadedMesh {
+                    node: Some(1),
+                    bind_inverse: bind.inverse(),
+                    ..Default::default()
+                },
+            ],
+            animations: vec![LoadedAnimation {
+                name: "转".into(),
+                duration: 1.0,
+                tracks: vec![AnimationTrack {
+                    node: 1,
+                    property: AnimatedProperty::Translation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0, 1.0],
+                    values: vec![[2.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0]],
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// 动画必须**只**动它覆盖的节点，而且以"基础变换"为基准（不累积漂移）。
+    #[test]
+    fn apply_animation_moves_only_animated_meshes_from_their_base() {
+        let model = pulley_model();
+        let mut scene = Scene::new();
+        // 两个物体：0 = 静止的地面网格，1 = 滑轮
+        let o0 = scene.add_named(
+            0,
+            0,
+            Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
+            "地面",
+        );
+        let base1 = Transform::new(Vec3::new(0.0, 5.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+        let o1 = scene.add_named(1, 0, base1, "滑轮");
+        let objects = vec![o0, o1];
+        let base = vec![Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE), base1];
+
+        let mut player = model.player("转").expect("该有播放器");
+        // t = 0：还是绑定姿态 → 两个物体都不动
+        let n = scene.apply_animation(&model, &objects, &base, &player);
+        assert_eq!(n, 2);
+        assert!((scene.objects[o1].transform.position.x - 0.0).abs() < 1e-5);
+        assert!((scene.objects[o1].transform.position.y - 5.0).abs() < 1e-5);
+
+        // t = 0.5：滑轮从 2 移到 3（+1），基础位置 y=5 保持
+        player.advance(0.5);
+        scene.apply_animation(&model, &objects, &base, &player);
+        assert!(
+            (scene.objects[o1].transform.position.x - 1.0).abs() < 1e-4,
+            "滑轮该右移 1（2→3），实际 {}",
+            scene.objects[o1].transform.position.x
+        );
+        assert!(
+            (scene.objects[o1].transform.position.y - 5.0).abs() < 1e-4,
+            "基础位置不能丢"
+        );
+        // 静止物体一分不动
+        assert!(scene.objects[o0].transform.position.length() < 1e-6);
+
+        // t = 1.0：再走半秒 → 位移 2（不是在 1 的基础上累加）
+        // 注意：播放器缺省是**循环**，t=1.0 会绕回 0（位移 0）。这里关掉循环，
+        // 顺便钉住"循环 vs 不循环"在场景层的可见差别。
+        player.looping = false;
+        player.advance(0.5);
+        scene.apply_animation(&model, &objects, &base, &player);
+        assert!(
+            (scene.objects[o1].transform.position.x - 2.0).abs() < 1e-4,
+            "t=1 时该是 +2（不累积），实际 {}",
+            scene.objects[o1].transform.position.x
+        );
+
+        // 越界下标跳过、不 panic
+        let n = scene.apply_animation(&model, &[9999], &[], &player);
+        assert_eq!(n, 0);
     }
 }

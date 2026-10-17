@@ -64,6 +64,11 @@
   - `mesh_matrix(mesh_index, worlds) = world(t) × bind_inverse`：几何是按绑定姿态烘过的，
     所以画动画只需要这一个矩阵；**绑定姿态下它恰好是单位矩阵**（静态路径逐位不变，
     测试盯着这条不变量）。
+  - `Scene::apply_animation(&model, objects, base, &player)`：把播放器当前帧应用到场景物体上
+    （`base × 额外矩阵`，**不是**在上一帧结果上累乘，所以不会漂）；只动被轨道覆盖的网格片段，
+    越界下标跳过。这一步纯 CPU（`MeshId` 只是句柄），所以"动画到底动了什么"在没有显卡的
+    测试里就能断言：t=0 不动、t=0.5 滑轮 +1 而静止物体一分不动、t=1（关掉循环）+2 而不是 +3。
+    变异 2 组全红（组合时丢基础变换 / 在上一帧结果上累乘）。
   - `ModelAnimationPlayer`（`model.player(name)`）：纯 CPU 的**播放状态** —— `advance(dt)` 推时间
     （循环用 `rem_euclid`、不循环夹到时长并置 `finished`、`speed` 倍速、`duration <= 0` 不除零、
     `dt` 非法不产生 NaN），`mesh_matrices(&model)` 直接给出"每个网格片段该用的矩阵"。
