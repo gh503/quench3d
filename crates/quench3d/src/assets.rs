@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use quench3d_math::{Aabb, Transform, Vec2, Vec3, Vec4};
+use quench3d_math::{Aabb, Mat4, Quat, Transform, Vec2, Vec3, Vec4};
 use quench3d_render::{
     GpuContext, ImageData, MaterialDesc, MaterialId, MeshData, MeshId, Renderer,
 };
@@ -71,10 +71,118 @@ impl From<std::io::Error> for AssetError {
 pub struct LoadedMesh {
     /// 名称。
     pub name: String,
-    /// 几何数据。
+    /// 几何数据（**已经烘进节点的绑定姿态世界变换**，见 [`LoadedModel::mesh_matrix`]）。
     pub data: MeshData,
     /// 材质下标（对应 [`LoadedModel::materials`]）。
     pub material: Option<usize>,
+    /// 这个片段来自哪个节点（[`LoadedModel::nodes`] 的下标）。
+    ///
+    /// OBJ 与"没被任何节点引用"的兜底片段是 `None` —— 它们没有可动画的节点。
+    pub node: Option<usize>,
+    /// 该节点**绑定姿态**世界矩阵的逆。
+    ///
+    /// 几何是按绑定姿态烘过的，所以"动画到 t 时刻"只需要 `world(t) × bind_inverse`
+    /// 这一个矩阵；存逆矩阵而不是运行时求逆，是因为求逆在每帧每网格都做一次、还会在
+    /// 退化节点（零缩放）上出 NaN。
+    pub bind_inverse: Mat4,
+}
+
+impl Default for LoadedMesh {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            data: MeshData::default(),
+            material: None,
+            node: None,
+            bind_inverse: Mat4::IDENTITY,
+        }
+    }
+}
+
+/// 一个节点的**局部**变换（绑定姿态）。
+#[derive(Clone, Debug)]
+pub struct LoadedNode {
+    /// 名称（glTF 里可能没有）。
+    pub name: String,
+    /// 父节点下标。
+    pub parent: Option<usize>,
+    /// 局部平移。
+    pub translation: Vec3,
+    /// 局部旋转。
+    pub rotation: Quat,
+    /// 局部缩放。
+    pub scale: Vec3,
+}
+
+impl Default for LoadedNode {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            parent: None,
+            translation: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
+    }
+}
+
+impl LoadedNode {
+    /// 局部的 TRS 矩阵。
+    pub fn local_matrix(&self) -> Mat4 {
+        Mat4::from_rotation_translation_scale(self.translation, self.rotation, self.scale)
+    }
+}
+
+/// 一条动画轨道作用的属性。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimatedProperty {
+    /// 平移。
+    Translation,
+    /// 旋转（四元数）。
+    Rotation,
+    /// 缩放。
+    Scale,
+}
+
+/// 关键帧插值方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interpolation {
+    /// 阶跃（不插值）。
+    Step,
+    /// 线性（旋转用球面插值）。
+    Linear,
+    /// 三次样条 —— **当前按线性采样**（只取每个关键帧的"值"，丢掉切线）。
+    ///
+    /// 诚实说明：真做 CUBICSPLINE 要按 Hermite 基函数算，且切线是逐分量的；
+    /// 对于"播放看起来对"这件事，退化到线性只表现为动作略"硬"。这条写在
+    /// `docs/production_readiness.md` §19.2。
+    CubicSplineDegradedToLinear,
+}
+
+/// 一条动画轨道：某个节点的某个属性随时间怎么变。
+#[derive(Clone, Debug)]
+pub struct AnimationTrack {
+    /// 节点下标（[`LoadedModel::nodes`]）。
+    pub node: usize,
+    /// 属性。
+    pub property: AnimatedProperty,
+    /// 插值方式。
+    pub interpolation: Interpolation,
+    /// 关键帧时间（秒，升序）。
+    pub times: Vec<f32>,
+    /// 每个关键帧的值：平移/缩放取前 3 个分量，旋转是 `xyzw`。
+    pub values: Vec<[f32; 4]>,
+}
+
+/// 一条动画（glTF 的一个 `animation`）。
+#[derive(Clone, Debug, Default)]
+pub struct LoadedAnimation {
+    /// 名称（glTF 里可能没有名字）。
+    pub name: String,
+    /// 时长（秒，= 所有轨道最后一个关键帧时间的最大值）。
+    pub duration: f32,
+    /// 轨道。
+    pub tracks: Vec<AnimationTrack>,
 }
 
 /// CPU 端的一个材质。
@@ -118,9 +226,105 @@ pub struct LoadedModel {
     pub materials: Vec<LoadedMaterial>,
     /// 图像（RGBA8，未上传到 GPU）。
     pub images: Vec<ImageData>,
+    /// 节点（glTF 的场景图；OBJ 模型为空）。
+    pub nodes: Vec<LoadedNode>,
+    /// 动画（glTF 的 `animations`；没有就是空）。
+    pub animations: Vec<LoadedAnimation>,
 }
 
 impl LoadedModel {
+    /// 绑定姿态下每个节点的世界矩阵。
+    pub fn bind_pose(&self) -> Vec<Mat4> {
+        let mut out = vec![Mat4::IDENTITY; self.nodes.len()];
+        // 按 parent 链递归（深度上限防御坏文件里的环）
+        fn walk(nodes: &[LoadedNode], i: usize, out: &mut Vec<Mat4>, depth: u32) -> Mat4 {
+            if depth > 64 {
+                return Mat4::IDENTITY;
+            }
+            let local = nodes[i].local_matrix();
+            let m = match nodes[i].parent {
+                Some(p) => walk(nodes, p, out, depth + 1) * local,
+                None => local,
+            };
+            out[i] = m;
+            m
+        }
+        for i in 0..self.nodes.len() {
+            walk(&self.nodes, i, &mut out, 0);
+        }
+        out
+    }
+
+    /// 动画名列表（按 glTF 里的顺序）。
+    pub fn animation_names(&self) -> Vec<&str> {
+        self.animations.iter().map(|a| a.name.as_str()).collect()
+    }
+
+    /// 按名字找动画（glTF 里没名字时用 `animation_{下标}`）。
+    pub fn animation(&self, name: &str) -> Option<&LoadedAnimation> {
+        self.animations.iter().find(|a| a.name == name)
+    }
+
+    /// 采样某条动画在 `time` 秒时的**节点世界矩阵**；名字不存在返回 `None`。
+    ///
+    /// 时间会被夹到 `[0, duration]`（循环是调用方的事：`time.rem_euclid(duration)`）。
+    /// 没被任何轨道覆盖的节点保持绑定姿态 —— 这正是"只动一部分关节"的资产需要的。
+    pub fn sample_animation(&self, name: &str, time: f32) -> Option<Vec<Mat4>> {
+        let clip = self.animation(name)?;
+        let t = if self.nodes.is_empty() {
+            0.0
+        } else {
+            time.clamp(0.0, clip.duration.max(0.0))
+        };
+        // ① 从绑定姿态的局部变换出发，把轨道采样覆盖上去
+        let mut locals: Vec<(Vec3, Quat, Vec3)> = self
+            .nodes
+            .iter()
+            .map(|n| (n.translation, n.rotation, n.scale))
+            .collect();
+        for track in &clip.tracks {
+            let Some((_, _, _)) = locals.get(track.node) else {
+                continue;
+            };
+            let value = sample_track(track, t);
+            let slot = &mut locals[track.node];
+            match track.property {
+                AnimatedProperty::Translation => slot.0 = Vec3::new(value[0], value[1], value[2]),
+                AnimatedProperty::Scale => slot.2 = Vec3::new(value[0], value[1], value[2]),
+                AnimatedProperty::Rotation => {
+                    let q = Quat::from_xyzw(value[0], value[1], value[2], value[3]);
+                    // 归一化：关键帧里的四元数理论上已是单位四元数，但外部工具会写坏
+                    slot.1 = q.normalize_or_identity();
+                }
+            }
+        }
+        // ② 局部 → 世界（按 parent 链；父在子之前算好）
+        let mut worlds: Vec<Mat4> = vec![Mat4::IDENTITY; self.nodes.len()];
+        let mut done: Vec<bool> = vec![false; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            resolve(i, &self.nodes, &locals, &mut worlds, &mut done, 0);
+        }
+        Some(worlds)
+    }
+
+    /// 画某个网格片段该用的矩阵：`world(t) × bind_inverse`。
+    ///
+    /// * 绑定姿态（或没有动画）时它**恰好是单位矩阵** —— 静态路径逐位不变。
+    /// * 几何是按绑定姿态烘过的，所以乘上"当前世界 × 绑定世界⁻¹"就是动画后的位置。
+    /// * 非节点片段（OBJ、兜底）永远返回单位矩阵。
+    pub fn mesh_matrix(&self, mesh_index: usize, node_worlds: &[Mat4]) -> Mat4 {
+        let Some(mesh) = self.meshes.get(mesh_index) else {
+            return Mat4::IDENTITY;
+        };
+        let Some(node) = mesh.node else {
+            return Mat4::IDENTITY;
+        };
+        match node_worlds.get(node) {
+            Some(world) => *world * mesh.bind_inverse,
+            None => Mat4::IDENTITY,
+        }
+    }
+
     /// 顶点总数。
     pub fn vertex_count(&self) -> usize {
         self.meshes.iter().map(|m| m.data.vertex_count()).sum()
@@ -307,6 +511,81 @@ fn transform_dir(m: &Matrix, d: [f32; 3]) -> [f32; 3] {
     out
 }
 
+/// 局部 → 世界：递归解析父节点（`done` 防重复，深度上限防环）。
+fn resolve(
+    i: usize,
+    nodes: &[LoadedNode],
+    locals: &[(Vec3, Quat, Vec3)],
+    worlds: &mut [Mat4],
+    done: &mut [bool],
+    depth: u32,
+) {
+    if done[i] || depth > 64 {
+        return;
+    }
+    let (t, r, s) = locals[i];
+    let local = Mat4::from_rotation_translation_scale(t, r, s);
+    let world = match nodes[i].parent {
+        Some(p) => {
+            resolve(p, nodes, locals, worlds, done, depth + 1);
+            worlds[p] * local
+        }
+        None => local,
+    };
+    worlds[i] = world;
+    done[i] = true;
+}
+
+/// 采样一条轨道在 `t` 时刻的值（4 分量；平移/缩放只用前 3 个）。
+fn sample_track(track: &AnimationTrack, t: f32) -> [f32; 4] {
+    let n = track.times.len().min(track.values.len());
+    if n == 0 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    if n == 1 || t <= track.times[0] {
+        return track.values[0];
+    }
+    if t >= track.times[n - 1] {
+        return track.values[n - 1];
+    }
+    // 二分找区间 [i, i+1)
+    let mut lo = 0usize;
+    let mut hi = n - 1;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if track.times[mid] <= t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let t0 = track.times[lo];
+    let t1 = track.times[hi];
+    let a = track.values[lo];
+    let b = track.values[hi];
+    if track.interpolation == Interpolation::Step || (t1 - t0).abs() < 1e-9 {
+        return a;
+    }
+    let u = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+    if track.property == AnimatedProperty::Rotation {
+        let qa = Quat::from_xyzw(a[0], a[1], a[2], a[3]);
+        let qb = Quat::from_xyzw(b[0], b[1], b[2], b[3]);
+        let q = if qa.length_squared() > 1e-12 && qb.length_squared() > 1e-12 {
+            qa.normalize_or_identity()
+                .slerp(qb.normalize_or_identity(), u)
+        } else {
+            qa
+        };
+        [q.x, q.y, q.z, q.w]
+    } else {
+        let mut out = [0.0f32; 4];
+        for k in 0..4 {
+            out[k] = a[k] + (b[k] - a[k]) * u;
+        }
+        out
+    }
+}
+
 /// 每个节点的**世界**变换（含父子累乘）。
 ///
 /// glTF 没有 `parent()`，只能从 `scenes` 的根节点往下走；没被任何场景引用的节点
@@ -335,6 +614,26 @@ fn node_world_matrices(doc: &gltf::Document) -> Vec<Option<Matrix>> {
         }
     }
     out
+}
+
+/// 每个节点的父节点下标（glTF 没有 `parent()`，只能从 `children()` 反推）。
+fn node_parents(doc: &gltf::Document) -> Vec<Option<usize>> {
+    let mut parents: Vec<Option<usize>> = vec![None; doc.nodes().len()];
+    for node in doc.nodes() {
+        for child in node.children() {
+            parents[child.index()] = Some(node.index());
+        }
+    }
+    parents
+}
+
+/// 列主序 `[[f32; 4]; 4]` → [`Mat4`]。
+fn matrix_to_mat4(m: &Matrix) -> Mat4 {
+    let mut a = [0.0f32; 16];
+    for (c, col) in m.iter().enumerate() {
+        a[c * 4..c * 4 + 4].copy_from_slice(col);
+    }
+    Mat4::from_cols_array(&a)
 }
 
 /// 网格片段的名字：优先用引用它的**节点**名（同一个网格常被多个节点引用，
@@ -418,8 +717,92 @@ fn model_from_gltf(
     // 这也是 gap #23（动画/蒙皮）的前置：动画就是对同一批节点改变换。
     let worlds = node_world_matrices(doc);
     let mut used_meshes: Vec<bool> = vec![false; doc.meshes().len()];
+    // ── 节点表（场景图）与动画 ──────────────────────────────────────────
+    // 节点表是动画的地基：动画改的就是这些节点的局部 TRS。
+    let parents = node_parents(doc);
+    for node in doc.nodes() {
+        let (t, r, s) = node.transform().decomposed();
+        let rot = Quat::from_xyzw(r[0], r[1], r[2], r[3]);
+        model.nodes.push(LoadedNode {
+            name: node
+                .name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("node_{}", node.index())),
+            parent: parents[node.index()],
+            translation: Vec3::new(t[0], t[1], t[2]),
+            rotation: rot.normalize_or_identity(),
+            scale: Vec3::new(s[0], s[1], s[2]),
+        });
+    }
+    for (ai, anim) in doc.animations().enumerate() {
+        let mut clip = LoadedAnimation {
+            name: anim
+                .name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("animation_{ai}")),
+            duration: 0.0,
+            tracks: Vec::new(),
+        };
+        for channel in anim.channels() {
+            // 在这一版 gltf crate 里 `target().node()` 直接返回节点（恒有）
+            let target_node = channel.target().node();
+            let target_node_index = target_node.index();
+            let reader = channel.reader(|b| buffers.get(b.index()).map(|b| b.0.as_slice()));
+            let Some(times) = reader.read_inputs() else {
+                continue;
+            };
+            let times: Vec<f32> = times.collect();
+            let Some(outputs) = reader.read_outputs() else {
+                continue;
+            };
+            let interpolation = match channel.sampler().interpolation() {
+                gltf::animation::Interpolation::Step => Interpolation::Step,
+                gltf::animation::Interpolation::Linear => Interpolation::Linear,
+                gltf::animation::Interpolation::CubicSpline => {
+                    Interpolation::CubicSplineDegradedToLinear
+                }
+            };
+            // CUBICSPLINE 的每个关键帧有 3 个值（入切线、值、出切线）：只取"值"。
+            let cubic = interpolation == Interpolation::CubicSplineDegradedToLinear;
+            let (property, values): (AnimatedProperty, Vec<[f32; 4]>) = match outputs {
+                gltf::animation::util::ReadOutputs::Translations(it) => (
+                    AnimatedProperty::Translation,
+                    it.map(|v| [v[0], v[1], v[2], 0.0]).collect(),
+                ),
+                gltf::animation::util::ReadOutputs::Scales(it) => (
+                    AnimatedProperty::Scale,
+                    it.map(|v| [v[0], v[1], v[2], 0.0]).collect(),
+                ),
+                gltf::animation::util::ReadOutputs::Rotations(it) => (
+                    AnimatedProperty::Rotation,
+                    it.into_f32().map(|v| [v[0], v[1], v[2], v[3]]).collect(),
+                ),
+                // 形变动画（morph target）不在这一轮的范围里：跳过而不是猜
+                gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => continue,
+            };
+            let values: Vec<[f32; 4]> = if cubic {
+                values.into_iter().skip(1).step_by(3).collect()
+            } else {
+                values
+            };
+            if times.is_empty() || values.is_empty() {
+                continue;
+            }
+            let duration = times.last().copied().unwrap_or(0.0);
+            clip.duration = clip.duration.max(duration);
+            clip.tracks.push(AnimationTrack {
+                node: target_node_index,
+                property,
+                interpolation,
+                times,
+                values,
+            });
+        }
+        model.animations.push(clip);
+    }
+
     // 每份实例带上**节点**标签：同一个网格被多个节点引用时，标签才分得清左右轮
-    let mut node_meshes: Vec<(usize, Matrix, String)> = Vec::new();
+    let mut node_meshes: Vec<(usize, Matrix, String, Option<usize>)> = Vec::new();
     for node in doc.nodes() {
         if let Some(mesh) = node.mesh() {
             used_meshes[mesh.index()] = true;
@@ -431,6 +814,7 @@ fn model_from_gltf(
                 mesh.index(),
                 worlds[node.index()].unwrap_or(IDENTITY),
                 label,
+                Some(node.index()),
             ));
         }
     }
@@ -438,10 +822,10 @@ fn model_from_gltf(
     // 免得"以前能看见、现在看不见"。引擎宁可多画一个，也不静默吞掉几何。
     for (i, used) in used_meshes.iter().enumerate() {
         if !used {
-            node_meshes.push((i, IDENTITY, mesh_label(doc, i)));
+            node_meshes.push((i, IDENTITY, mesh_label(doc, i), None));
         }
     }
-    for (mesh_index, world, label) in node_meshes {
+    for (mesh_index, world, label, node_index) in node_meshes {
         let mesh = doc.meshes().nth(mesh_index).expect("下标来自 doc.meshes()");
         for (pi, prim) in mesh.primitives().enumerate() {
             let reader = prim.reader(|b| buffers.get(b.index()).map(|b| b.0.as_slice()));
@@ -517,6 +901,9 @@ fn model_from_gltf(
                 },
                 data,
                 material: prim.material().index(),
+                node: node_index,
+                // 几何烘的是节点**绑定姿态**的世界变换，逆矩阵留给运行时算动画
+                bind_inverse: matrix_to_mat4(&world).inverse(),
             });
         }
     }
@@ -859,6 +1246,8 @@ pub fn parse_obj(text: &str, name: &str) -> Result<LoadedModel, AssetError> {
             name: g.name,
             data,
             material: g.material,
+            node: None,
+            bind_inverse: Mat4::IDENTITY,
         });
     }
 

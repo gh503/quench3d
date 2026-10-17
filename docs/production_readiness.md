@@ -2127,13 +2127,14 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 环节 | 状态 | 说明 |
 | --- | --- | --- |
 | glTF 节点层级 / 节点变换 | ✅ 本轮 | 静态几何正确了 |
-| glTF `animations` 解析 | ❌ | `gltf` crate 已有 API（`doc.animations()` → channels/samplers/accessors），缺的是"采样成轨道"这一层 |
+| glTF `animations` 解析 | ✅ 第 61 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 退化线性、morph 跳过） |
 | glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ❌ | `LoadedMesh.data` 的 `Vertex` 里没有 joint/weight 字段；要加 4 个关节下标 + 4 个权重 |
-| CPU 侧播放（时间推进、循环、插值 STEP/LINEAR/CUBICSPLINE） | ❌ | |
+| CPU 侧**采样**（给定 t 求节点世界矩阵） | ✅ 第 61 轮 | `sample_animation(name, t)`；循环/时间推进仍由调用方做（`t.rem_euclid(duration)`） |
+| CPU 侧播放（渲染循环里推进时间、每网格矩阵） | ❌ | `mesh_matrix` 已就绪，缺的是调用点与格式字段 |
 | 与场景格式的接口 | ❌ | 需要 `objects[].model.animation = { name, speed, loop }` 一类字段（**向后兼容**：不写 = 现在这样，静止） |
 | 混合（多轨道 / 权重） | ❌ | 至少要能"两条轨道按权重加权"，否则 #23 的"混合"没落地 |
 | GPU 蒙皮 | ❌ | 顶点着色器要读关节矩阵纹理/uniform；`MeshData` 要加两套顶点属性 |
-| `LoadedModel` 的节点树 | ❌ | 现在只有扁平 `meshes`；动画需要"节点 → 变换"可写，所以要先保留节点树 |
+| `LoadedModel` 的节点树 | ✅ 第 61 轮 | `nodes` + `bind_pose()` + `bind_inverse`（每网格）——静态烘焙与动画并存：`world(t) × bind_inverse` 在绑定姿态下是单位矩阵 |
 
 ### 19.3 下一步的实现顺序（建议）
 

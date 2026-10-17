@@ -4,6 +4,7 @@
 //! 格式的每个字节都在测试里看得见，改了格式也知道哪里断了。
 
 use quench3d::assets::{load_model, load_model_from_bytes, AssetError};
+use quench3d::math::Vec3;
 
 /// 手搓一个 GLB：12 字节头 + JSON 块 + BIN 块。
 fn glb_from_parts(json: &str, mut bin: Vec<u8>) -> Vec<u8> {
@@ -109,6 +110,10 @@ fn native_path_loading_still_reports_missing_files() {
 /// 【曾经是 bug】加载器直接遍历 `doc.meshes()`、完全不看节点，于是所有部件堆在原点
 /// （单网格模型看不出来，两个轮子的车一眼就看出来），同一网格被 3 个节点引用也只画一次。
 /// 这条测试同时盖住：平移、旋转（法线跟着转）、父子累乘、同名网格的多实例。
+// 旋转关键帧里要写 0.7071068（sin45°），clippy 会建议用 `FRAC_1_SQRT_2`；但那段是
+// **JSON 字符串**，塞常量进去要把整个 JSON 改成 format!（引号/大括号全要转义）。
+// 这里明确允许近似常量，比为了一个测试把夹具搞得不可读更划算。
+#[allow(clippy::approx_constant)]
 #[test]
 fn gltf_node_transforms_are_baked_into_geometry() {
     // BIN：位置(36) + 法线(36) + 索引(6，u16 补齐到 8)
@@ -124,6 +129,25 @@ fn gltf_node_transforms_are_baked_into_geometry() {
     for i in [0u16, 1, 2] {
         bin.extend_from_slice(&i.to_le_bytes());
     }
+    // 动画数据：2 个时间点 + 2 个平移 + 2 个旋转（绕 Z 从 0° 到 90°）
+    // 先把位置/法线/索引补到 80 字节（索引只有 6 字节）—— 否则后面的数据错位 2 字节，
+    // 读出来是 2.3e-23 这种 denormal，报错信息只会说"时长不对"。
+    while bin.len() < 80 {
+        bin.push(0);
+    }
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 80..88
+    }
+    for v in [[2.0f32, 0.0, 0.0], [5.0, 0.0, 0.0]] {
+        for f in v {
+            bin.extend_from_slice(&f.to_le_bytes()); // 88..112
+        }
+    }
+    for q in [[0.0f32, 0.0, 0.0, 1.0], [0.0, 0.0, 0.7071068, 0.7071068]] {
+        for f in q {
+            bin.extend_from_slice(&f.to_le_bytes()); // 112..144
+        }
+    }
     let json = r#"{"asset":{"version":"2.0"},"scene":0,
 "scenes":[{"nodes":[0,1,2]}],
 "nodes":[
@@ -136,14 +160,29 @@ fn gltf_node_transforms_are_baked_into_geometry() {
 "accessors":[
   {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
   {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
-  {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"}
+  {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
+  {"bufferView":3,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+  {"bufferView":4,"componentType":5126,"count":2,"type":"VEC3"},
+  {"bufferView":5,"componentType":5126,"count":2,"type":"VEC4"}
 ],
 "bufferViews":[
   {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
   {"buffer":0,"byteOffset":36,"byteLength":36,"target":34962},
-  {"buffer":0,"byteOffset":72,"byteLength":6,"target":34963}
+  {"buffer":0,"byteOffset":72,"byteLength":6,"target":34963},
+  {"buffer":0,"byteOffset":80,"byteLength":8},
+  {"buffer":0,"byteOffset":88,"byteLength":24},
+  {"buffer":0,"byteOffset":112,"byteLength":32}
 ],
-"buffers":[{"byteLength":80}]}"#;
+"animations":[{"name":"移动",
+  "channels":[
+    {"sampler":0,"target":{"node":0,"path":"translation"}},
+    {"sampler":1,"target":{"node":2,"path":"rotation"}}
+  ],
+  "samplers":[
+    {"input":3,"output":4,"interpolation":"LINEAR"},
+    {"input":3,"output":5,"interpolation":"LINEAR"}
+  ]}],
+"buffers":[{"byteLength":144}]}"#;
     let model = load_model_from_bytes("nodes.glb", &glb_from_parts(json, bin)).expect("该能解析");
     assert_eq!(
         model.meshes.len(),
@@ -203,4 +242,73 @@ fn gltf_node_transforms_are_baked_into_geometry() {
         xs.iter().any(|x| (x - 2.0).abs() < 1e-5),
         "子节点该继承父节点的 x=2：{xs:?}"
     );
+
+    // ── 节点表与动画（gap #23 第一刀：解析 + CPU 采样）────────────────────
+    assert_eq!(model.nodes.len(), 4, "4 个节点都要在表里");
+    assert_eq!(model.nodes[3].parent, Some(0), "子节点的父是「右」");
+    assert_eq!(model.animation_names(), vec!["移动"]);
+    let clip = model.animation("移动").expect("该有动画");
+    assert_eq!(clip.tracks.len(), 2, "一条平移 + 一条旋转");
+    assert!(
+        (clip.duration - 1.0).abs() < 1e-6,
+        "时长 1 秒：{}",
+        clip.duration
+    );
+
+    // 绑定姿态 = 初始状态：几何是烘好的，所以"动画矩阵"必须是单位矩阵
+    let bind = model.bind_pose();
+    let right_idx = model
+        .meshes
+        .iter()
+        .position(|m| m.name.starts_with("右/"))
+        .unwrap();
+    let m = model.mesh_matrix(right_idx, &bind);
+    let identity = [
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+    for (a, b) in m.to_cols_array().iter().zip(identity.iter()) {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "绑定姿态下 mesh_matrix 必须是单位矩阵：{:?}",
+            m.to_cols_array()
+        );
+    }
+
+    // 采样：t=0 → 2，t=0.5 → 3.5，t=1 → 5（LINEAR）
+    let at = |t: f32| model.sample_animation("移动", t).expect("名字对就该有结果");
+    for (t, want) in [(0.0f32, 2.0f32), (0.5, 3.5), (1.0, 5.0)] {
+        let w = at(t);
+        assert!(
+            (w[0].to_cols_array()[12] - want).abs() < 1e-4,
+            "t={t} 时「右」该在 x={want}，实际 {}",
+            w[0].to_cols_array()[12]
+        );
+    }
+    // 子节点跟着父节点走（世界矩阵）
+    assert!(
+        (at(0.5)[3].to_cols_array()[13] - 1.0).abs() < 1e-4,
+        "子节点该仍在父节点上方 1 米"
+    );
+    // 烘过的几何 + mesh_matrix = 动画后的位置
+    let baked = right.data.vertices[1].position; // x ≈ 3（三角的 (1,0) 顶点）
+    let anim = at(0.5);
+    let moved = model
+        .mesh_matrix(right_idx, &anim)
+        .transform_point3(Vec3::new(baked[0], baked[1], baked[2]));
+    assert!(
+        (moved.x - (baked[0] + 1.5)).abs() < 1e-4,
+        "t=0.5 时整体该右移 1.5（2→3.5）：{} vs {}",
+        moved.x,
+        baked[0] + 1.5
+    );
+
+    // 旋转轨道：t=1 时绕 Z 转 90°，(1,0) 方向 → (0,1)
+    let rot = at(1.0);
+    let rotated_dir = rot[2].transform_vector3(Vec3::new(1.0, 0.0, 0.0));
+    assert!(
+        rotated_dir.x.abs() < 1e-3 && (rotated_dir.y - 1.0).abs() < 1e-3,
+        "90° 后 (1,0) 该变成 (0,1)：{rotated_dir:?}"
+    );
+    // 不存在的动画名 → None（不是 panic、也不是静默给绑定姿态）
+    assert!(model.sample_animation("没有这条", 0.0).is_none());
 }
