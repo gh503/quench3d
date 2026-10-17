@@ -202,7 +202,7 @@ pub struct Trajectory {
     pub max_speed: f32,
     /// 最大倾斜角（度）。球体等各向同性形状会随意自转，此时该值没有物理意义。
     pub max_tilt_deg: f32,
-    /// 形状种类（box / sphere / capsule / cylinder / plane / convex）。
+    /// 形状种类（box / sphere / capsule / cylinder / cone / plane / convex）。
     pub shape: String,
     /// 倾斜角是否能说明问题（球体 / 平面为 false）。
     pub tilt_meaningful: bool,
@@ -1249,6 +1249,10 @@ pub fn physics_shape(shape: &ShapeDoc) -> Shape {
             half_height: shape.half_height.unwrap_or(0.5),
             radius: shape.radius.unwrap_or(0.5),
         },
+        ShapeKind::Cone => Shape::Cone {
+            half_height: shape.half_height.unwrap_or(0.5),
+            radius: shape.radius.unwrap_or(0.5),
+        },
         ShapeKind::Plane => Shape::Plane {
             normal: v3(shape.normal.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
         },
@@ -1277,6 +1281,12 @@ pub fn render_scale(shape: &ShapeDoc, plane_size: f32) -> Vec3 {
         }
         ShapeKind::Cylinder => {
             // 单位圆柱：半径 0.5、高 1
+            let r = shape.radius.unwrap_or(0.5);
+            let h = shape.half_height.unwrap_or(0.5);
+            Vec3::new(r * 2.0, h * 2.0, r * 2.0)
+        }
+        ShapeKind::Cone => {
+            // 单位圆锥：底面半径 0.5、高 1（中心在原点）
             let r = shape.radius.unwrap_or(0.5);
             let h = shape.half_height.unwrap_or(0.5);
             Vec3::new(r * 2.0, h * 2.0, r * 2.0)
@@ -1876,7 +1886,7 @@ pub fn parse_overlap_query(text: &str) -> Result<QueryKind, String> {
     };
     let Some((kind, params)) = head.split_once(':') else {
         return Err(format!(
-            "`{head}` 缺少形状：写成 sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / plane:0,1,0"
+            "`{head}` 缺少形状：写成 sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / cone:0.5,0.5 / plane:0,1,0"
         ));
     };
     let nums = parse_floats(params)?;
@@ -1928,6 +1938,18 @@ pub fn parse_overlap_query(text: &str) -> Result<QueryKind, String> {
                 format!("cylinder {},{}", nums[0], nums[1]),
             )
         }
+        "cone" => {
+            if nums.len() != 2 || nums[0] <= 0.0 || nums[1] <= 0.0 {
+                return Err("cone 需要 2 个正数（半高, 底面半径）：cone:0.5,0.5".into());
+            }
+            (
+                Shape::Cone {
+                    half_height: nums[0],
+                    radius: nums[1],
+                },
+                format!("cone {},{}", nums[0], nums[1]),
+            )
+        }
         "plane" => {
             if nums.len() != 3 {
                 return Err("plane 需要 3 个数（法线）：plane:0,1,0".into());
@@ -1943,7 +1965,7 @@ pub fn parse_overlap_query(text: &str) -> Result<QueryKind, String> {
         }
         other => {
             return Err(format!(
-                "不认识的形状 `{other}`：支持 sphere / box / capsule / cylinder / plane"
+                "不认识的形状 `{other}`：支持 sphere / box / capsule / cylinder / cone / plane"
             ))
         }
     };
@@ -2404,6 +2426,7 @@ fn shape_kind_of(doc: &SceneDoc, name: &str) -> &'static str {
                 ShapeKind::Sphere => "sphere",
                 ShapeKind::Capsule => "capsule",
                 ShapeKind::Cylinder => "cylinder",
+                ShapeKind::Cone => "cone",
                 ShapeKind::Plane => "plane",
                 ShapeKind::Convex => "convex",
             };
@@ -2554,6 +2577,7 @@ pub fn setup_visuals(
                 ShapeKind::Sphere => engine.assets.unit_sphere,
                 ShapeKind::Capsule => engine.assets.unit_capsule,
                 ShapeKind::Cylinder => engine.assets.unit_cylinder,
+                ShapeKind::Cone => engine.assets.unit_cone,
                 ShapeKind::Plane => engine.assets.unit_plane,
                 ShapeKind::Convex => engine.assets.unit_cube,
             };
@@ -3875,6 +3899,93 @@ mod tests {
             ..doc
         };
         assert!(!point_light_from_doc(&explicit).cast_shadows);
+    }
+
+    /// 形状映射表：每种 `ShapeKind` 都要同时给出物理形状与渲染缩放，且**两者尺寸一致**。
+    ///
+    /// 这是最容易"只接一半"的地方（第 61 轮加圆锥时就在这个位置）：格式里认了、物理里
+    /// 没认，或者渲染缩放写错一边 —— 两种都要等真渲染/真碰撞才看得出来。判据是
+    /// 「单位图元尺寸 × `render_scale` == 物理 `local_aabb` 尺寸」，平面/凸包没有单位图元
+    /// （平面无限大、凸包走 AABB 近似），只钉它们的映射本身。
+    #[test]
+    fn every_shape_kind_maps_to_physics_and_render_consistently() {
+        // 单位图元的尺寸（与 `AssetCache` 里创建的一致：半径 0.5 / 半高 0.5 / 边长 1）
+        let unit_size = |kind: ShapeKind| match kind {
+            ShapeKind::Box => Some(Vec3::ONE),
+            ShapeKind::Sphere => Some(Vec3::splat(1.0)),
+            ShapeKind::Capsule => Some(Vec3::new(1.0, 2.0, 1.0)),
+            ShapeKind::Cylinder | ShapeKind::Cone => Some(Vec3::new(1.0, 1.0, 1.0)),
+            ShapeKind::Plane | ShapeKind::Convex => None,
+        };
+        for kind in [
+            ShapeKind::Box,
+            ShapeKind::Sphere,
+            ShapeKind::Capsule,
+            ShapeKind::Cylinder,
+            ShapeKind::Cone,
+            ShapeKind::Plane,
+            ShapeKind::Convex,
+        ] {
+            let doc = ShapeDoc {
+                kind,
+                size: Some([0.4, 0.6, 0.8]),
+                radius: Some(0.3),
+                half_height: Some(0.7),
+                normal: Some([0.0, 1.0, 0.0]),
+                points: Some(vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ]),
+            };
+            let shape = physics_shape(&doc);
+            match kind {
+                // 逐形状钉住映射（字段顺序/单位写错就会红）
+                ShapeKind::Box => assert_eq!(
+                    shape,
+                    Shape::Box {
+                        half_extents: Vec3::new(0.2, 0.3, 0.4)
+                    }
+                ),
+                ShapeKind::Sphere => assert_eq!(shape, Shape::Sphere { radius: 0.3 }),
+                ShapeKind::Capsule => assert_eq!(
+                    shape,
+                    Shape::Capsule {
+                        half_height: 0.7,
+                        radius: 0.3
+                    }
+                ),
+                ShapeKind::Cylinder => assert_eq!(
+                    shape,
+                    Shape::Cylinder {
+                        half_height: 0.7,
+                        radius: 0.3
+                    }
+                ),
+                ShapeKind::Cone => assert_eq!(
+                    shape,
+                    Shape::Cone {
+                        half_height: 0.7,
+                        radius: 0.3
+                    }
+                ),
+                ShapeKind::Plane => assert!(shape.is_plane(), "{shape:?}"),
+                ShapeKind::Convex => {
+                    assert!(matches!(shape, Shape::ConvexHull { .. }), "{shape:?}")
+                }
+            }
+            if let Some(unit) = unit_size(kind) {
+                let scale = render_scale(&doc, 5.0);
+                let rendered = unit * scale;
+                let aabb = shape.local_aabb();
+                let physical = aabb.max - aabb.min;
+                assert!(
+                    (rendered - physical).length() < 1e-5,
+                    "{kind:?}: 渲染尺寸 {rendered:?} 与物理 AABB {physical:?} 不一致（缩放 {scale:?}）"
+                );
+            }
+        }
     }
 
     /// 文档 → 引擎：聚光灯的每个字段都要落到引擎里，尤其是**投影开关**。

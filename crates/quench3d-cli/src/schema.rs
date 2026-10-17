@@ -208,7 +208,7 @@ pub fn schema() -> Value {
                 "args": [
                     { "name": "scene", "type": "path", "required": true, "description": "场景 JSON 路径" },
                     { "name": "--ray", "type": "string", "required": false, "description": "射线：ox,oy,oz,dx,dy,dz（与 --overlap 二选一）" },
-                    { "name": "--overlap", "type": "string", "required": false, "description": "形状重叠：sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / plane:0,1,0，可接 @x,y,z 与 ~rx,ry,rz（度，XYZ 序）" },
+                    { "name": "--overlap", "type": "string", "required": false, "description": "形状重叠：sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / cone:0.5,0.5 / plane:0,1,0，可接 @x,y,z 与 ~rx,ry,rz（度，XYZ 序）" },
                     { "name": "--all", "type": "flag", "required": false, "description": "射线返回全部命中（按距离升序）；缺省只返回最近的一个。对 --overlap 无意义，给了会报错" },
                     { "name": "--mask", "type": "u32", "required": false, "description": "层掩码（单向：只看被查方在不在掩码里），缺省 u32::MAX 全查" },
                     { "name": "--no-sensors", "type": "flag", "required": false, "description": "不把传感器（触发区）算作可命中；缺省算" },
@@ -373,11 +373,12 @@ pub fn scene_grammar() -> Value {
             "emissive_texture": "自发光贴图路径"
         },
         "shape": {
-            "type": ["box", "sphere", "capsule", "cylinder", "plane", "convex"],
+            "type": ["box", "sphere", "capsule", "cylinder", "cone", "plane", "convex"],
             "box": { "size": "[x, y, z] 边长（不是半长），缺省 [1,1,1]" },
             "sphere": { "radius": "缺省 0.5" },
             "capsule": { "radius": "缺省 0.5", "half_height": "圆柱段半高，缺省 0.5" },
             "cylinder": { "radius": "缺省 0.5", "half_height": "缺省 0.5" },
+            "cone": { "radius": "底面半径，缺省 0.5", "half_height": "缺省 0.5（底面在 -half_height、顶点在 +half_height）" },
             "plane": { "normal": "[x,y,z]，缺省 [0,1,0]" },
             "convex": { "points": "至少 4 个 [x,y,z] 顶点" }
         },
@@ -544,7 +545,10 @@ pub fn json_schema() -> Value {
         ),
         (
             "shapeKind",
-            ["box", "sphere", "capsule", "cylinder", "plane", "convex"].as_slice(),
+            [
+                "box", "sphere", "capsule", "cylinder", "cone", "plane", "convex",
+            ]
+            .as_slice(),
         ),
         (
             "jointKind",
@@ -894,7 +898,7 @@ pub fn system_prompt() -> String {
   - name: 字符串（关节引用与报告用它）
   - template: 模板名（可选）；instances: [{position, rotation_deg, scale, name}]（可选）
     一次摆多个副本 = 多个**独立**刚体；缺省名字 `本名#1`、`本名#2`…（只有一个副本时是本名）
-  - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"plane"|"convex",
+  - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"cone"|"plane"|"convex",
              size: [x,y,z]（box 的**边长**）, radius, half_height, normal, points }
   - parent: 父物体的 name（可选）。给了之后 position/rotation_deg 是**相对父物体**的
             （父物体动，子物体跟着动；只继承位置与朝向，不继承缩放；
@@ -1068,7 +1072,9 @@ mod tests {
     fn grammar_covers_every_shape_and_joint_kind() {
         let g = scene_grammar();
         let kinds = g["shape"]["type"].as_array().unwrap();
-        for k in ["box", "sphere", "capsule", "cylinder", "plane", "convex"] {
+        for k in [
+            "box", "sphere", "capsule", "cylinder", "cone", "plane", "convex",
+        ] {
             assert!(kinds.iter().any(|v| v == k), "语法缺少形状 {k}");
         }
         let joints = g["joint"]["type"].as_array().unwrap();

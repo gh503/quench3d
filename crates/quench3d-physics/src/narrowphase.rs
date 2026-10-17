@@ -157,6 +157,23 @@ fn shape_plane_candidates(
                 }
             }
         }
+        // 圆锥：顶点 + 底面圆周。立着放时靠 8 个底圈点稳住（和圆柱同一套做法），
+        // 躺下时顶点与底圈给出侧面的两端接触点。
+        Shape::Cone {
+            half_height,
+            radius,
+        } => {
+            let r = radius.abs();
+            let h = half_height.abs();
+            let apex = t.transform_point(vec3(0.0, h, 0.0));
+            out.push((apex, -sd(apex)));
+            let count = 8;
+            for i in 0..count {
+                let a = i as f32 / count as f32 * core::f32::consts::TAU;
+                let p = t.transform_point(vec3(a.cos() * r, -h, a.sin() * r));
+                out.push((p, -sd(p)));
+            }
+        }
         Shape::ConvexHull { points } => {
             for p in points {
                 let w = t.transform_point(*p);

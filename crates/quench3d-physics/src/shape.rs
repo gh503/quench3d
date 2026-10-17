@@ -41,6 +41,17 @@ pub enum Shape {
         /// 半径。
         radius: f32,
     },
+    /// 圆锥（沿本地 Y 轴，底面在 `-half_height`、顶点在 `+half_height`）。
+    ///
+    /// 底面圆心在本地原点以下：**质心**因此不在本地原点，而是
+    /// `(0, -half_height/2, 0)`（实心圆锥质心距底面 1/4 高），
+    /// 由 [`MassProperties::center`] 如实报出。
+    Cone {
+        /// 半高（底面到顶点的一半）。
+        half_height: f32,
+        /// 底面半径。
+        radius: f32,
+    },
     /// 凸包（点集已包含质心）。
     ConvexHull {
         /// 顶点集。
@@ -133,6 +144,15 @@ impl Shape {
                 half_height: *half_height,
                 radius: radius + margin,
             },
+            // 与圆柱同族近似：只把底面半径胀大，顶点处不是严格的 Minkowski 膨胀
+            // （圆柱也一样；`margin` 是接触余量，量级远小于形状尺寸）。
+            Shape::Cone {
+                half_height,
+                radius,
+            } => Shape::Cone {
+                half_height: *half_height,
+                radius: radius + margin,
+            },
             other => other.clone(),
         }
     }
@@ -152,6 +172,10 @@ impl Shape {
                 half_height,
                 radius,
             } => PI * radius * radius * 2.0 * half_height,
+            Shape::Cone {
+                half_height,
+                radius,
+            } => PI * radius * radius * 2.0 * half_height / 3.0,
             Shape::ConvexHull { points } => {
                 let aabb = Aabb::from_points(points);
                 if !aabb.is_valid() {
@@ -235,6 +259,24 @@ impl Shape {
                     center: Vec3::ZERO,
                 }
             }
+            Shape::Cone {
+                half_height,
+                radius,
+            } => {
+                let h = half_height.abs();
+                let r = radius.abs();
+                // 实心圆锥：V = πr²H/3（H = 2h）；绕轴 I = 3mr²/10，
+                // 绕质心横轴 I = m(3r²/20 + 3H²/80)（H = 2h ⇒ 3h²/20）。
+                let mass = PI * r * r * 2.0 * h / 3.0 * d;
+                let i_axis = 0.3 * mass * r * r;
+                let i_perp = mass * (0.15 * r * r + 0.15 * h * h);
+                MassProperties {
+                    mass,
+                    inertia: Vec3::new(i_perp, i_axis, i_perp),
+                    // 底面在 `-h`、顶点在 `+h`：质心在底面以上 1/4 高 = `-h/2`。
+                    center: vec3(0.0, -h * 0.5, 0.0),
+                }
+            }
             Shape::ConvexHull { points } => hull_mass_properties(points, d),
             Shape::Plane { .. } | Shape::TriMesh { .. } => MassProperties::ZERO,
         }
@@ -260,6 +302,14 @@ impl Shape {
                 Aabb::new(vec3(-r, -h, -r), vec3(r, h, r))
             }
             Shape::Cylinder {
+                half_height,
+                radius,
+            } => {
+                let r = radius.abs();
+                let h = half_height.abs();
+                Aabb::new(vec3(-r, -h, -r), vec3(r, h, r))
+            }
+            Shape::Cone {
                 half_height,
                 radius,
             } => {
@@ -309,6 +359,10 @@ impl Shape {
                 radius,
             } => half_height.abs() + radius.abs(),
             Shape::Cylinder {
+                half_height,
+                radius,
+            } => (half_height * half_height + radius * radius).sqrt(),
+            Shape::Cone {
                 half_height,
                 radius,
             } => (half_height * half_height + radius * radius).sqrt(),
@@ -372,6 +426,21 @@ impl Shape {
                     -half_height.abs()
                 };
                 vec3(radial.x, y, radial.z)
+            }
+            // 圆锥是凸的：支持点只在「顶点」和「底面圆上沿 `dir` 最远的那点」之间。
+            Shape::Cone {
+                half_height,
+                radius,
+            } => {
+                let h = half_height.abs();
+                let r = radius.abs();
+                let apex = vec3(0.0, h, 0.0);
+                let rim = vec3(dir.x, 0.0, dir.z).normalize_or_zero() * r + vec3(0.0, -h, 0.0);
+                if apex.dot(dir) >= rim.dot(dir) {
+                    apex
+                } else {
+                    rim
+                }
             }
             Shape::ConvexHull { points } => max_dot_point(points, dir),
             Shape::TriMesh { vertices, .. } => max_dot_point(vertices, dir),
@@ -586,6 +655,108 @@ mod tests {
         let s3 = cy.support(Vec3::X);
         assert!((s3.x - 0.5).abs() < 1e-5, "径向支持点 {s3:?}");
         assert!((s3.y.abs() - 1.0).abs() < 1e-5, "端盖上的点 {s3:?}");
+    }
+
+    /// 圆锥：体积/质量/惯量/质心偏移都按实心圆锥的闭式解核对。
+    #[test]
+    fn cone_mass_properties_match_closed_form() {
+        let h = 1.0f32;
+        let r = 0.5f32;
+        let s = Shape::Cone {
+            half_height: h,
+            radius: r,
+        };
+        let d = 1000.0f32;
+        let v = PI * r * r * 2.0 * h / 3.0;
+        let mp = s.mass_properties(d);
+        assert!(
+            (s.volume() - v).abs() < 1e-6,
+            "体积 {} 期望 {v}",
+            s.volume()
+        );
+        assert!((mp.mass - v * d).abs() < 1e-3, "质量 {}", mp.mass);
+        // 绕轴 3mr²/10；绕质心横轴 m(3r²/20 + 3(2h)²/80)
+        let m = v * d;
+        assert!(
+            (mp.inertia.y - 0.3 * m * r * r).abs() < 1e-2,
+            "轴向惯量 {}",
+            mp.inertia.y
+        );
+        let i_perp = m * (0.15 * r * r + 0.15 * h * h);
+        assert!(
+            (mp.inertia.x - i_perp).abs() < 1e-2,
+            "横向惯量 {} 期望 {i_perp}",
+            mp.inertia.x
+        );
+        assert!((mp.inertia.z - i_perp).abs() < 1e-2);
+        assert!(mp.inertia.y < mp.inertia.x, "轴向应小于横向");
+        // 质心：底面在 -h、顶点在 +h，重心底面以上 1/4 高 = -h/2
+        assert!((mp.center.y + h * 0.5).abs() < 1e-6, "质心 {:?}", mp.center);
+        assert_eq!(mp.center.x, 0.0);
+        assert_eq!(mp.center.z, 0.0);
+        assert!(mp.is_finite());
+    }
+
+    /// 圆锥的支持函数：顶点与底面圆周二选一，且包围盒/包围球不自相矛盾。
+    #[test]
+    fn cone_support_and_bounds() {
+        let c = Shape::Cone {
+            half_height: 1.0,
+            radius: 0.5,
+        };
+        // 正上方 = 顶点
+        let up = c.support(Vec3::Y);
+        assert!(
+            (up.y - 1.0).abs() < 1e-6 && up.x == 0.0 && up.z == 0.0,
+            "{up:?}"
+        );
+        // 正下方 = 底面（整个底面都是支持点；这是并列里的一个，合法）
+        let down = c.support(Vec3::NEG_Y);
+        assert!((down.y + 1.0).abs() < 1e-6, "{down:?}");
+        assert!(down.x * down.x + down.z * down.z <= 0.25 + 1e-6, "{down:?}");
+        // 只要有一点点径向分量，底面圆上的点就赢了顶点
+        let almost_down = c.support(vec3(1.0, -10.0, 0.0));
+        assert!((almost_down.y + 1.0).abs() < 1e-6, "{almost_down:?}");
+        assert!((almost_down.x - 0.5).abs() < 1e-6, "{almost_down:?}");
+        // 径向 = 底面圆周上的点（不是顶点）
+        let side = c.support(Vec3::X);
+        assert!(
+            (side.x - 0.5).abs() < 1e-6 && (side.y + 1.0).abs() < 1e-6,
+            "{side:?}"
+        );
+        // 斜向：顶点与圆周谁远选谁（同一条射线，符号不同就换人）
+        let up_diag = c.support(vec3(3.0, 1.0, 0.0));
+        assert!((up_diag - Vec3::Y).length() < 1e-6, "该选顶点：{up_diag:?}");
+        let down_diag = c.support(vec3(3.0, -1.0, 0.0));
+        assert!(
+            (down_diag - vec3(0.5, -1.0, 0.0)).length() < 1e-6,
+            "该选底面圆：{down_diag:?}"
+        );
+
+        let aabb = c.local_aabb();
+        assert!(
+            (aabb.min - vec3(-0.5, -1.0, -0.5)).length() < 1e-6,
+            "{:?}",
+            aabb.min
+        );
+        assert!(
+            (aabb.max - vec3(0.5, 1.0, 0.5)).length() < 1e-6,
+            "{:?}",
+            aabb.max
+        );
+        let br = c.bounding_radius();
+        assert!((br - (1.0f32 + 0.25).sqrt()).abs() < 1e-6, "{br}");
+        // 膨胀只动半径（与圆柱同族近似）
+        match c.inflated(0.1) {
+            Shape::Cone {
+                half_height,
+                radius,
+            } => {
+                assert!((half_height - 1.0).abs() < 1e-6);
+                assert!((radius - 0.6).abs() < 1e-6);
+            }
+            other => panic!("膨胀后不该换形状：{other:?}"),
+        }
     }
 
     #[test]

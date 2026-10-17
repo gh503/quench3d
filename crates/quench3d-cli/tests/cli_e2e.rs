@@ -4084,7 +4084,7 @@ fn json_schema_is_machine_readable() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["box", "sphere", "capsule", "cylinder", "plane", "convex"]
+        vec!["box", "sphere", "capsule", "cylinder", "cone", "plane", "convex"]
     );
     let joints: Vec<&str> = s["$defs"]["jointKind"]["enum"]
         .as_array()
@@ -5379,4 +5379,131 @@ fn scenes_without_include_are_unaffected() {
     assert_eq!(r.code, 0);
     assert_eq!(r.json()["data"]["valid"], true);
     assert_eq!(r.json()["data"]["warnings"], 0);
+}
+
+/// 圆锥（第 61 轮补的第 7 种形状）：端到端真的落在地上、报告里形状名对得上、
+/// 坏参数给出稳定码与精确路径。
+#[test]
+fn cone_shape_simulates_validates_and_reports() {
+    let dir = temp_dir("cone");
+    let scene = write_scene(
+        &dir,
+        "cone.json",
+        serde_json::json!({
+            "format": "quench3d.scene",
+            "version": 2,
+            "ground": { "size": 20 },
+            "objects": [
+                // 底面朝下（默认朝向）：底面半径 0.4、半高 0.5 ⇒ 静止时原点在 y=0.5
+                { "name": "桩", "shape": { "type": "cone", "radius": 0.4, "half_height": 0.5 },
+                  "position": [0, 1.2, 0], "body": "dynamic", "friction": 0.8 },
+                // 顶点朝下 + 一点倾斜：应该翻倒，但不穿地
+                { "name": "陀螺", "shape": { "type": "cone", "radius": 0.3, "half_height": 0.4 },
+                  "position": [2.0, 1.0, 0], "rotation_deg": [0, 0, 189], "body": "dynamic" },
+                // 静态锥：只用来钉住"静态形状也能建"
+                { "name": "锥标", "shape": { "type": "cone", "radius": 0.25, "half_height": 0.6 },
+                  "position": [-2.0, 0.6, 0], "body": "static", "material": "橙" }
+            ],
+            "materials": { "橙": { "color": [0.95, 0.45, 0.15], "roughness": 0.6 } },
+            "simulate": { "steps": 300, "dt": 0.0166667 }
+        }),
+    );
+
+    let v = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(v.code, 0, "圆锥场景必须合法：{}", v.stdout);
+    assert_eq!(v.json()["data"]["valid"], true);
+
+    let s = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(s.code, 0, "{}", s.stdout);
+    let data = s.json()["data"].clone();
+    assert_eq!(data["nan_bodies"], 0, "圆锥仿真不允许 NaN");
+    let states = data["states"].as_array().unwrap();
+    let find = |name: &str| {
+        states
+            .iter()
+            .find(|st| st["name"] == name)
+            .unwrap_or_else(|| panic!("报告里缺 {name}：{states:?}"))
+            .clone()
+    };
+    // 立着的那根：原点停在 half_height 附近（底面贴地）
+    let post = find("桩");
+    let y = post["position"][1].as_f64().unwrap();
+    assert!(
+        (y - 0.5).abs() < 0.08,
+        "底面朝下的圆锥应停在 y≈0.5，实际 {y}（{post}）"
+    );
+    // 翻倒的那个：姿态明显偏开（四元数 x/z 分量大），且没穿地
+    let top = find("陀螺");
+    let ty = top["position"][1].as_f64().unwrap();
+    assert!(ty > 0.0, "翻倒的圆锥不该穿地：{top}");
+    let rot = top["rotation"].as_array().unwrap();
+    let tilt = (rot[0].as_f64().unwrap().powi(2) + rot[2].as_f64().unwrap().powi(2)).sqrt();
+    assert!(tilt > 0.3, "顶点朝下的圆锥应该翻倒，实际姿态 {rot:?}");
+    // 静态的那个：一动不动
+    let marker = find("锥标");
+    assert!((marker["position"][1].as_f64().unwrap() - 0.6).abs() < 1e-6);
+
+    // 倾斜报告里形状名 = "cone"（`--trace` 的每步姿态统计）
+    let t = run(&[
+        "simulate",
+        scene.to_str().unwrap(),
+        "--trace",
+        "桩",
+        "--json",
+    ]);
+    assert_eq!(t.code, 0, "{}", t.stdout);
+    let data = t.json()["data"].clone();
+    let traj = &data["trajectories"][0];
+    assert_eq!(traj["name"], "桩");
+    assert_eq!(
+        traj["shape"], "cone",
+        "轨迹报告里的形状名应为 cone：{}",
+        traj["shape"]
+    );
+
+    // 坏参数：半径 0 → out_of_range，路径指到 objects[0].shape.radius
+    let bad = write_scene(
+        &dir,
+        "bad_cone.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "objects": [ { "name": "坏", "shape": { "type": "cone", "radius": 0.0, "half_height": 0.5 },
+                          "body": "dynamic" } ],
+            "simulate": { "steps": 1 }
+        }),
+    );
+    let b = run(&["validate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        b.code, 2,
+        "坏圆锥必须校验失败（输入问题 = 退出码 2）：{}",
+        b.stdout
+    );
+    let env = b.json();
+    // 契约：场景**能解析**但语义不合法 → `data.diagnostics`（解析失败才走 `error.diagnostics`）
+    let diags = env["data"]["diagnostics"].as_array().unwrap();
+    let hit = diags
+        .iter()
+        .find(|d| d["path"] == "objects[0].shape.radius")
+        .unwrap_or_else(|| panic!("缺 objects[0].shape.radius 的诊断：{diags:?}"));
+    assert_eq!(hit["code"], "out_of_range");
+    // 半高为负 → 同一个码，另一条路径
+    let bad2 = write_scene(
+        &dir,
+        "bad_cone2.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "objects": [ { "name": "坏", "shape": { "type": "cone", "half_height": -1.0 },
+                          "body": "dynamic" } ],
+            "simulate": { "steps": 1 }
+        }),
+    );
+    let b2 = run(&["validate", bad2.to_str().unwrap(), "--json"]);
+    assert_eq!(b2.code, 2);
+    let diags2 = b2.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags2
+            .iter()
+            .any(|d| d["path"] == "objects[0].shape.half_height" && d["code"] == "out_of_range"),
+        "缺 half_height 的诊断：{diags2:?}"
+    );
 }

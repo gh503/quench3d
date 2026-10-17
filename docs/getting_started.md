@@ -305,7 +305,7 @@ l.fog = FogParams { /* 距离雾 */ ..Default::default() };
 ### 3.8 内置网格与材质
 
 内置网格是 `AssetCache` 上的**字段**（单位尺寸，用 `Transform` 缩放来改大小）：
-`unit_cube` `unit_sphere` `unit_cylinder` `unit_capsule` `unit_plane`。
+`unit_cube` `unit_sphere` `unit_cylinder` `unit_capsule` `unit_cone` `unit_plane`。
 自己造网格用 `MeshData` + `engine.renderer.add_mesh(...)`；
 加载外部模型见 3.1，缓存命中情况用 `engine.assets.cached_counts()` 看。
 

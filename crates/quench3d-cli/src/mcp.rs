@@ -1035,14 +1035,14 @@ fn raw_tool_definitions() -> Vec<Value> {
         json!({
             "name": "quench3d_query",
             "title": "几何查询：射线 / 形状重叠（不需要 GPU，只读）",
-            "description": "在场景上做一次查询，不改动场景、不渲染。ray 给 \"ox,oy,oz,dx,dy,dz\"（配合 all 返回沿路的全部命中，按距离升序；缺省只给最近的一个）；overlap 给 \"sphere:0.5\" / \"box:1,2,1\" / \"capsule:0.6,0.3\" / \"cylinder:0.5,0.5\" / \"plane:0,1,0\"，可接 @x,y,z 与 ~rx,ry,rz（度）。层过滤是单向的（mask 只看被查方在不在掩码里）；sensors=false 可排除触发区。",
+            "description": "在场景上做一次查询，不改动场景、不渲染。ray 给 \"ox,oy,oz,dx,dy,dz\"（配合 all 返回沿路的全部命中，按距离升序；缺省只给最近的一个）；overlap 给 \"sphere:0.5\" / \"box:1,2,1\" / \"capsule:0.6,0.3\" / \"cylinder:0.5,0.5\" / \"cone:0.5,0.5\" / \"plane:0,1,0\"，可接 @x,y,z 与 ~rx,ry,rz（度）。层过滤是单向的（mask 只看被查方在不在掩码里）；sensors=false 可排除触发区。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "scene": { "description": "场景对象或 JSON 字符串", "type": ["object", "string"] },
                     "scene_path": { "type": "string" },
                     "ray": { "type": "string", "description": "射线：ox,oy,oz,dx,dy,dz（与 overlap 二选一）" },
-                    "overlap": { "type": "string", "description": "形状重叠：sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / plane:0,1,0，可接 @x,y,z 与 ~rx,ry,rz（度）" },
+                    "overlap": { "type": "string", "description": "形状重叠：sphere:0.5 / box:1,2,1 / capsule:0.6,0.3 / cylinder:0.5,0.5 / cone:0.5,0.5 / plane:0,1,0，可接 @x,y,z 与 ~rx,ry,rz（度）" },
                     "all": { "type": "boolean", "description": "ray 返回全部命中（缺省 false，只给最近的一个）；对 overlap 无意义" },
                     "mask": { "type": "integer", "description": "层掩码（单向判据），缺省 4294967295 全查" },
                     "sensors": { "type": "boolean", "description": "是否把传感器（触发区）算作可命中，缺省 true" },

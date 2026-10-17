@@ -2756,3 +2756,107 @@ fn compound_body_is_one_rigid_body_and_the_old_shapes_still_match() {
     );
     assert!(w.raycast(vec3(0.0, 5.0, 0.0), Vec3::NEG_Y, 20.0).is_some());
 }
+
+// ---------------------------------------------------------------------------
+// 圆锥（第 61 轮补的形状）
+// ---------------------------------------------------------------------------
+
+/// 底面朝下的圆锥落在平面上：底面停在 y=0，刚体原点（几何中心）停在 `half_height`。
+///
+/// 这条同时钉住三件事：圆锥真的参与了半空间接触（`shape_plane_candidates` 的底圈点），
+/// 底面没有陷进地面，以及**质心偏移** `(0, -half_height/2, 0)` 被真的算进去了
+/// （否则重力作用点错、静置高度也会漂）。
+#[test]
+fn cone_base_down_rests_on_ground() {
+    let h = 0.5f32;
+    let r = 0.4f32;
+    let mut w = PhysicsWorld::new();
+    add_ground(&mut w, 0.6, 0.0);
+    let handle = w.add_body(
+        BodyBuilder::dynamic(Shape::Cone {
+            half_height: h,
+            radius: r,
+        })
+        .position(vec3(0.0, 1.0, 0.0))
+        .friction(0.6)
+        .build(),
+    );
+    // 刚体建好后质心就该在原点下方 h/2（`MassProperties::center` 生效）
+    assert!(
+        (w.body(handle).unwrap().local_center.y + h * 0.5).abs() < 1e-5,
+        "质心 {:?}",
+        w.body(handle).unwrap().local_center
+    );
+    for _ in 0..300 {
+        w.step(DT);
+    }
+    assert_all_finite(&w, "圆锥静置");
+    let body = w.body(handle).unwrap();
+    assert!(
+        (body.position().y - h).abs() < 0.05,
+        "底面应停在 y=0（原点在 {h}），实际 {}",
+        body.position().y
+    );
+    assert!(
+        body.linear_velocity().length() < 0.1,
+        "静置后速度应接近 0，实际 {:?}",
+        body.linear_velocity()
+    );
+    // 立着没倒：局部 Y 轴仍接近世界 +Y
+    let up = body.rotation().mul_vec3(Vec3::Y);
+    assert!(up.y > 0.95, "圆锥倒了：{up:?}");
+    // 质心在世界里也在原点下方 h/2
+    assert!(
+        (body.com_world().y - (body.position().y - h * 0.5)).abs() < 1e-4,
+        "com {:?} 位姿 {:?}",
+        body.com_world(),
+        body.position()
+    );
+}
+
+/// 顶点朝下（还带一点倾斜）的圆锥会倒下来：它的侧面对地面产生接触，
+/// 最终躺倒（局部 Y 轴偏离世界 +Y 很多）但不会穿地、不出 NaN。
+#[test]
+fn cone_apex_down_tips_over() {
+    let h = 0.5f32;
+    let r = 0.4f32;
+    let mut w = PhysicsWorld::new();
+    add_ground(&mut w, 0.4, 0.0);
+    let handle = w.add_body(
+        BodyBuilder::dynamic(Shape::Cone {
+            half_height: h,
+            radius: r,
+        })
+        // 顶点朝下：绕 Z 转 180°，再给 0.15 rad 的倾斜让它别停在对称的刀刃上
+        .position(vec3(0.0, 0.9, 0.0))
+        .rotation(Quat::from_rotation_z(core::f32::consts::PI + 0.15))
+        .friction(0.4)
+        .build(),
+    );
+    for _ in 0..420 {
+        w.step(DT);
+    }
+    assert_all_finite(&w, "圆锥翻倒");
+    let body = w.body(handle).unwrap();
+    let up = body.rotation().mul_vec3(Vec3::Y);
+    assert!(
+        up.y < 0.5,
+        "顶点朝下应翻倒（局部 Y 轴该偏开世界 Y），实际 {up:?}"
+    );
+    // 不穿地、也没浮着：用支持函数精确算「世界 -Y 方向上最低的那个点」。
+    let shape = Shape::Cone {
+        half_height: h,
+        radius: r,
+    };
+    let local_down = body.rotation().inverse().mul_vec3(Vec3::NEG_Y);
+    let lowest = body.position() + body.rotation().mul_vec3(shape.support(local_down));
+    assert!(
+        lowest.y.abs() < 0.1,
+        "躺倒后最低点应贴着地面 y≈0，实际 {lowest:?}"
+    );
+    assert!(
+        body.linear_velocity().length() < 0.4,
+        "翻倒后应基本停下，实际 {:?}",
+        body.linear_velocity()
+    );
+}

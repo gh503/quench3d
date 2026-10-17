@@ -429,7 +429,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 物体 | `name`/`shape`/`position`/`rotation_deg`/`scale`/`material`/**`parent`**（按父物体名字引用；有它时 `position`/`rotation_deg` 是局部量，**缩放不继承**） | — | — | :288-303 |
 | | `body` | `none\|static\|dynamic\|kinematic` | `none` | :273-286 |
 | | `density`/`restitution`/`friction`/`velocity`/`visible` | — | — | :312-324 |
-| 形状 | `type` | `box\|sphere\|capsule\|cylinder\|plane\|convex`（6 种） | — | :218-232 |
+| 形状 | `type` | `box\|sphere\|capsule\|cylinder\|cone\|plane\|convex`（7 种；圆角盒/高度场见 #18） | — | :218-232 |
 | | `size`（**边长**，不是半长）/`radius`/`half_height`/`normal`/`points` | — | — | :236-255 |
 | 模型 | `path`/`position`/`rotation_deg`/`scale`/`collide`/`friction` | — | — | :334-351 |
 | 关节 | `kind` | `fixed\|ball\|hinge\|distance\|slider` | — | :357-370 |
@@ -462,7 +462,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 15 | ✅ **已接线**（第 29 轮锚点 + 第 56 轮按端局部轴 + **第 59 轮参考姿态**） | 引擎 `Joint` 的 `local_anchor_a/b`、`local_frame_a/b`、`local_axis_a/b`（`joints.rs:34-125`）现在**全部有格式入口且全部生效**：`anchor_a`/`anchor_b`（局部坐标）、`axis_a`/`axis_b`（按端局部轴，不写 = 回落 `axis`）、`frame_a`/`frame_b`（固定关节的参考姿态，欧拉角度）。参考姿态这一段的落点在**引擎**：`Joint::Fixed` 多了参考姿态偏置（`fixed_frame_error` + `frame_target_velocity`，`joints.rs`），把两端扭到 `q_a⊗frame_a == q_b⊗frame_b`；两端参考姿态都是单位四元数时走**原来那条**角约束表达式，老场景逐位不变。诊断（全部复用已有码）：零向量 `out_of_range`；`axis_a/b` 写在无轴关节上 `ineffective`；两端朝向相差 >10° 却只写 `axis` → `suspicious_value`；`frame_a/b` 写在非 `fixed` 上、或**两端都写 0**（与不写逐位等价）→ `ineffective`。**仍缺**：关节可视化（轴 / 锚点 / 参考姿态的 gizmo —— 要动渲染侧）；参考姿态只作用于 `fixed`（球窝/铰链各有自己的轴与限位，不需要它） | 门上装合页、摆锤、两块板按「特征朝向」对齐——**都能做了**；只剩可视化 |
 | 16 | 🟡 部分（第 31/34/35 轮）：**正交 / near·far / fov / 距离 / 偏航俯仰 / 自动取景已落地**（`render/camera.rs:58/275/310`，e2e `cli_e2e.rs:2015`）；**命名相机 `cameras` 已落地**（校验空名/保留名 `default`，预检白名单+schema+系统提示同步）；**`--camera <名字>` 已落地**（`render`/`simulate`/`movie` 通用；未知名 → 退出码 2 + `unknown_camera` + 可用名单；单测 + 无显卡 e2e）。**没做**：报告里的 `camera_name` 字段、`render.outputs[]` 多输出（一次渲多张）与 `outputs[]`/`--no-clobber` 语义 | 格式 |
 | 17 | **地面全局唯一** | `ground` 是单个 `Option`；物理面无限大、摩擦**硬编码 0.85**（runner.rs:374-376），`size` 只管视觉 | 冰面 + 草地共存、可调摩擦——做不到 |
-| 18 | **形状集合固定 6 种** | 引擎有 `TriMesh`（仅能靠 `models[].collide` 间接用）；无 Compound / HeightField / Cone / 圆角盒 | 地形高度场、L 形刚体只能拆成多个物体用 fixed 关节凑 |
+| 18 | **形状集合固定 6 种** | 引擎有 `TriMesh`（仅能靠 `models[].collide` 间接用）；无 Compound / HeightField / Cone / 圆角盒。**2026-10-20 第 61 轮：`cone` 已补齐**（物理 `Shape::Cone` 支撑函数/质量/惯量/质心偏移 + 渲染单位网格 + 格式/校验/编辑器工具栏 + 射线与半空间接触；圆角盒、高度场仍未做） | 地形高度场、L 形刚体只能拆成多个物体用 fixed 关节凑 |
 | 19 | ✅ **已基本齐**（第 59 轮核对，**本条曾经是错的、会误导下一个 agent 去重复实现**） | 引擎 `BodyBuilder` 的 `angular_velocity` / `linear_damping` / `angular_damping` / `gravity_scale` / `mass` / `allow_sleep`（`body.rs:336-351`）**都已在格式里**：`ObjectDoc` 字段在 `scene_doc.rs:1179-1196`，runner 装配在 `runner.rs:1429-1445`，校验在 `scene_doc.rs:3500-3545`（`mass` 非正、阻尼为负、非有限 → `out_of_range`）与 `scene_doc.rs:3545-3565`（非 `dynamic` 刚体写这些 → `ineffective` 并列出被忽略的字段名）；`templates` 里也能写（`scene_doc.rs:663-668` 逐字段继承）。**仍缺**（都不在引擎里，属于「以后再说」）：初速度只能给固定值（没有随机/分布）、重力只有**缩放**没有逐物体方向、没有逐物体的求解器迭代次数 | 陀螺自转（`angular_velocity`）、气球（`gravity_scale`）、按克数给质量（`mass`）、休眠控制（`allow_sleep`）——**都表达得了**；上表「刚体参数」那行有实测数字 |
 
 ### 3.3 静默失效与"写对了不生效"清单（**已逐条复核**）

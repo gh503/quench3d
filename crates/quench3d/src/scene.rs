@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use quench3d_math::{Transform, Vec3, Vec4};
+use quench3d_math::{Mat4, Transform, Vec3, Vec4};
 use quench3d_physics::{BodyHandle, PhysicsWorld};
 use quench3d_render::{InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshId, Renderer};
 
@@ -413,6 +413,17 @@ fn rigid_only(t: &Transform) -> Transform {
 
 /// 便捷构造器：用一组预设网格/材质快速搭建场景。
 ///
+/// 单位圆锥网格（底面半径 0.5、高 1，**中心在原点**：底面 y=-0.5、顶点 y=+0.5）。
+///
+/// `MeshData::cone` 的约定是「底面在 y=0、顶点在 y=height」，而场景里的图元一律
+/// **中心在原点**（这样 `parts[].rotation` 绕的才是几何中心）。这里平移一次，与物理
+/// `Shape::Cone { half_height: 0.5, radius: 0.5 }`（底面 -h、顶点 +h）对齐；
+/// 两者的 AABB 由 `tests/unit_primitives.rs` 逐轴对账。
+pub fn unit_cone_mesh() -> quench3d_render::MeshData {
+    quench3d_render::MeshData::cone(0.5, 1.0, 28)
+        .transformed(&Mat4::from_translation(quench3d_math::vec3(0.0, -0.5, 0.0)))
+}
+
 /// 内部缓存了常用图元与纯色材质，避免重复上传。
 pub struct AssetCache {
     meshes: HashMap<String, MeshId>,
@@ -425,6 +436,8 @@ pub struct AssetCache {
     pub unit_cylinder: MeshId,
     /// 单位胶囊（半径 0.5，总高 2）。
     pub unit_capsule: MeshId,
+    /// 单位圆锥（底面半径 0.5、高 1，**以质心为原点**：底面 y=-0.5、顶点 y=+0.5）。
+    pub unit_cone: MeshId,
     /// 单位平面（XZ 平面，边长 1）。
     pub unit_plane: MeshId,
 }
@@ -448,6 +461,7 @@ impl AssetCache {
             &quench3d_render::MeshData::capsule(0.5, 0.5, 28, 20),
             "capsule",
         );
+        let unit_cone = renderer.add_mesh_named(ctx, &unit_cone_mesh(), "cone");
         let unit_plane =
             renderer.add_mesh_named(ctx, &quench3d_render::MeshData::plane(1.0, 1), "plane");
         Self {
@@ -457,6 +471,7 @@ impl AssetCache {
             unit_sphere,
             unit_cylinder,
             unit_capsule,
+            unit_cone,
             unit_plane,
         }
     }

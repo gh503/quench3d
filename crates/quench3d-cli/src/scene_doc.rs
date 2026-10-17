@@ -1020,6 +1020,8 @@ pub enum ShapeKind {
     Capsule,
     /// 圆柱。
     Cylinder,
+    /// 圆锥（底面半径 `radius`、半高 `half_height`；底面在 `-half_height`、顶点在 `+half_height`）。
+    Cone,
     /// 平面（无限大，仅物理用）。
     Plane,
     /// 凸包（用 `points` 指定顶点）。
@@ -1039,7 +1041,7 @@ pub struct ShapeDoc {
     /// 球的半径，缺省 0.5。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
-    /// 胶囊/圆柱的半高（不含两端半球），缺省 0.5。
+    /// 胶囊/圆柱/圆锥的半高（胶囊不含两端半球；圆锥是底面到顶点的一半），缺省 0.5。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub half_height: Option<f32>,
     /// 平面法线，缺省 `[0, 1, 0]`。
@@ -5528,7 +5530,7 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
                 }
             }
         }
-        ShapeKind::Capsule | ShapeKind::Cylinder => {
+        ShapeKind::Capsule | ShapeKind::Cylinder | ShapeKind::Cone => {
             if let Some(h) = s.half_height {
                 if !h.is_finite() || h <= 0.0 {
                     out.push(Diagnostic::error_code(

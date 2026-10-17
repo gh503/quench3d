@@ -463,6 +463,10 @@ pub(crate) fn ray_shape(
             half_height,
             radius,
         } => ray_cylinder(*half_height, *radius, t, origin, dir, max_distance),
+        Shape::Cone {
+            half_height,
+            radius,
+        } => ray_cone(*half_height, *radius, t, origin, dir, max_distance),
         Shape::TriMesh { vertices, indices } => {
             let ray = Ray::new(origin, dir);
             let mut best: Option<(f32, Vec3)> = None;
@@ -587,6 +591,74 @@ fn ray_capsule(
             if best.map(|b| tt < b.0).unwrap_or(true) {
                 best = Some((tt, n));
             }
+        }
+    }
+    best.map(|(tt, n)| (tt, t.rotation.mul_vec3(n)))
+}
+
+/// 射线 - 圆锥（底面在 `-h`、顶点在 `+h`）。
+///
+/// 侧面是二次曲面 `x² + z² = k²(y - h)²`（`k = r / 2h`），解这个二次方程并把解限制在
+/// `|y| <= h`；底面再单独当圆盘求一次。侧面与底面里取最近的那个解。
+fn ray_cone(
+    half_height: f32,
+    radius: f32,
+    t: &Transform,
+    origin: Vec3,
+    dir: Vec3,
+    max_distance: f32,
+) -> Option<(f32, Vec3)> {
+    let h = half_height.abs();
+    let r = radius.abs();
+    if h <= 0.0 || r <= 0.0 {
+        return None;
+    }
+    let o = t.inverse_transform_point(origin);
+    let d = t.rotation.inverse().mul_vec3(dir);
+    let k = r / (2.0 * h);
+    let k2 = k * k;
+    let mut best: Option<(f32, Vec3)> = None;
+    // 侧面：a t² + b t + c = 0
+    let a = d.x * d.x + d.z * d.z - k2 * d.y * d.y;
+    let b = 2.0 * (o.x * d.x + o.z * d.z - k2 * d.y * (o.y - h));
+    let c = o.x * o.x + o.z * o.z - k2 * (o.y - h) * (o.y - h);
+    let consider = |tt: f32, n: Vec3, best: &mut Option<(f32, Vec3)>| {
+        if tt >= 0.0 && tt <= max_distance && best.map(|x| tt < x.0).unwrap_or(true) {
+            *best = Some((tt, n));
+        }
+    };
+    let lateral = |tt: f32| {
+        let p = o + d * tt;
+        if p.y <= h + 1e-6 && p.y >= -h - 1e-6 {
+            // 侧面外法线 = ∇(x² + z² - k²(y-h)²) = (2x, -2k²(y-h), 2z)
+            Some(vec3(p.x, -k2 * (p.y - h), p.z).normalize_or_zero())
+        } else {
+            None
+        }
+    };
+    if a.abs() > 1e-12 {
+        let disc = b * b - 4.0 * a * c;
+        if disc >= 0.0 {
+            let sq = disc.sqrt();
+            for tt in [(-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)] {
+                if let Some(n) = lateral(tt) {
+                    consider(tt, n, &mut best);
+                }
+            }
+        }
+    } else if b.abs() > 1e-12 {
+        // 射线平行于某条母线：退化成一次方程。
+        let tt = -c / b;
+        if let Some(n) = lateral(tt) {
+            consider(tt, n, &mut best);
+        }
+    }
+    // 底面圆盘（外法线 -Y）
+    if d.y.abs() > 1e-9 {
+        let tt = (-h - o.y) / d.y;
+        let p = o + d * tt;
+        if p.x * p.x + p.z * p.z <= r * r + 1e-6 {
+            consider(tt, -Vec3::Y, &mut best);
         }
     }
     best.map(|(tt, n)| (tt, t.rotation.mul_vec3(n)))
@@ -845,6 +917,69 @@ mod tests {
         );
         let miss = w.shape_cast(&shape, &from, vec3(10.0, 5.0, 0.0));
         assert!(miss.is_none() || miss.unwrap().distance > 9.0);
+    }
+
+    /// 圆锥的射线求交：侧面用二次曲面解、底面单独当圆盘，两者取近的那个。
+    ///
+    /// 数字都是手算的：`h = 0.5, r = 0.5` ⇒ 半顶角处 `k = r / 2h = 0.5`。
+    /// * y=0 那一圈半径 = `k·(h - 0) = 0.25`（从 (0,0,5) 沿 -Z 打，距离 4.75）；
+    /// * 从下方沿 +Y 打，先撞底面圆盘（y=-0.5，距离 5.5）；
+    /// * 从上方沿 -Y 打，先撞顶点（y=+0.5，距离 5.5）。
+    #[test]
+    fn raycast_hits_cone_lateral_base_and_apex() {
+        let mut w = PhysicsWorld::new();
+        let h = w.add_body(
+            BodyBuilder::r#static(Shape::Cone {
+                half_height: 0.5,
+                radius: 0.5,
+            })
+            .build(),
+        );
+        // 侧面
+        let side = w
+            .raycast(vec3(0.0, 0.0, 5.0), Vec3::NEG_Z, 100.0)
+            .expect("应命中侧面");
+        assert_eq!(side.handle, h);
+        assert!(
+            (side.distance - 4.75).abs() < 1e-3,
+            "侧面命中距离 {}",
+            side.distance
+        );
+        assert!(
+            (side.point.z - 0.25).abs() < 1e-3,
+            "命中点 {:?}",
+            side.point
+        );
+        // 法线应朝外（有 +Z 分量，也有 +Y 分量：侧面是斜的）
+        assert!(side.normal.z > 0.5, "法线 {:?}", side.normal);
+        assert!(
+            side.normal.y > 0.0,
+            "斜侧面法线应有 +Y 分量 {:?}",
+            side.normal
+        );
+        // 底面（从下方打）
+        let base = w
+            .raycast(vec3(0.0, -5.0, 0.0), Vec3::Y, 100.0)
+            .expect("应命中底面");
+        assert!(
+            (base.distance - 4.5).abs() < 1e-3,
+            "底面距离 {}",
+            base.distance
+        );
+        assert!((base.point.y + 0.5).abs() < 1e-3, "命中点 {:?}", base.point);
+        assert!(base.normal.y < -0.9, "底面法线应朝下 {:?}", base.normal);
+        // 顶点（从上方沿轴打：x=z=0 处侧面退化成一点，仍要给出 +h 的命中）
+        let apex = w
+            .raycast(vec3(0.0, 5.0, 0.0), Vec3::NEG_Y, 100.0)
+            .expect("应命中顶点");
+        assert!(
+            (apex.distance - 4.5).abs() < 1e-3,
+            "顶点距离 {}",
+            apex.distance
+        );
+        assert!((apex.point.y - 0.5).abs() < 1e-3, "命中点 {:?}", apex.point);
+        // 打偏了就不该命中
+        assert!(w.raycast(vec3(0.0, 5.0, 3.0), Vec3::NEG_Y, 100.0).is_none());
     }
 
     #[test]

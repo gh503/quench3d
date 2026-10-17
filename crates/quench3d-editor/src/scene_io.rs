@@ -870,6 +870,15 @@ fn shape_doc_from_shape(shape: &Shape, _visual_scale: Vec3) -> Option<ShapeDoc> 
             radius: Some(*radius),
             ..Default::default()
         },
+        Shape::Cone {
+            half_height,
+            radius,
+        } => ShapeDoc {
+            kind: ShapeKind::Cone,
+            half_height: Some(*half_height),
+            radius: Some(*radius),
+            ..Default::default()
+        },
         Shape::Plane { normal } => ShapeDoc {
             kind: ShapeKind::Plane,
             normal: Some([normal.x, normal.y, normal.z]),
@@ -904,7 +913,8 @@ fn surface_offset(engine: &Engine, object: &SceneObject) -> f32 {
     let centered = object.mesh == assets.unit_cube
         || object.mesh == assets.unit_sphere
         || object.mesh == assets.unit_cylinder
-        || object.mesh == assets.unit_capsule;
+        || object.mesh == assets.unit_capsule
+        || object.mesh == assets.unit_cone;
     if centered {
         0.5 * scale_y
     } else {
@@ -939,6 +949,13 @@ fn shape_doc_from_mesh(engine: &Engine, object: &SceneObject) -> Option<ShapeDoc
         Some(ShapeDoc {
             kind: ShapeKind::Capsule,
             half_height: Some((0.5 * scale.y.abs()) - 0.5 * scale.x.abs()),
+            radius: Some(0.5 * scale.x.abs()),
+            ..Default::default()
+        })
+    } else if object.mesh == assets.unit_cone {
+        Some(ShapeDoc {
+            kind: ShapeKind::Cone,
+            half_height: Some(0.5 * scale.y.abs()),
             radius: Some(0.5 * scale.x.abs()),
             ..Default::default()
         })

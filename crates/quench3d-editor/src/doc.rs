@@ -22,15 +22,18 @@ pub enum Primitive {
     Cylinder,
     /// 胶囊。
     Capsule,
+    /// 圆锥。
+    Cone,
 }
 
 impl Primitive {
     /// 工具栏里按这个顺序排。
-    pub const ALL: [Primitive; 4] = [
+    pub const ALL: [Primitive; 5] = [
         Primitive::Cube,
         Primitive::Sphere,
         Primitive::Cylinder,
         Primitive::Capsule,
+        Primitive::Cone,
     ];
 
     /// 界面上的名字（也是物体默认名的前缀）。
@@ -40,6 +43,7 @@ impl Primitive {
             Primitive::Sphere => "球",
             Primitive::Cylinder => "圆柱",
             Primitive::Capsule => "胶囊",
+            Primitive::Cone => "圆锥",
         }
     }
 
@@ -50,6 +54,7 @@ impl Primitive {
             Primitive::Sphere => assets.unit_sphere,
             Primitive::Cylinder => assets.unit_cylinder,
             Primitive::Capsule => assets.unit_capsule,
+            Primitive::Cone => assets.unit_cone,
         }
     }
 
@@ -65,6 +70,10 @@ impl Primitive {
                 radius: 0.5,
             },
             Primitive::Capsule => Shape::Capsule {
+                half_height: 0.5,
+                radius: 0.5,
+            },
+            Primitive::Cone => Shape::Cone {
                 half_height: 0.5,
                 radius: 0.5,
             },
@@ -839,5 +848,48 @@ impl Doc {
                 return candidate;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 工具栏里每个图元都必须三件套齐全：名字、物理形状、"有体积"。
+    ///
+    /// 这条挡住的是"加了枚举值但只接了一半"：`Primitive::ALL` 驱动工具栏按钮，
+    /// `shape()` 驱动物理；漏掉任何一个，按钮点下去要么没反应、要么建出个退化刚体。
+    /// （`mesh()` 要 `AssetCache`，那要真 GPU，所以不在这里；单位网格与物理形状的
+    /// 对账在 `crates/quench3d/tests/unit_primitives.rs`。）
+    #[test]
+    fn every_primitive_has_a_label_and_a_real_shape() {
+        assert_eq!(Primitive::ALL.len(), 5, "工具栏图元数量变了？");
+        for p in Primitive::ALL {
+            assert!(!p.label().is_empty(), "{p:?} 没有名字");
+            let shape = p.shape();
+            assert!(shape.volume() > 0.0, "{p:?} 体积非正：{shape:?}");
+            assert!(shape.local_aabb().is_valid(), "{p:?} AABB 非法");
+            assert!(!shape.is_static_only(), "{p:?} 不该是静态专用形状");
+        }
+    }
+
+    /// 圆锥（第 61 轮补的）确实被接上了，且尺寸与单位网格一致（半径 0.5、半高 0.5）。
+    #[test]
+    fn cone_primitive_is_wired_like_the_others() {
+        assert!(Primitive::ALL.contains(&Primitive::Cone));
+        assert_eq!(Primitive::Cone.label(), "圆锥");
+        match Primitive::Cone.shape() {
+            Shape::Cone {
+                half_height,
+                radius,
+            } => {
+                assert!((half_height - 0.5).abs() < 1e-6, "{half_height}");
+                assert!((radius - 0.5).abs() < 1e-6, "{radius}");
+            }
+            other => panic!("圆锥的物理形状不对：{other:?}"),
+        }
+        let aabb = Primitive::Cone.shape().local_aabb();
+        assert!((aabb.max.x - 0.5).abs() < 1e-6 && (aabb.max.y - 0.5).abs() < 1e-6);
+        assert!((aabb.min.y + 0.5).abs() < 1e-6);
     }
 }
