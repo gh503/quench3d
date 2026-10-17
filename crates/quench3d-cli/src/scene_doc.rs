@@ -47,6 +47,13 @@ pub const MAX_POINT_LIGHTS: usize = quench3d::render::MAX_POINT_LIGHTS;
 pub const MAX_ACTIONS: usize = 10_000;
 /// 单个场景允许的最大区域探针数（每步都要对每个探针做一次区域查询）。
 pub const MAX_PROBES: usize = 256;
+/// 单个高度场允许的最大格点数（`行 × 列`，例如 256×256）。
+///
+/// 上限的理由是**物理**不是渲染：高度场会被展开成静态三角网，而三角网的窄相是逐三角形的
+/// （有逐三角形 AABB 早退，但没有层次结构），所以 `2·(行-1)·(列-1)` 个三角形每步都要过一遍。
+/// 65536 个格点 ≈ 13 万个三角形，正是"能跑但已经是负担"的量级；再大应该把地形切块
+/// （多个物体各自一个高度场），而不是抬高这个上限。
+pub const MAX_HEIGHTFIELD_POINTS: usize = 65_536;
 /// 单个场景允许的最大 `include` 嵌套深度（根文件算第 0 层）。
 ///
 /// 上限存在的理由是"环之外还能爆栈"：`a→b→c→…` 一路下去，每一层都要读盘、解析、合并。
@@ -1022,6 +1029,11 @@ pub enum ShapeKind {
     Cylinder,
     /// 圆锥（底面半径 `radius`、半高 `half_height`；底面在 `-half_height`、顶点在 `+half_height`）。
     Cone,
+    /// 高度场（`heights` 行主序：行沿 Z、列沿 X；`cell_size` 缺省 1.0）。
+    ///
+    /// 网格在 XZ 平面以形状原点为中心，`heights[行][列]` 是相对原点的高度。
+    /// 物理上是**静态三角网**，所以只能 `body: "static"`（`dynamic`/`kinematic` 会被校验拦下）。
+    HeightField,
     /// 平面（无限大，仅物理用）。
     Plane,
     /// 凸包（用 `points` 指定顶点）。
@@ -1050,6 +1062,12 @@ pub struct ShapeDoc {
     /// 凸包顶点。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub points: Option<Vec<[f32; 3]>>,
+    /// 高度场的高度，行主序（`heights[行][列]`，行沿 Z、列沿 X），至少 2×2。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heights: Option<Vec<Vec<f32>>>,
+    /// 高度场的格子边长（X/Z 方向的间距），缺省 1.0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_size: Option<f32>,
 }
 
 impl Default for ShapeDoc {
@@ -1061,6 +1079,8 @@ impl Default for ShapeDoc {
             half_height: None,
             normal: None,
             points: None,
+            heights: None,
+            cell_size: None,
         }
     }
 }
@@ -4175,6 +4195,21 @@ impl SceneDoc {
                     .with_hint("把 body 改成 \"static\""),
                 );
             }
+            let has_heightfield = o
+                .parts()
+                .iter()
+                .any(|part| part.shape.kind == ShapeKind::HeightField);
+            if has_heightfield && matches!(o.body, BodyKind::Dynamic | BodyKind::Kinematic) {
+                out.push(
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        format!("{p}.body"),
+                        "高度场是静态三角网，只能是 static 刚体（它没有质量属性，硬写成动态会\
+                         被引擎静默降级成静态）",
+                    )
+                    .with_hint("把 body 改成 \"static\"；要会动的地形请用 box 拼或等动态网格支持"),
+                );
+            }
             if o.body == BodyKind::None && o.velocity.is_some() {
                 out.push(Diagnostic::warn_code(
                     ErrorCode::Ineffective,
@@ -5546,6 +5581,62 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
                         ErrorCode::OutOfRange,
                         format!("{path}.radius"),
                         "半径必须为正数",
+                    ));
+                }
+            }
+        }
+        ShapeKind::HeightField => {
+            match &s.heights {
+                None => out.push(Diagnostic::error_code(
+                    ErrorCode::MissingField,
+                    format!("{path}.heights"),
+                    "高度场必须提供 heights（行主序的二维数组，至少 2 行 2 列）",
+                )),
+                Some(rows) => {
+                    let cols = rows.first().map(|r| r.len()).unwrap_or(0);
+                    if rows.len() < 2 || cols < 2 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.heights"),
+                            format!("高度场至少 2×2，当前 {} 行 {} 列", rows.len(), cols),
+                        ));
+                    }
+                    if rows.iter().any(|r| r.len() != cols) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{path}.heights"),
+                            "每一行的列数必须相同（矩形高度场）",
+                        ));
+                    }
+                    let points = rows.len().saturating_mul(cols);
+                    if points > MAX_HEIGHTFIELD_POINTS {
+                        out.push(
+                            Diagnostic::error_code(
+                                ErrorCode::LimitExceeded,
+                                format!("{path}.heights"),
+                                format!("高度场格点数 {points} 超过上限 {MAX_HEIGHTFIELD_POINTS}"),
+                            )
+                            .with_hint(
+                                "物理上是静态三角网，窄相逐三角形（没有层次结构）：先用粗网格，\
+                                 需要细节时把地形切块",
+                            ),
+                        );
+                    }
+                    if rows.iter().flatten().any(|h| !h.is_finite()) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.heights"),
+                            "高度必须是有限数",
+                        ));
+                    }
+                }
+            }
+            if let Some(c) = s.cell_size {
+                if !c.is_finite() || c <= 0.0 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.cell_size"),
+                        "格子边长必须是正有限数",
                     ));
                 }
             }
@@ -8168,6 +8259,122 @@ mod tests {
             classify_serde_code("backwards incompatible something"),
             ErrorCode::Invalid
         );
+    }
+
+    /// 高度场：结构（矩形、至少 2×2）、上限、格子边长、刚体类型逐条给稳定的码与路径。
+    ///
+    /// 上限那条在 e2e 里跑太贵（要写几十万个数的 JSON），所以在这里用**内存里构造**的文档测：
+    /// 校验是纯函数，没有理由为了测一个上限去落盘。
+    #[test]
+    fn heightfield_diagnostics_are_specific() {
+        // ① 正常：2×3 格点、格子 2 米、静态 —— 一条诊断都不该有
+        let ok = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "地形", "body": "static",
+                  "shape": { "type": "heightfield", "cell_size": 2,
+                             "heights": [[0, 0, 0], [1, 1, 1]] } } ] }"#,
+        )
+        .unwrap();
+        assert!(
+            !SceneDoc::has_errors(&ok.validate()),
+            "合法高度场不该报错：{:?}",
+            ok.validate()
+        );
+
+        // ② 只有一行
+        let one_row = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "t", "body": "static",
+                  "shape": { "type": "heightfield", "heights": [[0, 1]] } } ] }"#,
+        )
+        .unwrap();
+        let diags = one_row.validate();
+        let d = diag_at(&diags, "objects[0].shape.heights").expect("一行必须报错");
+        assert_eq!(d.code, ErrorCode::OutOfRange);
+        assert!(d.message.contains("2×2"), "{}", d.message);
+
+        // ③ 行长不一（不是矩形）
+        let ragged = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "t", "body": "static",
+                  "shape": { "type": "heightfield", "heights": [[0, 1, 2], [0, 1]] } } ] }"#,
+        )
+        .unwrap();
+        let diags = ragged.validate();
+        let d = diag_at(&diags, "objects[0].shape.heights").expect("行长不一要报错");
+        assert_eq!(d.code, ErrorCode::InvalidValue);
+
+        // ④ 缺 heights
+        let missing = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "t", "body": "static",
+                  "shape": { "type": "heightfield" } } ] }"#,
+        )
+        .unwrap();
+        let diags = missing.validate();
+        let d = diag_at(&diags, "objects[0].shape.heights").expect("缺字段要报错");
+        assert_eq!(d.code, ErrorCode::MissingField);
+
+        // ⑤ 格子边长 0 / 负 / 非有限
+        for cell in ["0", "-1"] {
+            let bad = SceneDoc::from_json(&format!(
+                r#"{{ "objects": [ {{ "name": "t", "body": "static",
+                      "shape": {{ "type": "heightfield", "cell_size": {cell},
+                                  "heights": [[0, 0], [0, 0]] }} }} ] }}"#
+            ))
+            .unwrap();
+            let diags = bad.validate();
+            let d = diag_at(&diags, "objects[0].shape.cell_size").expect("格子边长要报错");
+            assert_eq!(d.code, ErrorCode::OutOfRange, "cell_size = {cell}");
+        }
+
+        // ⑥ 动态/运动学刚体：三角网没有质量属性，硬写会被引擎静默降级 → 必须报错
+        for body in ["dynamic", "kinematic"] {
+            let bad = SceneDoc::from_json(&format!(
+                r#"{{ "objects": [ {{ "name": "t", "body": "{body}",
+                      "shape": {{ "type": "heightfield", "heights": [[0, 0], [0, 0]] }} }} ] }}"#
+            ))
+            .unwrap();
+            let diags = bad.validate();
+            let d = diag_at(&diags, "objects[0].body")
+                .unwrap_or_else(|| panic!("body = {body} 必须报错"));
+            assert_eq!(d.code, ErrorCode::InvalidValue);
+            assert!(d.hint.as_deref().unwrap_or("").contains("static"), "{d:?}");
+        }
+
+        // ⑦ 格点数超上限（内存里构造：2 行 × 32769 列 = 65538 > 65536）
+        let mut doc = SceneDoc::default();
+        doc.objects.push(
+            serde_json::from_value(json!({
+                "name": "巨地形",
+                "body": "static",
+                "shape": { "type": "heightfield" }
+            }))
+            .unwrap(),
+        );
+        doc.objects[0]
+            .shape
+            .as_mut()
+            .expect("上面 json 里写了 shape")
+            .heights = Some(vec![vec![0.0f32; MAX_HEIGHTFIELD_POINTS / 2 + 1]; 2]);
+        let diags = doc.validate();
+        let d = diag_at(&diags, "objects[0].shape.heights").expect("超上限要报错");
+        assert_eq!(d.code, ErrorCode::LimitExceeded);
+
+        // ⑧ 高度里有 NaN：直接构造结构体（JSON 里写不出 NaN）
+        let mut bad = SceneDoc::default();
+        bad.objects.push(
+            serde_json::from_value(json!({
+                "name": "坏地形",
+                "body": "static",
+                "shape": { "type": "heightfield", "heights": [[0, 0], [0, 0]] }
+            }))
+            .unwrap(),
+        );
+        bad.objects[0]
+            .shape
+            .as_mut()
+            .expect("上面 json 里写了 shape")
+            .heights = Some(vec![vec![0.0, f32::NAN], vec![0.0, 0.0]]);
+        let diags = bad.validate();
+        let d = diag_at(&diags, "objects[0].shape.heights").expect("NaN 高度要报错");
+        assert_eq!(d.code, ErrorCode::OutOfRange);
     }
 }
 

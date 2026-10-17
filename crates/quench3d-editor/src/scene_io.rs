@@ -225,20 +225,24 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
                     }
                 }
             }
-            Some(b) => match shape_doc_from_shape(&b.shape, object.transform.scale) {
+            Some(b) => match shape_doc_from_shape(&b.shape, object.transform.scale)
+                .or_else(|| base_shape_for(&base, &name))
+            {
                 Some(shape) => shape,
                 None => {
                     skipped.push(format!("{name}（三角网碰撞体）"));
                     continue;
                 }
             },
-            None => match shape_doc_from_mesh(engine, object) {
-                Some(shape) => shape,
-                None => {
-                    skipped.push(format!("{name}（不是预设网格）"));
-                    continue;
+            None => {
+                match shape_doc_from_mesh(engine, object).or_else(|| base_shape_for(&base, &name)) {
+                    Some(shape) => shape,
+                    None => {
+                        skipped.push(format!("{name}（不是预设网格）"));
+                        continue;
+                    }
                 }
-            },
+            }
         };
         // 地面：平面 + 静态 → 写成 `ground`（场景格式里地面是专门字段）。
         //
@@ -833,6 +837,21 @@ fn apply_camera(engine: &mut Engine, camera: &CameraDoc) {
         engine.orbit.far = far;
     }
     engine.orbit.orthographic_height = camera.orthographic_height.filter(|h| *h > 0.0);
+}
+
+/// 底稿里同名物体的形状 —— 引擎里的形状**反推不出来**时的兜底。
+///
+/// 目前只有一种情况：**静态三角网**（高度场展开成的）。编辑器没有形状编辑面板
+/// （只能加图元、摆位姿、删物体、改材质），所以"这个物体的形状没被改过"成立；
+/// 没有这条兜底，`载入带地形的场景 → 随手存一次` 就会把整块地形丢掉。
+///
+/// 找不到同名物体（或它当时也没写 `shape`）就返回 `None`，调用方照旧报 skipped。
+/// **部件级**的三角网不在兜底范围（那是 `shapes[]` 里的一个部件，按名字整体套用会串形状）。
+pub fn base_shape_for(base: &SceneDoc, name: &str) -> Option<ShapeDoc> {
+    base.objects
+        .iter()
+        .find(|o| o.name.as_deref() == Some(name))
+        .and_then(|o| o.shape.clone())
 }
 
 /// 物理形状 → 场景文档形状（`size` 是**边长**，不是半长）。

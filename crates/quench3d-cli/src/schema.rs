@@ -373,12 +373,18 @@ pub fn scene_grammar() -> Value {
             "emissive_texture": "自发光贴图路径"
         },
         "shape": {
-            "type": ["box", "sphere", "capsule", "cylinder", "cone", "plane", "convex"],
+            "type": ["box", "sphere", "capsule", "cylinder", "cone", "heightfield", "plane", "convex"],
             "box": { "size": "[x, y, z] 边长（不是半长），缺省 [1,1,1]" },
             "sphere": { "radius": "缺省 0.5" },
             "capsule": { "radius": "缺省 0.5", "half_height": "圆柱段半高，缺省 0.5" },
             "cylinder": { "radius": "缺省 0.5", "half_height": "缺省 0.5" },
             "cone": { "radius": "底面半径，缺省 0.5", "half_height": "缺省 0.5（底面在 -half_height、顶点在 +half_height）" },
+            "heightfield": {
+                "heights": "行主序的二维数组（heights[行][列]，行沿 Z、列沿 X），至少 2×2；网格以形状原点为中心，值是相对原点的高度",
+                "cell_size": "格子边长（米），缺省 1.0",
+                "body": "**【只能 static】**：物理上是静态三角网（没有质量属性），写 dynamic/kinematic 会被校验拦下",
+                "note": "格点数（行×列）上限 65536；窄相逐三角形，地形大就切块"
+            },
             "plane": { "normal": "[x,y,z]，缺省 [0,1,0]" },
             "convex": { "points": "至少 4 个 [x,y,z] 顶点" }
         },
@@ -546,7 +552,14 @@ pub fn json_schema() -> Value {
         (
             "shapeKind",
             [
-                "box", "sphere", "capsule", "cylinder", "cone", "plane", "convex",
+                "box",
+                "sphere",
+                "capsule",
+                "cylinder",
+                "cone",
+                "heightfield",
+                "plane",
+                "convex",
             ]
             .as_slice(),
         ),
@@ -579,7 +592,16 @@ pub fn json_schema() -> Value {
     defs.insert(
         "shape".into(),
         with_type(
-            def(&["type", "size", "radius", "half_height", "normal", "points"]),
+            def(&[
+                "type",
+                "size",
+                "radius",
+                "half_height",
+                "normal",
+                "points",
+                "heights",
+                "cell_size",
+            ]),
             json!({ "$ref": "#/$defs/shapeKind" }),
         ),
     );
@@ -898,8 +920,10 @@ pub fn system_prompt() -> String {
   - name: 字符串（关节引用与报告用它）
   - template: 模板名（可选）；instances: [{position, rotation_deg, scale, name}]（可选）
     一次摆多个副本 = 多个**独立**刚体；缺省名字 `本名#1`、`本名#2`…（只有一个副本时是本名）
-  - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"cone"|"plane"|"convex",
-             size: [x,y,z]（box 的**边长**）, radius, half_height, normal, points }
+  - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"cone"|"heightfield"|"plane"|"convex",
+             size: [x,y,z]（box 的**边长**）, radius, half_height, normal, points,
+             heights: [[…]]（heightfield：行主序，行沿 Z、列沿 X，至少 2×2；只能 static）,
+             cell_size（heightfield 的格子边长，缺省 1.0） }
   - parent: 父物体的 name（可选）。给了之后 position/rotation_deg 是**相对父物体**的
             （父物体动，子物体跟着动；只继承位置与朝向，不继承缩放；
              带刚体的物体不能有父物体）。父物体必须显式写 name
@@ -1073,7 +1097,14 @@ mod tests {
         let g = scene_grammar();
         let kinds = g["shape"]["type"].as_array().unwrap();
         for k in [
-            "box", "sphere", "capsule", "cylinder", "cone", "plane", "convex",
+            "box",
+            "sphere",
+            "capsule",
+            "cylinder",
+            "cone",
+            "heightfield",
+            "plane",
+            "convex",
         ] {
             assert!(kinds.iter().any(|v| v == k), "语法缺少形状 {k}");
         }

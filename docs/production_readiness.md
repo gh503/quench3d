@@ -1929,3 +1929,61 @@ Thread 20 "smithay-clipboa" received signal SIGSEGV, Segmentation fault.
 * **gap #18 还剩两件**：圆角盒（`rounded_box`）与高度场（`heightfield`）。高度场可以先用
   "静态三角网"的方式落地（格式紧凑、物理复用 `TriMesh`），但那会继承 `TriMesh` 的两条限制：
   只能静态、内存与三角形数同级（没有专用网格加速结构）。
+
+## 16. 第 61 轮：高度场（gap #18 的第二件）—— 取舍 / 不变量 / 边界
+
+### 16.1 一句话
+
+场景里可以直接写地形了：`shape.type = "heightfield"`（`heights` 行主序 + `cell_size`）。
+**物理与渲染共用同一份几何**（`MeshData::heightfield`），只能静态，校验把坏输入挡在门外，
+编辑器存盘不会把地形丢掉 —— 但窄相是逐三角形的，所以这是"能用地形"而不是"能用地形做大地图"。
+
+### 16.2 取舍表
+
+| 选择 | 备选 | 为什么选它 |
+| --- | --- | --- |
+| 展开成已有的 `Shape::TriMesh` | 新写一个 `Shape::HeightField`（带自己的网格加速结构） | TriMesh 的窄相/射线/复合形状/接触全套已经跑通，展开一次就能用；新形状意味着新窄相 + 新射线 + 新 AABB + 新质量路径，而高度场**天然只能用静态**，收益只在性能上。性能留作下一步（见 16.4） |
+| 高度场是**格式层**概念（CLI 展开），引擎不新增形状 | 引擎层新增形状 | 保证"引擎 API 不变"：老代码、老 wasm、老测试都不受影响；代价是引擎里看到的是 TriMesh（`--json` 报告的 `shape` 名由格式层给出，所以轨迹报告仍是 `heightfield`） |
+| 一份几何（`MeshData::heightfield`）同时供物理与渲染 | 物理/渲染各写一遍展开 | 各写一遍就会出现"看得见、踩不到"（网格与碰撞面错开半个格子）。第 61 轮的 `unit_primitives`/映射表测试已经在盯同类问题 |
+| 行主序 `heights[行][列]`，行沿 Z、列沿 X | 列主序 / 平铺一维数组 + `cols` | 二维数组在 JSON 里是**看得见的形状**（缩进就是地形），agent/人都不容易写反；平铺数组省不了多少 token 却多一个 `cols` 要对上 |
+| 网格以**物体原点**为中心、高度相对原点 | 以左下角为原点 | 与其它形状一致（`position` 就是形状原点），于是"把地形抬到 y=2"是写 `position`；左下角约定会让地形在原点处"只有一个角" |
+| UV 覆盖整块地形 `[0,1]²` | UV 用世界坐标（每米一次平铺） | 与其它图元一致（`uv_scale` = **网格 UV 空间**里的平铺次数），文档里 `uv_scale` 的说明不用改；要"每米一次"就写 `uv_scale = 边长` |
+| 平法线 | 平滑法线 | 地形的面片感更清楚，且避免"顶点法线取平均"在大落差处糊掉；要平滑可以后续加开关 |
+| **只能 `static`**（校验报错） | 允许 dynamic，引擎静默降级成静态 | 引擎 `BodyBuilder::build` 会把含静态专用形状的刚体强制成静态 —— 静默降级是"写对了不生效"的典型（同族的平面已经有这个坑，见 gap_analysis §3.3）。宁可报错 |
+| 编辑器存盘**按名字从底稿恢复** | 存盘时把它报成 skipped 丢掉 | "编辑器没有形状编辑面板"⇒"形状没被改过"成立，恢复是安全的；丢整块地形是静默的数据损失 |
+| 不给工具栏加"添加高度场" | 加一个按钮 | 高度场需要几十个高度值，点一下按钮得到的只能是 2×2 的平地（没有意义）；它是**写 JSON 的地形**，不是摆件图元 |
+
+### 16.3 不变量与守卫测试
+
+* **物理与渲染同源**：`runner::tests::heightfield_expands_to_a_trimesh_matching_the_render_mesh`
+  —— 三角网顶点与 `MeshData::heightfield` 的顶点**逐位相同**、索引相同、两边 AABB 相同。
+  变异：让物理用自己的一套展开（改一处）→ 红。
+* **网格本身**：`render::mesh::tests::heightfield_mesh_is_centered_and_faces_up`
+  —— 格点数 `行×列`、三角形数 `2·(行-1)·(列-1)`、XZ 居中、每个三角形几何法线朝 +Y、
+  UV ∈ `[0,1]²`、退化输入（空/一行/行长不一/`cell ≤ 0`/NaN）一律空网格不 panic。
+* **校验**：`scene_doc::tests::heightfield_diagnostics_are_specific` —— 合法 2×3 不报；
+  只有一行/行长不一/缺 `heights`/`cell_size ≤ 0`/`dynamic`/`kinematic`/超上限/NaN 高度
+  各自的码与路径。**超上限与 NaN 在内存里构造**（校验是纯函数，不为测上限落盘几十万个数）。
+* **端到端**：`cli_e2e::heightfield_terrain_simulates_and_queries` —— 两个球停在 `y≈1.8`、
+  `lowest_y ≈ 1.5`（同时证明 `position` 抬起了地形）、射线距离 3.5 且法线朝上、
+  轨迹报告 `shape == "heightfield"`（静态体也能 trace）、`--overlap heightfield:...`
+  退出码 2 带人话、`body: "dynamic"` 被拦。
+* **编辑器兜底**：`include_export::triangulated_objects_survive_save_via_the_base_doc`
+  （按名字恢复 `heights`/`cell_size`，查不到给 `None` 不编造）+
+  `scene_to_json_falls_back_to_the_base_doc_for_unknown_shapes`
+  （**两条**"反推不出来"的路径都接了 —— 只补一条的话另一种地形照样丢）。
+* **格式枚举**：`ShapeKind::HeightField` 加进 JSON Schema 的 `shapeKind` 枚举、语法表、
+  系统提示与映射表测试；删掉它就编译不过（映射表与 e2e 都引用）。
+
+### 16.4 边界与欠账
+
+* **窄相逐三角形**：`trimesh_vs_shape` 遍历所有三角形（每个先做 AABB 早退），没有 BVH/网格层次。
+  65536 格点 ≈ 13 万三角形是"能跑但吃力"；大地形请**切块**（多个物体各一块），
+  或者等"高度场专用加速结构"（下一步：按格子范围筛选候选三角形，等于给高度场一个隐式网格索引）。
+* **只能静态**：会动的地形（滑坡、升降台）做不到 —— 要么用 box 拼，要么等动态网格。
+* **不能当 `--overlap` 查询形状**：三角网没有解析的"点在内"判据（要做得先有"点在三角网内"的
+  判定），`--overlap heightfield:...` 会明确报错并建议改用 `raycast`。
+* **没有高度图/贴图导入**：`heights` 必须写在 JSON 里（没有"从 PNG 读高度"的入口）。
+* **复合形状里的高度场**：可以写、能跑（整个刚体会被撑成静态），但编辑器存盘时该**部件**
+  会报 skipped（按名字整体套用会串形状）。
+* **没有 `flip`/法线翻转、没有多材质分层**：一块地形一个材质。

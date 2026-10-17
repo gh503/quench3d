@@ -4084,7 +4084,16 @@ fn json_schema_is_machine_readable() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["box", "sphere", "capsule", "cylinder", "cone", "plane", "convex"]
+        vec![
+            "box",
+            "sphere",
+            "capsule",
+            "cylinder",
+            "cone",
+            "heightfield",
+            "plane",
+            "convex"
+        ]
     );
     let joints: Vec<&str> = s["$defs"]["jointKind"]["enum"]
         .as_array()
@@ -5505,5 +5514,149 @@ fn cone_shape_simulates_validates_and_reports() {
             .iter()
             .any(|d| d["path"] == "objects[0].shape.half_height" && d["code"] == "out_of_range"),
         "缺 half_height 的诊断：{diags2:?}"
+    );
+}
+
+/// 高度场（gap #18 第二件）：地形真的是可站立的静态三角网，射线打得到，
+/// 轨迹报告里形状名对得上，坏数据给稳定码 —— 全程不需要显卡。
+#[test]
+fn heightfield_terrain_simulates_and_queries() {
+    let dir = temp_dir("heightfield");
+    // 3×3 格点、格子 2 米 ⇒ 地形 X/Z 各跨 4 米（以物体原点为中心）；高度恒为 1.5（平地，
+    // 结果确定：球停在 1.5 + 半径）。坡面/台阶的网格几何由 render 的单元测试钉住。
+    let scene = write_scene(
+        &dir,
+        "terrain.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "objects": [
+                // 高度是**相对物体原点**的：物体抬到 y=1.5、高度全 0 ⇒ 地面在 1.5
+                { "name": "地形", "body": "static", "material": "岩", "position": [0.0, 1.5, 0.0],
+                  "shape": { "type": "heightfield", "cell_size": 2.0,
+                             "heights": [[0, 0, 0], [0, 0, 0], [0, 0, 0]] } },
+                { "name": "左球", "body": "dynamic", "position": [-1.0, 3.0, 0.0],
+                  "shape": { "type": "sphere", "radius": 0.3 } },
+                { "name": "右球", "body": "dynamic", "position": [1.0, 4.0, 0.5],
+                  "shape": { "type": "sphere", "radius": 0.3 } }
+            ],
+            "materials": { "岩": { "color": [0.5, 0.45, 0.4], "roughness": 0.9 } },
+            "simulate": { "steps": 300, "dt": 0.0166667 }
+        }),
+    );
+
+    // ① 校验通过（heightfield + static 是合法组合）
+    let v = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(v.code, 0, "高度场场景必须合法：{}", v.stdout);
+    assert_eq!(v.json()["data"]["errors"], 0);
+
+    // ② 仿真：两个球都停在 y ≈ 1.8（地形 1.5 + 半径 0.3），没有穿地、没有 NaN
+    let s = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(s.code, 0, "{}", s.stdout);
+    let data = s.json()["data"].clone();
+    assert_eq!(data["nan_bodies"], 0);
+    let states = data["states"].as_array().unwrap();
+    let find = |name: &str| {
+        states
+            .iter()
+            .find(|st| st["name"] == name)
+            .unwrap_or_else(|| panic!("报告里缺 {name}"))
+            .clone()
+    };
+    assert_eq!(find("地形")["kind"], "static");
+    for name in ["左球", "右球"] {
+        let st = find(name);
+        let y = st["position"][1].as_f64().unwrap();
+        assert!(
+            (y - 1.8).abs() < 0.05,
+            "{name} 应停在地形上（y≈1.8），实际 {y}（{st}）"
+        );
+    }
+    // `lowest_y` 数的是**刚体原点**（地形原点在 1.5），所以它同时证明了两件事：
+    // 物体 position 真的抬起了整块地形、而且没有球穿到地形下面
+    let lowest = data["lowest_y"].as_f64().unwrap();
+    assert!(
+        lowest >= 1.4,
+        "地形原点该在 1.5，且没有球穿下去：lowest_y = {lowest}"
+    );
+
+    // ③ 轨迹报告：从 3 米掉到 1.8 米（fall ≈ 1.2），形状名对得上
+    let t = run(&[
+        "simulate",
+        scene.to_str().unwrap(),
+        "--trace",
+        "左球",
+        "--json",
+    ]);
+    assert_eq!(t.code, 0, "{}", t.stdout);
+    let left = t.json()["data"]["trajectories"][0].clone();
+    assert_eq!(left["name"], "左球");
+    assert_eq!(left["shape"], "sphere");
+    let fall = left["fall"].as_f64().unwrap();
+    assert!(fall > 1.0, "左球该真的掉下来：fall = {fall}");
+
+    // 静态地形也能被 trace：形状名是 heightfield（`shape_kind_of` 的映射表）
+    let tt = run(&[
+        "simulate",
+        scene.to_str().unwrap(),
+        "--trace",
+        "地形",
+        "--json",
+    ]);
+    assert_eq!(tt.code, 0, "{}", tt.stdout);
+    let terrain = tt.json()["data"]["trajectories"][0].clone();
+    assert_eq!(terrain["shape"], "heightfield", "{terrain}");
+
+    // ④ 射线：从 (0, 5, 0) 垂直向下，命中地形；x=0 处高度 1.5 ⇒ 距离 3.5、法线朝上
+    let q = run(&[
+        "query",
+        scene.to_str().unwrap(),
+        "--ray",
+        "0,5,0,0,-1,0",
+        "--json",
+    ]);
+    assert_eq!(q.code, 0, "{}", q.stdout);
+    let hit = q.json()["data"]["hits"][0].clone();
+    assert_eq!(hit["name"], "地形");
+    let dist = hit["distance"].as_f64().unwrap();
+    assert!((dist - 3.5).abs() < 1e-3, "射线距离应为 3.5，实际 {dist}");
+    assert!(
+        hit["normal"][1].as_f64().unwrap() > 0.99,
+        "平地法线必须朝上：{hit}"
+    );
+
+    // ⑤ 高度场不能当重叠查询形状：给一句人话（退出码 2 = 输入问题）
+    let o = run(&[
+        "query",
+        scene.to_str().unwrap(),
+        "--overlap",
+        "heightfield:1,2",
+        "--json",
+    ]);
+    assert_eq!(o.code, 2, "{}", o.stdout);
+    let msg = o.json()["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("高度场"), "错误信息要说清为什么：{msg}");
+
+    // ⑥ 静止不动的地形体不能是动态刚体：校验拦下来并指到 body 上
+    let bad = write_scene(
+        &dir,
+        "bad_body.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "objects": [ { "name": "飘浮地形", "body": "dynamic",
+                           "shape": { "type": "heightfield", "heights": [[0, 0], [0, 1]] } } ],
+            "simulate": { "steps": 1 }
+        }),
+    );
+    let b = run(&["validate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(b.code, 2, "{}", b.stdout);
+    let diags = b.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["path"] == "objects[0].body" && d["code"] == "invalid_value"),
+        "缺 objects[0].body 的诊断：{diags:?}"
     );
 }

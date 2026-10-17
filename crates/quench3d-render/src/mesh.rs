@@ -509,6 +509,57 @@ impl MeshData {
         Self::from_parts(vertices, vec![0, 1, 2, 0, 2, 3])
     }
 
+    /// 由高度场构造网格（行主序：`heights[行][列]`，行沿 Z、列沿 X）。
+    ///
+    /// 网格在 XZ 平面**以原点为中心**，`y = heights[行][列]`，`cell` 是格子的 X/Z 边长；
+    /// 每格两个三角形，绕序保证法线朝 +Y。法线按三角形算（**平法线**）——地形面片的硬边比
+    /// 平滑法线更不容易在大落差处糊掉。UV 覆盖整块地形 `[0, 1]²`，所以材质的 `uv_scale`
+    /// 是"整块地形上的平铺次数"。
+    ///
+    /// 行数/列数不足 2、各行长度不一致、`cell` 非正时返回**空网格**：场景格式的校验层会先
+    /// 拦下这些输入，这里只保证不 panic（不 panic 是给"直接调 API 的人"的底线）。
+    pub fn heightfield(heights: &[Vec<f32>], cell: f32) -> Self {
+        let rows = heights.len();
+        let cols = heights.first().map(|r| r.len()).unwrap_or(0);
+        if rows < 2
+            || cols < 2
+            || heights.iter().any(|r| r.len() != cols)
+            || !cell.is_finite()
+            || cell <= 0.0
+        {
+            return Self::new();
+        }
+        let (cx, cz) = ((cols - 1) as f32 * 0.5, (rows - 1) as f32 * 0.5);
+        let (dx, dz) = ((cols - 1) as f32, (rows - 1) as f32);
+        let mut vertices = Vec::with_capacity(rows * cols);
+        for (r, row) in heights.iter().enumerate() {
+            let z = (r as f32 - cz) * cell;
+            let v = r as f32 / dz;
+            for (c, h) in row.iter().enumerate() {
+                let x = (c as f32 - cx) * cell;
+                vertices.push(Vertex::new(
+                    Vec3::new(x, *h, z),
+                    Vec3::Y,
+                    Vec2::new(c as f32 / dx, v),
+                ));
+            }
+        }
+        // 绕序：`(v00, v10, v11)` 与 `(v00, v11, v01)` 的法线都朝 +Y（见 mesh.rs 的测试）。
+        let mut indices = Vec::with_capacity(6 * (rows - 1) * (cols - 1));
+        for r in 0..rows - 1 {
+            for c in 0..cols - 1 {
+                let v00 = (r * cols + c) as u32;
+                let v01 = v00 + 1;
+                let v10 = ((r + 1) * cols + c) as u32;
+                let v11 = v10 + 1;
+                indices.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
+            }
+        }
+        let mut m = Self::from_parts(vertices, indices);
+        m.recompute_flat_normals();
+        m
+    }
+
     /// 由三角形汤（每 3 个顶点一个三角形）构造带平法线的网格。
     pub fn from_triangles(positions: &[Vec3]) -> Self {
         let mut vertices = Vec::with_capacity(positions.len());
@@ -525,6 +576,82 @@ impl MeshData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 高度场网格：格点数、三角形数、居中性、绕序（法线朝 +Y）、UV 范围、退化输入不 panic。
+    #[test]
+    fn heightfield_mesh_is_centered_and_faces_up() {
+        let heights = vec![
+            vec![0.0, 0.5, 1.0],
+            vec![0.25, 0.75, 1.5],
+            vec![0.5, 1.0, 2.0],
+            vec![0.75, 1.25, 2.5],
+        ]; // 4 行 3 列
+        let cell = 2.0;
+        let m = MeshData::heightfield(&heights, cell);
+        assert_eq!(m.vertices.len(), 12, "格点数 = 行 × 列");
+        assert_eq!(m.triangle_count(), 2 * 3 * 2, "每格两个三角形");
+        // 位置：x = (列-1)·cell（居中），z = (行-1)·cell（居中），y = 高度
+        let pos = |r: usize, c: usize| m.vertices[r * 3 + c].pos();
+        assert!((pos(0, 0).x + 2.0).abs() < 1e-5 && (pos(0, 2).x - 2.0).abs() < 1e-5);
+        assert!((pos(0, 0).z + 3.0).abs() < 1e-5 && (pos(3, 0).z - 3.0).abs() < 1e-5);
+        for (r, row) in heights.iter().enumerate() {
+            for (c, h) in row.iter().enumerate() {
+                assert!((pos(r, c).y - h).abs() < 1e-6);
+            }
+        }
+        // 绕序：每个三角形的几何法线都朝 +Y（地形朝上），与顶点法线一致
+        for tri in m.indices.as_chunks::<3>().0 {
+            let (a, b, c) = (
+                m.vertices[tri[0] as usize].pos(),
+                m.vertices[tri[1] as usize].pos(),
+                m.vertices[tri[2] as usize].pos(),
+            );
+            let n = (b - a).cross(c - a);
+            assert!(n.y > 0.0, "三角形绕序反了（法线 {n:?}）");
+            for i in tri {
+                // 顶点法线来自"最后一个碰到它的那个面"，所以只在**上半球**上断言：
+                // 地形有坡度，面法线本来就该歪开 +Y（陡坡上可以歪到接近水平）。
+                assert!(
+                    m.vertices[*i as usize].nrm().y > 0.0,
+                    "顶点法线该朝上，实际 {:?}（第 {i} 个顶点，三角形 {tri:?}）",
+                    m.vertices[*i as usize].nrm()
+                );
+            }
+        }
+        // UV 覆盖 [0,1]²（所以 uv_scale 是"整块地形上的平铺次数"）
+        for v in &m.vertices {
+            let (u, w) = (v.uv[0], v.uv[1]);
+            assert!((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&w));
+        }
+        assert_eq!(m.vertices[0].uv[0], 0.0);
+        assert_eq!(m.vertices[2].uv[0], 1.0);
+        assert_eq!(m.vertices[9].uv[1], 1.0);
+
+        // 一张平地：AABB 的高度为 0，宽度/深度 = (列-1)·cell / (行-1)·cell
+        let flat_heights = vec![vec![0.0f32; 3]; 4];
+        let flat = MeshData::heightfield(&flat_heights, 2.0);
+        let (lo, hi) = (flat.aabb().min, flat.aabb().max);
+        assert!((hi.y - lo.y).abs() < 1e-6, "平地的高度必须是 0");
+        assert!((hi.x - lo.x - 4.0).abs() < 1e-5 && (hi.z - lo.z - 6.0).abs() < 1e-5);
+        assert!(
+            (lo.x + 2.0).abs() < 1e-5 && (lo.z + 3.0).abs() < 1e-5,
+            "必须以原点为中心"
+        );
+
+        // 退化输入：空、只有一行、行长不一、cell ≤ 0 —— 一律空网格，不 panic
+        for (h, c) in [
+            (vec![], 1.0),
+            (vec![vec![0.0, 1.0]], 1.0),
+            (vec![vec![0.0, 1.0], vec![0.0]], 1.0),
+            (vec![vec![0.0, 1.0], vec![0.0, 1.0]], 0.0),
+            (vec![vec![0.0, 1.0], vec![0.0, 1.0]], f32::NAN),
+        ] {
+            assert!(
+                MeshData::heightfield(&h, c).is_empty(),
+                "退化输入该是空网格"
+            );
+        }
+    }
 
     #[test]
     fn primitives_are_valid() {

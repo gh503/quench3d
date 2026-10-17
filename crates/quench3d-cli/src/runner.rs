@@ -1232,7 +1232,50 @@ fn probe_overlaps(probe: &ProbeDoc, body: &quench3d::physics::RigidBody) -> bool
     }
 }
 
-/// 物理形状。
+/// 高度场 → 渲染网格（`MeshData::heightfield` 是唯一一份几何生成代码）。
+///
+/// 校验层已经保证"至少 2×2、矩形、有限、格点数不超上限"，这里再兜一层：数据不合法时
+/// `MeshData::heightfield` 给空网格（`physics_shape` 于是得到空三角网，不会 panic）。
+pub fn heightfield_mesh(shape: &ShapeDoc) -> quench3d::render::MeshData {
+    let heights = shape.heights.as_deref().unwrap_or(&[]);
+    quench3d::render::MeshData::heightfield(heights, shape.cell_size.unwrap_or(1.0))
+}
+
+/// 高度场网格的缓存名：**同一份高度数据只上传一次显存**。
+///
+/// 用内容哈希（FNV-1a over 高度与格边长的位模式）而不是物体名/下标：
+/// 下标会随物体增删漂移（删掉前面一个物体就让后面的地形重新上传），
+/// 名字则可能被两块不同地形共用。只要高度逐位相同就同名 —— 也保证确定性。
+fn heightfield_mesh_name(shape: &ShapeDoc) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    let mix = |hash: &mut u64, bits: u32| {
+        for b in bits.to_le_bytes() {
+            *hash ^= b as u64;
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    };
+    let heights = shape.heights.as_deref().unwrap_or(&[]);
+    mix(&mut hash, heights.len() as u32);
+    mix(
+        &mut hash,
+        heights.first().map(|r| r.len()).unwrap_or(0) as u32,
+    );
+    mix(&mut hash, shape.cell_size.unwrap_or(1.0).to_bits());
+    for row in heights {
+        for h in row {
+            mix(&mut hash, h.to_bits());
+        }
+    }
+    format!(
+        "heightfield:{}x{}:{hash:016x}",
+        heights.len(),
+        heights.first().map(|r| r.len()).unwrap_or(0)
+    )
+}
+
+/// 文档 → 引擎：形状描述翻成物理形状（**每种 `ShapeKind` 都必须有一个分支**）。
 pub fn physics_shape(shape: &ShapeDoc) -> Shape {
     match shape.kind {
         ShapeKind::Box => Shape::Box {
@@ -1253,6 +1296,15 @@ pub fn physics_shape(shape: &ShapeDoc) -> Shape {
             half_height: shape.half_height.unwrap_or(0.5),
             radius: shape.radius.unwrap_or(0.5),
         },
+        ShapeKind::HeightField => {
+            // 物理上就是静态三角网：顶点/索引与渲染网格**同一份**（`MeshData::heightfield`），
+            // 所以"看到的地形"和"踩到的地形"不可能对不上。
+            let mesh = heightfield_mesh(shape);
+            Shape::TriMesh {
+                vertices: mesh.vertices.iter().map(|v| v.pos()).collect(),
+                indices: mesh.indices,
+            }
+        }
         ShapeKind::Plane => Shape::Plane {
             normal: v3(shape.normal.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
         },
@@ -1291,6 +1343,8 @@ pub fn render_scale(shape: &ShapeDoc, plane_size: f32) -> Vec3 {
             let h = shape.half_height.unwrap_or(0.5);
             Vec3::new(r * 2.0, h * 2.0, r * 2.0)
         }
+        // 高度场用自己的网格（不是单位图元缩放出来的），所以缩放恒为 1
+        ShapeKind::HeightField => Vec3::ONE,
         // 凸包不走这里（见 setup_visuals 里的 AABB 近似）
         ShapeKind::Plane => Vec3::splat(plane_size.max(0.01)),
         ShapeKind::Convex => Vec3::ONE,
@@ -1963,6 +2017,13 @@ pub fn parse_overlap_query(text: &str) -> Result<QueryKind, String> {
                 format!("plane {},{},{}", nums[0], nums[1], nums[2]),
             )
         }
+        "heightfield" => {
+            return Err(
+                "高度场不能当重叠查询形状（静态三角网没有解析的「点在某形状内」判据）：\
+                 用 box / sphere 近似地形，或者改用 raycast（射线打地形很便宜）"
+                    .into(),
+            )
+        }
         other => {
             return Err(format!(
                 "不认识的形状 `{other}`：支持 sphere / box / capsule / cylinder / cone / plane"
@@ -2427,6 +2488,7 @@ fn shape_kind_of(doc: &SceneDoc, name: &str) -> &'static str {
                 ShapeKind::Capsule => "capsule",
                 ShapeKind::Cylinder => "cylinder",
                 ShapeKind::Cone => "cone",
+                ShapeKind::HeightField => "heightfield",
                 ShapeKind::Plane => "plane",
                 ShapeKind::Convex => "convex",
             };
@@ -2578,6 +2640,14 @@ pub fn setup_visuals(
                 ShapeKind::Capsule => engine.assets.unit_capsule,
                 ShapeKind::Cylinder => engine.assets.unit_cylinder,
                 ShapeKind::Cone => engine.assets.unit_cone,
+                // 高度场：网格由高度数据生成（按内容哈希缓存，同一份地形只上传一次）
+                ShapeKind::HeightField => {
+                    let data = heightfield_mesh(&part.shape);
+                    let name = heightfield_mesh_name(&part.shape);
+                    engine
+                        .assets
+                        .mesh(&mut engine.renderer, &engine.gpu, &name, &data)
+                }
                 ShapeKind::Plane => engine.assets.unit_plane,
                 ShapeKind::Convex => engine.assets.unit_cube,
             };
@@ -3915,7 +3985,8 @@ mod tests {
             ShapeKind::Sphere => Some(Vec3::splat(1.0)),
             ShapeKind::Capsule => Some(Vec3::new(1.0, 2.0, 1.0)),
             ShapeKind::Cylinder | ShapeKind::Cone => Some(Vec3::new(1.0, 1.0, 1.0)),
-            ShapeKind::Plane | ShapeKind::Convex => None,
+            // 高度场用自己的网格、平面无限大、凸包走 AABB 近似 —— 都没有单位图元
+            ShapeKind::HeightField | ShapeKind::Plane | ShapeKind::Convex => None,
         };
         for kind in [
             ShapeKind::Box,
@@ -3923,6 +3994,7 @@ mod tests {
             ShapeKind::Capsule,
             ShapeKind::Cylinder,
             ShapeKind::Cone,
+            ShapeKind::HeightField,
             ShapeKind::Plane,
             ShapeKind::Convex,
         ] {
@@ -3938,6 +4010,8 @@ mod tests {
                     [0.0, 1.0, 0.0],
                     [0.0, 0.0, 1.0],
                 ]),
+                heights: Some(vec![vec![0.0, 0.0], vec![0.0, 1.0]]),
+                cell_size: Some(1.0),
             };
             let shape = physics_shape(&doc);
             match kind {
@@ -3970,10 +4044,26 @@ mod tests {
                         radius: 0.3
                     }
                 ),
+                ShapeKind::HeightField => match &shape {
+                    // 2×2 格点 → 4 个顶点、2 个三角形（6 个索引）
+                    Shape::TriMesh { vertices, indices } => {
+                        assert_eq!(vertices.len(), 4, "{shape:?}");
+                        assert_eq!(indices.len(), 6, "{shape:?}");
+                    }
+                    other => panic!("高度场该展开成静态三角网：{other:?}"),
+                },
                 ShapeKind::Plane => assert!(shape.is_plane(), "{shape:?}"),
                 ShapeKind::Convex => {
                     assert!(matches!(shape, Shape::ConvexHull { .. }), "{shape:?}")
                 }
+            }
+            if kind == ShapeKind::HeightField {
+                // 高度场用的是"按高度数据生成的网格"，缩放必须是 1（缩放它 = 画面与碰撞错开）
+                assert_eq!(
+                    render_scale(&doc, 5.0),
+                    Vec3::ONE,
+                    "高度场不该被单位图元的缩放拉走"
+                );
             }
             if let Some(unit) = unit_size(kind) {
                 let scale = render_scale(&doc, 5.0);
@@ -3986,6 +4076,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 高度场：物理三角网与渲染网格必须是**同一份几何**（顶点逐位相同、AABB 相同）。
+    ///
+    /// 这条抓的是"两处各写一遍展开代码"：谁改了一处、另一处没改，就会看见一个地形、
+    /// 踩到另一个地形（而且只在真渲染 + 真碰撞下才看得出来）。
+    #[test]
+    fn heightfield_expands_to_a_trimesh_matching_the_render_mesh() {
+        let doc = ShapeDoc {
+            kind: ShapeKind::HeightField,
+            heights: Some(vec![
+                vec![0.0, 1.0, 2.0],
+                vec![0.5, 1.5, 2.5],
+                vec![1.0, 2.0, 3.0],
+            ]),
+            cell_size: Some(2.0),
+            ..Default::default()
+        };
+        let mesh = heightfield_mesh(&doc);
+        assert_eq!(mesh.vertex_count(), 9);
+        assert_eq!(mesh.triangle_count(), 8);
+        let shape = physics_shape(&doc);
+        match &shape {
+            Shape::TriMesh { vertices, indices } => {
+                assert_eq!(indices, &mesh.indices, "索引必须逐位相同");
+                let rendered: Vec<Vec3> = mesh.vertices.iter().map(|v| v.pos()).collect();
+                assert_eq!(vertices.len(), rendered.len());
+                for (i, (a, b)) in vertices.iter().zip(&rendered).enumerate() {
+                    assert!(
+                        (*a - *b).length() < 1e-6,
+                        "第 {i} 个顶点不一致：物理 {a:?} vs 渲染 {b:?}"
+                    );
+                }
+            }
+            other => panic!("高度场该展开成静态三角网：{other:?}"),
+        }
+        // 网格以原点为中心：3×3 格点、格子 2 米 → X/Z 各跨 4 米；高度 0..=3
+        let aabb = mesh.aabb();
+        assert!((aabb.min.x + 2.0).abs() < 1e-5 && (aabb.max.x - 2.0).abs() < 1e-5);
+        assert!((aabb.min.z + 2.0).abs() < 1e-5 && (aabb.max.z - 2.0).abs() < 1e-5);
+        assert!((aabb.min.y - 0.0).abs() < 1e-6 && (aabb.max.y - 3.0).abs() < 1e-6);
+        // 物理 AABB 与渲染 AABB 一致（三角网逐顶点同源，理应一致）
+        assert!((shape.local_aabb().min - aabb.min).length() < 1e-5);
+        assert!((shape.local_aabb().max - aabb.max).length() < 1e-5);
+        // 缺字段（校验层会拦，这里兜底）不应该 panic：退化成空三角网
+        let empty = ShapeDoc {
+            kind: ShapeKind::HeightField,
+            ..Default::default()
+        };
+        match physics_shape(&empty) {
+            Shape::TriMesh { vertices, indices } => {
+                assert!(vertices.is_empty() && indices.is_empty())
+            }
+            other => panic!("空高度场也该是三角网：{other:?}"),
+        }
+    }
+
+    /// 高度场网格按**内容**缓存：同数据同名（复用显存），数据或格子尺寸变了就换名字。
+    #[test]
+    fn heightfield_mesh_name_is_content_addressed() {
+        let base = ShapeDoc {
+            kind: ShapeKind::HeightField,
+            heights: Some(vec![vec![0.0, 1.0], vec![2.0, 3.0]]),
+            cell_size: Some(1.0),
+            ..Default::default()
+        };
+        assert_eq!(heightfield_mesh_name(&base), heightfield_mesh_name(&base));
+        let moved = ShapeDoc {
+            heights: Some(vec![vec![0.0, 1.0], vec![2.0, 3.5]]),
+            ..base.clone()
+        };
+        assert_ne!(heightfield_mesh_name(&base), heightfield_mesh_name(&moved));
+        let bigger = ShapeDoc {
+            cell_size: Some(2.0),
+            ..base.clone()
+        };
+        assert_ne!(heightfield_mesh_name(&base), heightfield_mesh_name(&bigger));
+        let other_grid = ShapeDoc {
+            heights: Some(vec![vec![0.0, 1.0, 2.0], vec![2.0, 3.0, 4.0]]),
+            ..base.clone()
+        };
+        assert_ne!(
+            heightfield_mesh_name(&base),
+            heightfield_mesh_name(&other_grid)
+        );
+        assert!(
+            heightfield_mesh_name(&base).starts_with("heightfield:2x2:"),
+            "{}",
+            heightfield_mesh_name(&base)
+        );
     }
 
     /// 文档 → 引擎：聚光灯的每个字段都要落到引擎里，尤其是**投影开关**。

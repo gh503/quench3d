@@ -12,7 +12,7 @@
 //! `docs/production_readiness.md` 的诚实边界。
 
 use quench3d_cli::scene_doc::SceneDoc;
-use quench3d_editor::scene_io::export_base_doc;
+use quench3d_editor::scene_io::{base_shape_for, export_base_doc};
 
 /// 临时目录（每个用例一个，避免互相踩）。
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -150,5 +150,61 @@ fn scene_to_json_uses_the_merged_export_base() {
     assert!(
         !src.contains("doc.base_doc.as_ref().and_then"),
         "材质继承必须查**合并后的底稿**（`base`），否则片段物体的材质/贴图会在存盘时丢掉"
+    );
+}
+
+/// 高度场（= 静态三角网）在存盘时必须**按名字从底稿里恢复**，不能凭空消失。
+///
+/// 引擎里的三角网形状反推不回场景格式（它没有"高度场"这个概念），所以
+/// `shape_doc_from_shape` 对它是 `None`。没有这条兜底：
+/// 「载入带地形的场景 → 随手存一次」就会把整块地形从文件里删掉（而且不报错）。
+#[test]
+fn triangulated_objects_survive_save_via_the_base_doc() {
+    let base = SceneDoc::from_json(
+        r#"{ "objects": [
+              { "name": "地形", "body": "static",
+                "shape": { "type": "heightfield", "cell_size": 2,
+                           "heights": [[0, 0, 0], [0, 1, 0]] } },
+              { "name": "箱子", "body": "dynamic",
+                "shape": { "type": "box", "size": [1, 1, 1] } },
+              { "name": "没形状" }
+            ] }"#,
+    )
+    .unwrap();
+
+    // ① 按名字找得到，且形状逐字段保留（含 heights 与 cell_size）
+    let shape = base_shape_for(&base, "地形").expect("地形必须能恢复");
+    assert_eq!(shape.kind, quench3d_cli::scene_doc::ShapeKind::HeightField);
+    assert_eq!(shape.cell_size, Some(2.0));
+    assert_eq!(
+        shape.heights.unwrap(),
+        vec![vec![0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]]
+    );
+    // ② 别的物体不受影响（查到谁就是谁）
+    assert_eq!(
+        base_shape_for(&base, "箱子").unwrap().kind,
+        quench3d_cli::scene_doc::ShapeKind::Box
+    );
+    // ③ 没写 shape 的物体 → None（调用方照旧报 skipped，不编造形状）
+    assert!(base_shape_for(&base, "没形状").is_none());
+    // ④ 名字对不上 → None
+    assert!(base_shape_for(&base, "不存在").is_none());
+}
+
+/// 结构守卫：`scene_to_json` 的两条"反推不出来"的路径都要走 [`base_shape_for`]。
+///
+/// 有刚体（三角网碰撞体）与没刚体（生成网格）是两条独立分支，只补一条的话另一种地形
+/// 照样会在存盘时消失 —— 这种"补了一半"在 CI 上不会红（往返测试要 GPU，缺卡就 skip）。
+#[test]
+fn scene_to_json_falls_back_to_the_base_doc_for_unknown_shapes() {
+    let src = include_str!("../src/scene_io.rs");
+    let body = src
+        .split("fn scene_to_json")
+        .nth(1)
+        .expect("scene_io.rs 里应当有 scene_to_json");
+    assert_eq!(
+        body.matches("base_shape_for(&base, &name)").count(),
+        2,
+        "有刚体与没刚体两条兜底路径都要查底稿（否则存盘会丢地形）"
     );
 }

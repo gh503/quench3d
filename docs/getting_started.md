@@ -171,7 +171,11 @@ let body = engine.world.add_builder(
 ```
 
 可用形状：`Sphere{radius}` `Box{half_extents}` `Capsule{half_height,radius}`
-`Cylinder{half_height,radius}` `ConvexHull{points}` `Plane{normal}` `TriMesh{vertices,indices}`。
+`Cylinder{half_height,radius}` `Cone{half_height,radius}` `ConvexHull{points}` `Plane{normal}`
+`TriMesh{vertices,indices}`（静态地形/关卡）。
+
+场景格式里还多一种**格式层**形状 `heightfield`（`heights` 行主序 + `cell_size`）：
+装载时展开成静态 `TriMesh`，渲染与物理共用 `MeshData::heightfield` 生成的同一份几何。
 
 ### 3.3 让物理推动画面（唯一正确的绑定方式）
 
