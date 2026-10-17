@@ -64,9 +64,14 @@
   - `mesh_matrix(mesh_index, worlds) = world(t) × bind_inverse`：几何是按绑定姿态烘过的，
     所以画动画只需要这一个矩阵；**绑定姿态下它恰好是单位矩阵**（静态路径逐位不变，
     测试盯着这条不变量）。
+  - `ModelAnimationPlayer`（`model.player(name)`）：纯 CPU 的**播放状态** —— `advance(dt)` 推时间
+    （循环用 `rem_euclid`、不循环夹到时长并置 `finished`、`speed` 倍速、`duration <= 0` 不除零、
+    `dt` 非法不产生 NaN），`mesh_matrices(&model)` 直接给出"每个网格片段该用的矩阵"。
+    渲染侧只要把它乘到片段的基础变换上，播放语义（循环/夹取/倍速）不必在渲染循环里重写一遍。
   - 测试（手搓 4 节点 + 2 轨道 GLB）：node 表/父子关系、时长、t=0/0.5/1 的平移采样、
     90° 旋转、子节点跟随父节点、"烘过的几何 + 动画矩阵 = 动画后位置"、未知名字 → None、
-    绑定姿态单位矩阵。变异 3 组全红（忽略时间 / 忘掉 bind_inverse / 丢掉动画）。
+    绑定姿态单位矩阵；播放器的时间推进/倍速/循环/播完/非法输入。变异 5 组全红
+    （忽略时间 / 忘掉 bind_inverse / 丢掉动画 / 不循环 / 忽略倍速）。
   - **边界（诚实）**：这一轮只到**引擎 API 层**。还没做：场景格式里的动画字段（`objects[].model.animation`）、
     渲染循环按时间推进、混合（多轨道加权）、`skins` 与 GPU 蒙皮；`CUBICSPLINE` 退化到线性
     （只取关键帧的"值"，丢切线）；形变动画（morph target）跳过不猜。顺序见

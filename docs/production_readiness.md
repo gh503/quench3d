@@ -2130,7 +2130,8 @@ if let Some(v) = doc.physics.static_friction_speed {
 | glTF `animations` 解析 | ✅ 第 61 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 退化线性、morph 跳过） |
 | glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ❌ | `LoadedMesh.data` 的 `Vertex` 里没有 joint/weight 字段；要加 4 个关节下标 + 4 个权重 |
 | CPU 侧**采样**（给定 t 求节点世界矩阵） | ✅ 第 61 轮 | `sample_animation(name, t)`；循环/时间推进仍由调用方做（`t.rem_euclid(duration)`） |
-| CPU 侧播放（渲染循环里推进时间、每网格矩阵） | ❌ | `mesh_matrix` 已就绪，缺的是调用点与格式字段 |
+| CPU 侧播放状态（循环/夹取/倍速） | ✅ 第 61 轮 | `ModelAnimationPlayer::advance(dt)` + `mesh_matrices(&model)`；**纯 CPU 可测**（循环用 `rem_euclid`、`duration <= 0` 不除零、非法 dt 不出 NaN） |
+| 渲染循环里的调用点 + 格式字段 | ❌ | 需要"每个网格片段 → 场景物体下标"的映射（`LoadedModel::spawn` 现在只返回 `Vec<usize>`），然后把 `mesh_matrices` 乘到片段基础变换上；格式字段必须与它**同一批**落地，否则就是"能解析但没人消费" |
 | 与场景格式的接口 | ❌ | 需要 `objects[].model.animation = { name, speed, loop }` 一类字段（**向后兼容**：不写 = 现在这样，静止） |
 | 混合（多轨道 / 权重） | ❌ | 至少要能"两条轨道按权重加权"，否则 #23 的"混合"没落地 |
 | GPU 蒙皮 | ❌ | 顶点着色器要读关节矩阵纹理/uniform；`MeshData` 要加两套顶点属性 |

@@ -311,4 +311,55 @@ fn gltf_node_transforms_are_baked_into_geometry() {
     );
     // 不存在的动画名 → None（不是 panic、也不是静默给绑定姿态）
     assert!(model.sample_animation("没有这条", 0.0).is_none());
+    assert!(model.player("没有这条").is_none());
+
+    // ── 播放器：时间推进 / 倍速 / 循环 / 播完 ────────────────────────────────
+    let mut p = model.player("移动").expect("该有播放器");
+    assert!((p.duration - 1.0).abs() < 1e-6 && p.time == 0.0 && p.looping);
+    assert_eq!(p.mesh_matrices(&model).len(), model.meshes.len());
+    let x_of_right = |mats: &[quench3d::math::Mat4]| mats[right_idx].to_cols_array()[12];
+    p.advance(0.25).advance(0.25);
+    assert!(
+        (p.time - 0.5).abs() < 1e-5,
+        "两次 0.25 秒后该是 0.5：{}",
+        p.time
+    );
+    let mats = p.mesh_matrices(&model);
+    assert!(
+        (x_of_right(&mats) - 1.5).abs() < 1e-4,
+        "t=0.5 时「右」该右移 1.5（2→3.5），实际 {}",
+        x_of_right(&mats)
+    );
+    // 循环：再走 1 秒 → 1.5 对 1.0 取模 = 0.5
+    p.advance(1.0);
+    assert!(
+        (p.time - 0.5).abs() < 1e-4 && !p.finished,
+        "循环播放该绕回 0.5 且不 finished：time={} finished={}",
+        p.time,
+        p.finished
+    );
+    // 倍速：speed=2 走 0.25 秒 = 0.5 秒的动画时间
+    let mut fast = model.player("移动").unwrap();
+    fast.speed = 2.0;
+    fast.advance(0.25);
+    assert!(
+        (fast.time - 0.5).abs() < 1e-4,
+        "倍速 2 该走到 0.5：{}",
+        fast.time
+    );
+    // 不循环：夹到时长并置 finished
+    let mut once = model.player("移动").unwrap();
+    once.looping = false;
+    once.advance(5.0);
+    assert!(
+        (once.time - 1.0).abs() < 1e-6 && once.finished,
+        "不循环该夹到 1.0 且 finished：time={} finished={}",
+        once.time,
+        once.finished
+    );
+    // 非法 dt / 非法速度不 panic、不产生 NaN
+    let mut weird = model.player("移动").unwrap();
+    weird.speed = 0.0;
+    weird.advance(f32::NAN);
+    assert!(weird.time.is_finite(), "时间不该变 NaN：{}", weird.time);
 }

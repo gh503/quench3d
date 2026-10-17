@@ -174,6 +174,84 @@ pub struct AnimationTrack {
     pub values: Vec<[f32; 4]>,
 }
 
+/// 一条动画的**播放状态**（时间推进、速度、循环）。
+///
+/// 这是纯 CPU 的：`advance(dt)` 推时间，`mesh_matrices(&model)` 给出"每个网格片段
+/// 该用的矩阵"，渲染侧只要把它乘到该片段的基础变换上即可。这样播放逻辑（循环取模、
+/// 夹到时长、速度）有单测，不需要显卡，也不必在渲染循环里重复实现一遍。
+#[derive(Clone, Debug)]
+pub struct ModelAnimationPlayer {
+    /// 动画名（必须在 `model.animations` 里存在）。
+    pub animation: String,
+    /// 时长（秒）。
+    pub duration: f32,
+    /// 当前时间（秒）。
+    pub time: f32,
+    /// 播放速度（倍速，必须 > 0）。
+    pub speed: f32,
+    /// 是否循环。
+    pub looping: bool,
+    /// 不循环时：是否已经播完（时间夹在时长上）。
+    pub finished: bool,
+}
+
+impl ModelAnimationPlayer {
+    /// 推进 `dt` 秒。
+    ///
+    /// * 循环：时间对时长取模（`rem_euclid`，负 dt 也不会变成负数）。
+    /// * 不循环：夹到时长并置 `finished`。
+    /// * 时长 <= 0（空动画）：时间恒为 0、立即 `finished`，不除零。
+    pub fn advance(&mut self, dt: f32) -> &mut Self {
+        if !dt.is_finite() || self.duration <= 0.0 {
+            self.time = 0.0;
+            self.finished = self.duration <= 0.0;
+            return self;
+        }
+        let speed = if self.speed.is_finite() && self.speed > 0.0 {
+            self.speed
+        } else {
+            1.0
+        };
+        self.time += dt * speed;
+        if self.looping {
+            self.time = self.time.rem_euclid(self.duration);
+            self.finished = false;
+        } else if self.time >= self.duration {
+            self.time = self.duration;
+            self.finished = true;
+        }
+        self
+    }
+
+    /// 每个网格片段该用的矩阵（长度 == `model.meshes.len()`）。
+    ///
+    /// 没动画、采样失败、或片段不属于任何节点时给单位矩阵 —— 也就是"保持烘焙好的样子"。
+    pub fn mesh_matrices(&self, model: &LoadedModel) -> Vec<Mat4> {
+        let worlds = model.sample_animation(&self.animation, self.time);
+        (0..model.meshes.len())
+            .map(|i| match &worlds {
+                Some(w) => model.mesh_matrix(i, w),
+                None => Mat4::IDENTITY,
+            })
+            .collect()
+    }
+}
+
+impl LoadedModel {
+    /// 为某条动画建一个播放器；名字不存在返回 `None`（不静默给绑定姿态）。
+    pub fn player(&self, name: &str) -> Option<ModelAnimationPlayer> {
+        let clip = self.animation(name)?;
+        Some(ModelAnimationPlayer {
+            animation: clip.name.clone(),
+            duration: clip.duration,
+            time: 0.0,
+            speed: 1.0,
+            looping: true,
+            finished: false,
+        })
+    }
+}
+
 /// 一条动画（glTF 的一个 `animation`）。
 #[derive(Clone, Debug, Default)]
 pub struct LoadedAnimation {
