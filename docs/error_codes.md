@@ -29,7 +29,7 @@
 | `message` | 给人读的细节（数字、可用名单）—— 可以改措辞，agent **不应该**依赖它做分支 |
 | `hint` | 修复建议（可选） |
 
-码表故意做得**窄**（十几个）而不是「一条诊断一个码」：232 个调用点如果各有各的码，
+码表故意做得**窄**（十几个）而不是「一条诊断一个码」：252 个调用点如果各有各的码，
 既没法保证稳定，agent 也没法穷举。`code` 说性质、`path` 说位置，两个合起来才是完整定位。
 
 ## 码表
@@ -46,6 +46,7 @@
 | `duplicate_name` | 同一命名空间里名字重复（`instances` 展开之后的重名也算） | 改名；重名会让后者覆盖前者，或让引用挂到错的物体上 |
 | `reserved_name` | 用了引擎保留的名字（例如相机段里的 `default`） | 换成别的名字；保留名的含义见 hint |
 | `cycle` | 父子引用成环（沿 `parent` 走回自己） | 打断环：环上至少一个物体的 `parent` 要指向环外或留空 |
+| `include_cycle` | `include` 引用成环：A 包含 B，B 又（直接或间接）包含 A | 打断环：环上至少有一个文件不要再 include 回上游；公共片段应该被并列包含，而不是互相包含 |
 | `asset_not_found` | 找不到贴图/模型文件，或 `assets.search_paths` 指向不存在的目录 | 把文件放到消息里列出的候选位置之一，或用 `assets.search_paths` / `--asset-path` 加一条搜索路径 |
 | `io_error` | 读写文件失败：不只是"找不到"，还包括权限、目录、编码 | 按消息里的 OS 错误处理路径/权限/编码；这不是场景语法问题，改 JSON 没用 |
 | `limit_exceeded` | 超过规模上限：物体数、步数、动作数、探针数、局部光名额 | 拆成多个场景或减少数量；hint 里给了具体上限 |
@@ -56,9 +57,9 @@
 | `invalid` | 兜底码：这条诊断还没有被归类（历史诊断，或新加的检查忘了给码） | 只能读 message；如果经常撞到它，给它补一个专门的码（见 docs/error_codes.md） |
 <!-- END GENERATED TABLE -->
 
-## 覆盖情况（第 55 轮，怎么核对）
+## 覆盖情况（第 60 轮，怎么核对）
 
-- `scene_doc.rs` 里 **232 个** `Diagnostic::error/warn` 调用点全部显式给了码
+- `scene_doc.rs` 里 **252 个** `Diagnostic::error/warn` 调用点全部显式给了码
   （`Diagnostic::error_code` / `warn_code`）。两参数的老构造器仍然保留，它给的是兜底码
   `invalid` —— 只在**没法归类**时用，用来兼容围栏外的调用点与老 JSON。
 - 字段级问题（未知字段 / 类型不对 / 枚举拼错 / 缺字段）在**唯一出口** `check_at` 里分类
@@ -66,7 +67,7 @@
 - 核对命令：
 
 ```bash
-# 调用点数量（应为 232）
+# 调用点数量（应为 252）
 grep -c 'Diagnostic::error_code(\|Diagnostic::warn_code(' crates/quench3d-cli/src/scene_doc.rs
 # 还没归类的调用点（应为空）
 grep -n 'Diagnostic::error(\|Diagnostic::warn(' crates/quench3d-cli/src/scene_doc.rs
@@ -75,10 +76,10 @@ grep -n 'Diagnostic::error(\|Diagnostic::warn(' crates/quench3d-cli/src/scene_do
 **代码 ↔ 本文件的一一对应**（可复核判据，不用读源码找字符串）：
 
 ```bash
-# ① 权威码集：代码里的 ErrorCode::TABLE，经 schema 暴露（17 行）
+# ① 权威码集：代码里的 ErrorCode::TABLE，经 schema 暴露（18 行）
 ./target/debug/quench3d schema --json | python3 -c 'import json,sys
 print("\n".join(sorted(e["code"] for e in json.load(sys.stdin)["data"]["error_codes"])))' > /tmp/from_code.txt
-# ② 本文件码表第一列（17 行）
+# ② 本文件码表第一列（18 行）
 python3 -c 'import re
 s=open("docs/error_codes.md",encoding="utf-8").read()
 b=s.split("<!-- BEGIN GENERATED TABLE")[1].split("<!-- END GENERATED TABLE -->")[0]
@@ -100,7 +101,7 @@ diff /tmp/from_code.txt /tmp/from_doc.txt && echo "1:1 一致"
 |---|---|
 | `error_code_table_is_self_consistent` | 表自身：名字唯一、snake_case、不含 `|`、serde 名一致、兜底码在位 |
 | `error_codes_doc_matches_the_table` | 本文件的表 ↔ `ErrorCode::TABLE` **逐格**（码/含义/动作三列）对账 |
-| `diagnostic_codes_are_stable_and_specific` | **稳定契约**：16 个非兜底码各有真实触发场景，钉死 `code` + `path`；末尾反向断言"覆盖集 == 码表 − `invalid`" |
+| `diagnostic_codes_are_stable_and_specific` | **稳定契约**：17 个非兜底码各有真实触发场景，钉死 `code` + `path`；末尾反向断言"覆盖集 == 码表 − `invalid`" |
 | `every_code_in_the_table_is_emitted_by_the_source` | **死码**：码表里每个码在 `mod tests` 之前的源码里至少有一个发出点（含兜底码） |
 | `serde_errors_classify_into_stable_codes` | 结构检查唯一出口的分类规则 |
 | `diagnostics_without_a_code_deserialize_to_invalid` | 老 JSON 向后兼容 |

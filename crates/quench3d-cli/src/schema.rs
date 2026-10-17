@@ -333,6 +333,14 @@ pub fn scene_grammar() -> Value {
             },
             "ground": { "size": "f32 边长，缺省 40", "material": "材质名（可选）", "y": "f32 高度，缺省 0" },
             "materials": "名字 → 材质对象",
+            "include": [
+                "被包含的外部场景片段路径数组（跨文件复用：把一份场景拆成多个文件）",
+                "相对路径以**写这一行的文件**所在目录为基准；片段可以再 include（最多 16 层，同一个文件只并入一次，成环报 include_cycle）",
+                "片段只能贡献可合并的段：materials/templates/cameras（重名 = duplicate_name 错误，不静默覆盖）+ objects/models/joints/actions/probes/animations（按声明顺序追加：本文件自己的内容在前，被包含的内容在后）",
+                "根独有的段（ground/camera/lighting/simulate/render/gravity/physics/name/assets）写在片段里是错误",
+                "片段里的贴图/模型相对路径按**片段自己的目录**解析（装载时重定基），不会因为被谁包含而指错地方",
+                "跨文件 prefab 的推荐写法：片段只放 templates，根场景用 objects[].template + instances 实例化",
+            ],
             "templates": "名字 → 模板对象（字段集与物体完全相同）。物体写 `template: \"名字\"` 复用；物体自己写的字段覆盖模板；模板里写 name/parent/position/rotation_deg 没有意义（会有警告并被忽略）",
             "objects": "图元物体数组",
             "models": "外部模型数组（gltf/glb/obj）",
@@ -815,6 +823,8 @@ pub fn json_schema() -> Value {
                 "ground": { "$ref": "#/$defs/ground" },
                 "materials": { "type": "object",
                                "additionalProperties": { "$ref": "#/$defs/material" } },
+                "include": { "type": "array", "items": { "type": "string" },
+                             "description": "被包含的外部场景片段：只贡献可合并的段（材质/模板/相机/物体/模型/关节/动作/探针/动画），具名表重名报错、数组按「自己的在前」追加；相对路径以写这一行的文件所在目录为基准，片段的资源路径按片段自己的目录重定基；最多 16 层，成环报 include_cycle" },
                 "templates": { "type": "object",
                                "additionalProperties": { "$ref": "#/$defs/object" },
                                "description": "可复用的物体描述；objects[].template 引用它" },
@@ -869,6 +879,17 @@ pub fn system_prompt() -> String {
 - templates: { 名字: { ...与物体相同的字段... } }   // 可复用的一段描述（省 token）
   物体写 "template": "名字" 引用；物体自己写的字段覆盖模板
   （模板里写 name/parent/position/rotation_deg 没有意义，会被忽略并警告）
+- include: ["parts/wall.json", "../shared/common.json"]   // 跨文件复用（可选）
+  被包含的片段只贡献可合并的段（materials/templates/cameras + objects/models/joints/
+  actions/probes/animations）：具名表重名 = duplicate_name 错误（不静默覆盖），
+  数组按声明顺序追加（**本文件自己的内容在前**，被包含的在后）。
+  根独有的段（ground/camera/lighting/simulate/render/gravity/physics/name/assets）
+  写在片段里是错误 —— 这些段只有一个实例，谁赢没有答案，所以宁可报错也不含糊地合并。
+  相对路径以**写这一行的文件**所在目录为基准；片段里的贴图/模型路径按片段自己的目录解析
+  （装载时重定基一次，不会因为被谁包含而指错地方）。
+  片段可以再 include（最多 16 层，同一文件只并入一次、并在 diagnostics 里给一条
+  ineffective 警告，成环 = include_cycle 错误）。
+  跨文件 prefab：片段只放 templates，根场景用 objects[].template + instances 实例化。
 - objects: 数组，每项：
   - name: 字符串（关节引用与报告用它）
   - template: 模板名（可选）；instances: [{position, rotation_deg, scale, name}]（可选）
@@ -1353,6 +1374,7 @@ mod tests {
             "materials",
             "templates",
             "instances",
+            "include",
             "objects",
             "shape",
             "body",

@@ -1335,11 +1335,30 @@ pub fn joint_frame_quat(deg: Option<[f32; 3]>) -> Quat {
     euler_quat(deg)
 }
 
+/// `include` 合并：把碎片场景并成一份自包含文档。
+///
+/// 这是给"直接调 runner API"的调用点兜底用的（CLI 的 `load_scene` 已经合并过一次）。
+/// 幂等：合并结果里 `include` 是空的，第二次调用只是克隆。
+fn resolve_includes(doc: &SceneDoc) -> Result<SceneDoc, RunError> {
+    if doc.include.is_empty() {
+        return Ok(doc.clone());
+    }
+    let resolved = doc.resolved();
+    match resolved.doc {
+        Some(d) => Ok(d),
+        None => Err(RunError::scene(resolved.error_message())),
+    }
+}
+
 /// 把文档里的物理内容建成一个独立世界（不需要 GPU）。
 pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
+    // `include` 先合并（[`SceneDoc::resolved`] 是唯一实现）。CLI 的装载路径已经合并过，
+    // 这里再调一次是幂等的（合并结果里 `include` 为空），所以直接调这个 API 的调用点
+    // （MCP / 编辑器 / 测试）也不会漏掉片段。
+    let resolved = resolve_includes(doc)?;
     // 模板 + 实例在这里展开：这一步之后，下面的代码只看见"一个物体一份描述"，
     // 不需要为 instances 写第二套装配逻辑（也就不会出现"CLI 一套、报告一套"的偏差）。
-    let expanded = doc.expanded();
+    let expanded = resolved.expanded();
     let doc = &expanded;
     let mut world = PhysicsWorld::new();
     let mut handles = BTreeMap::new();
@@ -2267,7 +2286,8 @@ pub fn run_simulate_traced(
     trace: &[String],
     every: u32,
 ) -> Result<(SimReport, Vec<Trajectory>), RunError> {
-    let expanded = doc.expanded();
+    let resolved = resolve_includes(doc)?;
+    let expanded = resolved.expanded();
     let doc = &expanded;
     let mut build = build_world(doc)?;
     let steps = doc.simulate.steps;
@@ -2463,8 +2483,10 @@ pub fn setup_visuals(
     doc: &SceneDoc,
     handles: &BTreeMap<String, BodyHandle>,
 ) -> Result<Vec<ModelInstance>, RunError> {
-    // 与 `build_world` 用同一套展开（名字必须一致，否则 handles 会对不上）
-    let expanded = doc.expanded();
+    // 与 `build_world` 用同一套展开（名字必须一致，否则 handles 会对不上）；
+    // `include` 的合并也走同一个入口，幂等。
+    let resolved = resolve_includes(doc)?;
+    let expanded = resolved.expanded();
     let doc = &expanded;
     apply_lighting(engine, doc);
 

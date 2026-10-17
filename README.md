@@ -878,6 +878,19 @@ NaN 刚体  : 0
   **每个副本是一个独立物体/刚体**：不是共享刚体，也不是 GPU 实例化——所以关节/动作要写
   `本名#序号`，副本多了就是真实的物理开销（>64 个给警告）。
   校验会拦：模板不存在、`instances: []`、展开后名字重复、实例里的未知字段。
+* `include: ["parts/wall.json", "../shared/common.json"]` 把场景**拆成多个文件**（跨文件复用
+  与跨文件 prefab）。相对路径以**写这一行的那个文件**所在目录为基准，候选位置与贴图/模型同源
+  （文件目录 → `assets.search_paths` → `--asset-path` → 工作目录 → 引擎搜索路径）。
+  片段只能贡献**可合并的段**：`materials`/`templates`/`cameras`（具名表，**重名 = `duplicate_name`
+  错误**，不静默覆盖）与 `objects`/`models`/`joints`/`actions`/`probes`/`animations`（数组，
+  按声明顺序追加：**本文件自己的内容在前**）。根独有的段（`ground`/`camera`/`lighting`/
+  `simulate`/`render`/`gravity`/`physics`/`name`/`assets`）写在片段里是**错误**——
+  这些段只有一个实例，谁赢没有答案。
+  片段里的贴图/模型相对路径按**片段自己的目录**解析（装载时重定基一次，文件搬到哪都跟着自己走）；
+  片段可以再 `include`（最多 16 层）；同一个文件在一次解析里只并入一次（菱形包含给一条
+  `ineffective` 警告），成环 = `include_cycle` 错误。**不写这个字段 = 行为与以前逐字节相同**。
+  跨文件 prefab 的推荐写法：片段只放 `templates`，根场景用 `objects[].template` + `instances`
+  实例化。
 * 命名相机：`cameras: { 名字 → 相机对象 }`（缺省空 = 只渲 `camera` 段那台）。校验拦空名与
   保留名 `default`。`--camera <名字>`（`render`/`simulate`/`movie` 都支持，未知名退出码 2、
   `error.kind = unknown_camera`）已可用；多输出（`render.outputs[]`）是下一步。
@@ -955,12 +968,12 @@ NaN 刚体  : 0
 | `invalid_value` / `out_of_range` | 枚举拼错 / 数字越界或非有限 | 换成允许的取值 |
 | `unknown_reference` | 引用了不存在的物体/材质/模板/相机 | 改名或补定义（hint 带可用名单） |
 | `asset_not_found` | 贴图/模型文件找不到 | 放到消息列出的候选位置，或加 `assets.search_paths` |
-| `duplicate_name` / `reserved_name` / `cycle` | 重名 / 保留名 / 父子成环 | 改名 / 换名 / 打断环 |
+| `duplicate_name` / `reserved_name` / `cycle` / `include_cycle` | 重名 / 保留名 / 父子成环 / `include` 成环 | 改名 / 换名 / 打断环（含文件包含环） |
 | `mutually_exclusive` | 两个字段只能留一个 | 删一个 |
 | `ineffective` / `suspicious_value` | 写了不生效 / 合法但很可能不是本意 | 删掉或复核数值 |
 | `unit_ambiguity` | 单位容易混（弧度 vs 度、米 vs 度） | 确认单位 |
 
-**完整码表**（17 个，含每个码的"agent 该做什么"）见 [docs/error_codes.md](docs/error_codes.md)，
+**完整码表**（18 个，含每个码的"agent 该做什么"）见 [docs/error_codes.md](docs/error_codes.md)，
 也可以让 agent 直接读 `quench3d schema --json` 的 `error_codes` 段（同一份表，由测试对账）。
 码是**契约**：发布后不改名、不改含义，只会新增。
 
@@ -1101,7 +1114,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 553 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 569 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1172,9 +1185,9 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（"要真建 GP
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 **172** 个测试（`cargo test -p quench3d-cli`：lib 86 + bin 6 + 7 个集成测试二进制共 79 + 1 个 doctest），按目的分这几块：
+命令行工具的 **184** 个测试（`cargo test -p quench3d-cli`：lib 92 + bin 6 + 7 个集成测试二进制共 85 + 1 个 doctest），按目的分这几块：
 
-* **契约测试**（`tests/cli_e2e.rs`，54 个）真的去 spawn `quench3d` 子进程，断言
+* **契约测试**（`tests/cli_e2e.rs`，60 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；
   其中 4 条是「能力真的接线了」的像素/数值证据：**材质贴图**（同一箱子带/不带贴图的
   中心色差）、**点光源**（一盏红灯必须把箱子照红，且显式清空预设补光必须改变画面）、
@@ -1614,9 +1627,13 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 * **JSON Schema 的边界**：它是**手写**的（加了一致性测试，不引 `schemars` 这类依赖），
   值类型宽松（多为"任意"）、不含 `format`/`minimum` 等语义约束；不支持外部 `$ref`、
   不生成 draft-07 版本；编辑器补全要靠它自己解析 `$defs`。
-* **模板/实例的边界**：没有**外部场景引用**（跨文件 include 组装，与资产搜索路径同源）；
-  模板不能嵌套模板；编辑器能装载、但**存回时把 `instances` 摊平**成具体物体
+* **模板/实例的边界**：模板不能嵌套模板；编辑器能装载、但**存回时把 `instances` 摊平**成具体物体
   （行为与数量不变，文件变长——有意取舍，测试钉住）；`instances` 只覆盖位置/朝向/缩放/名字。
+* **`include` 的边界**：它是**装载期**的文本级组合，不是运行期链接——合并后没有"片段"这个概念
+  （引擎与报告里只有一份物体表）；没有 variant（按场景覆盖片段字段）、没有条件包含；片段里写根独有的段
+  是错误而不是"覆盖根"；编辑器能装能存，但存盘会把片段**内联**进根文件（行为与数量不变，
+  片段文件本身不动，存盘报告里会说明这一次内联了哪些文件）；纯内存入口 `from_json`
+  （浏览器/wasm）没有"场景文件目录"，那里的 `include` 相对路径按工作目录解析（桌面路径不受影响）。
 * **复合形状的边界**：部件没有自己的摩擦/恢复/传感器/CCD（都是刚体级）；部件不能是三角网
   （凸包也只能当整个刚体用）；编辑器没有部件编辑面板——能原样往返，但界面上既不能增删部件、
   也看不到部件的选择框；接触点每对刚体最多 8 个；惯量是对角近似（没有惯性积）。

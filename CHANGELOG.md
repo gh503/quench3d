@@ -180,13 +180,13 @@
 - **校验诊断的稳定机器可读错误码（`diagnostics[].code`）**。以前
   `quench3d validate` 只给 `severity` + `path` + 中文 `message`，agent 想区分
   「模型路径不存在」和「字段非法」只能正则匹配中文文案 —— 文案一改，分支就烂。
-  现在每条校验诊断都带一个**稳定**的 `code`（17 个：`unknown_field`、`missing_field`、
+  现在每条校验诊断都带一个**稳定**的 `code`（当时 17 个 —— **第 60 轮起 18 个**（新增 `include_cycle`）：`unknown_field`、`missing_field`、
   `invalid_type`、`invalid_value`、`out_of_range`、`unknown_reference`、`duplicate_name`、
   `reserved_name`、`cycle`、`asset_not_found`、`io_error`、`limit_exceeded`、
   `mutually_exclusive`、`ineffective`、`suspicious_value`、`unit_ambiguity`、`invalid`）。
   - **`code` 说性质、`path` 说位置、`message` 只给人读**：码表故意做得窄（一条诊断一个码
     既不稳定也没法穷举）。码是契约：**发布后不改名、不改含义，只新增**（新增算契约变更）。
-  - 覆盖：`scene_doc.rs` 的 **232 个**校验出错点全部显式给码；字段级问题（未知字段/类型不对/
+  - 覆盖：`scene_doc.rs` 的 **232 个**（第 60 轮起 **252 个**）校验出错点全部显式给码；字段级问题（未知字段/类型不对/
     枚举拼错/缺字段）在**唯一出口** `check_at` 里由 `classify_serde_code` 分类，结构检查不可能漏码。
     两参数的老构造器保留，它给兜底码 `invalid`（兼容围栏外的调用点与老 JSON）。
   - **向后兼容**：老 JSON 里没有 `code` 的诊断仍能反序列化（`#[serde(default)]`，落到 `invalid`）；
@@ -199,7 +199,7 @@
     重算整表的命令）；README §6.4 补了分支表。
   - 测试（全部无显卡）：`error_code_table_is_self_consistent`、
     `error_codes_doc_matches_the_table`（与文档逐格对账）、
-    `diagnostic_codes_are_stable_and_specific`（码表里 16 个非兜底码**各有真实触发场景**，
+    `diagnostic_codes_are_stable_and_specific`（码表里 16 个非兜底码 —— 第 60 轮起 17 个 —— **各有真实触发场景**，
     钉死 `code` + `path`，并在末尾反向断言"覆盖集 == 码表 − `invalid`"）、
     `every_code_in_the_table_is_emitted_by_the_source`（码表里每个码在源码主体里至少有一个
     发出点，专门挡"加了码但没接线的死码"）、`serde_errors_classify_into_stable_codes`、

@@ -30,7 +30,7 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use quench3d::prelude::*;
 use serde::de::DeserializeOwned;
@@ -47,6 +47,19 @@ pub const MAX_POINT_LIGHTS: usize = quench3d::render::MAX_POINT_LIGHTS;
 pub const MAX_ACTIONS: usize = 10_000;
 /// 单个场景允许的最大区域探针数（每步都要对每个探针做一次区域查询）。
 pub const MAX_PROBES: usize = 256;
+/// 单个场景允许的最大 `include` 嵌套深度（根文件算第 0 层）。
+///
+/// 上限存在的理由是"环之外还能爆栈"：`a→b→c→…` 一路下去，每一层都要读盘、解析、合并。
+/// 16 层足够表达"关卡 → 区域 → 建筑 → 家具"这种层级，再多基本是把目录树抄了一遍。
+pub const MAX_INCLUDE_DEPTH: usize = 16;
+/// 被 `include` 的**片段不允许写**的段：它们是根场景独有的。
+///
+/// 判据不是"能不能合并"，而是"合并语义会不会含糊"：`lighting`/`render`/`simulate`
+/// 这些段只有一个实例，两个文件同时写就等于"谁赢"没有答案。宁可报错让作者把配置
+/// 放到根文件里，也不要静默地按"根赢"或"先来后到"处理 —— 那是查不出来的坑。
+const ROOT_ONLY_SECTIONS: [&str; 9] = [
+    "name", "gravity", "physics", "ground", "assets", "camera", "lighting", "simulate", "render",
+];
 
 /// 场景文件格式标识。
 pub const FORMAT: &str = "quench3d.scene";
@@ -168,6 +181,10 @@ define_error_codes! {
     Cycle => "cycle",
         "父子引用成环（沿 `parent` 走回自己）",
         "打断环：环上至少一个物体的 `parent` 要指向环外或留空";
+    /// `include` 成环。
+    IncludeCycle => "include_cycle",
+        "`include` 引用成环：A 包含 B，B 又（直接或间接）包含 A",
+        "打断环：环上至少有一个文件不要再 include 回上游；公共片段应该被并列包含，而不是互相包含";
     /// 找不到资源文件。
     AssetNotFound => "asset_not_found",
         "找不到贴图/模型文件，或 `assets.search_paths` 指向不存在的目录",
@@ -333,6 +350,30 @@ pub struct SceneDoc {
     /// 具名材质。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub materials: BTreeMap<String, MaterialDoc>,
+    /// 被包含的**外部场景片段**（`["parts/wall.json", "../shared/common.json"]`）。
+    ///
+    /// 语义（六条，`resolved()` 是唯一实现）：
+    /// 1. 相对路径以**写这一行的那份文件所在目录**为基准；候选顺序与贴图/模型同一套
+    ///    （文件目录 → `assets.search_paths` → `--asset-path` → 工作目录 → 引擎搜索路径）。
+    /// 2. 片段必须是合法的 `quench3d.scene`（同样的字段集），但只能贡献**可合并的段**：
+    ///    `materials` / `templates` / `cameras`（具名表，重名即错误）与
+    ///    `objects` / `models` / `joints` / `actions` / `probes` / `animations`（数组，按顺序追加）。
+    ///    根独有的段（`ground`/`camera`/`lighting`/`simulate`/`render`/`gravity`/`physics`/`name`/`assets`）
+    ///    写在片段里是错误（根独有的段列在源码的 `ROOT_ONLY_SECTIONS` 常量里）。
+    /// 3. 顺序：**本文件自己的内容在前**，被 include 的内容在后（按声明顺序先序深度优先）。
+    /// 4. 片段里的相对资源路径（4 个贴图槽、`models[].path`）在装载时按**片段自己的目录**
+    ///    重定基成"相对根场景目录"的路径 —— 所以片段搬到哪都跟着自己走，而校验/渲染只需要
+    ///    根目录一个基准（不会出现"贴图两套解析规则"）。`assets.search_paths` 不在此列：
+    ///    它是根独有的段（见第 2 条），片段写了就是错误。
+    /// 5. 片段可以再 `include`（最多 [`MAX_INCLUDE_DEPTH`] 层）；**同一个文件在一次解析里只并入一次**
+    ///    （菱形包含会得到一条警告并跳过第二次）。成环直接报错（`include_cycle`）。
+    /// 6. **不写这个字段 = 行为与以前逐字节相同**（不读任何额外文件、不重定基任何路径）。
+    ///
+    /// 跨文件 prefab 的推荐写法：片段只放 `templates`（不放 `objects`），根场景用
+    /// `objects: [{ "template": "箱子", "instances": [...] }]` 实例化 —— 这样同一份
+    /// 定义可以被多个场景复用，也不会因为"多摆了一个物体"而重名。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
     /// 图元物体。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<ObjectDoc>,
@@ -397,6 +438,12 @@ pub struct SceneDoc {
     /// 时是 `None`，解析退化为"相对当前工作目录 + 引擎搜索路径"。
     #[serde(skip)]
     pub base_dir: Option<PathBuf>,
+    /// 这份文档来自哪个文件（**不参与序列化**，由 [`SceneDoc::from_file`] 填入）。
+    ///
+    /// 只有 `include` 解析用得到它：根文件自己也要进"已包含"集合，否则
+    /// `a.json → b.json → a.json` 这种环会退化成"把 a 再并一遍"。
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     /// CLI 用 `--asset-path` 给的额外搜索路径（**不参与序列化**，也不会写回场景文件）。
     ///
     /// 与 `assets.search_paths` 同样处理，只是排在它们**之后**：命令行是"这一次运行"的
@@ -852,6 +899,7 @@ impl Default for SceneDoc {
             physics: PhysicsDoc::default(),
             ground: None,
             materials: BTreeMap::new(),
+            include: Vec::new(),
             objects: Vec::new(),
             templates: BTreeMap::new(),
             models: Vec::new(),
@@ -865,6 +913,7 @@ impl Default for SceneDoc {
             simulate: SimulateDoc::default(),
             render: RenderDoc::default(),
             base_dir: None,
+            source_path: None,
         }
     }
 }
@@ -2388,6 +2437,444 @@ fn clean_serde_message(msg: &str) -> String {
     }
 }
 
+/// `include` 的解析结果。
+///
+/// 单独一个结构体而不是 `Result<SceneDoc, Vec<Diagnostic>>`：解析期**警告**
+/// （菱形包含被跳过）也要能传出去，而"有警告"并不阻止场景运行。
+#[derive(Debug, Clone)]
+pub struct ResolvedDoc {
+    /// 合并后的文档；只要有一条 `Error` 级诊断就是 `None`。
+    pub doc: Option<SceneDoc>,
+    /// 解析期诊断（文件缺失、成环、重名冲突……），error 与 warning 都在这里。
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl ResolvedDoc {
+    /// 有没有 `Error` 级诊断。
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
+    }
+
+    /// 把 `Error` 级诊断拼成一句话（给没有诊断通道的调用点用，例如 `RunError`）。
+    pub fn error_message(&self) -> String {
+        let errors: Vec<String> = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("{}: {}", d.path, d.message))
+            .collect();
+        if errors.is_empty() {
+            return String::new();
+        }
+        format!(
+            "include 解析失败（{} 条）—— {}",
+            errors.len(),
+            errors.join("；")
+        )
+    }
+}
+
+/// `include` 解析的进行时状态。
+struct IncludeCtx {
+    diags: Vec<Diagnostic>,
+    /// 已经并入过的文件（规范化绝对路径）：既是"只并一次"的依据，也是报环的待查集合。
+    seen: Vec<PathBuf>,
+    /// 当前递归栈（规范化绝对路径）：报环时给出完整链条。
+    stack: Vec<PathBuf>,
+    /// 具名段的键（`materials/木纹`）→ 它来自哪个文件（重名冲突时告诉用户两边是谁）。
+    origin: BTreeMap<String, String>,
+    /// 根场景所在目录：片段里的相对资源路径以它为基准重定基。
+    root_dir: Option<PathBuf>,
+}
+
+impl IncludeCtx {
+    fn has_errors(&self) -> bool {
+        self.diags.iter().any(|d| d.severity == Severity::Error)
+    }
+
+    /// 装载一个被 include 的文件，返回它**贡献的合并内容**（片段自己 + 它 include 的内容）。
+    ///
+    /// `parent` 是写这一行 `include` 的文档：候选路径按**它**的目录展开（相对路径以
+    /// 写这一行的文件为基准）。任何问题都变成 `self.diags` 里的一条诊断并返回 `None`。
+    fn load(&mut self, parent: &SceneDoc, rel: &str, ref_path: &str) -> Option<SceneDoc> {
+        let rel = rel.trim();
+        if rel.is_empty() {
+            self.diags.push(
+                Diagnostic::error_code(ErrorCode::InvalidValue, ref_path, "include 的路径不能为空")
+                    .with_hint("删掉这一项，或写一个相对文件名（相对**写这一行的文件**所在目录）"),
+            );
+            return None;
+        }
+        let candidates = parent.asset_candidates(rel);
+        let found = match candidates.iter().find(|p| p.exists()) {
+            Some(p) => p.clone(),
+            None => {
+                let tried: Vec<String> =
+                    candidates.iter().map(|p| p.display().to_string()).collect();
+                self.diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::AssetNotFound,
+                        ref_path,
+                        format!(
+                            "找不到被 include 的场景文件 \"{rel}\"（找过：{}）",
+                            tried.join("、")
+                        ),
+                    )
+                    .with_hint(
+                        "相对路径以**写这一行的文件**所在目录为基准；也可以写进 `assets.search_paths` 或加 `--asset-path`",
+                    ),
+                );
+                return None;
+            }
+        };
+        if found.is_dir() {
+            self.diags.push(
+                Diagnostic::error_code(
+                    ErrorCode::IoError,
+                    ref_path,
+                    format!("{} 是目录，include 需要的是一个场景文件", found.display()),
+                )
+                .with_hint("把文件名补全（例如 parts/wall.json）"),
+            );
+            return None;
+        }
+        let canon = std::fs::canonicalize(&found).unwrap_or_else(|_| found.clone());
+        if let Some(pos) = self.stack.iter().position(|p| *p == canon) {
+            let chain: Vec<String> = self.stack[pos..]
+                .iter()
+                .chain(std::iter::once(&canon))
+                .map(|p| p.display().to_string())
+                .collect();
+            self.diags.push(
+                Diagnostic::error_code(
+                    ErrorCode::IncludeCycle,
+                    ref_path,
+                    format!("include 成环：{}", chain.join(" → ")),
+                )
+                .with_hint("环上至少一个文件不要再 include 回上游；公共片段应当被并列包含"),
+            );
+            return None;
+        }
+        if self.seen.contains(&canon) {
+            self.diags.push(
+                Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
+                    ref_path,
+                    format!(
+                        "{} 已经被包含过，这一处跳过（同一个文件在一次解析里只并入一次）",
+                        found.display()
+                    ),
+                )
+                .with_hint("要摆两份就把它写成一个模板，用 `objects[].instances` 摆多个副本"),
+            );
+            return None;
+        }
+        if self.stack.len() >= MAX_INCLUDE_DEPTH {
+            self.diags.push(
+                Diagnostic::error_code(
+                    ErrorCode::LimitExceeded,
+                    ref_path,
+                    format!("include 嵌套超过 {MAX_INCLUDE_DEPTH} 层"),
+                )
+                .with_hint("把层次拆平，或把公共片段直接列在根文件的 `include` 里"),
+            );
+            return None;
+        }
+        let text = match std::fs::read_to_string(&found) {
+            Ok(t) => t,
+            Err(e) => {
+                self.diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::IoError,
+                        ref_path,
+                        format!("读不了被 include 的文件 {}：{e}", found.display()),
+                    )
+                    .with_hint("检查权限与编码（场景文件必须是 UTF-8）"),
+                );
+                return None;
+            }
+        };
+        // 先看原始 JSON：片段"写了哪些段"要按**原文**判断（反序列化之后
+        // "没写"与"写了缺省值"分不出来，而根独有的段必须按"写没写"来判）。
+        let raw: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                self.diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidType,
+                        ref_path,
+                        format!("{} 不是合法 JSON：{e}", found.display()),
+                    )
+                    .with_hint("先让它自己能被解析：`quench3d validate <这个文件>`"),
+                );
+                return None;
+            }
+        };
+        if let Some(f) = raw.get("format").and_then(|v| v.as_str()) {
+            if f != FORMAT {
+                self.diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        ref_path,
+                        format!(
+                            "{} 的 format 是 \"{f}\"，应当是 \"{FORMAT}\"",
+                            found.display()
+                        ),
+                    )
+                    .with_hint("片段也是一份 quench3d.scene，只是被包含进来"),
+                );
+            }
+        }
+        if let Some(v) = raw.get("version").and_then(|v| v.as_u64()) {
+            if v != u64::from(parent.version) {
+                self.diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        ref_path,
+                        format!(
+                            "{} 的 version 是 {v}，与包含它的文件（{}）不一致",
+                            found.display(),
+                            parent.version
+                        ),
+                    )
+                    .with_hint("把版本号改成一致；版本不匹配的片段不会被按新语义解释"),
+                );
+            }
+        }
+        for key in ROOT_ONLY_SECTIONS {
+            if raw.get(key).is_some() {
+                self.diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        format!("{ref_path}.{key}"),
+                        format!(
+                            "{key} 是根场景独有的段，被 include 的片段（{}）不能写它",
+                            found.display()
+                        ),
+                    )
+                    .with_hint(format!("把 {key} 移到根场景文件里，或从片段里删掉")),
+                );
+            }
+        }
+        let mut frag = match SceneDoc::from_json(&text) {
+            Ok(d) => d,
+            Err(e) => {
+                self.push_parse_error(e, &found, ref_path);
+                return None;
+            }
+        };
+        let file_dir = found.parent().map(|p| {
+            if p.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                p.to_path_buf()
+            }
+        });
+        frag.base_dir = file_dir.clone();
+        frag.source_path = Some(found.clone());
+        // ① 这一层**自己的**资源路径按它自己的目录重定基。
+        //    每个文件只做一次（嵌套时子片段在它自己的 `load` 里已经做过），
+        //    所以不会出现"重定基两次"把路径指到别处去。
+        self.rebase(&mut frag, file_dir.as_deref());
+        // ② 片段自己的 include（相对片段所在目录；`frag` 就是那个"写这一行的文件"）
+        self.stack.push(canon.clone());
+        self.seen.push(canon);
+        let mut contribution = SceneDoc::default();
+        // 与根同一套顺序：自己的内容在前，自己 include 的内容在后。
+        let label = found.display().to_string();
+        self.merge_own(&mut contribution, &frag, ref_path, &label);
+        for (i, rel2) in frag.include.iter().enumerate() {
+            let ref_path2 = format!("{ref_path}.include[{i}]");
+            if let Some(sub) = self.load(&frag, rel2, &ref_path2) {
+                let label2 = sub
+                    .source_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| rel2.clone());
+                self.merge_own(&mut contribution, &sub, &ref_path2, &label2);
+            }
+        }
+        self.stack.pop();
+        contribution.source_path = Some(found);
+        Some(contribution)
+    }
+
+    /// 把 `doc` 里**可合并的段**并进 `into`。
+    ///
+    /// 具名表（材质/模板/相机）重名是**错误**：静默覆盖会让引用挂到错的东西上，
+    /// 而这类错误在渲染结果里完全看不出来。数组按顺序追加（所以合并顺序就是报告顺序）。
+    fn merge_own(&mut self, into: &mut SceneDoc, doc: &SceneDoc, ref_path: &str, label: &str) {
+        let materials: Vec<(String, MaterialDoc)> = doc
+            .materials
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in materials {
+            self.insert_named(&mut into.materials, "materials", &k, &v, ref_path, label);
+        }
+        let templates: Vec<(String, ObjectDoc)> = doc
+            .templates
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in templates {
+            self.insert_named(&mut into.templates, "templates", &k, &v, ref_path, label);
+        }
+        let cameras: Vec<(String, CameraDoc)> = doc
+            .cameras
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in cameras {
+            self.insert_named(&mut into.cameras, "cameras", &k, &v, ref_path, label);
+        }
+        into.objects.extend(doc.objects.iter().cloned());
+        into.models.extend(doc.models.iter().cloned());
+        into.joints.extend(doc.joints.iter().cloned());
+        into.actions.extend(doc.actions.iter().cloned());
+        into.probes.extend(doc.probes.iter().cloned());
+        into.animations.extend(doc.animations.iter().cloned());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_named<T: Clone>(
+        &mut self,
+        into: &mut BTreeMap<String, T>,
+        section: &str,
+        key: &str,
+        value: &T,
+        ref_path: &str,
+        label: &str,
+    ) {
+        let slot = format!("{section}/{key}");
+        if into.contains_key(key) {
+            let prev = self
+                .origin
+                .get(&slot)
+                .cloned()
+                .unwrap_or_else(|| "更早的定义".to_string());
+            self.diags.push(
+                Diagnostic::error_code(
+                    ErrorCode::DuplicateName,
+                    format!("{ref_path}.{section}.{key}"),
+                    format!("`{key}` 在 {section} 里重复定义：已在 {prev} 定义，这里又来了一份（{label}）"),
+                )
+                .with_hint("改名，或把两份定义合并；重名会让后者覆盖前者、引用挂到错的东西上"),
+            );
+            return;
+        }
+        self.origin.entry(slot).or_insert_with(|| label.to_string());
+        into.insert(key.to_string(), value.clone());
+    }
+
+    /// 把片段里的**相对资源路径**重定基成"相对根场景目录"的路径。
+    ///
+    /// 不做这件事的话，片段里的 `"base_color_texture": "tex/brick.png"` 会按**根场景**
+    /// 目录去找（`asset_candidates` 只有根一个 `base_dir`），于是"片段搬到哪、贴图就跟到哪"
+    /// 这件事不成立。`include` 自己的路径**不重定基**：它由 `load` 用片段文档的
+    /// `asset_candidates` 解析，基准本来就是片段自己的目录。
+    fn rebase(&mut self, doc: &mut SceneDoc, file_dir: Option<&Path>) {
+        let Some(file_dir) = file_dir else {
+            return;
+        };
+        let Some(from) = canonical_dir(file_dir) else {
+            return;
+        };
+        let root = self.root_dir.clone();
+        for m in doc.materials.values_mut() {
+            for slot in [
+                &mut m.base_color_texture,
+                &mut m.normal_texture,
+                &mut m.metallic_roughness_texture,
+                &mut m.emissive_texture,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *slot = rebase_path(slot, &from, root.as_deref());
+            }
+        }
+        for m in doc.models.iter_mut() {
+            let s = m.path.to_string_lossy().to_string();
+            m.path = PathBuf::from(rebase_path(&s, &from, root.as_deref()));
+        }
+        // `assets` 是根独有的段（片段写它会被判错），所以这里不需要重定基它。
+    }
+
+    /// 把片段自己的解析错误挂到引用点上（路径前缀成 `include[i]:objects[2]`），
+    /// 这样一次 `validate` 就能看出"是哪一份片段、哪一行出的问题"。
+    fn push_parse_error(&mut self, e: DocError, found: &Path, ref_path: &str) {
+        match e {
+            DocError::Invalid(diags) => {
+                for mut d in diags {
+                    d.path = format!("{ref_path}:{}", d.path);
+                    let note = format!("（来自 {}）", found.display());
+                    d.hint = Some(match d.hint {
+                        Some(h) => format!("{h}{note}"),
+                        None => note,
+                    });
+                    self.diags.push(d);
+                }
+            }
+            other => {
+                self.diags.push(Diagnostic::error_code(
+                    ErrorCode::InvalidType,
+                    ref_path,
+                    format!("{} 解析失败：{other}", found.display()),
+                ));
+            }
+        }
+    }
+}
+
+/// 规范化成绝对目录（不存在或不是目录时 `None`）。
+fn canonical_dir(p: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(p).ok().filter(|c| c.is_dir())
+}
+
+/// 把 `p`（相对 `from_dir`）改写成相对 `root_dir` 的路径；`root_dir` 缺失时退化成绝对路径。
+///
+/// 绝对路径原样返回（作者写了绝对路径就是他的意思，不去猜）。
+fn rebase_path(p: &str, from_dir: &Path, root_dir: Option<&Path>) -> String {
+    let raw = Path::new(p);
+    if raw.is_absolute() {
+        return p.to_string();
+    }
+    let abs = from_dir.join(raw);
+    let out = match root_dir {
+        Some(root) => relative_path(root, &abs),
+        None => abs,
+    };
+    out.to_string_lossy().replace('\\', "/")
+}
+
+/// 纯字典序的相对路径（两边都必须是绝对路径）：`root` 到 `target` 要往上几层。
+///
+/// 不做符号链接解析（调用方已经 `canonicalize` 过），也不检查存在性 ——
+/// 它只负责把"片段自己的目录"翻译成"相对根目录"。
+fn relative_path(root: &Path, target: &Path) -> PathBuf {
+    use std::path::Component;
+    let r: Vec<Component> = root.components().collect();
+    let t: Vec<Component> = target.components().collect();
+    let mut i = 0;
+    while i < r.len() && i < t.len() && r[i] == t[i] {
+        i += 1;
+    }
+    let mut out = PathBuf::new();
+    for _ in i..r.len() {
+        out.push("..");
+    }
+    for c in &t[i..] {
+        out.push(c.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
+}
+
 impl SceneDoc {
     /// 从 JSON 文本解析。
     ///
@@ -2433,12 +2920,100 @@ impl SceneDoc {
                 p.to_path_buf()
             }
         });
+        doc.source_path = Some(path_ref.to_path_buf());
         Ok(doc)
     }
 
     /// 序列化为美观 JSON。
     pub fn to_json_pretty(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// 递归解析 `include`，返回**合并后**的文档与解析期诊断。
+    ///
+    /// 这是 include 语义的**唯一实现**（`validate()`、CLI 装载、`runner::build_world`
+    /// 与编辑器导出全都走它）：不允许任何调用点自己再写一套"找文件/合并"的规则，
+    /// 否则就会出现"校验一套、渲染一套"的偏差。
+    ///
+    /// **没有 `include` 时是纯粹的克隆**：不读盘、不重定基任何路径，所以老场景的
+    /// 校验结果与运行结果逐字节不变。
+    pub fn resolved(&self) -> ResolvedDoc {
+        if self.include.is_empty() {
+            return ResolvedDoc {
+                doc: Some(self.clone()),
+                diagnostics: Vec::new(),
+            };
+        }
+        let mut ctx = IncludeCtx {
+            diags: Vec::new(),
+            seen: Vec::new(),
+            stack: Vec::new(),
+            origin: BTreeMap::new(),
+            root_dir: self.base_dir.as_deref().and_then(canonical_dir),
+        };
+        let root_label = self
+            .source_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<根场景>".to_string());
+        // 根文件自己也要进"已包含/栈"：`a.json → b.json → a.json` 才不会退化成"把 a 再并一遍"。
+        if let Some(p) = &self.source_path {
+            if let Ok(c) = std::fs::canonicalize(p) {
+                ctx.seen.push(c.clone());
+                ctx.stack.push(c);
+            }
+        }
+        let mut merged = SceneDoc::default();
+        // 顺序：**本文件自己的内容在前**，被 include 的内容在后（每个文件都按这条规则，
+        // 于是整体是"先序深度优先"）。这样重名冲突永远报在"后并进来的那一份"上 ——
+        // 也就是片段上（`include[i].materials.x`），而不是让人以为是根文件写错了。
+        ctx.merge_own(&mut merged, self, "$", &root_label);
+        for (i, rel) in self.include.iter().enumerate() {
+            let ref_path = format!("include[{i}]");
+            if let Some(frag) = ctx.load(self, rel, &ref_path) {
+                let label = frag
+                    .source_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| rel.clone());
+                ctx.merge_own(&mut merged, &frag, &ref_path, &label);
+            }
+        }
+        if ctx.has_errors() {
+            return ResolvedDoc {
+                doc: None,
+                diagnostics: ctx.diags,
+            };
+        }
+        // 根独有的段只可能来自根文件（片段写了会被判错），所以这里按根的值回填。
+        merged.format = self.format.clone();
+        merged.version = self.version;
+        merged.name = self.name.clone();
+        merged.gravity = self.gravity;
+        merged.physics = self.physics.clone();
+        merged.ground = self.ground.clone();
+        merged.assets = self.assets.clone();
+        merged.camera = self.camera.clone();
+        merged.lighting = self.lighting.clone();
+        merged.simulate = self.simulate.clone();
+        merged.render = self.render.clone();
+        merged.base_dir = self.base_dir.clone();
+        merged.source_path = self.source_path.clone();
+        merged.extra_asset_paths = self.extra_asset_paths.clone();
+        // `merge_own` **不搬运** `include`（每个文件的 include 各自由它自己的 `load`
+        // 递归处理完），所以合并结果必然是自包含的。这不是"顺手清一下"，而是一份契约：
+        // 结果一旦还带着 `include`，`build_world` / 编辑器存盘就会把同一批内容再并一遍
+        // （静默的数据繁殖）。可观察的那一条由
+        // `include_merges_fragments_in_order_and_rebases_fragment_asset_paths` 断言，
+        // 这里再补一道 debug 断言，把责任明确指到 `merge_own`。
+        debug_assert!(
+            merged.include.is_empty(),
+            "merge_own 不该搬运 include：合并结果必须是自包含的"
+        );
+        ResolvedDoc {
+            doc: Some(merged),
+            diagnostics: ctx.diags,
+        }
     }
 
     /// 把场景内的资源相对路径展开成候选路径，按解析优先级排列。
@@ -2551,8 +3126,24 @@ impl SceneDoc {
         }
     }
 
-    /// 语义校验；返回全部诊断（含警告），调用方自行判断是否有 `Error`。
+    /// 语义校验（**含** `include` 解析）；返回全部诊断（含警告），调用方自行判断是否有 `Error`。
+    ///
+    /// 有 `include` 时校验的是**合并之后**的文档：诊断路径是合并后的根路径
+    /// （`objects[7]` 可能是片段里的物体），而"文件缺失/成环/重名"这类片段级问题
+    /// 直接挂在 `include[i]` 上并带上文件名。
     pub fn validate(&self) -> Vec<Diagnostic> {
+        let resolved = self.resolved();
+        let mut out = resolved.diagnostics;
+        if let Some(doc) = resolved.doc {
+            out.extend(doc.validate_resolved());
+        }
+        out
+    }
+
+    /// 语义校验的**主体**：只校验这份文档本身，不解析 `include`、不读盘。
+    ///
+    /// 已经 `resolved()` 过的文档应当直接调它，免得为同一批文件再读一遍盘。
+    pub fn validate_resolved(&self) -> Vec<Diagnostic> {
         // 命名相机（`cameras`）：格式与校验先落地；`--camera <名字>` 的选择留到下一步。
         // 名字只在两处会出问题：空名（无从引用）与保留名 `default`（它是 `camera` 段的别名）。
         let mut cam_diags = Vec::new();
@@ -2753,7 +3344,7 @@ impl SceneDoc {
                 .any(|o| o.template.is_some() || o.instances.is_some())
         {
             let mut out = self.validate_template_layer();
-            out.extend(self.expanded().validate());
+            out.extend(self.expanded().validate_resolved());
             return out;
         }
         let mut out = Vec::new();
@@ -3100,7 +3691,8 @@ impl SceneDoc {
             .collect();
         if point_casters.len() > 1 {
             out.push(
-                Diagnostic::warn(
+                Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
                     format!("lighting.point_lights[{}].cast_shadows", point_casters[0]),
                     format!(
                         "有 {} 盏点光源要求投影，但引擎只支持一盏：实际投影的是 point_lights[{}]（第一盏要求投影的），其余照常照明但不投影",
@@ -3114,7 +3706,8 @@ impl SceneDoc {
         if let Some(&first) = point_casters.first() {
             if first >= MAX_POINT_LIGHTS {
                 out.push(
-                    Diagnostic::warn(
+                    Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
                         format!("lighting.point_lights[{first}].cast_shadows"),
                         format!(
                             "这一盏排在第 {} 个局部光名额（一共只有 {MAX_POINT_LIGHTS} 个），它既不会照明也不会投影",
@@ -7456,6 +8049,34 @@ mod tests {
         );
         covered.push("io_error");
 
+        // include_cycle 走的是 `resolved()`（要真的有两个互相包含的文件），也不是 from_json。
+        let dir = std::env::temp_dir().join(format!("quench3d_cycle_55c_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("cycle_a.json"),
+            r#"{"format":"quench3d.scene","version":2,"include":["cycle_b.json"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("cycle_b.json"),
+            r#"{"format":"quench3d.scene","version":2,"include":["cycle_a.json"]}"#,
+        )
+        .unwrap();
+        let a = SceneDoc::from_file(dir.join("cycle_a.json")).unwrap();
+        let resolved = a.resolved();
+        assert!(resolved.doc.is_none(), "成环必须失败");
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| d.code == ErrorCode::IncludeCycle),
+            "成环应当是 include_cycle：{:?}",
+            resolved.diagnostics
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        covered.push("include_cycle");
+
         // 反向对账：码表里（兜底码除外）每一个码都要在上面有真实触发场景。
         covered.sort_unstable();
         covered.dedup();
@@ -7631,5 +8252,341 @@ mod camera_select_tests {
             .select_camera("任何")
             .expect_err("没有 cameras 段也要报错");
         assert!(err.contains("没有 `cameras` 段"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod include_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // include：跨文件合并（格式层）
+    // -----------------------------------------------------------------------
+
+    /// 写一个临时场景目录：`files` 是 `相对路径 → 文件内容`（父目录自动建）。
+    fn temp_scene_dir(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("quench3d_inc_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (rel, text) in files {
+            let p = dir.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, text).unwrap();
+        }
+        dir
+    }
+
+    fn resolved_of(path: &Path) -> ResolvedDoc {
+        SceneDoc::from_file(path)
+            .expect("根场景要能解析")
+            .resolved()
+    }
+
+    /// 合并顺序、具名表合并、根独有段保留、**片段资源路径重定基**、幂等、校验通过。
+    #[test]
+    fn include_merges_fragments_in_order_and_rebases_fragment_asset_paths() {
+        let dir = temp_scene_dir(
+            "merge",
+            &[
+                (
+                    "main.json",
+                    r#"{
+                      "format": "quench3d.scene", "version": 2,
+                      "include": ["parts/wall.json"],
+                      "ground": { "size": 20 },
+                      "objects": [ { "name": "球", "shape": { "type": "sphere", "radius": 0.5 },
+                                     "position": [0, 0.5, 0], "body": "dynamic" } ],
+                      "lighting": { "preset": "day" }
+                    }"#,
+                ),
+                (
+                    "parts/wall.json",
+                    r#"{
+                      "format": "quench3d.scene", "version": 2,
+                      "materials": { "砖": { "color": [0.6, 0.3, 0.25],
+                                             "base_color_texture": "tex/brick.png" } },
+                      "templates": { "砖块": { "shape": { "type": "box", "size": [1, 1, 1] },
+                                               "body": "static", "material": "砖" } },
+                      "objects": [ { "name": "墙", "template": "砖块", "position": [2, 0.5, 0] } ]
+                    }"#,
+                ),
+                ("parts/tex/brick.png", "这不是真的 PNG，只要求文件存在"),
+            ],
+        );
+        let doc = SceneDoc::from_file(dir.join("main.json")).unwrap();
+        let resolved = doc.resolved();
+        assert!(!resolved.has_errors(), "{:?}", resolved.diagnostics);
+        let merged = resolved.doc.expect("合并必须成功");
+        // 顺序：本文件自己的内容在前，被 include 的在后
+        let names: Vec<&str> = merged
+            .objects
+            .iter()
+            .map(|o| o.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["球", "墙"]);
+        // 具名表合并
+        assert!(merged.materials.contains_key("砖"));
+        assert!(merged.templates.contains_key("砖块"));
+        // 根独有的段按根的值保留
+        assert_eq!(merged.lighting.preset.as_deref(), Some("day"));
+        assert_eq!(merged.ground.as_ref().map(|g| g.size), Some(20.0));
+        // 片段里的相对贴图路径按**片段自己的目录**重定基
+        assert_eq!(
+            merged.materials["砖"].base_color_texture.as_deref(),
+            Some("parts/tex/brick.png"),
+            "片段里的 tex/brick.png 应当被重定基成相对根场景目录的路径"
+        );
+        // 合并结果里 include 必须是空的，否则会再并一遍（静默的数据繁殖）
+        assert!(merged.include.is_empty());
+        // 幂等：对合并结果再解析一次不该有变化
+        let again = merged.resolved();
+        assert!(!again.has_errors());
+        assert_eq!(again.doc.expect("幂等").objects.len(), 2);
+        // 合并后的文档必须真的能过校验（贴图按重定基后的路径找得到）
+        let diags = doc.validate();
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 嵌套 include 的相对路径以**片段自己的目录**为基准（不是根目录）。
+    #[test]
+    fn nested_include_paths_are_relative_to_the_fragment_that_writes_them() {
+        let dir = temp_scene_dir(
+            "nested",
+            &[
+                ("main.json", r#"{ "include": ["parts/outer.json"] }"#),
+                ("parts/outer.json", r#"{ "include": ["inner.json"] }"#),
+                (
+                    "parts/inner.json",
+                    r#"{ "objects": [ { "name": "内层", "shape": { "type": "box", "size": [1,1,1] } } ] }"#,
+                ),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(!resolved.has_errors(), "{:?}", resolved.diagnostics);
+        let merged = resolved.doc.expect("嵌套包含必须成功");
+        let names: Vec<&str> = merged
+            .objects
+            .iter()
+            .map(|o| o.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["内层"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 片段写 `assets` 是错误（根独有的段），并且**不改动**根自己的搜索路径。
+    #[test]
+    fn fragment_assets_section_is_rejected() {
+        let dir = temp_scene_dir(
+            "assets",
+            &[
+                (
+                    "main.json",
+                    r#"{ "assets": { "search_paths": ["maps"] }, "include": ["parts/tex.json"] }"#,
+                ),
+                (
+                    "parts/tex.json",
+                    r#"{ "assets": { "search_paths": ["../shared"] } }"#,
+                ),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(resolved.doc.is_none());
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| { d.code == ErrorCode::InvalidValue && d.path == "include[0].assets" }),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 五类失败路径各自的码与路径：缺失、根独有段、重名、成环、深度上限；外加菱形包含的警告。
+    #[test]
+    fn include_reports_missing_root_only_conflicts_cycles_and_depth() {
+        // ① 文件缺失
+        let dir = temp_scene_dir("miss", &[("main.json", r#"{ "include": ["nope.json"] }"#)]);
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(resolved.doc.is_none(), "缺失文件必须失败");
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| d.code == ErrorCode::AssetNotFound && d.path == "include[0]"),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // ② 片段写了根独有的段
+        let dir = temp_scene_dir(
+            "rootonly",
+            &[
+                ("main.json", r#"{ "include": ["frag.json"] }"#),
+                ("frag.json", r#"{ "lighting": { "preset": "day" } }"#),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| { d.code == ErrorCode::InvalidValue && d.path == "include[0].lighting" }),
+            "{:?}",
+            resolved.diagnostics
+        );
+        assert!(resolved.doc.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // ③ 材质重名（静默覆盖是本仓库最在意的那类坑）
+        let dir = temp_scene_dir(
+            "dup",
+            &[
+                (
+                    "main.json",
+                    r#"{ "materials": { "木": { "color": [1,0,0] } },
+                        "include": ["frag.json"] }"#,
+                ),
+                (
+                    "frag.json",
+                    r#"{ "materials": { "木": { "color": [0,1,0] } } }"#,
+                ),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(
+            resolved.diagnostics.iter().any(|d| {
+                d.code == ErrorCode::DuplicateName && d.path == "include[0].materials.木"
+            }),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // ④ 成环（A → B → A）
+        let dir = temp_scene_dir(
+            "cycle",
+            &[
+                ("a.json", r#"{ "include": ["b.json"] }"#),
+                ("b.json", r#"{ "include": ["a.json"] }"#),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("a.json"));
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| d.code == ErrorCode::IncludeCycle),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // ⑤ 深度上限（19 层 > MAX_INCLUDE_DEPTH = 16）
+        let mut files: Vec<(String, String)> = Vec::new();
+        for i in 0..19 {
+            let body = if i == 18 {
+                r#"{ "objects": [ { "name": "底", "shape": { "type": "box", "size": [1,1,1] } } ] }"#
+                    .to_string()
+            } else {
+                format!(r#"{{ "include": ["lvl{}.json"] }}"#, i + 1)
+            };
+            files.push((format!("lvl{i}.json"), body));
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let dir = temp_scene_dir("deep", &refs);
+        let resolved = resolved_of(&dir.join("lvl0.json"));
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| d.code == ErrorCode::LimitExceeded),
+            "超过 {MAX_INCLUDE_DEPTH} 层应当报 limit_exceeded：{:?}",
+            resolved.diagnostics
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // ⑥ 菱形包含：同一个文件被包含两次 → 跳过第二次并给一条 `ineffective` 警告
+        let dir = temp_scene_dir(
+            "diamond",
+            &[
+                ("main.json", r#"{ "include": ["a.json", "b.json"] }"#),
+                ("a.json", r#"{ "include": ["common.json"] }"#),
+                ("b.json", r#"{ "include": ["common.json"] }"#),
+                (
+                    "common.json",
+                    r#"{ "objects": [ { "name": "公共", "shape": { "type": "box", "size": [1,1,1] } } ] }"#,
+                ),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(!resolved.has_errors(), "{:?}", resolved.diagnostics);
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| d.code == ErrorCode::Ineffective),
+            "菱形包含应当给一条 ineffective 警告：{:?}",
+            resolved.diagnostics
+        );
+        assert_eq!(
+            resolved.doc.expect("合并成功").objects.len(),
+            1,
+            "公共片段只该被并入一次"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 有 `include` 时报错的诊断要挂到**引用点**上（`include[0]:...`），
+    /// 而不是让人去猜是哪一份片段里的 `objects[3]`。
+    #[test]
+    fn fragment_content_errors_are_labelled_with_the_referencing_include() {
+        let dir = temp_scene_dir(
+            "frag_err",
+            &[
+                ("main.json", r#"{ "include": ["frag.json"] }"#),
+                (
+                    "frag.json",
+                    r#"{ "objects": [ { "name": "坏的", "shape": { "type": "pyramid" } } ] }"#,
+                ),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        let diag = resolved
+            .diagnostics
+            .iter()
+            .find(|d| d.code == ErrorCode::InvalidValue)
+            .unwrap_or_else(|| panic!("应当有 invalid_value：{:?}", resolved.diagnostics));
+        assert_eq!(diag.path, "include[0]:objects[0].shape.type");
+        assert!(
+            diag.hint.as_deref().unwrap_or("").contains("frag.json"),
+            "提示里要点名是哪份文件：{diag:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **不写 `include` = 老行为逐字节不变**：没有 include 时 `resolved()` 是纯克隆，
+    /// 序列化结果一个字都不差（新字段有 `skip_serializing_if`）。
+    #[test]
+    fn scenes_without_include_are_byte_identical() {
+        let json = r#"{ "name": "老场景", "ground": { "size": 10 },
+                        "objects": [ { "name": "箱", "shape": { "type": "box", "size": [1,1,1] },
+                                       "position": [0, 0.5, 0], "body": "dynamic" } ],
+                        "simulate": { "steps": 30 } }"#;
+        let doc = SceneDoc::from_json(json).unwrap();
+        let resolved = doc.resolved();
+        assert!(resolved.diagnostics.is_empty());
+        let merged = resolved.doc.expect("没有 include 时必然成功");
+        assert_eq!(merged.to_json_pretty(), doc.to_json_pretty());
+        assert!(
+            !doc.to_json_pretty().contains("include"),
+            "不写就不该出现这个键"
+        );
     }
 }

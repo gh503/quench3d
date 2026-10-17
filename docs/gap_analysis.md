@@ -199,7 +199,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 单测 `paused_freezes_simulation_time_but_not_frame_stats`；`render_sequence` 同规则。
 
 **agent 向缺口**（这是本项目的卖点，所以单列）：错误**分类**已有（`error.kind` = invalid/env/io/scene + 退出码 2/3/4），
-~~细粒度错误码~~ ✅ **2026-10-19 第 55 轮**：**校验诊断**每条都带稳定 `code`（17 个码；`docs/error_codes.md`
+~~细粒度错误码~~ ✅ **2026-10-19 第 55 轮**：**校验诊断**每条都带稳定 `code`（第 60 轮：18 个码；`docs/error_codes.md`
 + `quench3d schema --json` 的 `error_codes` + 系统提示三处同步，逐格对账/稳定性/e2e 守卫测试，变异验证过）。
 现在 agent 能按 `diagnostics[].code` 而不是中文文案分支（`asset_not_found` vs `invalid_type` 一眼可分）。
 **仍无**：顶层 `error.kind` 与运行期 `RunError` 的细分（`ErrorInfo` 在 `report.rs`）；
@@ -451,13 +451,13 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 4 | ✅ 2026-10-17 | ~~**点光源 / 聚光灯**~~ **点光源已接线**（`lighting.point_lights`，最多 8 盏，超出给警告）；**聚光灯仍然没有**（引擎里也没有，见 §4 #24） | `PointLight`（light.rs:79）、`MAX_POINT_LIGHTS = 8`（light.rs:103）；`spot` 全仓 0 命中 | 室内布光可以了；手电/舞台灯还做不了 |
 | 5 | ✅ 2026-10-17 | ~~**天空与雾参数**~~ 已接线：`lighting.sky_colors`（天顶/地平线/地面，线性色）+ `lighting.fog`（颜色 + 密度，不写 = 关闭）+ `lighting.shadow_quality`（强度/覆盖半径）。**没做**：线性雾的起止距离（引擎只有指数雾）、阴影贴图分辨率、天空盒贴图/IBL | 黄昏、雾天、自定义天空都能配了 |
 | 6 | ✅ | **阴影质量 / 范围** | 引擎 `DirectionalLight` 有 `shadow_radius`（light.rs:17）/ `shadow_map_size`（light.rs:19，缺省 28.0 / 2048 见 :30-31）；格式只有 `shadows: bool` | 大场景阴影糊、小场景阴影浪费 |
-| 7 | ✅ | **层级 / 父子变换** | ~~`SceneObject` 只有 `transform`，无 parent~~ **已做**（2026-10-17 第 16 轮）：`objects[].parent`（按名字引用）+ 局部/世界变换 + 格式 v2；校验器拦悬空/成环/带刚体挂父物体 | 机械臂、车辆、角色挂点这类"组合体"现在能直接摆（仍缺：空物体、Prefab/实例、场景树内拖放改父） |
-| 8 | ✅ | **实例 / 模板复用** | 渲染器支持实例化（`InstanceDesc`，renderer.rs:87；绘制入口 renderer.rs:992） | 堆 1000 个箱子 = JSON 里 1000 份重复描述；agent 生成大场景时 token 直接爆。**格式侧已补**（2026-10-18 第 26 轮）：`templates` + `objects[].template` + `objects[].instances[]`。仍缺：外部场景引用（跨文件 include） |
+| 7 | ✅ | **层级 / 父子变换** | ~~`SceneObject` 只有 `transform`，无 parent~~ **已做**（2026-10-17 第 16 轮）：`objects[].parent`（按名字引用）+ 局部/世界变换 + 格式 v2；校验器拦悬空/成环/带刚体挂父物体 | 机械臂、车辆、角色挂点这类"组合体"现在能直接摆（仍缺：空物体、场景树内拖放改父；**Prefab/实例已补**：见 #8 的 `templates`/`instances` 与 #13 的跨文件 `include`） |
+| 8 | ✅ | **实例 / 模板复用** | 渲染器支持实例化（`InstanceDesc`，renderer.rs:87；绘制入口 renderer.rs:992） | 堆 1000 个箱子 = JSON 里 1000 份重复描述；agent 生成大场景时 token 直接爆。**格式侧已补**（2026-10-18 第 26 轮）：`templates` + `objects[].template` + `objects[].instances[]`（2026-10-20 第 60 轮再补**外部场景引用**，见 #13） |
 | 9 | ✅ | **行为 / 时间轴** | `SimulateDoc` 只有 `steps`/`dt`（:464-470）；而 CLI 有 `--trace` / `--bodies` / `--layout` / `--no-sleep` 等参数（runner.rs 里 trace 12 处命中，scene_doc.rs 里 0 处） | 「第 60 步给球一个冲量」「记录这个物体的轨迹」在场景文件里表达不了 → **agent 从 `schema` 看到的能力 < CLI 实际能力** |
 | 10 | ✅ | **正交相机 / 多相机 / 裁剪面** | `CameraDoc` 只有 `fov_deg`（:416） | 平面图、CAD 视图、分屏、像素风做不了 |
-| 11 | ✅ 2026-10-19（第 44~45 轮） | ~~`models[].path` 是裸路径~~ **已修 + 已加资源库**：`assets.search_paths`（场景级搜索路径，相对路径以场景目录为基准）；贴图与模型**共用同一套候选**（场景目录 → `assets.search_paths` → 当前工作目录 → 引擎搜索路径），validate 与渲染也一致；找不到时错误里列出找过的位置。**修掉的 bug**：模型以前不走场景目录，`models[].path: "chair.glb"` 在工作目录≠场景目录时直接失败（贴图却正常），validate 用的还是第三套规则。**运行时可加**：`--asset-path a:b`（只影响这一次运行，不改场景文件）；**仍缺**：跨文件 include/prefab（见 #13）、资源索引与去重报告 | 素材复用要靠相对路径约定 |
+| 11 | ✅ 2026-10-19（第 44~45 轮） | ~~`models[].path` 是裸路径~~ **已修 + 已加资源库**：`assets.search_paths`（场景级搜索路径，相对路径以场景目录为基准）；贴图与模型**共用同一套候选**（场景目录 → `assets.search_paths` → 当前工作目录 → 引擎搜索路径），validate 与渲染也一致；找不到时错误里列出找过的位置。**修掉的 bug**：模型以前不走场景目录，`models[].path: "chair.glb"` 在工作目录≠场景目录时直接失败（贴图却正常），validate 用的还是第三套规则。**运行时可加**：`--asset-path a:b`（只影响这一次运行，不改场景文件）；**已补**：跨文件 `include`/prefab（2026-10-20 第 60 轮，见 #13）；**仍缺**：资源索引与去重报告 | 素材复用要靠相对路径约定 |
 | 12 | ✅ **机器可读 schema** | `quench3d schema` 输出的是手写示例 + 文字（schema.rs:16-42） | ~~agent 拿不到 JSON Schema~~ **已修**（第 27 轮）：`schema --json-schema`（draft 2020-12，见 P1 #19 与 readiness §8.13）。**第 55 轮补上配套的那半**：schema 表达不了的范围/互斥/交叉引用仍以 `validate` 为准，而 `validate` 的每条诊断现在都有稳定 `code`（见 §1 的 agent 向缺口），所以"schema 校验过了但跑不了"这件事至少能被程序分支处理 |
-| 13 | **多文件组合（include / prefab / variant）** | 无（全仓无命中） | 大场景不能拆分复用 |
+| 13 | ✅ 2026-10-20（第 60 轮） | ~~无（全仓无命中）~~ **已做 `include`**：跨文件组合 + 跨文件 prefab；相对路径以写这一行的文件为基准（与贴图/模型同一套候选）；片段只贡献可合并的段（具名表重名 = `duplicate_name`，数组按「自己的在前」追加），根独有的段写在片段里 = `invalid_value`；片段的资源相对路径按片段目录重定基；最多 16 层、同文件只并一次（菱形给 `ineffective` 警告）、成环 = `include_cycle`；CLI/MCP/编辑器（装载 + 存盘内联）/JSON Schema/语法表/系统提示全部可达。**没做**：variant（同一份片段按场景覆盖字段）、条件包含、运行期资源去重报告、编辑器侧的「另存为片段」 | 大场景可以拆开复用 |
 | 14 | **单位与轴向写进文件** | 约定在 README:430 与 schema 文字里，文件本身没有 | 与外部工具交换时需要口头约定 |
 | 15 | ✅ **已接线**（第 29 轮锚点 + 第 56 轮按端局部轴 + **第 59 轮参考姿态**） | 引擎 `Joint` 的 `local_anchor_a/b`、`local_frame_a/b`、`local_axis_a/b`（`joints.rs:34-125`）现在**全部有格式入口且全部生效**：`anchor_a`/`anchor_b`（局部坐标）、`axis_a`/`axis_b`（按端局部轴，不写 = 回落 `axis`）、`frame_a`/`frame_b`（固定关节的参考姿态，欧拉角度）。参考姿态这一段的落点在**引擎**：`Joint::Fixed` 多了参考姿态偏置（`fixed_frame_error` + `frame_target_velocity`，`joints.rs`），把两端扭到 `q_a⊗frame_a == q_b⊗frame_b`；两端参考姿态都是单位四元数时走**原来那条**角约束表达式，老场景逐位不变。诊断（全部复用已有码）：零向量 `out_of_range`；`axis_a/b` 写在无轴关节上 `ineffective`；两端朝向相差 >10° 却只写 `axis` → `suspicious_value`；`frame_a/b` 写在非 `fixed` 上、或**两端都写 0**（与不写逐位等价）→ `ineffective`。**仍缺**：关节可视化（轴 / 锚点 / 参考姿态的 gizmo —— 要动渲染侧）；参考姿态只作用于 `fixed`（球窝/铰链各有自己的轴与限位，不需要它） | 门上装合页、摆锤、两块板按「特征朝向」对齐——**都能做了**；只剩可视化 |
 | 16 | 🟡 部分（第 31/34/35 轮）：**正交 / near·far / fov / 距离 / 偏航俯仰 / 自动取景已落地**（`render/camera.rs:58/275/310`，e2e `cli_e2e.rs:2015`）；**命名相机 `cameras` 已落地**（校验空名/保留名 `default`，预检白名单+schema+系统提示同步）；**`--camera <名字>` 已落地**（`render`/`simulate`/`movie` 通用；未知名 → 退出码 2 + `unknown_camera` + 可用名单；单测 + 无显卡 e2e）。**没做**：报告里的 `camera_name` 字段、`render.outputs[]` 多输出（一次渲多张）与 `outputs[]`/`--no-clobber` 语义 | 格式 |
@@ -592,7 +592,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 ### 3.7 落地顺序建议（`scene.json` 相关）
 
 1. **材质 1:1 对齐引擎**（① ② ③）——投入最小、用户感知最强，且不涉及引擎改动。
-2. ~~**模板 + 实例**（⑧）~~ ✅ 2026-10-18 第 26 轮：`templates` + `objects[].template` + `objects[].instances[]`（每个副本一个独立刚体）。仍缺外部场景引用（跨文件 include）。
+2. ~~**模板 + 实例**（⑧）~~ ✅ 2026-10-18 第 26 轮：`templates` + `objects[].template` + `objects[].instances[]`（每个副本一个独立刚体）；~~仍缺外部场景引用~~ ✅ 2026-10-20 第 60 轮：跨文件 `include`（见 #13）。
 3. **行为 + 探针**（⑨）——让"实验"可以在一个文件里描述完，这是 agent 工作流的刚需。
 4. **物理参数透出**（⑤）——把引擎已有但没暴露的参数补齐（含 solver / sleep）。
 5. **机器可读 JSON Schema + 版本迁移表**（⑫）——先手写 + 加一致性测试，避免引入依赖。
@@ -629,7 +629,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | # | 事项 | 类 |
 | --- | --- | --- |
 | 13 | ~~CCD / 推测接触（子弹穿墙）~~ 🟡 2026-10-16（扫掠式，非精确 TOI） | 引擎 |
-| 14 | 🟡 2026-10-18：`templates`（字段集与物体相同）+ `objects[].template` + `objects[].instances[]`（每个副本一个独立刚体，名字 `本名#i`）；校验拦模板不存在/空实例/名字撞车。**没做**：外部场景引用（跨文件 include）、编辑器把 instances 存回时摊平 | 格式 |
+| 14 | 🟡 2026-10-18：`templates`（字段集与物体相同）+ `objects[].template` + `objects[].instances[]`（每个副本一个独立刚体，名字 `本名#i`）；校验拦模板不存在/空实例/名字撞车。2026-10-20 第 60 轮：~~外部场景引用（跨文件 include）~~ ✅ 见 #13。**没做**：编辑器把 instances 存回时摊平 | 格式 |
 | 15 | ✅ 2026-10-19 核对（第 29 轮）：**已实现**——`SceneDoc.actions`/`SceneDoc.probes`（`scene_doc.rs:158`/`:164`）走完"格式 + 校验 + 引擎 + CLI + 编辑器"全程：动作按 `at_step`/`at_time` 到点施力（`cli_e2e.rs:2345 scheduled_actions_reach_the_solver`），探针只读记录进出区域、不碰物理（`:2500 probes_observe_without_touching_physics`），三条渲染路径（render/movie/simulate）都能用（`:2577 actions_and_probes_work_on_all_three_paths`）；编辑器 `scene_io` 保留 `probes`、并在删除物体时同步清掉指向它的动作（`scene_io.rs:37`/`:386`）。**边界**：探针没有可视化绘制（只在报告里出现）；动作没有时间线 UI，只能手写 JSON | 格式 |
 | 16 | 🟡 部分（第 31 轮核对）：**正交 / near·far / fov / 距离 / 偏航俯仰 / 自动取景都已落地**——`camera.orthographic_height` 走 `Projection::Orthographic`（`render/camera.rs:58/275/310`，`orthographic_rh`），`near`/`far` 进投影矩阵，`fov_deg`/`distance`/`yaw_deg`/`pitch_deg`/`frame_scene` 齐全；校验与 CLI 可达由 e2e `camera_clip_planes_and_orthographic_projection_are_wired`（`cli_e2e.rs:2015`，含 `near > far` 的报错路径）钉住。**没做**：**多相机 / 多输出**——格式里只有一个 `camera`，一次渲染只出一张图；真做它要动场景格式（`cameras[]` 或 `render.outputs[]` + 向后兼容单个 `camera`）、渲染循环（每台相机各渲一遍并命名输出）、CLI 报告（多份 output 字段）三处 | 格式 |
 | 17 | ~~光照透出：点光源 / 天空 / 雾 / 阴影质量参数~~ ✅ 2026-10-17：点光源（本来就有）、雾（`lighting.fog`，不写 = 关闭）、阴影质量（`strength`/`radius`）、天空颜色（`sky_colors`）。**没做**：阴影贴图分辨率（渲染器构造参数）、点光/聚光阴影（#24）、线性雾的起止距离（引擎只有指数雾） | 格式 |
@@ -682,4 +682,4 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 ## 6. 相关文档
 
 - **仿真视频方案**（可行性、实测速度、三条路线、行业对标、落地顺序）→ [`docs/simulation_video.md`](simulation_video.md)
-- **诊断码表**（稳定契约、17 个码的含义与 agent 动作、怎么加新码）→ [`docs/error_codes.md`](error_codes.md)
+- **诊断码表**（稳定契约、18 个码的含义与 agent 动作、怎么加新码）→ [`docs/error_codes.md`](error_codes.md)

@@ -828,8 +828,23 @@ fn apply_asset_paths(args: &Args, doc: &mut SceneDoc) {
 
 fn load_scene(args: &Args, path: &str, started: Instant) -> Result<SceneDoc, i32> {
     match SceneDoc::from_file(path) {
-        Ok(doc) => {
-            let diags = doc.validate();
+        Ok(mut doc) => {
+            apply_asset_paths(args, &mut doc);
+            // `include` 先合并（这是唯一实现）：有 error 就直接当校验失败报出去 ——
+            // 片段没读到就别谈"场景合法"。
+            let resolved = doc.resolved();
+            let mut diags = resolved.diagnostics;
+            let Some(doc) = resolved.doc else {
+                return Err(fail(
+                    args,
+                    "validate",
+                    ErrorInfo::new("invalid", "include 解析失败")
+                        .hint("先跑 quench3d validate 看全部诊断")
+                        .with_diagnostics(diags),
+                    started,
+                ));
+            };
+            diags.extend(doc.validate_resolved());
             let errors: Vec<_> = diags
                 .iter()
                 .filter(|d| d.severity == Severity::Error)
@@ -839,7 +854,6 @@ fn load_scene(args: &Args, path: &str, started: Instant) -> Result<SceneDoc, i32
                 // `--camera <名字>`：把命名相机搬到 `camera` 段上——下游（apply_camera、
                 // 渲染报告）只看 `camera`，所以这里换一次就够，不必改渲染路径。
                 let mut doc = doc;
-                apply_asset_paths(args, &mut doc);
                 if let Some(name) = args.flag_str("--camera") {
                     if let Err(message) = doc.select_camera(name) {
                         return Err(fail(

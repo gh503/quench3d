@@ -31,13 +31,50 @@ pub struct Installed {
     pub instances: Vec<runner::ModelInstance>,
 }
 
+/// 导出用的**底稿**：有 `include` 时先合并成一份自包含文档，并把 `include` 清掉。
+///
+/// 为什么必须在导出前做这件事：编辑器编辑的是**合并后**的世界（引擎里就是合并后的物体），
+/// 存盘时 `objects` 会按引擎重建。于是两种错法都不可接受 ——
+///
+/// * 底稿**留着** `include`：下次载入把同一批物体再并一遍（静默的数据繁殖）；
+/// * 只清 `include` **不合并**：片段里的 `models` / `joints` / `actions` / 材质
+///   会在存盘时被悄悄丢掉（它们不在根文件的这些段里）。
+///
+/// 所以"合并 + 清 `include`"是唯一正确的导出方式。代价写在这里、也说给用户听：
+/// 存盘会把片段**内联**进根文件（片段文件本身不动），`notes` 里会说明这一次内联了什么。
+///
+/// 纯 CPU：不碰 GPU，也不需要真窗口 —— 编辑器侧的回归测试因此能在 CI 上真跑。
+pub fn export_base_doc(base: &SceneDoc, notes: &mut Vec<String>) -> Result<SceneDoc, String> {
+    if base.include.is_empty() {
+        return Ok(base.clone());
+    }
+    let includes = base.include.clone();
+    let resolved = base.resolved();
+    let Some(merged) = resolved.doc else {
+        return Err(format!(
+            "include 解析失败，拒绝存盘（硬存会把片段内容丢掉）：{}",
+            resolved.error_message()
+        ));
+    };
+    notes.push(format!(
+        "已把 include 的片段内联进这份文件（编辑器编辑的是合并后的场景，片段文件本身没动）：{}",
+        includes.join("、")
+    ));
+    Ok(merged)
+}
+
 /// 把引擎当前场景导出成 `quench3d.scene` JSON。
 pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
+    // 没法用场景格式表达的物体（导入的模型、凸包…）与"这次存盘做了什么"都记在这里。
+    let mut skipped = Vec::new();
     // **以最近载入的那份文档为底稿**：编辑器只"懂"物体、地面、材质标量与相机，
     // 而 `lighting` / `simulate` / `render` / `probes` / `models` 这些段它既不改也不该丢。
     // 曾经这里是 `SceneDoc::default()` 起头 —— 后果是「CLI 生成（带光照与渲染设置）
     // → 编辑器改一改 → 存盘」，光照、渲染设置、模型引用被**静默清零**。
-    let mut out = doc.base_doc.clone().unwrap_or_default();
+    // `include` 的合并也在这一步（见 [`export_base_doc`]）。
+    let loaded = doc.base_doc.clone().unwrap_or_default();
+    let base = export_base_doc(&loaded, &mut skipped)?;
+    let mut out = base.clone();
     out.format = FORMAT.to_string();
     out.version = VERSION;
     let inherited_models = out.models.len();
@@ -141,7 +178,6 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     });
     out.lighting = lighting;
 
-    let mut skipped = Vec::new();
     // 场景物体下标 → 导出后 `objects` 里的下标（父子关系要靠它对上）。
     let mut exported: Vec<(usize, usize)> = Vec::new();
     for (index, object) in engine.scene.objects.iter().enumerate() {
@@ -227,13 +263,14 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         let material_name = format!("mat{index}");
         // 同名物体在原文档里用过的材质：连贴图、UV、开关一起继承。
         // 编辑器没有贴图界面 —— 但"没有界面"不等于"应该丢"。
-        let inherited = doc.base_doc.as_ref().and_then(|base| {
-            let source = base
-                .objects
-                .iter()
-                .find(|o| o.name.as_deref() == Some(name.as_str()))?;
-            base.materials.get(source.material.as_deref()?).cloned()
-        });
+        //
+        // 查的是**合并后的底稿**（`base`）：片段里的物体/材质也要能被继承到，
+        // 否则「载入带 include + 贴图的场景 → 随手存一次」会把片段物体的贴图清零。
+        let inherited = base
+            .objects
+            .iter()
+            .find(|o| o.name.as_deref() == Some(name.as_str()))
+            .and_then(|source| base.materials.get(source.material.as_deref()?).cloned());
         let base = engine
             .renderer
             .material(object.material)

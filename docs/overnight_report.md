@@ -2289,25 +2289,44 @@ QUENCH3D_EDITOR_EXIT_AFTER_MS=3000 timeout 120 gdb -q -batch \
 
 * 门禁（`tools/gate.sh`，七段）：**七段全绿**（`fmt` / `clippy-native` / `clippy-wasm` / `doc` /
   `tests` / `web-build` / `check-web`），`wasm 字节：12002058`。
-* **门禁报的整树测试总数是 577**，但**这不是我这一提交的数**：工作树里还有**另一位写者**
-  正在做的 `QUENCH3D_EDITOR_EXIT_AFTER_MS` 自动退出钩子（`crates/quench3d-editor/src/app.rs`
-  的改动 + 未跟踪的 `crates/quench3d-editor/tests/exit_hook.rs`，**6 条**测试）。
-  我**没有**动、也没有提交他们的文件（`git status` 里那两处就是他们当时的全部改动；
-  `app.rs` 是纯新增 152 行、0 删除，所以不存在"我 fmt 覆盖了他们"的情况）。
-* **我这一提交的数 = 577 − 6 = 571**（553 之前的 README 数是**整树**口径，含更早那批未提交的
-  19 条；**别用 README 的旧数做减法**，这一轮的口径见下）。构成：
-  CLI **184**（`cargo test -p quench3d-cli` 实测：lib 92 + bin 6 + 7 个集成二进制 85 + doctest 1，
+* **门禁报的整树测试总数是 575**，其中 **6 条**属于并行写者（见 §55.9）刚提交的
+  `crates/quench3d-editor/tests/exit_hook.rs`。**我这一提交的数 = 575 − 6 = 569**
+  （= README 上一版的 553 + 我新增的 16）。构成：CLI **184**
+  （`cargo test -p quench3d-cli` 实测：lib 92 + bin 6 + 7 个集成二进制 85 + doctest 1，
   其中 `cli_e2e` 54 → **60**、lib 86 → **92**）+ 编辑器新增 `tests/include_export.rs` **4** 条
-  + `scene_doc` 里 6 条单元测试 —— 共 **+16**。
-  **README 的计数块我按 571 / 184 / 60 回填了**，并在 CI 出结果后按 §54.7 的老办法
-  （把 CI 日志里各 target 的 `test result:` 加起来）核对一次；若 CI 的数与 571 不一致，
-  以 CI 为准再回填一条 docs 提交。
+  + `scene_doc.rs` 里 6 条单元测试。
+* **同一个门禁，两次跑出 577 与 575 两个数** —— 不是脚本坏了，是并行写者当时正在改
+  `tests/exit_hook.rs`（他们提交的版本是 6 条；中间某一刻是 8 条）。
+  教训：**"我这一提交有多少测试"只能用提交后的树再跑一次，或按 CI 日志核对**
+  （§54.7 的老办法：把各 target 的 `test result:` 行加起来），
+  别拿一个在别人还在写的时候跑出来的数当结论，也别拿"整树数 − 别人条数"当自己的数
+  ——除非你确认了别人那一刻的条数（这一轮我第一次就是这么算错的：577 − 6 = 571，
+  真值是 575 − 6 = 569）。
 * `web/pkg` 我**重建并提交**了（与 `a765e44` 同一条约定：源码变了就重建产物）。
-  注意这次重建是在**含另一位写者改动的工作树**上做的 —— 他们的钩子全部包在
-  `#[cfg(not(target_arch = "wasm32"))]` 里（`clippy-wasm` 能绿也是这个原因），
-  所以 wasm 的**行为**与"干净树 + 我的改动"一致；严格说不是**逐字节**可复现
-  （`file:line` 这类调试定位串会随 `app.rs` 行号平移而变）。下一轮要逐字节可复现，
-  只能在干净检出里重建。
+  这次重建的树里，并行写者的 `app.rs` 钩子**已经提交**（`aa38587`），
+  所以产物与"已提交源码 + 我的改动"对得上（他们的钩子全在
+  `#[cfg(not(target_arch = "wasm32"))]` 里，wasm 侧行为中性）。
 * 本轮**没有**在真浏览器里验证 `include`（`check_web.mjs` 只做导入/最少调用检查），
   也没有验证 wasm 里"`from_json` 没有场景目录 → `include` 按工作目录解析会失败"这条路径 ——
   见 `docs/production_readiness.md` §14.4。
+
+### 55.9 一个工作树、两个写者：`git add <文件>` 会带走对方未提交的改动
+
+这一轮真实发生了：我在同一个工作树里做 #13，另一位写者在做 Wayland 退出钩子。
+他们提交 `aa38587` 时用了 `git add CHANGELOG.md crates/... docs/overnight_report.md
+docs/production_readiness.md` —— 而那三个 `.md` 里**同时有我的未提交改动**
+（本文件 §55、`production_readiness.md` §14、CHANGELOG 的 `include` 条目），
+于是**我的改动跟着他们的提交进了 main**。
+
+核对结果：**内容一条没丢**（`git show aa38587:<file>` 里我的 §55 / §14 / CHANGELOG 条目都在，
+工作树与 HEAD 逐行一致），我后面又做的几处行内修订（错误码 232→252、17→18 之类）
+仍留在工作树里，进我自己的提交。
+
+处置上的两条（都不是"回退"）：
+1. **先核对，别慌着回退**：`git show <their-sha>:<file>` 与工作树比对，
+   确认自己的内容在不在、有没有被覆盖。这次是在（我在他们的提交里读到了自己的段落）。
+2. **在报告里写明**：这属于"两个写者共用一个工作树"的必然风险（handoff 里那条
+   「一个工作树一个写者」的规矩就是防它）。**能避开的做法只有一个：另开一个 worktree**
+   （`git worktree add`），而不是"我们小心一点"。
+   `git add -A` / `git commit -a` 会把整个工作树都带上，所以本仓库才明令禁止它们 ——
+   但**即使只用 `git add <文件>`，只要那个文件对方也改了，就会带上对方的改动**。

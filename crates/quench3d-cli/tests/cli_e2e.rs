@@ -4906,3 +4906,477 @@ fn cli_asset_path_flag_resolves_assets_without_touching_the_scene() {
         r.json()
     );
 }
+
+// ---------------------------------------------------------------------------
+// include：跨文件组合（gap §3.2 #13）
+// ---------------------------------------------------------------------------
+
+/// 把场景拆成多文件之后，**物理结果必须与手写一份单文件逐位相同**。
+///
+/// 这是"合并语义正确"最强的判据：顺序、模板展开、材质解析、关节引用只要有一处
+/// 因为"并进来"而变了，`states` 里的坐标就会差出浮点位。
+#[test]
+fn include_split_scene_simulates_bit_identically_to_a_single_file() {
+    let dir = temp_dir("include_equiv");
+
+    // 多文件版：根文件 + 一个定义模板与材质的片段
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(
+        dir.join("parts/blocks.json"),
+        r#"{
+          "format": "quench3d.scene", "version": 2,
+          "templates": { "块": { "shape": { "type": "box", "size": [0.5, 0.5, 0.5] },
+                                 "body": "dynamic", "material": "石" } },
+          "materials": { "石": { "color": [0.6, 0.6, 0.62], "roughness": 0.8 } }
+        }"#,
+    )
+    .unwrap();
+    let split = write_scene(
+        &dir,
+        "split.json",
+        serde_json::json!({
+            "format": "quench3d.scene",
+            "version": 2,
+            "include": ["parts/blocks.json"],
+            "ground": { "size": 20 },
+            "objects": [
+                { "name": "塔基", "shape": { "type": "box", "size": [2, 0.2, 2] },
+                  "position": [0, 0.1, 0], "body": "static" },
+                { "name": "堆", "template": "块",
+                  "instances": [ { "position": [0, 0.45, 0] },
+                                 { "position": [0, 0.95, 0] },
+                                 { "position": [0, 1.45, 0], "rotation_deg": [0, 20, 0] } ] }
+            ],
+            "simulate": { "steps": 150, "dt": 0.0166667 }
+        }),
+    );
+
+    // 单文件版：把片段里的模板展开成三个具体物体，字段逐项相同
+    let single = write_scene(
+        &dir,
+        "single.json",
+        serde_json::json!({
+            "format": "quench3d.scene",
+            "version": 2,
+            "ground": { "size": 20 },
+            "materials": { "石": { "color": [0.6, 0.6, 0.62], "roughness": 0.8 } },
+            "objects": [
+                { "name": "塔基", "shape": { "type": "box", "size": [2, 0.2, 2] },
+                  "position": [0, 0.1, 0], "body": "static" },
+                { "name": "堆#1", "shape": { "type": "box", "size": [0.5, 0.5, 0.5] },
+                  "position": [0, 0.45, 0], "body": "dynamic", "material": "石" },
+                { "name": "堆#2", "shape": { "type": "box", "size": [0.5, 0.5, 0.5] },
+                  "position": [0, 0.95, 0], "body": "dynamic", "material": "石" },
+                { "name": "堆#3", "shape": { "type": "box", "size": [0.5, 0.5, 0.5] },
+                  "position": [0, 1.45, 0], "rotation_deg": [0, 20, 0],
+                  "body": "dynamic", "material": "石" }
+            ],
+            "simulate": { "steps": 150, "dt": 0.0166667 }
+        }),
+    );
+
+    let a = run(&["simulate", split.to_str().unwrap(), "--json"]);
+    assert_eq!(a.code, 0, "多文件版要能跑：{}", a.stdout);
+    let b = run(&["simulate", single.to_str().unwrap(), "--json"]);
+    assert_eq!(b.code, 0, "单文件版要能跑：{}", b.stdout);
+
+    let sa = &a.json()["data"];
+    let sb = &b.json()["data"];
+    assert_eq!(sa["bodies"], sb["bodies"], "刚体数必须相同");
+    assert_eq!(sa["steps"], sb["steps"]);
+    assert_eq!(sa["lowest_y"], sb["lowest_y"], "最低点必须逐位相同");
+    assert_eq!(sa["max_speed"], sb["max_speed"]);
+    // 逐物体逐坐标：名字与位置都要一样
+    for (x, y) in sa["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(sb["states"].as_array().unwrap().iter())
+    {
+        assert_eq!(x["name"], y["name"], "物体顺序/名字必须一致");
+        assert_eq!(
+            x["position"], y["position"],
+            "{} 的位置必须逐位相同",
+            x["name"]
+        );
+        assert_eq!(
+            x["rotation"], y["rotation"],
+            "{} 的朝向必须逐位相同",
+            x["name"]
+        );
+    }
+
+    // 多文件版也应当能被 `render --dry-run` 接受（不进 GPU 也能验证装配链路）
+    let dry = run(&["render", split.to_str().unwrap(), "--dry-run", "--json"]);
+    assert_eq!(dry.code, 0, "{}", dry.stdout);
+}
+
+/// 片段的相对贴图路径以**片段自己的目录**为基准（不是场景目录，也不是工作目录）。
+#[test]
+fn include_rebases_fragment_relative_asset_paths() {
+    let dir = temp_dir("include_assets");
+    std::fs::create_dir_all(dir.join("parts/tex")).unwrap();
+    // 贴图**只**放在片段自己的目录里：如果实现按"场景目录"解析，这里会直接找不到
+    // （"两个位置都有时谁赢"由 scene_doc 的单元测试钉住：那里断言重定基后的**路径字符串**
+    //  正好是 `parts/tex/brick.png`，比"能不能找到"精确得多）。
+    write_test_png(
+        &dir.join("parts/tex/brick.png"),
+        2,
+        2,
+        &[0, 255, 0, 255].repeat(4),
+    );
+    std::fs::write(
+        dir.join("parts/wall.json"),
+        r#"{ "format": "quench3d.scene", "version": 2,
+             "materials": { "砖": { "color": [1,1,1], "base_color_texture": "tex/brick.png" } },
+             "objects": [ { "name": "墙", "shape": { "type": "box", "size": [1,1,1] },
+                            "position": [0, 0.5, 0], "material": "砖" } ] }"#,
+    )
+    .unwrap();
+    let scene = write_scene(
+        &dir,
+        "main.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "include": ["parts/wall.json"],
+            "ground": { "size": 10 }
+        }),
+    );
+    let ok = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        ok.code, 0,
+        "片段里的 tex/brick.png 应当按片段目录找到：{}",
+        ok.stdout
+    );
+
+    // 反证：把片段挪到没有 tex/ 的子目录里，同一个相对路径必须**找不到**
+    // （如果实现是"相对场景目录"，这条会误判为合法 —— 那正是要防的偏差）
+    std::fs::create_dir_all(dir.join("moved")).unwrap();
+    std::fs::write(
+        dir.join("moved/wall.json"),
+        std::fs::read_to_string(dir.join("parts/wall.json")).unwrap(),
+    )
+    .unwrap();
+    let moved = write_scene(
+        &dir,
+        "moved_main.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "include": ["moved/wall.json"],
+            "ground": { "size": 10 }
+        }),
+    );
+    let bad = run(&["validate", moved.to_str().unwrap(), "--json"]);
+    assert_eq!(bad.code, 2, "片段目录里没有 tex/ 就该报错：{}", bad.stdout);
+    assert!(
+        bad.json()["data"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "asset_not_found"),
+        "应当是 asset_not_found：{}",
+        bad.stdout
+    );
+}
+
+/// `--asset-path` 与 `assets.search_paths` 对 include 同样生效（"一次运行"的补充路径）。
+#[test]
+fn include_honours_search_paths_and_asset_path_flag() {
+    let dir = temp_dir("include_search");
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        lib.join("common.json"),
+        r#"{ "format": "quench3d.scene", "version": 2,
+             "objects": [ { "name": "公共", "shape": { "type": "box", "size": [1,1,1] },
+                            "position": [0, 0.5, 0], "body": "static" } ] }"#,
+    )
+    .unwrap();
+    let scene = write_scene(
+        &dir,
+        "main.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "include": ["common.json"],
+            "ground": { "size": 10 }
+        }),
+    );
+    // 不指路时找不到
+    let missing = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(missing.code, 2, "{}", missing.stdout);
+    assert!(
+        missing.json()["data"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "asset_not_found" && d["path"] == "include[0]"),
+        "{}",
+        missing.stdout
+    );
+    // `--asset-path` 之后找得到
+    let ok = run(&[
+        "validate",
+        scene.to_str().unwrap(),
+        "--asset-path",
+        lib.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        ok.code, 0,
+        "--asset-path 应当能被 include 用上：{}",
+        ok.stdout
+    );
+    // 场景文件自己声明 search_paths 也找得到
+    let declared = write_scene(
+        &dir,
+        "declared.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "assets": { "search_paths": ["lib"] },
+            "include": ["common.json"],
+            "ground": { "size": 10 }
+        }),
+    );
+    let ok2 = run(&["validate", declared.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        ok2.code, 0,
+        "assets.search_paths 应当能被 include 用上：{}",
+        ok2.stdout
+    );
+    // `simulate` 也真的把片段里的物体建出来（不只是校验通过）
+    let sim = run(&[
+        "simulate",
+        scene.to_str().unwrap(),
+        "--asset-path",
+        lib.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(sim.code, 0, "{}", sim.stdout);
+    let states = sim.json()["data"]["states"].as_array().unwrap().clone();
+    assert!(
+        states.iter().any(|s| s["name"] == "公共"),
+        "片段里的物体必须真的进世界：{states:?}"
+    );
+}
+
+/// 跨文件 prefab：片段只定义 `templates`，根场景用 `instances` 摆多份。
+#[test]
+fn include_gives_cross_file_prefabs() {
+    let dir = temp_dir("include_prefab");
+    std::fs::create_dir_all(dir.join("prefabs")).unwrap();
+    std::fs::write(
+        dir.join("prefabs/crate.json"),
+        r#"{ "format": "quench3d.scene", "version": 2,
+             "templates": { "木箱": { "shape": { "type": "box", "size": [0.4, 0.4, 0.4] },
+                                      "body": "dynamic", "material": "木", "mass": 5 } },
+             "materials": { "木": { "color": [0.7, 0.45, 0.2], "roughness": 0.7 } } }"#,
+    )
+    .unwrap();
+    let scene = write_scene(
+        &dir,
+        "main.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "include": ["prefabs/crate.json"],
+            "ground": { "size": 12 },
+            "objects": [
+                { "template": "木箱", "instances": [
+                    { "name": "箱A", "position": [0, 0.2, 0] },
+                    { "name": "箱B", "position": [0.5, 0.2, 0] },
+                    { "name": "箱C", "position": [-0.5, 0.2, 0] }
+                ] }
+            ],
+            "simulate": { "steps": 60 }
+        }),
+    );
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let states = r.json()["data"]["states"].as_array().unwrap().clone();
+    for name in ["箱A", "箱B", "箱C"] {
+        assert!(
+            states.iter().any(|s| s["name"] == name),
+            "跨文件模板的实例 {name} 必须进世界：{:?}",
+            states.iter().map(|s| s["name"].clone()).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(r.json()["data"]["dynamic"], 3, "三个副本 = 三个动态刚体");
+}
+
+/// 片段层的问题：缺失、成环、重名、根独有的段 —— 每条都有稳定码与精确路径。
+#[test]
+fn include_failures_have_stable_codes_and_precise_paths() {
+    let dir = temp_dir("include_fail");
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+
+    // ① 缺失
+    let miss = write_scene(
+        &dir,
+        "miss.json",
+        serde_json::json!({ "include": ["parts/nope.json"] }),
+    );
+    let r = run(&["validate", miss.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2);
+    let diags = r.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["code"] == "asset_not_found" && d["path"] == "include[0]"),
+        "{diags:?}"
+    );
+
+    // ② 成环（a → b → a）
+    std::fs::write(
+        dir.join("parts/a.json"),
+        r#"{ "format": "quench3d.scene", "version": 2, "include": ["b.json"] }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("parts/b.json"),
+        r#"{ "format": "quench3d.scene", "version": 2, "include": ["a.json"] }"#,
+    )
+    .unwrap();
+    let cyc = write_scene(
+        &dir,
+        "cycle.json",
+        serde_json::json!({ "include": ["parts/a.json"] }),
+    );
+    let r = run(&["validate", cyc.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2);
+    let diags = r.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags.iter().any(|d| d["code"] == "include_cycle"),
+        "成环应当是 include_cycle：{diags:?}"
+    );
+
+    // ③ 材质重名（静默覆盖是最坏的形态：引用会挂到错的东西上）
+    std::fs::write(
+        dir.join("parts/dup.json"),
+        r#"{ "materials": { "木": { "color": [0, 1, 0] } } }"#,
+    )
+    .unwrap();
+    let dup = write_scene(
+        &dir,
+        "dup.json",
+        serde_json::json!({
+            "materials": { "木": { "color": [1, 0, 0] } },
+            "include": ["parts/dup.json"]
+        }),
+    );
+    let r = run(&["validate", dup.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2);
+    let diags = r.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["code"] == "duplicate_name" && d["path"] == "include[0].materials.木"),
+        "重名要报在片段那一份上：{diags:?}"
+    );
+
+    // ④ 片段写了根独有的段（光照只有一个实例，谁赢没有答案）
+    std::fs::write(
+        dir.join("parts/lit.json"),
+        r#"{ "lighting": { "preset": "day" } }"#,
+    )
+    .unwrap();
+    let lit = write_scene(
+        &dir,
+        "lit.json",
+        serde_json::json!({ "include": ["parts/lit.json"] }),
+    );
+    let r = run(&["validate", lit.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2);
+    let diags = r.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["code"] == "invalid_value" && d["path"] == "include[0].lighting"),
+        "{diags:?}"
+    );
+
+    // ⑤ 片段里的内容错误要带上是哪一份片段（`include[0]:objects[...]`）
+    std::fs::write(
+        dir.join("parts/bad.json"),
+        r#"{ "objects": [ { "name": "坏", "shape": { "type": "pyramid" } } ] }"#,
+    )
+    .unwrap();
+    let bad = write_scene(
+        &dir,
+        "bad.json",
+        serde_json::json!({ "include": ["parts/bad.json"] }),
+    );
+    let r = run(&["validate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2);
+    let diags = r.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags.iter().any(|d| d["path"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("include[0]:objects[0]")),
+        "内容错误要挂在引用点上：{diags:?}"
+    );
+
+    // ⑥ 菱形包含：同一个文件被包含两次只并入一次，并且**说出来**（不是静默跳过）
+    std::fs::write(
+        dir.join("parts/common.json"),
+        r#"{ "objects": [ { "name": "公共", "shape": { "type": "box", "size": [1,1,1] },
+                            "position": [0, 0.5, 0], "body": "static" } ] }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("parts/left.json"),
+        r#"{ "include": ["common.json"] }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("parts/right.json"),
+        r#"{ "include": ["common.json"] }"#,
+    )
+    .unwrap();
+    let diamond = write_scene(
+        &dir,
+        "diamond.json",
+        serde_json::json!({ "include": ["parts/left.json", "parts/right.json"] }),
+    );
+    let r = run(&["validate", diamond.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "菱形包含是合法的：{}", r.stdout);
+    assert_eq!(
+        r.json()["data"]["warnings"],
+        1,
+        "应当有一条警告：{}",
+        r.stdout
+    );
+    let diags = r.json()["data"]["diagnostics"].as_array().unwrap().clone();
+    assert!(
+        diags.iter().any(|d| d["code"] == "ineffective"),
+        "跳过第二次要说出来：{diags:?}"
+    );
+    // 只该有一个"公共"物体（并入两次就会 duplicate_name）
+    let sim = run(&["simulate", diamond.to_str().unwrap(), "--json"]);
+    assert_eq!(sim.code, 0, "{}", sim.stdout);
+    let states = sim.json()["data"]["states"].as_array().unwrap().clone();
+    assert_eq!(
+        states.iter().filter(|s| s["name"] == "公共").count(),
+        1,
+        "{states:?}"
+    );
+}
+
+/// 不写 `include` 的场景：报错/报告/退出码一切照旧（新字段不该改变老行为）。
+#[test]
+fn scenes_without_include_are_unaffected() {
+    let dir = temp_dir("include_absent");
+    let scene = write_scene(
+        &dir,
+        "plain.json",
+        serde_json::json!({
+            "ground": { "size": 10 },
+            "objects": [ { "name": "箱", "shape": { "type": "box", "size": [1,1,1] },
+                           "position": [0, 0.5, 0], "body": "dynamic" } ],
+            "simulate": { "steps": 30 }
+        }),
+    );
+    let r = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0);
+    assert_eq!(r.json()["data"]["valid"], true);
+    assert_eq!(r.json()["data"]["warnings"], 0);
+}
