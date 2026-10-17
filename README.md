@@ -1127,7 +1127,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 603 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 607 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1198,9 +1198,9 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（"要真建 GP
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 **192** 个测试（`cargo test -p quench3d-cli`：lib 97 + bin 6 + 7 个集成测试二进制共 88 + 1 个 doctest），按目的分这几块：
+命令行工具的 **195** 个测试（`cargo test -p quench3d-cli`：lib 99 + bin 6 + 7 个集成测试二进制共 89 + 1 个 doctest），按目的分这几块：
 
-* **契约测试**（`tests/cli_e2e.rs`，63 个）真的去 spawn `quench3d` 子进程，断言
+* **契约测试**（`tests/cli_e2e.rs`，64 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；
   其中 4 条是「能力真的接线了」的像素/数值证据：**材质贴图**（同一箱子带/不带贴图的
   中心色差）、**点光源**（一盏红灯必须把箱子照红，且显式清空预设补光必须改变画面）、

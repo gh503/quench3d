@@ -481,7 +481,7 @@ pub struct PhysicsDoc {
     pub static_friction_speed: Option<f32>,
     /// 接触余量（米）：分离但距离小于它的形状对也生成接触点，让高速物体"即将接触"时
     /// 就进入约束求解（少一帧穿透突跳）。缺省 0 = 只在重叠时生成接触（历史行为，结果
-    /// 逐位不变）。只作用于**单形状**刚体：复合形状不膨胀（见文档边界）。
+    /// 逐位不变）。**单形状与复合形状都生效**（复合刚体逐部件膨胀）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speculative_margin: Option<f32>,
 }
@@ -3407,6 +3407,31 @@ impl SceneDoc {
                         format!("阈值 {v} m/s 偏大：慢速滑行会被当成静止接触（表现为「滑到一半突然很黏」）"),
                     )
                     .with_hint("多数场景 0.01~0.1 就够"),
+                );
+            }
+        }
+
+        if let Some(v) = self.physics.speculative_margin {
+            if !v.is_finite() || v < 0.0 {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "physics.speculative_margin",
+                    "接触余量必须是非负的有限数（米）",
+                ));
+            } else if v > 1.0 {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "physics.speculative_margin",
+                    format!("接触余量 {v} 米过大：它只是「提前一点点算接触」，正常是厘米量级"),
+                ));
+            } else if v > 0.25 {
+                out.push(
+                    Diagnostic::warn_code(
+                        ErrorCode::SuspiciousValue,
+                        "physics.speculative_margin",
+                        format!("接触余量 {v} 米偏大：物体之间会「还没碰到就被推开」"),
+                    )
+                    .with_hint("多数场景 0.005~0.02 就够"),
                 );
             }
         }
@@ -8315,6 +8340,55 @@ mod tests {
     ///
     /// 上限那条在 e2e 里跑太贵（要写几十万个数的 JSON），所以在这里用**内存里构造**的文档测：
     /// 校验是纯函数，没有理由为了测一个上限去落盘。
+    #[test]
+    fn speculative_margin_diagnostics_are_specific() {
+        let doc = |physics: &str| {
+            SceneDoc::from_json(&format!(
+                r#"{{ "objects": [ {{ "name": "球", "body": "dynamic", "shape": {{ "type": "sphere" }} }} ],
+                     "physics": {physics}, "simulate": {{ "steps": 1 }} }}"#
+            ))
+            .expect("文档本身要能解析")
+        };
+        let codes_at = |physics: &str| -> Vec<crate::scene_doc::ErrorCode> {
+            doc(physics)
+                .validate()
+                .iter()
+                .filter(|d| {
+                    d.path == "physics.speculative_margin"
+                        && d.severity == crate::scene_doc::Severity::Error
+                })
+                .map(|d| d.code)
+                .collect()
+        };
+        // 合法：缺省 / 0 / 厘米量级
+        assert!(codes_at("{}").is_empty());
+        assert!(codes_at(r#"{ "speculative_margin": 0.0 }"#).is_empty());
+        assert!(codes_at(r#"{ "speculative_margin": 0.01 }"#).is_empty());
+        // 负数 / NaN / 过大 → out_of_range
+        for bad in ["-0.01", "-1"] {
+            assert_eq!(
+                codes_at(&format!(r#"{{ "speculative_margin": {bad} }}"#)),
+                vec![crate::scene_doc::ErrorCode::OutOfRange],
+                "余量 {bad}"
+            );
+        }
+        assert_eq!(
+            codes_at(r#"{ "speculative_margin": 2.0 }"#),
+            vec![crate::scene_doc::ErrorCode::OutOfRange],
+            "2 米余量"
+        );
+        // 偏大但可用 → 只是告警（不阻止运行）
+        let warned = doc(r#"{ "speculative_margin": 0.4 }"#).validate();
+        assert!(
+            warned.iter().any(|d| {
+                d.path == "physics.speculative_margin"
+                    && d.severity == crate::scene_doc::Severity::Warning
+            }),
+            "0.4 米该告警：{warned:?}"
+        );
+        assert!(!SceneDoc::has_errors(&warned));
+    }
+
     #[test]
     fn rounded_box_diagnostics_are_specific() {
         let doc = |json: &str| {

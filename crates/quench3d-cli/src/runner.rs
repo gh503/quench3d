@@ -1476,7 +1476,14 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     }
     if let Some(v) = doc.physics.static_friction_speed {
         world.config.static_friction_speed = v;
-        world.config.speculative_margin = v;
+    }
+    // 【曾经是 bug】这两行原来黏在一起：写 `static_friction_speed` 会顺手把
+    // `speculative_margin` 也设成同一个值（而 `physics.speculative_margin` 本身
+    // 反而从未被读到）。后果是"只调了摩擦阈值"的场景被悄悄加了接触余量 ——
+    // 物理结果变了却没有任何诊断。现在两个字段各归各，并由
+    // `world_config_wiring_is_field_for_field` 逐字段盯住。
+    if let Some(v) = doc.physics.speculative_margin {
+        world.config.speculative_margin = v.max(0.0);
     }
 
     if let Some(ground) = &doc.ground {
@@ -4013,6 +4020,64 @@ pub fn run_doctor() -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 世界级物理参数必须**逐字段**落到 `SolverConfig` 的同名字段上。
+    ///
+    /// 这条抓的是"字段接错人"：第 61 轮发现 `static_friction_speed` 被顺手也写进了
+    /// `speculative_margin`，而 `physics.speculative_margin` 从来没被读过 ——
+    /// 结果是"只调了摩擦阈值"的场景被悄悄加了接触余量（物理结果变了、没有诊断），
+    /// 而"调了接触余量"的场景毫无效果。两者都是静默的，只有逐字段对账能抓。
+    #[test]
+    fn world_config_wiring_is_field_for_field() {
+        let doc = |physics: &str| {
+            SceneDoc::from_json(&format!(
+                r#"{{ "objects": [ {{ "name": "球", "body": "dynamic",
+                                     "position": [0, 2, 0], "shape": {{ "type": "sphere" }} }} ],
+                     "physics": {physics}, "simulate": {{ "steps": 1 }} }}"#
+            ))
+            .unwrap_or_else(|e| panic!("要能解析：{e:?}"))
+        };
+        // 四个字段同时给：各归各位
+        let all = build_world(&doc(
+            r#"{ "friction_combine": "min", "restitution_combine": "average",
+                 "static_friction_speed": 0.07, "speculative_margin": 0.013 }"#,
+        ))
+        .expect("要能建世界");
+        let cfg = &all.world.config;
+        assert_eq!(cfg.friction_combine, quench3d::physics::CombineRule::Min);
+        assert_eq!(
+            cfg.restitution_combine,
+            quench3d::physics::CombineRule::Average
+        );
+        assert!(
+            (cfg.static_friction_speed - 0.07).abs() < 1e-6,
+            "static_friction_speed = {}",
+            cfg.static_friction_speed
+        );
+        assert!(
+            (cfg.speculative_margin - 0.013).abs() < 1e-6,
+            "speculative_margin = {}（是不是串到别的字段上了？）",
+            cfg.speculative_margin
+        );
+
+        // 只给摩擦阈值：余量必须保持默认 0
+        let only_friction = build_world(&doc(r#"{ "static_friction_speed": 0.07 }"#)).unwrap();
+        assert_eq!(
+            only_friction.world.config.speculative_margin, 0.0,
+            "写摩擦阈值不该顺手打开接触余量"
+        );
+        // 只给余量：摩擦阈值必须保持默认 0.02
+        let only_margin = build_world(&doc(r#"{ "speculative_margin": 0.013 }"#)).unwrap();
+        assert!(
+            (only_margin.world.config.static_friction_speed - 0.02).abs() < 1e-6,
+            "写接触余量不该改动摩擦阈值：{}",
+            only_margin.world.config.static_friction_speed
+        );
+        // 两个都不写：全是引擎缺省（老场景行为逐位不变）
+        let none = build_world(&doc("{}")).unwrap();
+        assert_eq!(none.world.config.speculative_margin, 0.0);
+        assert!((none.world.config.static_friction_speed - 0.02).abs() < 1e-6);
+    }
 
     /// 文档 → 引擎：点光源的每个字段都要落到引擎里，尤其是**投影开关**。
     ///

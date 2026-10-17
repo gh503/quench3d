@@ -2052,3 +2052,57 @@ Thread 20 "smithay-clipboa" received signal SIGSEGV, Segmentation fault.
   要几下支持函数调用。这是所有凸体共享的成本，不是圆角盒特有的问题。
 * **半空间接触候选是采样出来的**（14 个支持点 + 4 个平面面片角）：斜面/棱接触时
   流形可能不如解析解那么"整齐"，但平放是严格 4 点流形（不会摇晃）。
+
+## 18. 第 61 轮：接触余量（gap #20 收尾）—— 一个静默的串线 bug，和为什么测试没抓到
+
+### 18.1 一句话
+
+`physics.speculative_margin` 现在**真的**生效（复合刚体也算）、有数值范围校验、有观察物理结果的
+专门 e2e；同时修掉了"写 `static_friction_speed` 会顺手打开接触余量"的静默串线 bug。
+
+### 18.2 bug 长什么样
+
+```rust
+if let Some(v) = doc.physics.static_friction_speed {
+    world.config.static_friction_speed = v;
+    world.config.speculative_margin = v;   // ← 黏在同一个 if 里
+}
+// ……而 `doc.physics.speculative_margin` 从来没有被读过
+```
+
+两个后果都是静默的：
+
+1. 只调了摩擦阈值（`static_friction_speed: 0.05`）的场景，被悄悄加了 5 cm 的接触余量 ——
+   物理结果变了，没有任何诊断指出"你的场景多了个余量"。
+2. 真正写 `physics.speculative_margin` 的场景**毫无效果**（字段被解析、被校验、被写进 JSON
+   Schema、被编辑器保留 —— 就是没接到引擎上）。
+
+### 18.3 为什么之前的测试全是绿的
+
+* 单测 `speculative_margin_defaults_off_and_inflates_shapes` 验的是**引擎 API**（直接设
+  `SolverConfig`），不经过文档 → 世界这条线。
+* 默认路径的 digest 测试证明"缺省 0 时逐位不变" —— 而那恰恰是这个 bug **不**影响的情形。
+* 没有任何一条 e2e 观察**物理结果**（轨迹、穿透深度）与 `physics.*` 的关系。
+* gap 表自己就写着"余量的数值范围校验与专门 e2e 用例没加" —— 欠账清单是对的，只是没还。
+
+### 18.4 修法与守卫
+
+* **字段各归各**：`static_friction_speed` 只写自己，`speculative_margin` 单独接线。
+* `world_config_wiring_is_field_for_field`：四个世界级物理字段逐一对照 `SolverConfig` 同名
+  字段 + 三条"只写 A 时 B 必须保持默认"。这是抓"接错人"最直接的办法 ——
+  变异（旧代码原样放回 / 删掉余量接线）都会红。
+* 校验：负数 / 非有限 / > 1 m → `out_of_range`；0.25~1 m → `suspicious_value` 告警
+  （"物体之间会还没碰到就被推开"）。
+* 复合刚体：逐部件 `inflated(margin)`。**不需要**重算刚体局部质心或聚合 AABB ——
+  那些只跟装配有关，跟窄相选哪个几何无关（旧注释里的顾虑是错的）。
+* e2e `speculative_margin_reduces_penetration_on_impact`：同一个球掉到地上，开 6 cm 余量的
+  轨迹**低点更高**。这是"余量真的生效"的唯一观测口径（并且它对"没接线"是致命的：
+  两个场景的低点会逐位相同）。
+
+### 18.5 边界（诚实）
+
+* **流形本身仍然不跨帧复用**（跨帧只有接触身份与冲量）—— 这条是 #20 唯一剩下的欠账。
+* 余量的作用范围是"每对形状的窄相膨胀"，不是真 TOI：极高速的物体依然可以一步跳过整个
+  障碍（那是 #13 的扫掠 CCD 的职责）。
+* 余量对**三角网/高度场**同样逐三角形膨胀（每个三角形都是它的 Minkowski 和），
+  但巨大地形上这会放大窄相的工作量（本来就在逐三角形）。

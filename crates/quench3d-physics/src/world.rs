@@ -1808,8 +1808,6 @@ fn collide_bodies(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactMa
 
 fn collide_bodies_raw(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactManifold> {
     if a.extra_parts.is_empty() && b.extra_parts.is_empty() {
-        // 【边界】接触余量只作用于单形状刚体：复合刚体逐部件膨胀要重算局部质心与
-        // 聚合 AABB，收益（复合体在贴上前的早接触）远小于代价。
         let sa = a.shape.inflated(margin);
         let sb = b.shape.inflated(margin);
         return narrowphase::collide_shapes(&sa, &a.transform, &sb, &b.transform);
@@ -1819,7 +1817,16 @@ fn collide_bodies_raw(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<Conta
         let wa = a.part_world_transform(&ta);
         for (sb, tb) in b.parts() {
             let wb = b.part_world_transform(&tb);
-            if let Some(m) = narrowphase::collide_shapes(sa, &wa, sb, &wb) {
+            // 余量对复合刚体同样生效：逐部件独立膨胀（每个部件都是凸体，"这个部件长胖
+            // margin"就是它自己的 Minkowski 和，不需要重算刚体的局部质心或聚合 AABB ——
+            // 那些只跟**装配**有关，跟窄相用哪个几何无关）。`collide_bodies` 之后统一
+            // 把 penetration 减回 margin。
+            let hit = if margin > 0.0 {
+                narrowphase::collide_shapes(&sa.inflated(margin), &wa, &sb.inflated(margin), &wb)
+            } else {
+                narrowphase::collide_shapes(sa, &wa, sb, &wb)
+            };
+            if let Some(m) = hit {
                 points.extend_from_slice(&m.points);
             }
         }

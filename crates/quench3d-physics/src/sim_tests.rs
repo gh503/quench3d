@@ -2671,6 +2671,58 @@ fn compound_mass_properties_add_up() {
     assert!((aabb.max.y - 0.5).abs() < 1e-4, "{:?}", aabb);
 }
 
+/// 接触余量对**复合刚体**同样生效：部件离地面还剩 2 cm 时就该有负穿透的接触点。
+///
+/// 这条盯的是"余量只作用于单形状刚体"那个旧边界（第 61 轮补上）：复合刚体过去不膨胀，
+/// 于是"高速复合体贴上墙前没有早接触"——表现和没开余量一模一样，但没人会想到是复合形状的问题。
+#[test]
+fn speculative_margin_applies_to_compound_bodies() {
+    let build = |margin: f32| {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        w.config.speculative_margin = margin;
+        w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+        // 复合刚体：主形状在原点（小球），附加盒子在下方 0.5 处，盒子半高 0.25
+        // ⇒ 刚体原点在 y = 0.75 + 0.02 时，盒子底面离地 0.02
+        let body = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(vec3(0.0, 0.75 + 0.02, 0.0))
+                .part_at(
+                    Shape::Box {
+                        half_extents: Vec3::splat(0.25),
+                    },
+                    vec3(0.0, -0.5, 0.0),
+                )
+                .gravity_scale(0.0)
+                .build(),
+        );
+        w.step(DT);
+        let hit = w
+            .contacts()
+            .iter()
+            .find(|p| p.a == body || p.b == body)
+            .cloned();
+        (hit, w.body(body).unwrap().position().y)
+    };
+
+    // 没有余量：还差 2 cm，不该有接触
+    let (none, _) = build(0.0);
+    assert!(none.is_none(), "余量 0 时 2 cm 的空气不该算接触：{none:?}");
+
+    // 有余量：该生成接触对（复合刚体也要膨胀），而且接触点在**地面上**（不是部件中心）
+    let (some, y) = build(0.05);
+    let pair = some.expect("余量 0.05 时 2 cm 的空气必须算接触（复合刚体也要膨胀）");
+    assert!(
+        pair.point.y.abs() < 0.05,
+        "接触点该贴在地面上，实际 {:?}",
+        pair.point
+    );
+    // 零重力 + 还没真碰上 ⇒ 不该被推开（余量只"提前算接触"，不制造冲量）
+    assert!(
+        (y - 0.77).abs() < 0.02,
+        "余量不该把没碰上的物体推开：y = {y}"
+    );
+}
+
 #[test]
 fn compound_extra_parts_really_collide() {
     // 主形状（小球）挂在高处，附加部件（盒子）在下方：落地的是**附加部件**。

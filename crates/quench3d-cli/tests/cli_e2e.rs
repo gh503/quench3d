@@ -5776,3 +5776,85 @@ fn rounded_box_behaves_like_a_box_and_validates_radius() {
         .to_string();
     assert!(msg.contains("胶囊") || msg.contains("球"), "{msg}");
 }
+
+/// 接触余量（`physics.speculative_margin`）的**专门 e2e**：它必须真的生效。
+///
+/// 判据不是"配置读到了"（那有单测），而是**物理结果变了**：同一个球掉到地上，
+/// 开了 6 cm 余量的那个第一帧接触更早，所以整条轨迹里到达的最低点更高（吃得浅）。
+/// 这条同时钉住第 61 轮修掉的串线 bug —— 那次 `speculative_margin` 压根没被读，
+/// 两个场景的低点会**逐位相同**。
+#[test]
+fn speculative_margin_reduces_penetration_on_impact() {
+    let dir = temp_dir("margin");
+    let scene = |name: &str, physics: serde_json::Value| {
+        write_scene(
+            &dir,
+            name,
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "objects": [ { "name": "球", "body": "dynamic", "position": [0.0, 3.0, 0.0],
+                               "shape": { "type": "sphere", "radius": 0.5 } } ],
+                "ground": { "size": 10 },
+                "physics": physics,
+                "simulate": { "steps": 90, "dt": 0.0166667 }
+            }),
+        )
+    };
+    let lowest = |path: &std::path::Path| -> f64 {
+        let t = run(&[
+            "simulate",
+            path.to_str().unwrap(),
+            "--trace",
+            "球",
+            "--json",
+        ]);
+        assert_eq!(t.code, 0, "{}", t.stdout);
+        let traj = t.json()["data"]["trajectories"][0].clone();
+        let samples = traj["samples"].as_array().unwrap().clone();
+        assert!(samples.len() > 10, "轨迹样本太少：{traj}");
+        samples
+            .iter()
+            .map(|s| s["position"][1].as_f64().unwrap())
+            .fold(f64::INFINITY, f64::min)
+    };
+    let plain = scene("plain.json", serde_json::json!({}));
+    let margin = scene(
+        "margin.json",
+        serde_json::json!({ "speculative_margin": 0.06 }),
+    );
+    let y_plain = lowest(&plain);
+    let y_margin = lowest(&margin);
+    // 球半径 0.5：没余量时会吃进地面一点（低点 < 0.5），有余量时提前接触（低点更高）
+    assert!(
+        y_plain < 0.5,
+        "没余量的场景该出现一点穿透（低点 < 0.5），实际 {y_plain}"
+    );
+    assert!(
+        y_margin > y_plain + 0.01,
+        "6 cm 余量必须让低点更高（吃得更浅）：{y_margin} vs {y_plain} —— 相等说明余量没被读到"
+    );
+    assert!(y_margin > 0.48, "余量下的低点不该深于 2 cm：{y_margin}");
+
+    // 余量过大 → 校验报 out_of_range（给退出码 2 与稳定码）
+    let bad = write_scene(
+        &dir,
+        "bad_margin.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "objects": [ { "name": "球", "shape": { "type": "sphere" } } ],
+            "physics": { "speculative_margin": 2.0 },
+            "simulate": { "steps": 1 }
+        }),
+    );
+    let v = run(&["validate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(v.code, 2, "{}", v.stdout);
+    assert!(
+        v.json()["data"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["path"] == "physics.speculative_margin" && d["code"] == "out_of_range"),
+        "{}",
+        v.stdout
+    );
+}
