@@ -447,6 +447,42 @@
 
 ### 修复
 
+- **glTF 的节点变换被整段忽略：多节点模型的所有部件堆在原点**（第 61 轮发现）。
+  加载器原来直接遍历 `doc.meshes()`，**完全不看 `doc.nodes()`** —— 节点上的
+  平移/旋转/缩放全被丢掉，同一个网格被多个节点引用时也只画一次。
+  单网格资产（DamagedHelmet 之类）完全看不出来，两个轮子的车、一栋由多块拼起来的房子
+  会立刻变形。
+  - 现在按节点走：从 `scenes` 的根往下累乘世界变换（glTF 没提供 `parent()`，只能自己建
+    父子链），把位置按点、法线/切线按方向变换后烘进顶点；每份实例的名字带上节点名
+    （`右/轮`、`左/轮`）。
+  - 兜底：没被任何节点引用的网格仍按单位变换输出（坏文件不该"以前能看见、现在消失"）；
+    节点递归有深度上限 64（防御坏文件里的环 —— 递归爆栈不可恢复）。
+  - 测试 `gltf_node_transforms_are_baked_into_geometry` 手搓 4 个节点的 GLB（平移、绕 X
+    转 90°、父子累乘、同一网格 4 份实例），断言顶点与法线都跟着走。变异三组全红
+    （不烘 / 父子不累乘 / 位置不做平移）。
+  - **边界**：非均匀缩放下法线用的是"方向变换 + 归一化"而不是逆转置矩阵，高光角度会略偏
+    （换来的是一条不求逆、不会因奇异矩阵出 NaN 的路径）。
+  - 这也是 gap #23（动画/蒙皮）的**前置**：动画就是对同一批节点改变换；设计草图见
+    `docs/production_readiness.md` §19。
+
+- **`physics.speculative_margin` 从来没被读到，而 `static_friction_speed` 会顺手把它设上**
+  （第 61 轮发现，闭合 gap #20 的两条欠账）。`build_world` 里原本是：
+  ```
+  if let Some(v) = doc.physics.static_friction_speed {
+      world.config.static_friction_speed = v;
+      world.config.speculative_margin = v;   // ← 这两行黏在一起
+  }
+  ```
+  后果有两个，都**静默**：只调了摩擦阈值的场景被悄悄加了 1:1 的接触余量（物理结果变了、
+  没有任何诊断），而真正写 `physics.speculative_margin` 的场景**毫无效果**。
+  - 现在两个字段各归各的；并且新增 `world_config_wiring_is_field_for_field`：把
+    `friction_combine` / `restitution_combine` / `static_friction_speed` / `speculative_margin`
+    四个字段逐一对到 `SolverConfig` 的同名字段上，外加"只写 A 时 B 必须保持默认"的三条。
+    变异（把旧代码原样放回 / 或删掉余量的接线）都会红。
+  - 为什么以前没抓到：单测只验"配置读到了"、没有一条 e2e 观察**物理结果**，而
+    `speculative_margin` 缺省是 0（默认路径的 digest 测试当然是绿的）。见
+    `docs/overnight_report.md` §59。
+
 - **Wayland 上关闭编辑器窗口必崩（SIGSEGV / 退出码 139 / core dumped）**（用户实测，本机真显卡 + Wayland）。
   进程在正常跑、第一帧也正常，**用户点窗口关闭按钮的那一刻**收到 `SIGSEGV`；回溯固定落在
   `smithay-clipboard` 的 worker 线程上（`#9 smithay_clipboard::worker::worker_impl

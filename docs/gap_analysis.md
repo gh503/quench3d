@@ -638,7 +638,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 20 | 🟡 部分（第 28/30 轮）：**接触特征 ID 已落地**（`ContactPoint.feature_id`：两端局部坐标按 0.5 mm 量化哈希，宽相/窄相与求解器共用同一函数；热启动缓存优先按 ID 精确匹配，2 cm 坐标容差退化为兜底）；**接触余量已落地**（`physics.speculative_margin`，缺省 0 = 历史结果逐位不变；膨胀窄相 + 负穿透 + `separation/dt` 速度目标；digest 测试证明缺省路径没漂）。2026-10-19 第 61 轮：~~余量只作用于单形状刚体~~ ✅（复合刚体逐部件膨胀）、~~余量的数值范围校验~~ ✅（负数/非有限/> 1 m → `out_of_range`，0.25~1 m → 告警）、~~专门 e2e~~ ✅（`speculative_margin_reduces_penetration_on_impact`：开余量的轨迹低点更高）；**顺带修掉一个静默 bug**——`physics.speculative_margin` 从来没被读到，而 `static_friction_speed` 会顺手把它设成同一个值（详见 CHANGELOG「修复」与 `production_readiness` §18）。**没做**：流形本身跨帧复用（跨帧只有身份与冲量） | 物理 |
 | 21 | ~~查询补全 + 查询加速结构~~ ✅ 2026-10-17：`raycast_all` / 任意形状 `overlap_shape` / 单向 `QueryFilter`（mask + 传感器开关）/ `distance_to` + `QueryIndex` 快照网格（射线 3D DDA）；CLI `query`、MCP `quench3d_query`、编辑器 F7 查询探针。**没做**：`shape_cast` 仍线性、CLI 不做批量查询、索引是快照（世界一动就回退线性） | 引擎 |
 | 22 | ~~物理材质与 combine mode、静/动摩擦分离~~ ✅ 2026-10-17：`CombineRule`（5 条：几何平均/平均/取小/取大/相乘，摩擦缺省几何平均、恢复缺省取大 = 老行为）、`static_friction`（缺省跟随动摩擦）、世界级 `physics.{friction_combine,restitution_combine,static_friction_speed}` + 物体级覆盖、编辑器滑块与下拉。判定用**施力前**速度（否则静摩擦永远不生效）。**没做**：材质的各向异性/滚动摩擦、`friction_combine` 在两端都显式且不同时只有一条确定性优先级（取 slot 靠前者） | 引擎 |
-| 23 | 动画/蒙皮（glTF animations/skins 导入 + 播放 + 混合） | 引擎（大） |
+| 23 | 🟡 部分（第 61 轮）：**前置修好了**——glTF **节点层级与节点变换**现在会正确烘进几何（`assets.rs` 按 `doc.nodes()` 走、父子累乘、法线/切线跟着转、同一网格多节点 → 多实例；测试 `gltf_node_transforms_are_baked_into_geometry`）。此前加载器遍历的是 `doc.meshes()`，整段忽略节点（多节点模型会把所有部件堆在原点）。**仍缺**：`animations`/`skins` 的解析（`LoadedModel` 只有扁平 `meshes`，没有节点树、没有骨骼权重）→ 播放/混合/GPU 蒙皮。实现顺序见 `docs/production_readiness.md` §19.3 | 引擎（大） |
 | 24c | ✅ 编辑器局部光编辑（第 53 轮）：点光/聚光的增删改 + 从引擎写回 + CPU 往返测试 | 视口 gizmo / 选中高亮（要靠坐标数字调） | 编辑器里能直接把灯摆明白，不用手改 JSON |
 | 24d | 🟡 部分（第 54~55 轮）：**聚光灯阴影**（第 54 轮，`SpotLight.cast_shadows`，一张 2D 图）+ **点光源立方体阴影**（第 55 轮，`PointLight.cast_shadows`，`texture_depth_2d_array` 6 层）；两者的缺点都是缺省 `false`（老场景像素逐位不变），各自整帧**只支持一盏**（第一盏要求投影的），但**两套图互相独立、可以同时各有一盏**；相机/bias 都是纯函数（无显卡可跑），uniform/WGSL/校验/编辑器勾选框全链路；本机 GPU 探针（聚光 14 条 + 点光 23 条断言）与 `point_shadow_diag` 逐面对账量化 | 多盏投影（阴影图数组 / 逐灯索引）、级联聚光阴影、半透明物体阴影、可单独调的阴影图分辨率；编辑器勾选框没有人在真窗口里点过；面接缝与 bias 没有扫参 | 局部光终于会被挡住（以前光穿透一切） |
 | 24b | ✅ 编辑器与 CLI 的后处理一致性（第 51–52 轮）：级联 UI + `bloom/fxaa/ssao` 载入应用与写回，共用同一份映射函数 | — | 编辑器预览与 `quench3d render` 在后处理上不再分叉 |
@@ -652,7 +652,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 
 ### P2（长尾，按需）
 
-- **格式**：`units`/`up_axis` 自描述、凸包按 `points` 生成真实渲染网格（现在只做 AABB 盒体近似 + 告警）、多地面、形状补全（Cone/圆角盒/HeightField）。~~地面可配摩擦~~ ✅ 已做、~~`scale` 与碰撞体一致性诊断~~ ✅ 已做（告警）。
+- **格式**：`units`/`up_axis` 自描述、凸包按 `points` 生成真实渲染网格（现在只做 AABB 盒体近似 + 告警）、多地面、~~形状补全（Cone/圆角盒/HeightField）~~ ✅ 第 61 轮补齐。~~地面可配摩擦~~ ✅ 已做、~~`scale` 与碰撞体一致性诊断~~ ✅ 已做（告警）。
 - **引擎**：透明距离排序 + OIT、贴花、粒子/ billboard、LOD + 遮挡剔除、多视口、地形/水体、快照与回放、渲染插值、时间缩放与单步调试、音频、脚本层、输入映射与手柄/触屏、多体/articulation、TGS/SIMD 求解器、精确凸包质量属性。
 - **交付**：crate 元数据 + `cargo publish --dry-run`、CHANGELOG/semver 策略、cargo-deny 依赖审计、预编译发行（cargo-dist）、Web 产物 `wasm-opt`/Brotli/文件名哈希（编辑器包 11 MB，见 README §2）、移动端。
 - **编辑器**：~~拖拽 gizmo~~、~~撤销/重做~~、原生文件对话框、多选/成组、~~模型导入到场景树~~、

@@ -2106,3 +2106,44 @@ if let Some(v) = doc.physics.static_friction_speed {
   障碍（那是 #13 的扫掠 CCD 的职责）。
 * 余量对**三角网/高度场**同样逐三角形膨胀（每个三角形都是它的 Minkowski 和），
   但巨大地形上这会放大窄相的工作量（本来就在逐三角形）。
+
+## 19. 第 61 轮：glTF 节点变换（gap #23 的前置）—— 现在的状态与下一步的草图
+
+### 19.1 这轮修了什么
+
+`assets::model_from_gltf` 原来遍历 `doc.meshes()`，**不看节点**：节点上的 TRS 全丢，
+同一网格被多个节点引用也只画一次。现在：
+
+* 从 `scenes` 的根节点往下递归，累乘世界变换（glTF 没有 `parent()`，只能自己建父子链；
+  递归深度上限 64，防御坏文件的环 —— 递归爆栈不可恢复）。
+* 顶点烘焙：位置按点变换、法线/切线按方向变换后归一化；非均匀缩放的严格做法（逆转置）
+  没做，见 §19.3。
+* 每份实例一个 `LoadedMesh`，名字带节点标签（`右/轮`）。未被任何节点引用的网格按单位
+  变换兜底输出。
+* 测试：手搓 4 节点 GLB（平移 / 绕 X 转 90° / 父子累乘 / 同网格 4 实例）。
+
+### 19.2 gap #23 现在到底缺什么（诚实的清单）
+
+| 环节 | 状态 | 说明 |
+| --- | --- | --- |
+| glTF 节点层级 / 节点变换 | ✅ 本轮 | 静态几何正确了 |
+| glTF `animations` 解析 | ❌ | `gltf` crate 已有 API（`doc.animations()` → channels/samplers/accessors），缺的是"采样成轨道"这一层 |
+| glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ❌ | `LoadedMesh.data` 的 `Vertex` 里没有 joint/weight 字段；要加 4 个关节下标 + 4 个权重 |
+| CPU 侧播放（时间推进、循环、插值 STEP/LINEAR/CUBICSPLINE） | ❌ | |
+| 与场景格式的接口 | ❌ | 需要 `objects[].model.animation = { name, speed, loop }` 一类字段（**向后兼容**：不写 = 现在这样，静止） |
+| 混合（多轨道 / 权重） | ❌ | 至少要能"两条轨道按权重加权"，否则 #23 的"混合"没落地 |
+| GPU 蒙皮 | ❌ | 顶点着色器要读关节矩阵纹理/uniform；`MeshData` 要加两套顶点属性 |
+| `LoadedModel` 的节点树 | ❌ | 现在只有扁平 `meshes`；动画需要"节点 → 变换"可写，所以要先保留节点树 |
+
+### 19.3 下一步的实现顺序（建议）
+
+1. **保留节点树**：`LoadedModel.nodes: Vec<LoadedNode { name, parent, local_trs, mesh_indices }>`
+   + 由它算世界变换。静态路径继续烘焙（零回归），但把树留着。
+2. **`animations` 解析 + CPU 播放**：只做 TRS 轨道（绝大多数资产就这个），先 STEP/LINEAR；
+   加 `--animation name --time t` 之类的 CLI 观察口径 + 一条"t=0 与 t=中点 的包围盒不同"的测试。
+3. **接进场景格式**（向后兼容的新字段）+ 编辑器保留 + 校验（动画名不存在 → `unknown_reference`）。
+4. **`skins` + GPU 蒙皮**（最大的一块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
+   绑定姿态对账测试（t=0 必须与不蒙皮的渲染逐像素近似）。
+
+**不要**从 GPU 蒙皮开始：没有节点树和 CPU 侧采样，着色器里的关节矩阵只能从常量来，
+调不动也测不了。

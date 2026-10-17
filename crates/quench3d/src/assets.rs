@@ -271,6 +271,91 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<LoadedModel, AssetError> {
 }
 
 /// glTF 文档（含已解析的 buffer 与贴图）→ 可上传的模型。
+/// glTF 的 4×4 矩阵是**列主序**的 `[[f32; 4]; 4]`（`m[列][行]`）。
+type Matrix = [[f32; 4]; 4];
+
+const IDENTITY: Matrix = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
+
+fn mat_mul(a: &Matrix, b: &Matrix) -> Matrix {
+    let mut out = [[0.0f32; 4]; 4];
+    for (c, col) in out.iter_mut().enumerate() {
+        for (r, cell) in col.iter_mut().enumerate() {
+            *cell = (0..4).map(|k| a[k][r] * b[c][k]).sum();
+        }
+    }
+    out
+}
+
+fn transform_point(m: &Matrix, p: [f32; 3]) -> [f32; 3] {
+    let mut out = [0.0f32; 3];
+    for (r, cell) in out.iter_mut().enumerate() {
+        *cell = m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r];
+    }
+    out
+}
+
+fn transform_dir(m: &Matrix, d: [f32; 3]) -> [f32; 3] {
+    let mut out = [0.0f32; 3];
+    for (r, cell) in out.iter_mut().enumerate() {
+        *cell = m[0][r] * d[0] + m[1][r] * d[1] + m[2][r] * d[2];
+    }
+    out
+}
+
+/// 每个节点的**世界**变换（含父子累乘）。
+///
+/// glTF 没有 `parent()`，只能从 `scenes` 的根节点往下走；没被任何场景引用的节点
+/// （有些导出器会留下这种孤儿）按"自己的局部变换 = 世界变换"处理，免得它们消失。
+/// 深度上限是防御坏文件里的环 —— 递归爆栈是不可恢复的。
+fn node_world_matrices(doc: &gltf::Document) -> Vec<Option<Matrix>> {
+    fn walk(node: &gltf::Node, parent: &Matrix, out: &mut [Option<Matrix>], depth: u32) {
+        if depth > 64 {
+            return;
+        }
+        let world = mat_mul(parent, &node.transform().matrix());
+        out[node.index()] = Some(world);
+        for child in node.children() {
+            walk(&child, &world, out, depth + 1);
+        }
+    }
+    let mut out: Vec<Option<Matrix>> = vec![None; doc.nodes().len()];
+    for scene in doc.scenes() {
+        for node in scene.nodes() {
+            walk(&node, &IDENTITY, &mut out, 0);
+        }
+    }
+    for node in doc.nodes() {
+        if out[node.index()].is_none() {
+            walk(&node, &IDENTITY, &mut out, 0);
+        }
+    }
+    out
+}
+
+/// 网格片段的名字：优先用引用它的**节点**名（同一个网格常被多个节点引用，
+/// 名字带上节点才分得清"左轮"和"右轮"），其次用网格名，最后用下标。
+fn mesh_label(doc: &gltf::Document, mesh_index: usize) -> String {
+    for node in doc.nodes() {
+        if let Some(mesh) = node.mesh() {
+            if mesh.index() == mesh_index {
+                return match node.name() {
+                    Some(n) => n.to_string(),
+                    None => format!("node_{}", node.index()),
+                };
+            }
+        }
+    }
+    doc.meshes()
+        .nth(mesh_index)
+        .and_then(|m| m.name().map(|s| s.to_string()))
+        .unwrap_or_else(|| format!("mesh_{mesh_index}"))
+}
+
 fn model_from_gltf(
     name: String,
     doc: &gltf::Document,
@@ -326,7 +411,38 @@ fn model_from_gltf(
         });
     }
 
-    for mesh in doc.meshes() {
+    // 【曾经是 bug】这里原来直接遍历 `doc.meshes()`，**完全不看节点**：节点上的
+    // 平移/旋转/缩放被丢掉，于是多节点模型的所有部件都堆在原点（单网格的
+    // DamagedHelmet 看不出来，两个轮子的车一眼就看出来了），同一个网格被多个节点
+    // 引用时也只出现一次。现在按节点走，把世界变换烘进顶点。
+    // 这也是 gap #23（动画/蒙皮）的前置：动画就是对同一批节点改变换。
+    let worlds = node_world_matrices(doc);
+    let mut used_meshes: Vec<bool> = vec![false; doc.meshes().len()];
+    // 每份实例带上**节点**标签：同一个网格被多个节点引用时，标签才分得清左右轮
+    let mut node_meshes: Vec<(usize, Matrix, String)> = Vec::new();
+    for node in doc.nodes() {
+        if let Some(mesh) = node.mesh() {
+            used_meshes[mesh.index()] = true;
+            let label = node
+                .name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("node_{}", node.index()));
+            node_meshes.push((
+                mesh.index(),
+                worlds[node.index()].unwrap_or(IDENTITY),
+                label,
+            ));
+        }
+    }
+    // 没被任何节点引用的网格（坏文件/极端导出器）：仍然按单位变换输出，
+    // 免得"以前能看见、现在看不见"。引擎宁可多画一个，也不静默吞掉几何。
+    for (i, used) in used_meshes.iter().enumerate() {
+        if !used {
+            node_meshes.push((i, IDENTITY, mesh_label(doc, i)));
+        }
+    }
+    for (mesh_index, world, label) in node_meshes {
+        let mesh = doc.meshes().nth(mesh_index).expect("下标来自 doc.meshes()");
         for (pi, prim) in mesh.primitives().enumerate() {
             let reader = prim.reader(|b| buffers.get(b.index()).map(|b| b.0.as_slice()));
             let Some(positions) = reader.read_positions() else {
@@ -373,11 +489,31 @@ fn model_from_gltf(
             if tangents.is_empty() && !uvs.is_empty() {
                 data.recompute_tangents();
             }
+            // 把节点的世界变换烘进顶点：位置按点变换、法线/切线按方向变换后归一化。
+            // 【边界】非均匀缩放下法线严格来说要用逆转置矩阵；这里用方向变换 + 归一化，
+            // 偏差只在非均匀缩放的部件上出现（视觉上表现为高光角度略偏），换来的是一条
+            // 不需要求逆、不会因奇异矩阵出 NaN 的路径。
+            for v in &mut data.vertices {
+                v.position = transform_point(&world, v.position);
+                let n = transform_dir(&world, v.normal);
+                let nv = Vec3::new(n[0], n[1], n[2]);
+                v.normal = if nv.length_squared() > 1e-12 {
+                    nv.normalize().to_array()
+                } else {
+                    Vec3::Y.to_array()
+                };
+                let t = transform_dir(&world, [v.tangent[0], v.tangent[1], v.tangent[2]]);
+                let tv = Vec3::new(t[0], t[1], t[2]);
+                if tv.length_squared() > 1e-12 {
+                    let tv = tv.normalize();
+                    v.tangent = [tv.x, tv.y, tv.z, v.tangent[3]];
+                }
+            }
             model.meshes.push(LoadedMesh {
                 name: match mesh.name() {
-                    Some(n) if mesh.primitives().len() > 1 => format!("{n}_{pi}"),
-                    Some(n) => n.to_string(),
-                    None => format!("mesh_{}_{pi}", mesh.index()),
+                    Some(n) if mesh.primitives().len() > 1 => format!("{label}/{n}_{pi}"),
+                    Some(n) => format!("{label}/{n}"),
+                    None => format!("{label}/prim_{pi}"),
                 },
                 data,
                 material: prim.material().index(),
