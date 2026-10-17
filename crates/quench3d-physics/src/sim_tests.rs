@@ -8,6 +8,8 @@ use quench3d_math::*;
 use crate::body::{BodyBuilder, CombineRule, InteractionGroups};
 use crate::contact::ContactPair;
 use crate::joints::{BallConeLimit, HingeMotor, Joint};
+use crate::narrowphase::collide_shapes;
+use crate::query::ray_shape;
 use crate::query::QueryFilter;
 use crate::shape::Shape;
 use crate::world::PhysicsWorld;
@@ -2766,6 +2768,117 @@ fn compound_body_is_one_rigid_body_and_the_old_shapes_still_match() {
 /// 这条同时钉住三件事：圆锥真的参与了半空间接触（`shape_plane_candidates` 的底圈点），
 /// 底面没有陷进地面，以及**质心偏移** `(0, -half_height/2, 0)` 被真的算进去了
 /// （否则重力作用点错、静置高度也会漂）。
+/// 圆角盒：平放稳稳停在 y = 半长（底面是平面面片），不会因为"只有一个接触点"摇晃。
+#[test]
+fn rounded_box_rests_flat_on_ground() {
+    let he = vec3(0.5, 0.3, 0.4);
+    let r = 0.05;
+    let mut w = PhysicsWorld::new();
+    add_ground(&mut w, 0.6, 0.0);
+    let handle = w.add_body(
+        BodyBuilder::dynamic(Shape::RoundedBox {
+            half_extents: he,
+            radius: r,
+        })
+        .position(vec3(0.0, 1.0, 0.0))
+        .friction(0.6)
+        .build(),
+    );
+    for _ in 0..400 {
+        w.step(DT);
+    }
+    assert_all_finite(&w, "圆角盒静置");
+    let body = w.body(handle).unwrap();
+    assert!(
+        (body.position().y - he.y).abs() < 0.02,
+        "底面应停在 y=0（原点在 {}），实际 {}",
+        he.y,
+        body.position().y
+    );
+    // 没有翻倒：绕 X/Z 的倾斜很小（平放 vs 侧翻）
+    let up = body.rotation().mul_vec3(Vec3::Y);
+    assert!(up.y > 0.98, "不该翻倒：up = {up:?}");
+}
+
+/// 圆角盒 45° 斜着落下：圆角让它能滚过去而不是"卡在棱上"，最后必须躺平。
+#[test]
+fn rounded_box_settles_after_tilted_drop() {
+    let he = Vec3::splat(0.4);
+    let mut w = PhysicsWorld::new();
+    add_ground(&mut w, 0.9, 0.0);
+    let handle = w.add_body(
+        BodyBuilder::dynamic(Shape::RoundedBox {
+            half_extents: he,
+            radius: 0.12,
+        })
+        .position(vec3(0.0, 0.8, 0.0))
+        .rotation(Quat::from_rotation_z(0.7))
+        .friction(0.9)
+        .build(),
+    );
+    for _ in 0..600 {
+        w.step(DT);
+    }
+    assert_all_finite(&w, "圆角盒斜落");
+    let body = w.body(handle).unwrap();
+    // 落地后原点高度在 [最薄半长, 外接半长] 之间（躺平取最小值），且没有穿地
+    assert!(
+        body.position().y > he.y - 0.05 && body.position().y < he.length() + 0.1,
+        "落地高度异常：{}",
+        body.position().y
+    );
+    assert!(
+        body.linear_velocity.length() < 0.2,
+        "该停下来了：{:?}",
+        body.linear_velocity
+    );
+}
+
+/// 圆角盒 vs 球/盒/平面/三角网的窄相都走通用凸体路径：只要不 NaN、能分开就算通。
+#[test]
+fn rounded_box_pairs_produce_finite_contacts() {
+    let rb = Shape::RoundedBox {
+        half_extents: Vec3::splat(0.5),
+        radius: 0.1,
+    };
+    let others = [
+        Shape::Sphere { radius: 0.4 },
+        Shape::Box {
+            half_extents: Vec3::splat(0.3),
+        },
+        Shape::Cylinder {
+            half_height: 0.3,
+            radius: 0.3,
+        },
+        Shape::Cone {
+            half_height: 0.3,
+            radius: 0.3,
+        },
+        Shape::RoundedBox {
+            half_extents: Vec3::splat(0.4),
+            radius: 0.05,
+        },
+    ];
+    let ta = Transform::from_translation(Vec3::ZERO);
+    for other in &others {
+        let tb = Transform::from_translation(vec3(0.55, 0.0, 0.0));
+        if let Some(m) = collide_shapes(&rb, &ta, other, &tb) {
+            assert!(m.points.len() <= 4, "流形点数 {}", m.points.len());
+            for p in &m.points {
+                assert!(p.position.is_finite() && p.normal.is_finite());
+                assert!(p.penetration.is_finite());
+            }
+        }
+        // 分离时必须没有接触
+        let far = Transform::from_translation(vec3(5.0, 0.0, 0.0));
+        assert!(collide_shapes(&rb, &ta, other, &far).is_none(), "{other:?}");
+    }
+    // 射线打在圆角盒上：沿 -Y 打到顶面 (y = 0.5)
+    let hit = ray_shape(&rb, &ta, vec3(0.0, 3.0, 0.0), -Vec3::Y, 10.0).expect("射线该命中圆角盒");
+    assert!((hit.0 - 2.5).abs() < 1e-3, "距离 {}", hit.0);
+    assert!(hit.1.y > 0.99, "法线该朝上：{:?}", hit.1);
+}
+
 #[test]
 fn cone_base_down_rests_on_ground() {
     let h = 0.5f32;

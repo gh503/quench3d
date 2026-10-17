@@ -52,6 +52,22 @@ pub enum Shape {
         /// 底面半径。
         radius: f32,
     },
+    /// 圆角盒（"盒子 ⊕ 半径 `radius` 的球"，即盒子与球的 Minkowski 和）。
+    ///
+    /// `half_extents` 是**外接**半长（跟 `Box` 一样是半长，不是边长）：
+    /// 内盒半长 = `half_extents - radius`，形状的最外沿就在 `±half_extents`。
+    /// 因此 `radius == 0` 退化成普通长方体，`radius == min(half_extents)`
+    /// 退化成球（三个半长相等时）。
+    ///
+    /// **惯量是数值积分**（见 [`Shape::mass_properties`]）：体积有闭式
+    /// （Steiner 公式），惯量的闭式要拆成 6 个面片 + 12 段 1/4 圆柱 + 8 个 1/8 球，
+    /// 容易写错；这里按本仓库已有的做法（凸包同理）用确定性网格采样，误差 < 1%。
+    RoundedBox {
+        /// 外接半长。
+        half_extents: Vec3,
+        /// 圆角半径。
+        radius: f32,
+    },
     /// 凸包（点集已包含质心）。
     ConvexHull {
         /// 顶点集。
@@ -153,6 +169,15 @@ impl Shape {
                 half_height: *half_height,
                 radius: radius + margin,
             },
+            // 圆角盒与球的 Minkowski 和仍是圆角盒：外沿与半径同时长胖 `margin`，
+            // 这是**精确**的膨胀（不像圆柱/圆锥那样只胀半径）。
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => Shape::RoundedBox {
+                half_extents: *half_extents + Vec3::splat(margin),
+                radius: radius + margin,
+            },
             other => other.clone(),
         }
     }
@@ -176,6 +201,20 @@ impl Shape {
                 half_height,
                 radius,
             } => PI * radius * radius * 2.0 * half_height / 3.0,
+            // Steiner 公式（盒子 ⊕ 球）：内盒半长 `i = h - r`，
+            // V = 8ixiyiz + 8(ixiy+iyiz+izix)r + 2π(ix+iy+iz)r² + 4πr³/3。
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => {
+                let he = half_extents.abs();
+                let r = radius.abs().min(he.min_element());
+                let i = he - Vec3::splat(r);
+                8.0 * i.x * i.y * i.z
+                    + 8.0 * (i.x * i.y + i.y * i.z + i.z * i.x) * r
+                    + 2.0 * PI * (i.x + i.y + i.z) * r * r
+                    + 4.0 / 3.0 * PI * r * r * r
+            }
             Shape::ConvexHull { points } => {
                 let aabb = Aabb::from_points(points);
                 if !aabb.is_valid() {
@@ -277,6 +316,10 @@ impl Shape {
                     center: vec3(0.0, -h * 0.5, 0.0),
                 }
             }
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => rounded_box_mass_properties(*half_extents, *radius, d),
             Shape::ConvexHull { points } => hull_mass_properties(points, d),
             Shape::Plane { .. } | Shape::TriMesh { .. } => MassProperties::ZERO,
         }
@@ -316,6 +359,16 @@ impl Shape {
                 let r = radius.abs();
                 let h = half_height.abs();
                 Aabb::new(vec3(-r, -h, -r), vec3(r, h, r))
+            }
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => {
+                let he = half_extents.abs();
+                let r = radius.abs().min(he.min_element());
+                let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+                let ext = inner + Vec3::splat(r);
+                Aabb::new(-ext, ext)
             }
             Shape::ConvexHull { points } => Aabb::from_points(points),
             Shape::Plane { .. } => Aabb::new(Vec3::NEG_INFINITY, Vec3::INFINITY),
@@ -366,6 +419,7 @@ impl Shape {
                 half_height,
                 radius,
             } => (half_height * half_height + radius * radius).sqrt(),
+            Shape::RoundedBox { half_extents, .. } => half_extents.abs().length(),
             Shape::ConvexHull { points } => points
                 .iter()
                 .map(|p| p.length_squared())
@@ -441,6 +495,21 @@ impl Shape {
                 } else {
                     rim
                 }
+            }
+            // Minkowski 和的支持函数：`support_K(d) + r·d̂`。
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => {
+                let he = half_extents.abs();
+                let r = radius.abs().min(he.min_element());
+                let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+                let corner = Vec3::new(
+                    if dir.x >= 0.0 { inner.x } else { -inner.x },
+                    if dir.y >= 0.0 { inner.y } else { -inner.y },
+                    if dir.z >= 0.0 { inner.z } else { -inner.z },
+                );
+                corner + dir.normalize_or_zero() * r
             }
             Shape::ConvexHull { points } => max_dot_point(points, dir),
             Shape::TriMesh { vertices, .. } => max_dot_point(vertices, dir),
@@ -578,6 +647,69 @@ fn hull_mass_properties(points: &[Vec3], density: f32) -> MassProperties {
         mass,
         inertia,
         center,
+    }
+}
+
+/// 圆角盒的质量属性：体积用 Steiner 闭式，**惯量用确定性网格采样**。
+///
+/// 为什么要采样：惯量的闭式解要按"6 面片 + 12 段 1/4 圆柱 + 8 个 1/8 球"逐块
+/// 用平行轴定理拼起来（每块的方向、质心偏移都不同），写错一位就是几十分之一的偏差，
+/// 而这种偏差在游戏里只表现为"滚起来有点怪"—— 没人看得出来。采样版本 20 行、
+/// 误差 < 1%（见 `rounded_box_mass_properties_match_closed_forms` 拿球/盒两个已知解对账），
+/// 而且**完全确定**（固定顺序、固定分辨率，同平台逐位可复现）。
+///
+/// 质心严格在原点（形状关于三轴对称），所以采样只算惯量，不修正质心。
+fn rounded_box_mass_properties(half_extents: Vec3, radius: f32, density: f32) -> MassProperties {
+    let he = half_extents.abs();
+    if density <= 0.0 || !density.is_finite() || he.min_element() <= 1e-9 {
+        return MassProperties::ZERO;
+    }
+    let r = radius.abs().min(he.min_element());
+    let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+    let volume = Shape::RoundedBox {
+        half_extents: he,
+        radius: r,
+    }
+    .volume();
+    if !volume.is_finite() || volume <= 0.0 {
+        return MassProperties::ZERO;
+    }
+    let mass = volume * density;
+    // 每轴 `n` 个格心：n³ 次"点在内"判定（闭式，比凸包那套 GJK 判定便宜得多）。
+    let n: usize = 32;
+    let cell = he * 2.0 / n as f32;
+    // 先累加"每个命中的格心到轴的平方距离"，最后除以命中数 —— 只把**形状内**的
+    //格子算进去（用 `mass / n³` 会漏掉形状外那部分质量，球体上直接差一半）。
+    let mut sum = Vec3::ZERO;
+    let mut count = 0usize;
+    for i in 0..n {
+        let x = -he.x + (i as f32 + 0.5) * cell.x;
+        for j in 0..n {
+            let y = -he.y + (j as f32 + 0.5) * cell.y;
+            for k in 0..n {
+                let z = -he.z + (k as f32 + 0.5) * cell.z;
+                let p = vec3(x, y, z);
+                let q = p.clamp(-inner, inner);
+                if (p - q).length() > r {
+                    continue;
+                }
+                sum += vec3(y * y + z * z, x * x + z * z, x * x + y * y);
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return MassProperties {
+            mass,
+            inertia: box_inertia(mass, he),
+            center: Vec3::ZERO,
+        };
+    }
+    let cell_mass = mass / count as f32;
+    MassProperties {
+        mass,
+        inertia: sum * cell_mass,
+        center: Vec3::ZERO,
     }
 }
 
@@ -757,6 +889,148 @@ mod tests {
             }
             other => panic!("膨胀后不该换形状：{other:?}"),
         }
+    }
+
+    #[test]
+    fn rounded_box_support_bounds_and_volume() {
+        let he = vec3(1.0, 0.5, 0.25);
+        let r = 0.1;
+        let s = Shape::RoundedBox {
+            half_extents: he,
+            radius: r,
+        };
+        // 支持点沿 +X 落在平面面片上：x = 内盒 + r = 外接半长
+        let p = s.support(Vec3::X);
+        assert!((p.x - he.x).abs() < 1e-6, "{p:?}");
+        // 沿对角方向落在圆角上：每个分量都朝外，且离内盒顶点恰好 r
+        let d = vec3(1.0, 1.0, 1.0).normalize();
+        let q = s.support(d);
+        let inner = he - Vec3::splat(r);
+        assert!(((q - inner).length() - r).abs() < 1e-6, "{q:?}");
+        // AABB 就是外接盒
+        let aabb = s.local_aabb();
+        assert!((aabb.min - (-he)).length() < 1e-5 && (aabb.max - he).length() < 1e-5);
+        assert!((s.bounding_radius() - he.length()).abs() < 1e-5);
+
+        // 体积：r = 0 → 长方体；r = 最薄的一半且三边相等 → 球
+        let flat = Shape::RoundedBox {
+            half_extents: he,
+            radius: 0.0,
+        };
+        assert!((flat.volume() - 8.0 * he.x * he.y * he.z).abs() < 1e-5);
+        let ball = Shape::RoundedBox {
+            half_extents: Vec3::splat(0.5),
+            radius: 0.5,
+        };
+        let expected = 4.0 / 3.0 * PI * 0.125;
+        assert!(
+            (ball.volume() - expected).abs() < 1e-4,
+            "{} vs {expected}",
+            ball.volume()
+        );
+        // 半径超过最薄的一半时按最薄的一半算（不产生负的内盒）
+        let clamped = Shape::RoundedBox {
+            half_extents: he,
+            radius: 10.0,
+        };
+        assert!(clamped.volume() > 0.0 && clamped.local_aabb().max.is_finite());
+    }
+
+    #[test]
+    fn rounded_box_mass_properties_match_closed_forms() {
+        // ① r = 0 就是长方体：惯量必须与闭式解一致（采样误差 < 1%）
+        let he = vec3(1.0, 0.5, 0.25);
+        let flat = Shape::RoundedBox {
+            half_extents: he,
+            radius: 0.0,
+        };
+        let mp = flat.mass_properties(1000.0);
+        let box_mp = Shape::Box { half_extents: he }.mass_properties(1000.0);
+        assert!((mp.mass - box_mp.mass).abs() < 1e-3, "{}", mp.mass);
+        for (got, want) in [
+            (mp.inertia.x, box_mp.inertia.x),
+            (mp.inertia.y, box_mp.inertia.y),
+            (mp.inertia.z, box_mp.inertia.z),
+        ] {
+            assert!((got - want).abs() / want < 0.01, "{got} vs {want}");
+        }
+        assert!(mp.center.length() < 1e-6);
+
+        // ② r = 最薄的一半且三边相等 → 球：惯量对球（2/5 m R²）
+        let ball = Shape::RoundedBox {
+            half_extents: Vec3::splat(0.5),
+            radius: 0.5,
+        };
+        let bmp = ball.mass_properties(1000.0);
+        let sphere = Shape::Sphere { radius: 0.5 }.mass_properties(1000.0);
+        assert!(
+            (bmp.mass - sphere.mass).abs() / sphere.mass < 1e-3,
+            "{}",
+            bmp.mass
+        );
+        for (got, want) in [
+            (bmp.inertia.x, sphere.inertia.x),
+            (bmp.inertia.y, sphere.inertia.y),
+            (bmp.inertia.z, sphere.inertia.z),
+        ] {
+            assert!(
+                (got - want).abs() / want < 0.02,
+                "球惯量对不上：{got} vs {want}"
+            );
+        }
+
+        // ③ 中等圆角：质量与惯量都落在"同尺寸长方体"与"同尺寸球"之间
+        let mid = Shape::RoundedBox {
+            half_extents: Vec3::splat(0.5),
+            radius: 0.2,
+        };
+        let mmp = mid.mass_properties(1000.0);
+        let cube_mp = Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        }
+        .mass_properties(1000.0);
+        assert!(
+            mmp.mass < cube_mp.mass && mmp.mass > sphere.mass,
+            "质量该在球与立方体之间：{} {} {}",
+            sphere.mass,
+            mmp.mass,
+            cube_mp.mass
+        );
+        assert!(
+            mmp.inertia.x < cube_mp.inertia.x && mmp.inertia.x > sphere.inertia.x,
+            "惯量该在球与立方体之间：{} {} {}",
+            sphere.inertia.x,
+            mmp.inertia.x,
+            cube_mp.inertia.x
+        );
+        // 三个轴相等（立方体对称）
+        assert!((mmp.inertia.x - mmp.inertia.y).abs() / mmp.inertia.x < 0.02);
+        assert!((mmp.inertia.x - mmp.inertia.z).abs() / mmp.inertia.x < 0.02);
+    }
+
+    #[test]
+    fn rounded_box_inflates_exactly() {
+        let he = vec3(1.0, 0.5, 0.25);
+        let s = Shape::RoundedBox {
+            half_extents: he,
+            radius: 0.1,
+        };
+        let m = 0.05;
+        let g = s.inflated(m);
+        match g {
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => {
+                assert!((radius - 0.15).abs() < 1e-6);
+                assert!((half_extents - (he + Vec3::splat(m))).length() < 1e-6);
+            }
+            other => panic!("膨胀后应仍是圆角盒：{other:?}"),
+        }
+        // 膨胀是 Minkowski 和，所以支持点整体外移 m
+        let d = vec3(1.0, -1.0, 1.0).normalize();
+        let diff = (g.support(d) - s.support(d)).length();
+        assert!((diff - m).abs() < 1e-5, "{diff}");
     }
 
     #[test]

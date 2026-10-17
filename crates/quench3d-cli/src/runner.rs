@@ -1275,6 +1275,33 @@ fn heightfield_mesh_name(shape: &ShapeDoc) -> String {
     )
 }
 
+/// 圆角盒的渲染网格：外接边长 + 圆角半径 → `MeshData::rounded_box`。
+pub fn rounded_box_mesh(shape: &ShapeDoc) -> quench3d::render::MeshData {
+    let size = v3(shape.size.unwrap_or([1.0, 1.0, 1.0]));
+    let radius = shape
+        .radius
+        .unwrap_or_else(|| size.min_element().max(1e-4) * 0.1);
+    quench3d::render::MeshData::rounded_box(size * 0.5, radius, 32, 16)
+}
+
+/// 圆角盒网格的缓存名：按（边长 + 圆角半径）的位模式做内容哈希。
+pub fn rounded_box_mesh_name(shape: &ShapeDoc) -> String {
+    let size = v3(shape.size.unwrap_or([1.0, 1.0, 1.0]));
+    let radius = shape
+        .radius
+        .unwrap_or_else(|| size.min_element().max(1e-4) * 0.1);
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for v in [size.x, size.y, size.z, radius] {
+        for b in v.to_bits().to_le_bytes() {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    format!("rounded_box:{hash:016x}")
+}
+
 /// 文档 → 引擎：形状描述翻成物理形状（**每种 `ShapeKind` 都必须有一个分支**）。
 pub fn physics_shape(shape: &ShapeDoc) -> Shape {
     match shape.kind {
@@ -1296,6 +1323,13 @@ pub fn physics_shape(shape: &ShapeDoc) -> Shape {
             half_height: shape.half_height.unwrap_or(0.5),
             radius: shape.radius.unwrap_or(0.5),
         },
+        ShapeKind::RoundedBox => {
+            let size = v3(shape.size.unwrap_or([1.0, 1.0, 1.0]));
+            Shape::RoundedBox {
+                half_extents: size * 0.5,
+                radius: shape.radius.unwrap_or_else(|| size.min_element() * 0.1),
+            }
+        }
         ShapeKind::HeightField => {
             // 物理上就是静态三角网：顶点/索引与渲染网格**同一份**（`MeshData::heightfield`），
             // 所以"看到的地形"和"踩到的地形"不可能对不上。
@@ -1343,6 +1377,8 @@ pub fn render_scale(shape: &ShapeDoc, plane_size: f32) -> Vec3 {
             let h = shape.half_height.unwrap_or(0.5);
             Vec3::new(r * 2.0, h * 2.0, r * 2.0)
         }
+        // 圆角盒的圆角半径逐物体不同，用"按尺寸生成的网格"，缩放恒为 1
+        ShapeKind::RoundedBox => Vec3::ONE,
         // 高度场用自己的网格（不是单位图元缩放出来的），所以缩放恒为 1
         ShapeKind::HeightField => Vec3::ONE,
         // 凸包不走这里（见 setup_visuals 里的 AABB 近似）
@@ -2004,6 +2040,36 @@ pub fn parse_overlap_query(text: &str) -> Result<QueryKind, String> {
                 format!("cone {},{}", nums[0], nums[1]),
             )
         }
+        "rounded_box" => {
+            if nums.len() != 4
+                || nums[0] <= 0.0
+                || nums[1] <= 0.0
+                || nums[2] <= 0.0
+                || nums[3] <= 0.0
+            {
+                return Err(
+                    "rounded_box 需要 4 个正数（边长 x, 边长 y, 边长 z, 圆角半径）：rounded_box:1,1,1,0.1"
+                        .into(),
+                );
+            }
+            let half = Vec3::new(nums[0] * 0.5, nums[1] * 0.5, nums[2] * 0.5);
+            if nums[3] > half.min_element() + 1e-6 {
+                return Err(format!(
+                    "圆角半径不能超过最短半边长 {}：再大就是胶囊/球了",
+                    half.min_element()
+                ));
+            }
+            (
+                Shape::RoundedBox {
+                    half_extents: half,
+                    radius: nums[3],
+                },
+                format!(
+                    "rounded_box {},{},{},{}",
+                    nums[0], nums[1], nums[2], nums[3]
+                ),
+            )
+        }
         "plane" => {
             if nums.len() != 3 {
                 return Err("plane 需要 3 个数（法线）：plane:0,1,0".into());
@@ -2488,6 +2554,7 @@ fn shape_kind_of(doc: &SceneDoc, name: &str) -> &'static str {
                 ShapeKind::Capsule => "capsule",
                 ShapeKind::Cylinder => "cylinder",
                 ShapeKind::Cone => "cone",
+                ShapeKind::RoundedBox => "rounded_box",
                 ShapeKind::HeightField => "heightfield",
                 ShapeKind::Plane => "plane",
                 ShapeKind::Convex => "convex",
@@ -2640,6 +2707,14 @@ pub fn setup_visuals(
                 ShapeKind::Capsule => engine.assets.unit_capsule,
                 ShapeKind::Cylinder => engine.assets.unit_cylinder,
                 ShapeKind::Cone => engine.assets.unit_cone,
+                // 圆角盒：圆角半径逐物体不同，网格按尺寸生成（同样按内容哈希缓存）
+                ShapeKind::RoundedBox => {
+                    let data = rounded_box_mesh(&part.shape);
+                    let name = rounded_box_mesh_name(&part.shape);
+                    engine
+                        .assets
+                        .mesh(&mut engine.renderer, &engine.gpu, &name, &data)
+                }
                 // 高度场：网格由高度数据生成（按内容哈希缓存，同一份地形只上传一次）
                 ShapeKind::HeightField => {
                     let data = heightfield_mesh(&part.shape);
@@ -3985,8 +4060,11 @@ mod tests {
             ShapeKind::Sphere => Some(Vec3::splat(1.0)),
             ShapeKind::Capsule => Some(Vec3::new(1.0, 2.0, 1.0)),
             ShapeKind::Cylinder | ShapeKind::Cone => Some(Vec3::new(1.0, 1.0, 1.0)),
-            // 高度场用自己的网格、平面无限大、凸包走 AABB 近似 —— 都没有单位图元
-            ShapeKind::HeightField | ShapeKind::Plane | ShapeKind::Convex => None,
+            // 圆角盒/高度场用自己的网格、平面无限大、凸包走 AABB 近似 —— 都没有单位图元
+            ShapeKind::RoundedBox
+            | ShapeKind::HeightField
+            | ShapeKind::Plane
+            | ShapeKind::Convex => None,
         };
         for kind in [
             ShapeKind::Box,
@@ -3994,6 +4072,7 @@ mod tests {
             ShapeKind::Capsule,
             ShapeKind::Cylinder,
             ShapeKind::Cone,
+            ShapeKind::RoundedBox,
             ShapeKind::HeightField,
             ShapeKind::Plane,
             ShapeKind::Convex,
@@ -4044,6 +4123,13 @@ mod tests {
                         radius: 0.3
                     }
                 ),
+                ShapeKind::RoundedBox => assert_eq!(
+                    shape,
+                    Shape::RoundedBox {
+                        half_extents: Vec3::new(0.2, 0.3, 0.4),
+                        radius: 0.3
+                    }
+                ),
                 ShapeKind::HeightField => match &shape {
                     // 2×2 格点 → 4 个顶点、2 个三角形（6 个索引）
                     Shape::TriMesh { vertices, indices } => {
@@ -4064,6 +4150,26 @@ mod tests {
                     Vec3::ONE,
                     "高度场不该被单位图元的缩放拉走"
                 );
+            }
+            if kind == ShapeKind::RoundedBox {
+                // 圆角盒同样用"按尺寸生成的网格"：缩放恒 1，而且网格外接盒 == 物理 AABB
+                // （半径超过最短半边长时两边都会钳制到最短半边长，所以这条也盯着钳制）
+                assert_eq!(
+                    render_scale(&doc, 5.0),
+                    Vec3::ONE,
+                    "圆角盒不该被单位图元的缩放拉走"
+                );
+                let mesh = rounded_box_mesh(&doc);
+                let aabb = shape.local_aabb();
+                assert!(
+                    (mesh.aabb().min - aabb.min).length() < 1e-4,
+                    "网格 {mesh:?} 与物理 {aabb:?}"
+                );
+                assert!(
+                    (mesh.aabb().max - aabb.max).length() < 1e-4,
+                    "网格 {mesh:?} 与物理 {aabb:?}"
+                );
+                assert!(rounded_box_mesh_name(&doc).starts_with("rounded_box:"));
             }
             if let Some(unit) = unit_size(kind) {
                 let scale = render_scale(&doc, 5.0);

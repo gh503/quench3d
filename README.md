@@ -365,12 +365,13 @@ let (ids, terrain) = engine.load_model_as_static("level.obj", Transform::IDENTIT
 ```rust
 let mut world = PhysicsWorld::with_gravity(Vec3::new(0.0, -9.81, 0.0));
 
-// 8 种形状
+// 9 种形状
 Shape::Sphere { radius: 0.5 }
 Shape::Box { half_extents: Vec3::splat(0.5) }
 Shape::Capsule { half_height: 0.6, radius: 0.3 }
 Shape::Cylinder { half_height: 0.5, radius: 0.5 }
 Shape::Cone { half_height: 0.5, radius: 0.5 }   // 底面在 -h、顶点在 +h（质心不在原点）
+Shape::RoundedBox { half_extents: Vec3::splat(0.5), radius: 0.05 }  // 盒子 ⊕ 半径 r 的球
 Shape::ConvexHull { points }
 Shape::Plane { normal: Vec3::Y }
 Shape::TriMesh { vertices, indices }        // 静态地形/关卡
@@ -900,6 +901,11 @@ NaN 刚体  : 0
   `quench3d validate` 管"语义"（范围、互斥、交叉引用）**——schema 过了不等于场景能跑。
   版本策略：当前格式版本 2；版本 1 的文件把 `version` 改成 2 即可（1→2 的唯一差别是
   `objects[].parent` 在 v2 才生效，没有 parent 的文件语义完全一样）。
+* `objects[].shape.type = "rounded_box"`：**圆角盒**（`size` 是外接**边长**，`radius` **必填**、
+  ≤ 最短边长的一半）。几何上是"盒子 ⊕ 半径 `radius` 的球"：`radius` 越小越像箱子，
+  等于最短边长的一半（三边相等时）就是球。物理支持函数是精确的，惯量用确定性网格采样
+  （误差 < 1%，见 `docs/production_readiness.md` §17）；渲染网格按尺寸生成（同样按内容哈希缓存），
+  所以 `render_scale` 恒为 1。
 * `objects[].shape.type = "heightfield"`：**地形高度场**。`heights` 是行主序的二维数组
   （`heights[行][列]`，行沿 Z、列沿 X），`cell_size` 是格子边长（米，缺省 1）；网格在 XZ 平面
   **以物体原点为中心**，高度是**相对原点**的。物理上它是**静态三角网**，所以只能 `body: "static"`
@@ -1121,7 +1127,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 593 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 603 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1192,9 +1198,9 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（"要真建 GP
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 **190** 个测试（`cargo test -p quench3d-cli`：lib 96 + bin 6 + 7 个集成测试二进制共 87 + 1 个 doctest），按目的分这几块：
+命令行工具的 **192** 个测试（`cargo test -p quench3d-cli`：lib 97 + bin 6 + 7 个集成测试二进制共 88 + 1 个 doctest），按目的分这几块：
 
-* **契约测试**（`tests/cli_e2e.rs`，62 个）真的去 spawn `quench3d` 子进程，断言
+* **契约测试**（`tests/cli_e2e.rs`，63 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；
   其中 4 条是「能力真的接线了」的像素/数值证据：**材质贴图**（同一箱子带/不带贴图的
   中心色差）、**点光源**（一盏红灯必须把箱子照红，且显式清空预设补光必须改变画面）、

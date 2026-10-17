@@ -493,7 +493,116 @@ pub(crate) fn ray_shape(
             }
             ray_convex_hull(shape, t, origin, dir, max_distance)
         }
+        // 圆角盒是凸的且有支持函数：直接走同一条"球体追踪 + GJK 最近点"的路径
+        // （它只要求形状会算支持函数，所以无需为圆角盒另写一套解析求交）。
+        Shape::RoundedBox {
+            half_extents,
+            radius,
+        } => ray_rounded_box(*half_extents, *radius, t, origin, dir, max_distance),
     }
+}
+
+/// 射线 - 圆角盒（局部空间，用**解析 SDF** 做球体步进）。
+///
+/// 为什么不用 `ray_convex_hull` 那条 GJK 球体步进：GJK 的"点-形状最近点"在
+/// **点位于形状内部**时不返回 0（返回的是单纯形上某个顶点的距离 —— 实测一个
+/// 稍微陷进圆角盒的点会得到 0.57），而球体步进一旦踩进内部就会跳过头。
+/// 圆角盒的 SDF 是闭式的（`dist(p, 内盒) - r`，1-Lipschitz），步进永不穿透，
+/// 落进内部时再做一次二分即可。
+fn ray_rounded_box(
+    half_extents: Vec3,
+    radius: f32,
+    t: &Transform,
+    origin: Vec3,
+    dir: Vec3,
+    max_distance: f32,
+) -> Option<(f32, Vec3)> {
+    let he = half_extents.abs();
+    let r = radius.abs().min(he.min_element());
+    let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+    let o = t.inverse_transform_point(origin);
+    let dl = t.rotation.inverse().mul_vec3(dir);
+    let len = dl.length();
+    if len < 1e-9 {
+        return None;
+    }
+    let d = dl / len;
+    let sdf = |p: Vec3| (p - p.clamp(-inner, inner)).length() - r;
+    let normal_at = |p: Vec3| {
+        let n = (p - p.clamp(-inner, inner)).normalize_or_zero();
+        if n.length_squared() > 0.5 {
+            return n;
+        }
+        // `r == 0`（退化成普通盒）时梯度为 0：取最外侧那个轴。
+        let a = [p.x.abs(), p.y.abs(), p.z.abs()];
+        let axis = if a[0] >= a[1] && a[0] >= a[2] {
+            0
+        } else if a[1] >= a[2] {
+            1
+        } else {
+            2
+        };
+        let mut n = Vec3::ZERO;
+        n[axis] = if [p.x, p.y, p.z][axis] >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        n
+    };
+    // 起点在内部：与其他形状一致，报**出射点**。
+    let mut s = 0.0f32;
+    if sdf(o) <= 0.0 {
+        let mut lo = 0.0f32;
+        let mut step = 1e-4f32;
+        let mut hi = lo + step;
+        while sdf(o + d * hi) <= 0.0 {
+            lo = hi;
+            step *= 2.0;
+            hi = lo + step;
+            if hi > max_distance {
+                return None;
+            }
+        }
+        for _ in 0..40 {
+            let mid = 0.5 * (lo + hi);
+            if sdf(o + d * mid) > 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        s = 0.5 * (lo + hi);
+        return Some((s, t.rotation.mul_vec3(normal_at(o + d * s))));
+    }
+    let mut prev = 0.0f32;
+    for _ in 0..64 {
+        let f = sdf(o + d * s);
+        if f <= 0.0 {
+            // 踩进了内部（数值抖动）：在 (prev, s) 之间二分出表面
+            let mut lo = prev;
+            let mut hi = s;
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if sdf(o + d * mid) > 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            s = 0.5 * (lo + hi);
+            return Some((s, t.rotation.mul_vec3(normal_at(o + d * s))));
+        }
+        if f <= 1e-6 {
+            return Some((s, t.rotation.mul_vec3(normal_at(o + d * s))));
+        }
+        prev = s;
+        s += f;
+        if s > max_distance {
+            return None;
+        }
+    }
+    None
 }
 
 /// 射线 - 盒（局部空间平板法）。

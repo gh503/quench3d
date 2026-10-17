@@ -560,6 +560,70 @@ impl MeshData {
         m
     }
 
+    /// 圆角盒（"盒子 ⊕ 半径 `radius` 的球"）：`half_extents` 是**外接**半长。
+    ///
+    /// 生成方式是从球的**方向网格径向投影**到圆角盒表面：对每个单位方向 `n`，沿射线
+    /// `t·n` 求"距内盒 `half_extents - radius` 恰好 `radius`"的那个 `t`（二分求根）。
+    /// 凸体的径向投影是双射，所以顶点一定落在表面上、三角形不会自交；拓扑也直接沿用
+    /// 球的（封闭、朝向一致）。法线取 SDF 的梯度（解析精确），不做事后平均。
+    ///
+    /// 代价是**网格疏密不均**（面片中心附近三角形大、圆角处密），这是径向投影的固有性质；
+    /// 要均匀就得按"6 面片 + 12 段 1/4 圆柱 + 8 个 1/8 球"拼接，代码量翻几倍。
+    /// 半长非正、半径非有限时返回空网格（不 panic）。
+    pub fn rounded_box(half_extents: Vec3, radius: f32, sectors: u32, stacks: u32) -> Self {
+        let he = Vec3::new(
+            half_extents.x.abs(),
+            half_extents.y.abs(),
+            half_extents.z.abs(),
+        );
+        if !he.is_finite() || he.min_element() <= 0.0 || !radius.is_finite() {
+            return Self::new();
+        }
+        let r = radius.abs().min(he.min_element());
+        let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+        let mut m = Self::sphere(1.0, sectors, stacks);
+        let sdf = |p: Vec3| (p - p.clamp(-inner, inner)).length() - r;
+        for v in &mut m.vertices {
+            let n = v.pos().normalize_or_zero();
+            // 沿 n 找表面：从"球半径方向"出发，步进到 SDF 变号再二分。
+            let mut lo = 0.0f32;
+            let mut hi = he.length() + r + 1.0;
+            for _ in 0..48 {
+                let mid = 0.5 * (lo + hi);
+                if sdf(n * mid) > 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let p = n * (0.5 * (lo + hi));
+            let g = (p - p.clamp(-inner, inner)).normalize_or_zero();
+            let normal = if g.length_squared() > 0.5 {
+                g
+            } else {
+                // 半径 0 的退化情形：法线取最外侧轴
+                let a = [p.x.abs(), p.y.abs(), p.z.abs()];
+                let axis = if a[0] >= a[1] && a[0] >= a[2] {
+                    0
+                } else if a[1] >= a[2] {
+                    1
+                } else {
+                    2
+                };
+                let mut nrm = Vec3::ZERO;
+                nrm[axis] = if [p.x, p.y, p.z][axis] >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                nrm
+            };
+            let uv = v.uv;
+            *v = Vertex::new(p, normal, Vec2::new(uv[0], uv[1]));
+        }
+        m
+    }
+
     /// 由三角形汤（每 3 个顶点一个三角形）构造带平法线的网格。
     pub fn from_triangles(positions: &[Vec3]) -> Self {
         let mut vertices = Vec::with_capacity(positions.len());
@@ -576,6 +640,51 @@ impl MeshData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 圆角盒网格：所有顶点都在表面（SDF = 0）、法线朝外且与位置一致、AABB 等于外接盒。
+    #[test]
+    fn rounded_box_mesh_lies_on_the_surface() {
+        let he = Vec3::new(1.0, 0.6, 0.35);
+        let r = 0.12;
+        let m = MeshData::rounded_box(he, r, 32, 16);
+        assert_eq!(m.vertices.len(), 33 * 17, "沿用球的方向网格");
+        assert_eq!(m.triangle_count(), 2 * 32 * 16);
+        let inner = he - Vec3::splat(r);
+        let sdf = |p: Vec3| (p - p.clamp(-inner, inner)).length() - r;
+        for v in &m.vertices {
+            let p = v.pos();
+            assert!(sdf(p).abs() < 1e-4, "顶点该在表面：{p:?} sdf={}", sdf(p));
+            let n = v.nrm();
+            assert!((n.length() - 1.0).abs() < 1e-4, "法线该是单位向量：{n:?}");
+            // 法线 == SDF 梯度（朝外）
+            let g = (p - p.clamp(-inner, inner)).normalize_or_zero();
+            assert!((n - g).length() < 1e-3, "法线该朝外：{n:?} vs {g:?}");
+        }
+        // AABB == 外接盒（sectors 是 4 的倍数时 ±X/±Z 面心正好被采到，极点是 ±Y）
+        let aabb = m.aabb();
+        assert!((aabb.min + he).length() < 1e-4, "{:?}", aabb.min);
+        assert!((aabb.max - he).length() < 1e-4, "{:?}", aabb.max);
+
+        // r = 0 退化成普通盒：顶点必须贴在盒面上，且三个方向都到边
+        let boxy = MeshData::rounded_box(Vec3::splat(0.5), 0.0, 32, 16);
+        for v in &boxy.vertices {
+            let p = v.pos();
+            let m = [p.x.abs(), p.y.abs(), p.z.abs()];
+            assert!(
+                (m[0] - 0.5).abs() < 1e-4 || (m[1] - 0.5).abs() < 1e-4 || (m[2] - 0.5).abs() < 1e-4,
+                "顶点该在盒面上：{p:?}"
+            );
+        }
+        // 退化输入：空网格，不 panic
+        assert!(MeshData::rounded_box(Vec3::ZERO, 0.1, 8, 4).is_empty());
+        assert!(MeshData::rounded_box(Vec3::splat(1.0), f32::NAN, 8, 4).is_empty());
+        // 负半长按绝对值处理（防御性，和物理 `Shape` 一致），不是空网格
+        let neg = MeshData::rounded_box(Vec3::splat(-1.0), 0.1, 8, 4);
+        assert!(
+            (neg.aabb().max - Vec3::splat(1.0)).length() < 0.2,
+            "负半长取绝对值"
+        );
+    }
 
     /// 高度场网格：格点数、三角形数、居中性、绕序（法线朝 +Y）、UV 范围、退化输入不 panic。
     #[test]

@@ -898,6 +898,19 @@ fn shape_doc_from_shape(shape: &Shape, _visual_scale: Vec3) -> Option<ShapeDoc> 
             radius: Some(*radius),
             ..Default::default()
         },
+        Shape::RoundedBox {
+            half_extents,
+            radius,
+        } => ShapeDoc {
+            kind: ShapeKind::RoundedBox,
+            size: Some([
+                half_extents.x * 2.0,
+                half_extents.y * 2.0,
+                half_extents.z * 2.0,
+            ]),
+            radius: Some(*radius),
+            ..Default::default()
+        },
         Shape::Plane { normal } => ShapeDoc {
             kind: ShapeKind::Plane,
             normal: Some([normal.x, normal.y, normal.z]),
@@ -1111,6 +1124,63 @@ pub fn roundtrip_probe() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 引擎形状 → 场景文档形状：每种图元都要能**原样反推**（存盘不丢形状）。
+    ///
+    /// 这条只覆盖"反推得出"的那些（三角网走底稿兜底，见 `include_export.rs`）。
+    /// 判据是往返：写进去的形状 → 引擎形状 → 反推回来还是同一份（`size` 是边长）。
+    #[test]
+    fn shape_export_round_trips_every_reversible_kind() {
+        fn check(shape: &Shape, kind: ShapeKind, size: Option<[f32; 3]>, radius: Option<f32>) {
+            let doc = shape_doc_from_shape(shape, Vec3::ONE).expect("该能反推");
+            assert_eq!(doc.kind, kind, "{shape:?}");
+            if let Some(size) = size {
+                let got = doc.size.expect("该写 size");
+                for (a, b) in got.iter().zip(size.iter()) {
+                    assert!((a - b).abs() < 1e-6, "{shape:?}: {got:?} vs {size:?}");
+                }
+            }
+            if let Some(radius) = radius {
+                assert!(
+                    (doc.radius.expect("该写 radius") - radius).abs() < 1e-6,
+                    "{shape:?}"
+                );
+            }
+        }
+        check(
+            &Shape::Box {
+                half_extents: Vec3::new(0.5, 0.25, 0.75),
+            },
+            ShapeKind::Box,
+            Some([1.0, 0.5, 1.5]),
+            None,
+        );
+        check(
+            &Shape::Sphere { radius: 0.4 },
+            ShapeKind::Sphere,
+            None,
+            Some(0.4),
+        );
+        check(
+            &Shape::Capsule {
+                half_height: 0.6,
+                radius: 0.2,
+            },
+            ShapeKind::Capsule,
+            None,
+            Some(0.2),
+        );
+        // 圆角盒：`size` 是边长（= 半长 × 2），`radius` 原样保留
+        check(
+            &Shape::RoundedBox {
+                half_extents: Vec3::new(0.5, 0.3, 0.7),
+                radius: 0.12,
+            },
+            ShapeKind::RoundedBox,
+            Some([1.0, 0.6, 1.4]),
+            Some(0.12),
+        );
+    }
 
     /// 欧拉角提取必须是**真的**反解：抽出来再塞回去要得到同一个旋转。
     ///

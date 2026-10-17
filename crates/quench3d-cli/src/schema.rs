@@ -373,12 +373,17 @@ pub fn scene_grammar() -> Value {
             "emissive_texture": "自发光贴图路径"
         },
         "shape": {
-            "type": ["box", "sphere", "capsule", "cylinder", "cone", "heightfield", "plane", "convex"],
+            "type": ["box", "sphere", "capsule", "cylinder", "cone", "rounded_box", "heightfield", "plane", "convex"],
             "box": { "size": "[x, y, z] 边长（不是半长），缺省 [1,1,1]" },
             "sphere": { "radius": "缺省 0.5" },
             "capsule": { "radius": "缺省 0.5", "half_height": "圆柱段半高，缺省 0.5" },
             "cylinder": { "radius": "缺省 0.5", "half_height": "缺省 0.5" },
             "cone": { "radius": "底面半径，缺省 0.5", "half_height": "缺省 0.5（底面在 -half_height、顶点在 +half_height）" },
+            "rounded_box": {
+                "size": "[x, y, z] 外接**边长**，缺省 [1,1,1]（和 box 同一套）",
+                "radius": "**必填**圆角半径，≤ 最短边长的一半（等于一半时（三边相等）就是球）",
+                "note": "几何 = 盒子 ⊕ 半径 radius 的球；惯量按确定性网格采样（误差 < 1%）"
+            },
             "heightfield": {
                 "heights": "行主序的二维数组（heights[行][列]，行沿 Z、列沿 X），至少 2×2；网格以形状原点为中心，值是相对原点的高度",
                 "cell_size": "格子边长（米），缺省 1.0",
@@ -557,6 +562,7 @@ pub fn json_schema() -> Value {
                 "capsule",
                 "cylinder",
                 "cone",
+                "rounded_box",
                 "heightfield",
                 "plane",
                 "convex",
@@ -920,8 +926,9 @@ pub fn system_prompt() -> String {
   - name: 字符串（关节引用与报告用它）
   - template: 模板名（可选）；instances: [{position, rotation_deg, scale, name}]（可选）
     一次摆多个副本 = 多个**独立**刚体；缺省名字 `本名#1`、`本名#2`…（只有一个副本时是本名）
-  - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"cone"|"heightfield"|"plane"|"convex",
-             size: [x,y,z]（box 的**边长**）, radius, half_height, normal, points,
+  - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"cone"|"rounded_box"|"heightfield"|"plane"|"convex",
+             size: [x,y,z]（box / rounded_box 的**边长**）, radius, half_height, normal, points,
+             radius（rounded_box 必填：圆角半径，≤ 最短边长的一半）,
              heights: [[…]]（heightfield：行主序，行沿 Z、列沿 X，至少 2×2；只能 static）,
              cell_size（heightfield 的格子边长，缺省 1.0） }
   - parent: 父物体的 name（可选）。给了之后 position/rotation_deg 是**相对父物体**的
@@ -1102,6 +1109,7 @@ mod tests {
             "capsule",
             "cylinder",
             "cone",
+            "rounded_box",
             "heightfield",
             "plane",
             "convex",
@@ -1222,8 +1230,15 @@ mod tests {
         let rest = &src[start..];
         let body = &rest[..rest.find("\n}").expect("枚举没有结束")];
         let mut out = Vec::new();
+        // 逐变体的 `#[serde(rename = "…")]` 也要认：`rename_all` 只是缺省值，
+        // 像 `RoundedBox → "rounded_box"` 这种蛇形名必须显式写，否则 schema 对不上。
+        let mut pending_rename: Option<String> = None;
         for line in body.lines() {
             let t = line.trim().trim_end_matches(',');
+            if let Some(rest) = t.strip_prefix("#[serde(rename = \"") {
+                pending_rename = Some(rest.split('"').next().unwrap_or("").to_string());
+                continue;
+            }
             if t.is_empty() || t.starts_with("///") || t.starts_with("//") || t.starts_with("#[") {
                 continue;
             }
@@ -1231,23 +1246,26 @@ mod tests {
             if ident.is_empty() || !ident.chars().next().unwrap().is_ascii_uppercase() {
                 continue;
             }
-            let json = match rename_all.as_str() {
-                "lowercase" => ident.to_lowercase(),
-                "snake_case" => {
-                    let mut s = String::new();
-                    for (i, c) in ident.chars().enumerate() {
-                        if c.is_ascii_uppercase() {
-                            if i > 0 {
-                                s.push('_');
+            let json = match pending_rename.take() {
+                Some(renamed) => renamed,
+                None => match rename_all.as_str() {
+                    "lowercase" => ident.to_lowercase(),
+                    "snake_case" => {
+                        let mut s = String::new();
+                        for (i, c) in ident.chars().enumerate() {
+                            if c.is_ascii_uppercase() {
+                                if i > 0 {
+                                    s.push('_');
+                                }
+                                s.push(c.to_ascii_lowercase());
+                            } else {
+                                s.push(c);
                             }
-                            s.push(c.to_ascii_lowercase());
-                        } else {
-                            s.push(c);
                         }
+                        s
                     }
-                    s
-                }
-                _ => ident.to_string(),
+                    _ => ident.to_string(),
+                },
             };
             out.push(json);
         }

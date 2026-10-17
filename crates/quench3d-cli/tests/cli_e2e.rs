@@ -4090,6 +4090,7 @@ fn json_schema_is_machine_readable() {
             "capsule",
             "cylinder",
             "cone",
+            "rounded_box",
             "heightfield",
             "plane",
             "convex"
@@ -5659,4 +5660,119 @@ fn heightfield_terrain_simulates_and_queries() {
             .any(|d| d["path"] == "objects[0].body" && d["code"] == "invalid_value"),
         "缺 objects[0].body 的诊断：{diags:?}"
     );
+}
+
+/// 圆角盒（gap #18 第三件）：小圆角时行为必须和普通箱子一致（停在半高、能射线打、能查重叠），
+/// 大圆角/坏数据给稳定码 —— 全程不需要显卡。
+#[test]
+fn rounded_box_behaves_like_a_box_and_validates_radius() {
+    let dir = temp_dir("rounded_box");
+    // 半径 0.05 的圆角盒与同尺寸普通箱子并排掉下来：两者都停在 y ≈ 0.5
+    let scene = write_scene(
+        &dir,
+        "rb.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "objects": [
+                { "name": "圆角", "body": "dynamic", "position": [-0.8, 2.0, 0.0],
+                  "shape": { "type": "rounded_box", "size": [1.0, 1.0, 1.0], "radius": 0.05 } },
+                { "name": "方盒", "body": "dynamic", "position": [0.8, 2.0, 0.0],
+                  "shape": { "type": "box", "size": [1.0, 1.0, 1.0] } }
+            ],
+            "ground": { "size": 20 },
+            "simulate": { "steps": 240, "dt": 0.0166667 }
+        }),
+    );
+    let v = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(v.code, 0, "{}", v.stdout);
+
+    let s = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(s.code, 0, "{}", s.stdout);
+    let data = s.json()["data"].clone();
+    assert_eq!(data["nan_bodies"], 0);
+    let states = data["states"].as_array().unwrap().clone();
+    for name in ["圆角", "方盒"] {
+        let st = states.iter().find(|x| x["name"] == name).unwrap();
+        let y = st["position"][1].as_f64().unwrap();
+        assert!(
+            (y - 0.5).abs() < 0.05,
+            "{name} 该停在 y≈0.5，实际 {y}（{st}）"
+        );
+        // 没翻倒：up 向量仍朝上
+        let rot = st["rotation"].as_array().unwrap();
+        assert!(
+            rot[0].as_f64().unwrap().abs() < 0.1,
+            "{name} 不该翻倒：{st}"
+        );
+    }
+
+    // 轨迹报告里形状名是 rounded_box
+    let t = run(&[
+        "simulate",
+        scene.to_str().unwrap(),
+        "--trace",
+        "圆角",
+        "--json",
+    ]);
+    assert_eq!(t.code, 0, "{}", t.stdout);
+    assert_eq!(t.json()["data"]["trajectories"][0]["shape"], "rounded_box");
+
+    // 重叠查询：圆角盒能当查询形状（有解析的"点在内"判据），而且能查到箱子
+    // （`query` 用的是文档里的**初始**位置，不是仿真后的位置，所以这里用 y=2）
+    let o = run(&[
+        "query",
+        scene.to_str().unwrap(),
+        "--overlap",
+        "rounded_box:1,1,1,0.1@-0.8,2,0",
+        "--json",
+    ]);
+    assert_eq!(o.code, 0, "{}", o.stdout);
+    let names: Vec<String> = o.json()["data"]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        names.contains(&"圆角".to_string()),
+        "重叠查询该命中：{names:?}"
+    );
+
+    // 半径超过最短半边长：校验拦下并指到 radius
+    let bad = write_scene(
+        &dir,
+        "bad_radius.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "objects": [ { "name": "太圆", "body": "dynamic",
+                           "shape": { "type": "rounded_box", "size": [1.0, 0.4, 1.0], "radius": 0.3 } } ],
+            "simulate": { "steps": 1 }
+        }),
+    );
+    let b = run(&["validate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(b.code, 2, "{}", b.stdout);
+    assert!(
+        b.json()["data"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["path"] == "objects[0].shape.radius" && d["code"] == "out_of_range"),
+        "{}",
+        b.stdout
+    );
+
+    // `--overlap` 的 radius 超过半边长时给一句人话
+    let o2 = run(&[
+        "query",
+        scene.to_str().unwrap(),
+        "--overlap",
+        "rounded_box:1,1,1,0.6",
+        "--json",
+    ]);
+    assert_eq!(o2.code, 2, "{}", o2.stdout);
+    let msg = o2.json()["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("胶囊") || msg.contains("球"), "{msg}");
 }

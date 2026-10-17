@@ -174,6 +174,60 @@ fn shape_plane_candidates(
                 out.push((p, -sd(p)));
             }
         }
+        // 圆角盒：14 个方向（6 个面心 + 8 个圆角）用支持函数采样 —— 斜着落地靠圆角接触；
+        // 再补"最朝下的那个平面面片"的 4 个角：平放时必须给 4 点流形，一个点支撑会让
+        // 盒子在地上轻微摇晃（圆柱/圆锥的 8 点采样是同一个理由）。
+        Shape::RoundedBox {
+            half_extents,
+            radius,
+        } => {
+            let he = half_extents.abs();
+            let r = radius.abs().min(he.min_element());
+            let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+            for &d in &[
+                vec3(1.0, 0.0, 0.0),
+                vec3(-1.0, 0.0, 0.0),
+                vec3(0.0, 1.0, 0.0),
+                vec3(0.0, -1.0, 0.0),
+                vec3(0.0, 0.0, 1.0),
+                vec3(0.0, 0.0, -1.0),
+                vec3(1.0, 1.0, 1.0),
+                vec3(1.0, 1.0, -1.0),
+                vec3(1.0, -1.0, 1.0),
+                vec3(1.0, -1.0, -1.0),
+                vec3(-1.0, 1.0, 1.0),
+                vec3(-1.0, 1.0, -1.0),
+                vec3(-1.0, -1.0, 1.0),
+                vec3(-1.0, -1.0, -1.0),
+            ] {
+                let w = t.transform_point(shape.support(d));
+                out.push((w, -sd(w)));
+            }
+            // 平面面片在 `±he[axis]`，另外两轴只到 `±inner`（圆角之外才是球面）。
+            let down = t.rotation.inverse().mul_vec3(-n);
+            let a = [down.x.abs(), down.y.abs(), down.z.abs()];
+            let axis = if a[0] >= a[1] && a[0] >= a[2] {
+                0
+            } else if a[1] >= a[2] {
+                1
+            } else {
+                2
+            };
+            let sign = if [down.x, down.y, down.z][axis] >= 0.0 {
+                1.0f32
+            } else {
+                -1.0
+            };
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            for &(su, sv) in &[(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let mut p = [0.0f32; 3];
+                p[axis] = sign * he[axis];
+                p[u] = su * inner[u];
+                p[v] = sv * inner[v];
+                let w = t.transform_point(vec3(p[0], p[1], p[2]));
+                out.push((w, -sd(w)));
+            }
+        }
         Shape::ConvexHull { points } => {
             for p in points {
                 let w = t.transform_point(*p);

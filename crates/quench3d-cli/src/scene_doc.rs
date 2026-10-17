@@ -1029,6 +1029,15 @@ pub enum ShapeKind {
     Cylinder,
     /// 圆锥（底面半径 `radius`、半高 `half_height`；底面在 `-half_height`、顶点在 `+half_height`）。
     Cone,
+    /// 圆角盒（外接**边长** `size` + 圆角半径 `radius`；`radius` 必须显式给出且 ≤ 最短边长的一半）。
+    ///
+    /// 几何上是"盒子 ⊕ 半径 `radius` 的球"：`radius` 越小越像盒子，等于最短边长的一半时
+    /// （三边相等的话）就是一个球。物理支持函数是精确的，惯量见 `docs/production_readiness.md`。
+    ///
+    /// 显式写 `rename`：`rename_all = "lowercase"` 会把它变成 `roundedbox`，
+    /// 而格式文档/校验/系统提示里都是 `rounded_box` —— 蛇形名得单独钉住。
+    #[serde(rename = "rounded_box")]
+    RoundedBox,
     /// 高度场（`heights` 行主序：行沿 Z、列沿 X；`cell_size` 缺省 1.0）。
     ///
     /// 网格在 XZ 平面以形状原点为中心，`heights[行][列]` 是相对原点的高度。
@@ -5585,6 +5594,47 @@ fn validate_shape(s: &ShapeDoc, path: &str, out: &mut Vec<Diagnostic>) {
                 }
             }
         }
+        ShapeKind::RoundedBox => {
+            if let Some(size) = s.size {
+                if !finite3(&size) || size.iter().any(|v| *v <= 0.0) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.size"),
+                        "边长必须是正有限数",
+                    ));
+                }
+            }
+            let min_edge = s
+                .size
+                .map(|v| v.iter().cloned().fold(f32::INFINITY, f32::min))
+                .unwrap_or(1.0);
+            match s.radius {
+                None => out.push(Diagnostic::error_code(
+                    ErrorCode::MissingField,
+                    format!("{path}.radius"),
+                    "圆角盒必须给出 radius（圆角半径）：不知道给多少就试「最短边长 × 0.1」",
+                )),
+                Some(r) => {
+                    if !r.is_finite() || r <= 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.radius"),
+                            "圆角半径必须为正数",
+                        ));
+                    } else if min_edge.is_finite() && r > min_edge * 0.5 + 1e-6 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.radius"),
+                            format!(
+                                "圆角半径不能超过最短边长的一半（{} / 2 = {}）：再大就滚成胶囊/球了，改用 sphere 或 capsule",
+                                min_edge,
+                                min_edge * 0.5
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         ShapeKind::HeightField => {
             match &s.heights {
                 None => out.push(Diagnostic::error_code(
@@ -8265,6 +8315,68 @@ mod tests {
     ///
     /// 上限那条在 e2e 里跑太贵（要写几十万个数的 JSON），所以在这里用**内存里构造**的文档测：
     /// 校验是纯函数，没有理由为了测一个上限去落盘。
+    #[test]
+    fn rounded_box_diagnostics_are_specific() {
+        let doc = |json: &str| {
+            SceneDoc::from_json(&format!(
+                r#"{{ "objects": [ {{ "name": "盒", "body": "dynamic", "shape": {json} }} ],
+                    "simulate": {{ "steps": 1 }} }}"#
+            ))
+            .expect("文档本身要能解析")
+        };
+        let diags_at = |json: &str, path: &str| -> Vec<crate::scene_doc::ErrorCode> {
+            let d = doc(json).validate();
+            d.iter()
+                .filter(|x| x.path == path && x.severity == crate::scene_doc::Severity::Error)
+                .map(|x| x.code)
+                .collect()
+        };
+        // 合法
+        assert!(diags_at(
+            r#"{ "type": "rounded_box", "size": [1, 1, 1], "radius": 0.1 }"#,
+            "objects[0].shape.radius"
+        )
+        .is_empty());
+        // 缺 radius
+        let codes = diags_at(
+            r#"{ "type": "rounded_box", "size": [1, 1, 1] }"#,
+            "objects[0].shape.radius",
+        );
+        assert_eq!(
+            codes,
+            vec![crate::scene_doc::ErrorCode::MissingField],
+            "缺半径该报 missing_field"
+        );
+        // 半径非正
+        for r in ["0", "-0.1"] {
+            let codes = diags_at(
+                &format!(r#"{{ "type": "rounded_box", "size": [1, 1, 1], "radius": {r} }}"#),
+                "objects[0].shape.radius",
+            );
+            assert_eq!(
+                codes,
+                vec![crate::scene_doc::ErrorCode::OutOfRange],
+                "半径 {r}"
+            );
+        }
+        // 半径超过最短半边长
+        let codes = diags_at(
+            r#"{ "type": "rounded_box", "size": [1, 0.4, 1], "radius": 0.3 }"#,
+            "objects[0].shape.radius",
+        );
+        assert_eq!(
+            codes,
+            vec![crate::scene_doc::ErrorCode::OutOfRange],
+            "0.3 > 0.4/2"
+        );
+        // 边长非正
+        let codes = diags_at(
+            r#"{ "type": "rounded_box", "size": [1, 0, 1], "radius": 0.1 }"#,
+            "objects[0].shape.size",
+        );
+        assert_eq!(codes, vec![crate::scene_doc::ErrorCode::OutOfRange]);
+    }
+
     #[test]
     fn heightfield_diagnostics_are_specific() {
         // ① 正常：2×3 格点、格子 2 米、静态 —— 一条诊断都不该有
