@@ -30,6 +30,7 @@ use crate::parallel::ParallelLayout;
 use crate::query::{self, QueryFilter, ShapeDistance};
 use crate::shape::Shape;
 use crate::solver::{self, BodyView, ContactCache, ContactSolver, ManifoldEntry, SolverConfig};
+use crate::water::{self, WaterVolume};
 
 /// 默认固定步长（1/60 秒）。
 pub const DEFAULT_FIXED_DT: f32 = 1.0 / 60.0;
@@ -279,6 +280,8 @@ pub struct PhysicsWorld {
     parallel_used: bool,
     joint_free: Vec<u32>,
     gravity: Vec3,
+    /// 水域（浮力环境）：不写就是空，行为与没有这一节时逐位相同。
+    waters: Vec<WaterVolume>,
     fixed_dt: f32,
     accumulator: f32,
     /// 最近一次子步的接触对（公开只读）。
@@ -439,6 +442,7 @@ impl PhysicsWorld {
             parallel_used: false,
             joint_free: Vec::new(),
             gravity,
+            waters: Vec::new(),
             fixed_dt: DEFAULT_FIXED_DT,
             accumulator: 0.0,
             contacts: Vec::new(),
@@ -505,6 +509,46 @@ impl PhysicsWorld {
     /// 尚未消化的时间余量。
     pub fn accumulator(&self) -> f32 {
         self.accumulator
+    }
+
+    // -----------------------------------------------------------------
+    // 水域（浮力）
+    // -----------------------------------------------------------------
+
+    /// 添加一块水域；参数不可用时返回 `None`（不塞进世界）。
+    ///
+    /// 水域是**环境**：它不参与碰撞、不占刚体槽，只影响动态体的浮力/阻尼。
+    /// 参数非法（NaN、非正尺寸、非正密度、负阻尼）时直接拒绝，避免把
+    /// "静默不生效"带进报告。
+    pub fn add_water(&mut self, water: WaterVolume) -> Option<usize> {
+        if !water.is_valid() {
+            return None;
+        }
+        self.waters.push(water);
+        Some(self.waters.len() - 1)
+    }
+
+    /// 清空所有水域，并把刚体上的浸没占比归零。
+    pub fn clear_waters(&mut self) {
+        if self.waters.is_empty() {
+            return;
+        }
+        self.waters.clear();
+        for slot in &mut self.bodies {
+            if let Some(b) = &mut slot.body {
+                b.submerged = 0.0;
+            }
+        }
+    }
+
+    /// 当前水域（只读）。
+    pub fn waters(&self) -> &[WaterVolume] {
+        &self.waters
+    }
+
+    /// 水域数量。
+    pub fn water_count(&self) -> usize {
+        self.waters.len()
     }
 
     // -----------------------------------------------------------------
@@ -979,6 +1023,67 @@ impl PhysicsWorld {
         steps
     }
 
+    /// 浮力 + 浸没阻尼：对每个动态体，把各水域的排开体积合成一个力，
+    /// 作用在合成形心上（因此有扶正力矩）。
+    ///
+    /// 睡眠体**不施力**（否则浮力会把它们一直唤醒，永远睡不着）；它们的
+    /// 浸没占比仍会重算，报告里看得到。水域为空时整段不执行。
+    fn apply_buoyancy(&mut self, dt: f32) {
+        if self.waters.is_empty() {
+            return;
+        }
+        let gravity = self.gravity;
+        let waters = &self.waters;
+        for slot in &mut self.bodies {
+            let Some(b) = slot.body.as_mut() else {
+                continue;
+            };
+            if b.body_type != BodyType::Dynamic {
+                b.submerged = 0.0;
+                continue;
+            }
+            // 睡眠体连采样都跳过：浮力/阻尼都不会叫醒它，重算只会白烧 CPU。
+            // 代价是 `submerged` 停在"最后一次醒着"的值（报告口径，见 water.rs）。
+            if b.sleeping {
+                continue;
+            }
+            let total = water::body_volume(b);
+            let mut volume = 0.0f32;
+            let mut force = Vec3::ZERO;
+            let mut moment = Vec3::ZERO;
+            let mut drag = 0.0f32;
+            for w in waters {
+                let s = water::submerged_in(b, w);
+                if !s.is_submerged() {
+                    continue;
+                }
+                volume += s.volume;
+                // 浮力 = -g · ρ · V（与重力反向）。
+                force -= gravity * (w.density * s.volume);
+                moment += s.centroid * s.volume;
+                drag = drag.max(w.drag);
+            }
+            b.submerged = if total > 0.0 {
+                (volume / total).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if volume <= 0.0 || !force.is_finite() {
+                continue;
+            }
+            // 直接累加到 force/torque（**不调 `apply_force`**）：浮力是环境力，
+            // 不该每一步都把刚体唤醒——否则漂浮物永远睡不着。睡眠体上面已经跳过，
+            // 醒着的体照常积分。
+            b.add_force_at_point(force, moment / volume);
+            if drag > 0.0 {
+                // 简化线性阻尼（只对浸没部分生效）；不是粘性应力。
+                let f = 1.0 / (1.0 + drag * b.submerged * dt);
+                b.linear_velocity *= f;
+                b.angular_velocity *= f;
+            }
+        }
+    }
+
     /// 单个固定子步。
     fn substep(&mut self, dt: f32) {
         if dt <= 0.0 || !dt.is_finite() {
@@ -1009,6 +1114,8 @@ impl PhysicsWorld {
                 None => pre_velocities.push((Vec3::ZERO, Vec3::ZERO)),
             }
         }
+        // 0.5 浮力：在速度积分之前施力（与重力一样作为"本步外力"被消费）。
+        self.apply_buoyancy(dt);
         // 1. 速度积分
         solver::integrate_velocities(&mut self.bodies, self.gravity, dt);
         lap!(integrate_velocity_us);

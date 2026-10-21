@@ -929,3 +929,41 @@ fn templates_and_instances_are_flattened_on_save() {
         parsed.validate()
     );
 }
+
+#[test]
+fn waters_survive_editor_roundtrip_and_render_a_surface() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let source = r#"{
+      "format": "quench3d.scene", "version": 2, "name": "water-editor",
+      "ground": { "size": 20, "y": -2 },
+      "waters": [{ "center": [1, -2], "size": [8, 6], "level": 0.4,
+                   "density": 900, "drag": 2.5 }],
+      "objects": [
+        { "name": "浮球", "shape": { "type": "sphere", "radius": 0.5 },
+          "position": [0, 2, 0], "body": "dynamic", "density": 400 }
+      ]
+    }"#;
+    let mut doc = Doc::new();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+    assert_eq!(engine.world.water_count(), 1, "物理世界要装上水域");
+    assert!(
+        engine
+            .scene
+            .objects
+            .iter()
+            .any(|o| o.name.starts_with("水域")),
+        "水面要有可见物体，否则编辑器里看不到水"
+    );
+
+    let out = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    let parsed = SceneDoc::from_json(&out.json).expect("导出的必须是合法场景 JSON");
+    assert_eq!(parsed.waters.len(), 1, "存一次不许把水域丢掉");
+    let w = &parsed.waters[0];
+    assert_eq!(w.center, Some([1.0, -2.0]));
+    assert_eq!(w.size, [8.0, 6.0]);
+    assert_eq!(w.level, 0.4);
+    assert_eq!(w.density, 900.0);
+    assert_eq!(w.drag, 2.5);
+}

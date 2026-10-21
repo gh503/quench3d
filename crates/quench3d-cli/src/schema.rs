@@ -332,11 +332,19 @@ pub fn scene_grammar() -> Value {
                 "note": "世界级缺省；物体上的同名字段优先。不写这一节 = 全用引擎缺省（结果与没有这一节逐位相同）"
             },
             "ground": { "size": "f32 边长，缺省 40", "material": "材质名（可选）", "y": "f32 高度，缺省 0" },
+            "waters": [{
+                "center": "[x, z]，缺省 [0, 0]",
+                "size": "[x, z] 米，必须为正（水面范围，不是池底）",
+                "level": "水面高度 y（米）",
+                "density": "密度 kg/m³，缺省 1000（水）",
+                "drag": "浸没部分线性阻尼 1/s，缺省 6；0 = 无阻尼",
+                "note": "一维浮力环境：y <= level 且在 XZ 范围内算浸没；没有粒子/流动/波浪（M1）。不写 = 没有水，物理结果与以前逐位相同",
+            }],
             "materials": "名字 → 材质对象",
             "include": [
                 "被包含的外部场景片段路径数组（跨文件复用：把一份场景拆成多个文件）",
                 "相对路径以**写这一行的文件**所在目录为基准；片段可以再 include（最多 16 层，同一个文件只并入一次，成环报 include_cycle）",
-                "片段只能贡献可合并的段：materials/templates/cameras（重名 = duplicate_name 错误，不静默覆盖）+ objects/models/joints/actions/probes/animations（按声明顺序追加：本文件自己的内容在前，被包含的内容在后）",
+                "片段只能贡献可合并的段：materials/templates/cameras（重名 = duplicate_name 错误，不静默覆盖）+ waters/objects/models/joints/actions/probes/animations（按声明顺序追加：本文件自己的内容在前，被包含的内容在后）",
                 "根独有的段（ground/camera/lighting/simulate/render/gravity/physics/name/assets）写在片段里是错误",
                 "片段里的贴图/模型相对路径按**片段自己的目录**解析（装载时重定基），不会因为被谁包含而指错地方",
                 "跨文件 prefab 的推荐写法：片段只放 templates，根场景用 objects[].template + instances 实例化",
@@ -679,6 +687,14 @@ pub fn json_schema() -> Value {
         "ground".into(),
         def(&["size", "material", "y", "friction", "restitution"]),
     );
+    defs.insert("water".into(), {
+        let mut d = def(&["center", "size", "level", "density", "drag"]);
+        d["description"] = json!(
+            "一块水域（浮力环境）：y <= level 且在 XZ 范围内的刚体按排开体积受浮力；不是流体求解器"
+        );
+        d["required"] = json!(["size", "level"]);
+        d
+    });
     defs.insert("model".into(), {
         let mut d = def(&[
             "path",
@@ -861,6 +877,8 @@ pub fn json_schema() -> Value {
                 "gravity": { "$ref": "#/$defs/vec3" },
                 "physics": { "$ref": "#/$defs/physics" },
                 "ground": { "$ref": "#/$defs/ground" },
+                "waters": { "type": "array", "items": { "$ref": "#/$defs/water" },
+                            "description": "水域（浮力环境）：只影响动态刚体的浮力/阻尼，不参与碰撞；不写 = 没有水" },
                 "materials": { "type": "object",
                                "additionalProperties": { "$ref": "#/$defs/material" } },
                 "include": { "type": "array", "items": { "type": "string" },
@@ -911,6 +929,9 @@ pub fn system_prompt() -> String {
 - name: 字符串
 - gravity: [x, y, z]，缺省 [0, -9.81, 0]
 - ground: { size: 40, material: "floor" }   // 地面是无限大静态平面
+- waters: [{ center: [0, 0], size: [10, 6], level: 0.0, density: 1000, drag: 6 }]
+  // 水域（浮力环境，M1）：y <= level 且在 XZ 范围内算浸没；动态刚体按排开体积受浮力，
+  // 睡眠体不受力。没有粒子/流动/波浪；不写 = 没有水。
 - materials: { 名字: { color: [r,g,b]（sRGB）, metallic: 0~1, roughness: 0.05~1, emissive: 0,
              alpha: 0~1, emissive_color: [r,g,b], uv_scale: 1, normal_scale: 1,
              alpha_cutoff: 0, alpha_blend: false, unlit: false, double_sided: false,
@@ -920,8 +941,8 @@ pub fn system_prompt() -> String {
   物体写 "template": "名字" 引用；物体自己写的字段覆盖模板
   （模板里写 name/parent/position/rotation_deg 没有意义，会被忽略并警告）
 - include: ["parts/wall.json", "../shared/common.json"]   // 跨文件复用（可选）
-  被包含的片段只贡献可合并的段（materials/templates/cameras + objects/models/joints/
-  actions/probes/animations）：具名表重名 = duplicate_name 错误（不静默覆盖），
+  被包含的片段只贡献可合并的段（materials/templates/cameras + waters/objects/models/
+  joints/actions/probes/animations）：具名表重名 = duplicate_name 错误（不静默覆盖），
   数组按声明顺序追加（**本文件自己的内容在前**，被包含的在后）。
   根独有的段（ground/camera/lighting/simulate/render/gravity/physics/name/assets）
   写在片段里是错误 —— 这些段只有一个实例，谁赢没有答案，所以宁可报错也不含糊地合并。
@@ -1299,6 +1320,7 @@ mod tests {
             ("InstanceDoc", "instance"),
             ("MaterialDoc", "material"),
             ("GroundDoc", "ground"),
+            ("WaterDoc", "water"),
             ("ModelDoc", "model"),
             ("ModelAnimationDoc", "modelAnimation"),
             ("AssetsDoc", "assets"),
@@ -1440,6 +1462,7 @@ mod tests {
             "cameras",
             "gravity",
             "ground",
+            "waters",
             "materials",
             "templates",
             "instances",

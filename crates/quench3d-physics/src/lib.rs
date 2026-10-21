@@ -37,6 +37,7 @@ mod shape;
 mod sim_tests;
 mod small_vec;
 mod solver;
+mod water;
 mod world;
 
 pub use crate::island::IslandStats;
@@ -55,6 +56,7 @@ pub use query_index::*;
 pub use shape::*;
 pub use small_vec::SmallVec;
 pub use solver::*;
+pub use water::*;
 pub use world::*;
 
 use quench3d_math::{vec3, Vec3};

@@ -204,6 +204,63 @@ fn simulate_traces_bodies_and_reports_fall_and_tilt() {
 }
 
 #[test]
+fn water_buoyancy_floats_light_bodies_and_sinks_dense_ones() {
+    let dir = temp_dir("water");
+    let scene = dir.join("water.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "ground": { "size": 20, "y": -3 },
+          "waters": [{ "center": [0, 0], "size": [10, 10], "level": 0.0 }],
+          "objects": [
+            { "name": "轻箱", "shape": { "type": "box", "size": [1, 0.5, 1] },
+              "position": [0, 2, 0], "body": "dynamic", "density": 500 },
+            { "name": "重箱", "shape": { "type": "box", "size": [1, 0.5, 1] },
+              "position": [3, 2, 0], "body": "dynamic", "density": 2000 }
+          ],
+          "simulate": { "steps": 360, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let env = r.json();
+    let data = &env["data"];
+    assert_eq!(data["waters"], 1, "报告要能看出配了水域: {data}");
+    let states = data["states"].as_array().unwrap();
+    let light = states.iter().find(|s| s["name"] == "轻箱").unwrap();
+    let heavy = states.iter().find(|s| s["name"] == "重箱").unwrap();
+    let light_y = light["position"][1].as_f64().unwrap();
+    assert!(
+        light_y.abs() < 0.2,
+        "半密度箱的箱心应停在水面附近，实际 {light_y}"
+    );
+    let sub = light["submerged"].as_f64().unwrap();
+    assert!((sub - 0.5).abs() < 0.12, "浸没占比应接近 0.5，实际 {sub}");
+    let heavy_y = heavy["position"][1].as_f64().unwrap();
+    assert!(heavy_y < -0.3, "密度两倍的箱应沉底，实际 y = {heavy_y}");
+
+    // 尺寸非法：当场报 waters[0].size，而不是静默没有水。
+    let bad = dir.join("bad_water.json");
+    std::fs::write(
+        &bad,
+        r#"{"waters": [{ "size": [0, 4], "level": 0 }], "simulate": { "steps": 1 }}"#,
+    )
+    .unwrap();
+    let r = run(&["validate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    let env = r.json();
+    let diags = env["data"]["diagnostics"].as_array().unwrap();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["path"].as_str() == Some("waters[0].size")),
+        "要报 waters[0].size: {diags:?}"
+    );
+}
+
+#[test]
 fn invalid_scene_exits_with_code_2_and_reports_paths() {
     let dir = temp_dir("invalid");
     let scene = dir.join("bad.json");

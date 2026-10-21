@@ -8,6 +8,20 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`waters`：解析水域 + 浮力（M1，不是流体求解器）**：场景新增 `waters: [{ center, size,
+  level, density, drag }]`，动态刚体按**排开体积**受浮力（作用在排开体积形心上，因此有扶正
+  力矩）、按浸没比例受线性阻尼；`simulate` 报告新增 `waters` 计数与 `states[].submerged`
+  （0~1，人读输出显示"浸没 %"）。渲染把水域画成半透明水面（alpha 混合批次，排在 opaque 之后）。
+  **不写 = 没有水，物理结果与以前逐位相同**；浮力是环境力，**不会把睡眠体叫醒**（睡眠体连采样都跳过，`submerged` 停在最后醒着的值），
+  水面变化后要显式唤醒。边界：没有粒子/流动/波浪/折射，没有池底（半空间）；这是 M1，PBF 粒子流体是
+  后续批次。验证：`cargo test -p quench3d-physics water`（球浮到水面、重物沉底、确定性）、
+  `cargo test -p quench3d-cli --test cli_e2e water`（报告字段与校验路径）、
+  `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test scene_roundtrip waters`
+  （编辑器存读保留 + 水面物体存在）；`render` 有无水域对比：25.9% 像素变化，差异区域在画面
+  下半部（水面），不是全屏噪声。
+
 ### 工程卫生
 
 - **CI 不再出现无法诊断的 Windows 假红**：在**没有 GPU 的 Windows runner** 上创建真实 wgpu

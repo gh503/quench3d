@@ -641,6 +641,9 @@ fn dispatch(args: &Args) -> i32 {
                         report.lowest_y,
                         report.nan_bodies
                     );
+                    if report.waters > 0 {
+                        human.push_str(&format!("水域      : {}\n", report.waters));
+                    }
                     for s in &report.states {
                         human.push_str(&format!(
                             "  {:<14} {:<9} 位置 ({:>7.2},{:>7.2},{:>7.2}) 速度 {:>6.2} 位移 {:>6.2}{}\n",
@@ -651,7 +654,12 @@ fn dispatch(args: &Args) -> i32 {
                             s.position[2],
                             s.speed,
                             s.displacement,
-                            if s.asleep { " 休眠" } else { "" }
+                            match (s.asleep, s.submerged) {
+                                (true, m) if m > 0.0 => format!(" 休眠 浸没 {:.0}%", m * 100.0),
+                                (true, _) => " 休眠".to_string(),
+                                (false, m) if m > 0.0 => format!(" 浸没 {:.0}%", m * 100.0),
+                                (false, _) => String::new(),
+                            }
                         ));
                     }
                     for w in &report.warnings {

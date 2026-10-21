@@ -2159,3 +2159,45 @@ if let Some(v) = doc.physics.static_friction_speed {
 
 **不要**从 GPU 蒙皮开始：没有节点树和 CPU 侧采样，着色器里的关节矩阵只能从常量来，
 调不动也测不了。
+
+## 20. 第 63 轮：`waters` —— 解析水域 + 浮力（M1）
+
+### 20.1 这轮交付了什么
+
+* 场景格式：`waters: [{ center: [x,z], size: [x,z], level, density, drag }]`，
+  不写 = 没有水（物理结果与以前**逐位相同**；`Shape` 的采样/浮力代码只在 `waters` 非空时执行）。
+* 物理：`PhysicsWorld::add_water` + 每个子步在速度积分**之前**施加浮力；作用点是**排开体积的
+  形心**（不是质心），所以倾斜的箱子有扶正力矩。`submerged_fraction()` 是只读观测值。
+* 渲染：`setup_visuals` 生成一块单位水面网格（16×16 细分，为将来的波浪网格留位置），
+  按水域尺寸缩放，alpha 混合。没有波浪/折射；渲染器本来就会把 alpha 批次排到最后。
+* 报告：`simulate` 顶层 `waters`（没水域不出现）+ `states[].submerged`（没浸没不出现），
+  人读输出多一行"水域"与"浸没 %"；`mcp` 的 simulate outputSchema 同步。
+* 编辑器：载入即装进世界并出现"水域"物体；存盘原样保留（`waters` 在底稿里），有 GPU 测试。
+
+### 20.2 算法与边界（诚实清单）
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 浸没体积 | 🟡 采样近似 | 每个形状部件在**本地 AABB** 上取 10³ 个格点，`Shape::contains_local` 判内部、变换到世界判水面；体积 = 格体积 × 命中数。误差约几个百分点（球体半浸没实测 < 5%），因此平衡水位有约一格（尺寸/10）的量化误差 |
+| 凸包 | 🟡 按 AABB | 凸包只存点集、没有面表；`contains_local` 对凸包退化为 AABB 判定（与 `Shape::volume` 的口径一致），文档已标注 |
+| 水面 | 半空间 | `y <= level` 且在 XZ 范围内就算浸没；**没有池底**（要池底就把地面放水下） |
+| 浮力 | ✅ | `F = -g · ρ · V_sub`；`g = world.gravity()`，与 `gravity_scale` 无关 |
+| 阻尼 | 🟡 简化 | 浸没部分按 `drag × submerged` 的比例缩速度（1/s），不是粘性应力；缺省 6 是"辐射阻尼"的替身 |
+| 睡眠 | ✅ 可睡 | 浮力直接累加 `force/torque`、**不调 `wake_up`**，睡眠体连采样都跳过（`submerged` 停在最后醒着的值）；水面变化后要显式唤醒 |
+| 多重水域 | ⚠️ 叠加 | 重叠水域会叠加浮力（不做优先级/去重）；文档建议不要重叠 |
+| 粒子/流动/波浪/折射 | ❌ | 这是 M1；PBF 粒子流体、屏幕空间水渲染是 M2/M4 |
+| 格式校验 | ✅ | 尺寸/密度/阻尼非法在 `validate` 报 `waters[i].*`；`build_world` 再挡一次（不静默忽略） |
+
+### 20.3 测试与证据
+
+* `quench3d-physics`：`water_contains_respects_bounds_and_level`、
+  `half_submerged_sphere_reports_half_its_volume`、`fully_above_water_has_no_buoyancy`、
+  `fully_submerged_box_reports_its_volume`、`body_volume_sums_parts`、
+  `half_density_sphere_floats_at_the_surface`、`dense_body_sinks_and_rests_on_the_ground`、
+  `buoyancy_is_deterministic`。
+* CLI e2e：`water_buoyancy_floats_light_bodies_and_sinks_dense_ones`（半密度箱停在水面、
+  两倍密度箱沉底、报告有 `waters` / `submerged`、非法尺寸报 `waters[0].size`）。
+* 编辑器（需 `QUENCH3D_GPU_TESTS=1`）：`waters_survive_editor_roundtrip_and_render_a_surface`。
+* 像素证据：同一场景有/无 `waters` 的 `render` 对比 **25.9% 像素变化**，差异 y 范围
+  154~419（画面下半部，即水面），平均绝对差 6.24；GIF（48 帧，640×420）帧间差异经 2px
+  高斯模糊后集中在箱子区域（2.6%），排除 GIF 调色板抖动造成的假差异。

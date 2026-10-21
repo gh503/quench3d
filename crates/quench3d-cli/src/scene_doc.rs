@@ -354,6 +354,13 @@ pub struct SceneDoc {
     /// 地面：静态平面 + 可视平面。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ground: Option<GroundDoc>,
+    /// 水域（浮力环境）：水面高度 + XZ 范围，**没有流体求解器**。
+    ///
+    /// 不写 = 没有水（物理结果与以前逐位相同）。写了之后，动态刚体按"排开体积"
+    /// 受浮力与阻尼，睡眠体不受力（不会被浮力一直唤醒）。
+    /// 这是 M1 的解析水域；粒子流体（PBF）还没做。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waters: Vec<WaterDoc>,
     /// 具名材质。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub materials: BTreeMap<String, MaterialDoc>,
@@ -364,7 +371,8 @@ pub struct SceneDoc {
     ///    （文件目录 → `assets.search_paths` → `--asset-path` → 工作目录 → 引擎搜索路径）。
     /// 2. 片段必须是合法的 `quench3d.scene`（同样的字段集），但只能贡献**可合并的段**：
     ///    `materials` / `templates` / `cameras`（具名表，重名即错误）与
-    ///    `objects` / `models` / `joints` / `actions` / `probes` / `animations`（数组，按顺序追加）。
+    ///    `waters` / `objects` / `models` / `joints` / `actions` / `probes` / `animations`
+    ///    （数组，按顺序追加）。
     ///    根独有的段（`ground`/`camera`/`lighting`/`simulate`/`render`/`gravity`/`physics`/`name`/`assets`）
     ///    写在片段里是错误（根独有的段列在源码的 `ROOT_ONLY_SECTIONS` 常量里）。
     /// 3. 顺序：**本文件自己的内容在前**，被 include 的内容在后（按声明顺序先序深度优先）。
@@ -905,6 +913,7 @@ impl Default for SceneDoc {
             gravity: None,
             physics: PhysicsDoc::default(),
             ground: None,
+            waters: Vec::new(),
             materials: BTreeMap::new(),
             include: Vec::new(),
             objects: Vec::new(),
@@ -952,6 +961,37 @@ fn default_ground_size() -> f32 {
 
 fn default_ground_friction() -> f32 {
     0.85
+}
+
+/// 一块水域（浮力环境）。
+///
+/// 不是流体：没有粒子、没有流动，只有"水面以下排开体积"产生的浮力。
+/// 水面是**半空间**（`y <= level` 且落在 XZ 范围内就算浸没），没有池底；
+/// 要池底就把地面放在水下。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaterDoc {
+    /// XZ 中心 `[x, z]`，缺省 `[0, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f32; 2]>,
+    /// XZ 尺寸 `[x, z]`（米），必须为正。
+    pub size: [f32; 2],
+    /// 水面高度（世界 Y）。
+    pub level: f32,
+    /// 密度（kg/m³），缺省 1000（水）。
+    #[serde(default = "default_water_density")]
+    pub density: f32,
+    /// 浸没部分的线性阻尼（1/s），缺省 6；0 = 无阻尼。
+    #[serde(default = "default_water_drag")]
+    pub drag: f32,
+}
+
+fn default_water_density() -> f32 {
+    1000.0
+}
+
+fn default_water_drag() -> f32 {
+    6.0
 }
 
 /// 材质（线性或 sRGB 由 `srgb` 控制，缺省按 sRGB 解释，符合直觉）。
@@ -2190,6 +2230,7 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     check_section::<u32>(map.get("version"), "version", &mut out);
     check_section::<[f32; 3]>(map.get("gravity"), "gravity", &mut out);
     check_section::<GroundDoc>(map.get("ground"), "ground", &mut out);
+    check_array::<WaterDoc>(map.get("waters"), "waters", &mut out);
     check_section::<CameraDoc>(map.get("camera"), "camera", &mut out);
     check_section::<Vec<AnimationDoc>>(map.get("animations"), "animations", &mut out);
     check_section::<BTreeMap<String, CameraDoc>>(map.get("cameras"), "cameras", &mut out);
@@ -2793,6 +2834,7 @@ impl IncludeCtx {
         for (k, v) in cameras {
             self.insert_named(&mut into.cameras, "cameras", &k, &v, ref_path, label);
         }
+        into.waters.extend(doc.waters.iter().cloned());
         into.objects.extend(doc.objects.iter().cloned());
         into.models.extend(doc.models.iter().cloned());
         into.joints.extend(doc.joints.iter().cloned());
@@ -3276,6 +3318,50 @@ impl SceneDoc {
                 }
             }
             let _ = i;
+        }
+        // 水域：尺寸/密度/阻尼非法会让"浮力静默不生效"，必须当场报。
+        for (i, w) in self.waters.iter().enumerate() {
+            let p = format!("waters[{i}]");
+            if let Some(c) = &w.center {
+                if !c.iter().all(|v| v.is_finite()) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.center"),
+                        "水域中心必须是有限数",
+                    ));
+                }
+            }
+            if !w.size.iter().all(|v| v.is_finite() && *v > 0.0) {
+                cam_diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.size"),
+                        "水域 XZ 尺寸必须是有限正数",
+                    )
+                    .with_hint("例如 `\"size\": [10, 6]`；只写 0 或负数等于没有水"),
+                );
+            }
+            if !w.level.is_finite() {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.level"),
+                    "水面高度必须是有限数",
+                ));
+            }
+            if !(w.density.is_finite() && w.density > 0.0) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.density"),
+                    "密度必须是有限正数（水 = 1000）",
+                ));
+            }
+            if !(w.drag.is_finite() && w.drag >= 0.0) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.drag"),
+                    "阻尼必须是有限的非负数",
+                ));
+            }
         }
         // 关键帧动画：轨道本身要自洽（长度一致、时间严格递增、>= 0、数值有限），
         // 目标名与"至少一条轨道"也要当场拦住——这些都是"跑起来才发现"的错。
@@ -6304,6 +6390,47 @@ mod tests {
         assert_eq!(again.objects[0].primary_shape().kind, ShapeKind::Sphere);
         assert_eq!(again.simulate.steps, 60);
         assert_eq!(again.render.output, PathBuf::from("x.png"));
+    }
+
+    #[test]
+    fn waters_parse_validate_and_roundtrip() {
+        let doc = SceneDoc::from_value(json!({
+            "waters": [
+                { "center": [1, 2], "size": [8, 6], "level": 0.4 },
+                { "size": [4, 4], "level": 0.0, "density": 800, "drag": 0.0 }
+            ]
+        }))
+        .expect("waters 要能解析");
+        assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+        assert_eq!(doc.waters[0].density, 1000.0, "缺省密度是水");
+        assert_eq!(doc.waters[0].drag, 6.0, "缺省阻尼");
+        let text = serde_json::to_string(&doc).expect("序列化");
+        let again = SceneDoc::from_json(&text).expect("往返");
+        assert_eq!(again.waters.len(), 2);
+        assert_eq!(again.waters[0].center, Some([1.0, 2.0]));
+        assert_eq!(again.waters[0].size, [8.0, 6.0]);
+        assert_eq!(again.waters[0].level, 0.4);
+        assert_eq!(again.waters[1].density, 800.0);
+        assert_eq!(again.waters[1].drag, 0.0);
+
+        for (water, path) in [
+            (json!({"size": [0, 4], "level": 0}), "waters[0].size"),
+            (
+                json!({"size": [4, 4], "level": 0, "density": 0}),
+                "waters[0].density",
+            ),
+            (
+                json!({"size": [4, 4], "level": 0, "drag": -1}),
+                "waters[0].drag",
+            ),
+        ] {
+            let doc = SceneDoc::from_value(json!({ "waters": [water] })).expect("结构合法");
+            let diags = doc.validate();
+            assert!(
+                diags.iter().any(|d| d.path == path),
+                "要报 {path}: {diags:?}"
+            );
+        }
     }
 
     #[test]

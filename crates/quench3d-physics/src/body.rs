@@ -400,6 +400,12 @@ pub struct RigidBody {
     pub(crate) force: Vec3,
     /// 本步累计的外力矩。
     pub(crate) torque: Vec3,
+    /// 上个子步算出的浸没体积占比 `[0, 1]`（没有水域时为 0）。
+    ///
+    /// 只用于报告/调试（`simulate` 的 `states[].submerged`）；物理上一律由
+    /// [`crate::WaterVolume`] 重算，不存在"缓存值参与积分"的路径。睡眠体不采样，
+    /// 这里停在它最后一次醒着的值。
+    pub(crate) submerged: f32,
     /// 是否处于睡眠。
     pub(crate) sleeping: bool,
     /// 低速持续时间计时器。
@@ -473,6 +479,42 @@ impl RigidBody {
             self.force += force;
             self.wake_up();
         }
+    }
+
+    /// 在世界点 `world_point` 施加持续外力（同时产生力矩）。
+    ///
+    /// 与 [`Self::apply_force`] 的区别只在力矩：浮力作用在**排开体积的形心**上，
+    /// 用质心施力就没有扶正力矩，船会歪着漂。力矩在本步速度积分时统一消费。
+    pub fn apply_force_at_point(&mut self, force: Vec3, world_point: Vec3) {
+        if !force.is_finite() || !world_point.is_finite() {
+            return;
+        }
+        self.wake_up();
+        self.add_force_at_point(force, world_point);
+    }
+
+    /// [`Self::apply_force_at_point`] 的**不唤醒**版本（环境力用）。
+    ///
+    /// 浮力每个子步都作用一次；如果它也 `wake_up`，漂浮物就永远睡不着。
+    /// 这里只累加力/力矩，醒不醒由调用方决定（世界里的浮力只对醒着的体调用）。
+    pub(crate) fn add_force_at_point(&mut self, force: Vec3, world_point: Vec3) {
+        if !force.is_finite() || !world_point.is_finite() {
+            return;
+        }
+        self.force += force;
+        if self.inv_mass > 0.0 {
+            let r = world_point - self.com_world();
+            self.torque += r.cross(force);
+        }
+    }
+
+    /// 上个子步的浸没体积占比 `[0, 1]`（没有水域时为 0）。
+    ///
+    /// 这是**只读观测值**，不参与积分；`simulate` 报告里的 `submerged` 取自这里。
+    /// 睡眠体不重算，停在最后一次醒着的值。
+    #[inline]
+    pub fn submerged_fraction(&self) -> f32 {
+        self.submerged
     }
 
     /// 施加冲量（作用于质心）。
@@ -996,6 +1038,7 @@ impl BodyBuilder {
             },
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
+            submerged: 0.0,
             sleeping: false,
             sleep_timer: 0.0,
             allow_sleep: self.allow_sleep && body_type == BodyType::Dynamic,

@@ -182,6 +182,72 @@ impl Shape {
         }
     }
 
+    /// 本地空间"点是否在形状内部"（浮力采样用）。
+    ///
+    /// `Plane` / `TriMesh` 恒为 `false`：它们是薄壳/边界，没有可排开的水体积。
+    /// `ConvexHull` **按点集 AABB 近似**——凸包只存点集、没有面表，精确判定要重建
+    /// 凸包；这里的近似口径与 [`Shape::volume`] 的「AABB × 填充率」一致，
+    /// 误差在文档里如实标注。
+    pub fn contains_local(&self, p: Vec3) -> bool {
+        match self {
+            Shape::Sphere { radius } => p.length_squared() <= radius.abs().powi(2),
+            Shape::Box { half_extents } => {
+                let he = half_extents.abs();
+                p.x.abs() <= he.x && p.y.abs() <= he.y && p.z.abs() <= he.z
+            }
+            Shape::Capsule {
+                half_height,
+                radius,
+            } => {
+                let r = radius.abs();
+                let dy = (p.y.abs() - half_height.abs()).max(0.0);
+                p.x * p.x + p.z * p.z + dy * dy <= r * r
+            }
+            Shape::Cylinder {
+                half_height,
+                radius,
+            } => p.y.abs() <= half_height.abs() && p.x * p.x + p.z * p.z <= radius.abs().powi(2),
+            Shape::Cone {
+                half_height,
+                radius,
+            } => {
+                let h = half_height.abs();
+                if h <= 0.0 || p.y.abs() > h {
+                    return false;
+                }
+                // 底面 `y = -h` 半径为 r，顶点 `y = +h` 半径为 0。
+                let t = (h - p.y) / (2.0 * h);
+                let r = radius.abs() * t.max(0.0);
+                p.x * p.x + p.z * p.z <= r * r
+            }
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => {
+                let he = half_extents.abs();
+                let r = radius.abs().min(he.min_element());
+                let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+                let q = Vec3::new(
+                    (p.x.abs() - inner.x).max(0.0),
+                    (p.y.abs() - inner.y).max(0.0),
+                    (p.z.abs() - inner.z).max(0.0),
+                );
+                q.length_squared() <= r * r
+            }
+            Shape::ConvexHull { points } => {
+                let b = Aabb::from_points(points);
+                b.is_valid()
+                    && p.x >= b.min.x
+                    && p.y >= b.min.y
+                    && p.z >= b.min.z
+                    && p.x <= b.max.x
+                    && p.y <= b.max.y
+                    && p.z <= b.max.z
+            }
+            Shape::Plane { .. } | Shape::TriMesh { .. } => false,
+        }
+    }
+
     /// 体积（半空间/网格返回 0）。
     pub fn volume(&self) -> f32 {
         match self {

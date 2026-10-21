@@ -759,6 +759,7 @@ NaN 刚体  : 0
 {
   "gravity": [0, -9.81, 0],
   "ground": { "size": 40, "material": "floor" },
+  "waters": [{ "center": [0, 0], "size": [10, 6], "level": 0.0 }],
   "materials": {
     "floor": { "color": [0.55, 0.58, 0.62], "roughness": 0.9 },
     "wood":  { "color": [0.78, 0.48, 0.26], "roughness": 0.55 },
@@ -838,6 +839,12 @@ NaN 刚体  : 0
   几何保持绑定姿态，不会让场景非法。`loop` 缺省 **true**（与 `animations[].loop` 缺省 false
   相反：模型片段通常是循环的）；`loop: false` 播完停在最后一帧。`collide: true` 的静态碰撞体
   **不跟着动**。可用名字用 `quench3d info 模型.glb` 看。
+* `waters` 是**解析浮力环境**，不是流体求解器：`{ "center": [x, z], "size": [x, z], "level": y,
+  "density": 1000, "drag": 6 }`。`size` 是水面范围（**半空间**，没有池底），动态刚体按
+  **排开体积**受浮力、按浸没比例受线性阻尼；密度小于水会浮、大于水会沉。睡眠体**不受浮力**
+  （否则浮力会把它一直唤醒——这是性能取舍，水面变了要显式唤醒）。`validate` 只查参数；
+  浮力结果看 `simulate` 的 `states[].submerged`（0~1）与顶层 `waters` 计数，人读输出有
+  "浸没 %"。水面物体只是半透明平面，**没有波浪 / 折射 / 流动**；粒子流体（PBF）还没做。
 * `friction_combine` / `restitution_combine` 可写在世界级 `physics` 段（缺省）或单个物体上
   （覆盖缺省）。缺省规则是**几何平均**（摩擦）与**取大**（恢复）——正是老行为；
   改成 `average`/`min`/`max`/`multiply` 会改变已有场景的观感，属于**有意**调整。
@@ -1134,7 +1141,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 614 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 625 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1609,7 +1616,8 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 * CLI / 大模型：`ask` 需要有一个正在运行的 OpenAI 兼容服务（本地 Ollama / llama.cpp /
   LM Studio / vLLM，或云端）；`https://` 端点依赖系统 `curl`。模型输出质量取决于所选模型，
   本仓库的测试用假服务覆盖协议与校验，不评价模型本身。
-  场景语法目前只覆盖图元 + 外部模型 + 关节，没有粒子/地形/程序化材质。
+  场景语法目前没有粒子/流体求解器（只有 `waters` 的解析浮力与半透明水面），
+  也没有程序化材质。
 * 编辑器：**已有拖拽式变换 gizmo、撤销/重做与父子层级**（见 §1.1），但
   **手柄不支持拖拽中键入数值、不支持轴心切换、不支持多选成组变换**（多选还没做；
   改父只能在下拉框里选，场景树里还不支持拖放改父；

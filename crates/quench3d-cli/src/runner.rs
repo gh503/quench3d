@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use quench3d::physics::{BodyType, PhysicsWorld, QueryFilter, Shape};
 use quench3d::prelude::*;
-use quench3d::render::RenderStats;
+use quench3d::render::{RenderStats, Vertex};
 use serde::{Deserialize, Serialize};
 
 use crate::scene_doc::{
@@ -103,6 +103,11 @@ pub struct BodyState {
     pub asleep: bool,
     /// 是否与别的刚体接触。
     pub touching: bool,
+    /// 浸没体积占比 `[0, 1]`。
+    ///
+    /// **没有水域或没浸没时不出现**——这样旧场景的报告字节不变。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub submerged: f32,
 }
 
 /// 物理仿真报告。
@@ -116,6 +121,9 @@ pub struct SimReport {
     pub gravity: [f32; 3],
     /// 刚体总数。
     pub bodies: usize,
+    /// 场景里的水域数（没写 `waters` 时不出现）。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub waters: usize,
     /// 动态刚体数。
     pub dynamic: usize,
     /// 已休眠数。
@@ -1584,6 +1592,23 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     if let Some(g) = doc.gravity {
         world.set_gravity(v3(g));
     }
+    // 水域（浮力环境）：先装进物理世界，后续所有步进路径（simulate/render/movie/编辑器）
+    // 都自动生效。参数不可用的水域在校验阶段已经报错，这里再挡一次而不是静默忽略。
+    for (i, w) in doc.waters.iter().enumerate() {
+        let center = w.center.unwrap_or([0.0, 0.0]);
+        let water = quench3d::physics::WaterVolume {
+            center: Vec2::new(center[0], center[1]),
+            half_size: Vec2::new(w.size[0] * 0.5, w.size[1] * 0.5),
+            level: w.level,
+            density: w.density,
+            drag: w.drag,
+        };
+        if world.add_water(water).is_none() {
+            let mut err = RunError::io(format!("waters[{i}] 的参数不可用（尺寸/密度/阻尼非法）"));
+            err.path = Some(format!("waters[{i}]"));
+            return Err(err);
+        }
+    }
     // 世界级物理参数：不写就是引擎缺省（因此行为与这一节不存在时逐位相同）
     if let Some(r) = doc.physics.friction_combine {
         world.config.friction_combine = r.into();
@@ -1889,6 +1914,10 @@ fn is_zero_f32(v: &f32) -> bool {
     *v == 0.0
 }
 
+fn is_zero_usize(v: &usize) -> bool {
+    *v == 0
+}
+
 /// 把事件总线翻译成报告条目（刚体句柄 → 物体名；找不到名字时退化成 `body#N`）。
 fn event_reports(build: &mut WorldBuild) -> (Vec<EventReport>, u64) {
     let mut raw = Vec::new();
@@ -1944,6 +1973,7 @@ fn body_states(build: &WorldBuild) -> Vec<BodyState> {
             displacement: (p - birth).length(),
             asleep: body.is_sleeping(),
             touching: touching.contains(handle),
+            submerged: body.submerged_fraction(),
         });
     }
     out
@@ -1998,6 +2028,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         dt,
         gravity: arr(build.world.gravity()),
         bodies: build.world.body_count(),
+        waters: build.world.water_count(),
         dynamic,
         sleeping,
         contacts: build.world.contacts().len(),
@@ -2993,8 +3024,78 @@ pub fn setup_visuals(
         });
     }
 
+    add_water_visuals(engine, doc);
     apply_camera(engine, doc);
     Ok(instances)
+}
+
+/// 把 `waters` 画成半透明水面（一单元网格，按水域尺寸缩放）。
+///
+/// 视觉是**平的**——M1 没有波浪网格、没有折射；`waters` 是浮力环境，
+/// 不是流体。水面材质走 alpha 混合（渲染器会把透明批次排到不透明之后）。
+fn add_water_visuals(engine: &mut Engine, doc: &SceneDoc) {
+    if doc.waters.is_empty() {
+        return;
+    }
+    let mesh = engine.assets.mesh(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$water_surface",
+        &water_surface_mesh(),
+    );
+    let desc = MaterialDesc {
+        base_color: Vec4::new(0.12, 0.38, 0.55, 0.55),
+        metallic: 0.0,
+        roughness: 0.08,
+        alpha_blend: true,
+        double_sided: true,
+        ..MaterialDesc::default()
+    };
+    let material = engine
+        .assets
+        .material(&mut engine.renderer, &engine.gpu, "$water", desc);
+    for (i, w) in doc.waters.iter().enumerate() {
+        let c = w.center.unwrap_or([0.0, 0.0]);
+        let transform = Transform::new(
+            Vec3::new(c[0], w.level, c[1]),
+            Quat::IDENTITY,
+            Vec3::new(w.size[0], 1.0, w.size[1]),
+        );
+        engine
+            .scene
+            .add_named(mesh, material, transform, &format!("水域{i}"));
+    }
+}
+
+/// 单位水面网格：XZ 平面上 `N×N` 个格子（y = 0，法线朝上）。
+///
+/// 现在只是"平的半透明面"；多细分是为了以后在顶点着色器里做波浪时不用换网格。
+fn water_surface_mesh() -> MeshData {
+    const N: usize = 16;
+    let mut vertices = Vec::with_capacity((N + 1) * (N + 1));
+    for j in 0..=N {
+        for i in 0..=N {
+            let u = i as f32 / N as f32;
+            let v = j as f32 / N as f32;
+            vertices.push(Vertex::new(
+                Vec3::new(u - 0.5, 0.0, v - 0.5),
+                Vec3::Y,
+                Vec2::new(u, v),
+            ));
+        }
+    }
+    let mut indices = Vec::with_capacity(N * N * 6);
+    let row = (N + 1) as u32;
+    for j in 0..N as u32 {
+        for i in 0..N as u32 {
+            let a = j * row + i;
+            let b = a + 1;
+            let c = a + row;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    MeshData::from_parts(vertices, indices)
 }
 
 /// 贴图缓存键：`(解析后的路径, 是否按 sRGB 采样)`。

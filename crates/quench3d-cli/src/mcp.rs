@@ -846,6 +846,7 @@ fn annotate_tools(tools: &mut [Value]) {
                     ("bodies", "integer"),
                     ("max_speed", "number"),
                     ("states", "array"),
+                    ("waters", "integer"),
                     ("probes", "array"),
                     ("trajectories", "array"),
                     ("warnings", "array"),
