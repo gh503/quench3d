@@ -2477,7 +2477,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**663** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**664** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
