@@ -2014,6 +2014,8 @@ fn golden_png_comparison_is_wired_and_fails_loudly() {
     let missing = run(&[
         "render",
         red.to_str().unwrap(),
+        "--out",
+        dir.join("missing.png").to_str().unwrap(),
         "--golden",
         dir.join("nope.png").to_str().unwrap(),
         "--json",
