@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **699** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **701** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -80,6 +80,9 @@ tools/verify_all.sh
 | 状态编辑控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「#0 待机」「起始」；状态行的 clip 下拉与起始时间真的排版出来 |
 | 状态/过渡增删写回 | `cargo test -p quench3d-editor --lib add_remove_animator_states_and_transitions` | 加状态/加过渡后底稿真的多一项；删除状态连带删除引用它的过渡、改写 `initial`；只剩一个状态时拒绝删除 |
 | 状态/过渡按钮绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「加状态」「加过渡」；按钮在状态机实例下真的排版出来 |
+| 过渡端点写回 | `cargo test -p quench3d-editor --lib set_animator_transition_ends_rejects_self_loop` | `walk→run` 写回；自环/未知状态/越界/未知物体返回 `None` |
+| 初始状态写回 | `cargo test -p quench3d-editor --lib set_animator_initial_rejects_unknown_state` | `initial` 读回 `idle`、改成 `walk` 后读回 `walk`；未知状态返回 `None` |
+| 初始状态控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「初始（立即切换）」；无底稿映射时回退到运行时当前状态 |
 | 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |

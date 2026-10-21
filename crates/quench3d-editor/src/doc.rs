@@ -336,6 +336,64 @@ impl Doc {
         Some(path)
     }
 
+    /// 读回底稿里的状态机初始状态名。
+    pub fn animator_initial(&self, objects: &[usize]) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_ref()?;
+        base.models
+            .get(model)?
+            .animator
+            .as_ref()
+            .map(|a| a.initial.clone())
+    }
+
+    /// 改写状态机初始状态；未知状态/没有 animator 时返回 `None`。
+    pub fn set_animator_initial(&mut self, objects: &[usize], name: &str) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let animator = doc.animator.as_mut()?;
+        if !animator.states.iter().any(|s| s.name == name) {
+            return None;
+        }
+        animator.initial = name.to_string();
+        Some(path)
+    }
+
+    /// 改写第 `index` 条过渡的起点/终点状态；自环或未知状态返回 `None`。
+    pub fn set_animator_transition_ends(
+        &mut self,
+        objects: &[usize],
+        index: usize,
+        from: &str,
+        to: &str,
+    ) -> Option<String> {
+        if from == to {
+            return None;
+        }
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let animator = doc.animator.as_mut()?;
+        if !animator.states.iter().any(|s| s.name == from)
+            || !animator.states.iter().any(|s| s.name == to)
+        {
+            return None;
+        }
+        let transition = animator.transitions.get_mut(index)?;
+        transition.from = from.to_string();
+        transition.to = to.to_string();
+        Some(path)
+    }
+
     /// 删除第 `index` 条状态机过渡。
     pub fn remove_animator_transition(
         &mut self,
@@ -1405,5 +1463,92 @@ mod tests {
         );
         assert!(doc.remove_animator_state(&[8], 0).is_none());
         assert!(doc.add_animator_state(&[99], "x", "x").is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_animator_transition_ends_rejects_self_loop() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{"path": "a.glb", "animator": {
+                    "initial": "idle",
+                    "states": [
+                        {"name": "idle", "animation": "idle"},
+                        {"name": "walk", "animation": "walk"},
+                        {"name": "run", "animation": "run"}
+                    ],
+                    "transitions": [
+                        {"from": "idle", "to": "walk", "after": 0.0}
+                    ]
+                }}]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![quench3d_cli::runner::ModelInstance {
+            model: 0,
+            path: "a.glb".into(),
+            objects: vec![8],
+        }]);
+        assert_eq!(
+            doc.set_animator_transition_ends(&[8], 0, "walk", "run")
+                .as_deref(),
+            Some("a.glb")
+        );
+        let transition = &doc.base_doc.as_ref().unwrap().models[0]
+            .animator
+            .as_ref()
+            .unwrap()
+            .transitions[0];
+        assert_eq!(
+            (transition.from.as_str(), transition.to.as_str()),
+            ("walk", "run")
+        );
+        assert!(doc
+            .set_animator_transition_ends(&[8], 0, "run", "run")
+            .is_none());
+        assert!(doc
+            .set_animator_transition_ends(&[8], 0, "walk", "nope")
+            .is_none());
+        assert!(doc
+            .set_animator_transition_ends(&[8], 9, "idle", "walk")
+            .is_none());
+        assert!(doc
+            .set_animator_transition_ends(&[99], 0, "idle", "walk")
+            .is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_animator_initial_rejects_unknown_state() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{"path": "a.glb", "animator": {
+                    "initial": "idle",
+                    "states": [
+                        {"name": "idle", "animation": "idle"},
+                        {"name": "walk", "animation": "walk"}
+                    ]
+                }}]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![quench3d_cli::runner::ModelInstance {
+            model: 0,
+            path: "a.glb".into(),
+            objects: vec![8],
+        }]);
+        assert_eq!(doc.animator_initial(&[8]).as_deref(), Some("idle"));
+        assert_eq!(
+            doc.set_animator_initial(&[8], "walk").as_deref(),
+            Some("a.glb")
+        );
+        assert_eq!(doc.animator_initial(&[8]).as_deref(), Some("walk"));
+        assert!(doc.set_animator_initial(&[8], "nope").is_none());
+        assert!(doc.set_animator_initial(&[99], "walk").is_none());
+        assert!(doc.animator_initial(&[99]).is_none());
     }
 }
