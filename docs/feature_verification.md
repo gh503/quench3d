@@ -68,7 +68,7 @@ tools/verify_all.sh
 | --- | --- | --- |
 | wasm 构建 + 产物自检 | `tools/build_web.sh web_client`；`node tools/check_web.mjs` | 符号/实例化/内存都在 |
 | WebGL2 启动 | `tools/probe_webgl2.sh` | 第一帧日志 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式 |
-| Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R 前后 UI 状态与中央视口截图都必须变（暂停态，排除物理运动） |
+| Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/P 前后 UI 状态与中央视口截图都必须变；F5 只断言状态（默认场景可能没有接触），Tab 断言相机模式（Orbit→Fly） |
 | 浏览器场景往返（纯 CPU） | `cargo test -p quench3d-editor --lib` / wasm 导出探针 | 场景 JSON 往返 |
 
 ## 5. 摄像头动捕（桌面 Linux，实验）

@@ -2479,8 +2479,10 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 * `CARGO_NET_OFFLINE=true tools/gate.sh`：**663** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
-* `tools/probe_web_ui.sh`：暂停态按 F3/F4/R，UI 状态与截图都必须变化（F3=`grid`、
-  F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale）。
+* `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
+  （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
+  F6=`bounds`、F7=`query`、P=`paused` true→false）；F5 只断言 `contacts`，Tab 断言
+  `camera` Orbit→Fly。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
 **仍未做**：GPU 蒙皮/骨骼动画、IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、

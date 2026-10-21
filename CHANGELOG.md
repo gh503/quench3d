@@ -41,9 +41,10 @@
   `multiple_render_outputs_resolve_before_writing_and_honour_no_clobber`。
 - **编辑器 UI 正向冒烟 + Web 按键探针**：`ui_smoke` 在无窗口引擎上把整块
   `ui::panels` 真跑一帧（工具栏/场景树/属性/视口/帮助/摄像头窗口）；新增
-  `tools/probe_web_ui.sh` 用 CDP 在暂停态依次按 F3/F4/R，要求 `<body data-quench3d-ui>`
-  状态与中央视口截图**同时**变化，避免"截图自己动了"的假绿。`?ui_debug=1` 才暴露
-  这个只读状态属性（默认不污染页面）。
+  `tools/probe_web_ui.sh` 用 CDP 在暂停态依次按 F3/F4/R/F6/F7/P，要求
+  `<body data-quench3d-ui>` 状态与中央视口截图**同时**变化；F5 只断言状态（默认场景
+  可能没有接触），Tab 断言 Orbit→Fly。`?ui_debug=1` 才暴露这个只读状态属性
+  （默认不污染页面），避免"截图自己动了"的假绿。
 - **`tools/verify_all.sh` + [`docs/feature_verification.md`](docs/feature_verification.md)**：
   一条命令串起门禁、WebGL2 启动、Web UI 按键、摄像头纯函数测试，并给出每类功能的
   可复现命令与"未覆盖"清单。

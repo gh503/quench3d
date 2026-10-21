@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// 真实浏览器里的 Web UI 正向探针：暂停后依次按 F3/F4/R，截图中央视口并断言像素变化。
+// 真实浏览器里的 Web UI 正向探针：暂停后依次按 F3/F4/R/F6/F7/P/F5/Tab，
+// 截图中央视口并断言状态（多数项还要求像素）变化。
 //
 // 为什么不是只跑 `probe_webgl2.sh`：那条只证明"能启动/第一帧出来了"，不证明
 // "按一个键，画面真的跟着变"。这里用 CDP 的 Input.dispatchKeyEvent + Page.captureScreenshot，
@@ -158,7 +159,7 @@ async function main() {
   };
 
   const results = [];
-  const toggle = async (label, k, code, vk) => {
+  const toggle = async (label, k, code, vk, expectPixels = true) => {
     const before = await snap(`${label}-before`);
     const beforeUi = await uiState();
     const beforeState = await state();
@@ -171,7 +172,14 @@ async function main() {
     if (beforeUi === afterUi) {
       die(`${label} 的按键只改了截图、没改状态（假绿）：${beforeState}`);
     }
-    results.push({ feature: label, before, after, changed: before !== after });
+    // 有些快捷键只切模式、不立刻挪动画面（例如 Tab 在 Orbit/Fly 之间切），
+    // 这时只要求状态变；其余项要求截图也变，否则是"状态在改、画面没跟上"。
+    if (expectPixels && before === after) {
+      die(`${label} 状态变了但画面没变（假绿）：${beforeState} → ${afterState}`);
+    }
+    if (expectPixels) {
+      results.push({ feature: label, before, after, changed: before !== after });
+    }
     await key(send, k, code, vk); // 还原，避免影响下一项
     await sleep(300);
   };
@@ -179,6 +187,17 @@ async function main() {
   await toggle("网格 F3", "F3", "F3", 114);
   await toggle("阴影 F4", "F4", "F4", 115);
   await toggle("缩放手柄 R", "r", "KeyR", 82);
+  await toggle("无头包围盒 F6", "F6", "F6", 117);
+  // F5 只画**已有接触**；默认场景暂停在初始姿态时可能一个接触都没有，
+  // 所以只要求状态切换正确，不强迫截图变化（F6/F7 有几何，必须变）。
+  await toggle("接触点 F5", "F5", "F5", 116, false);
+  await toggle("查询探针 F7", "F7", "F7", 118);
+  await toggle("暂停 P", "p", "KeyP", 80);
+  // Tab 只切相机模式：状态必须变，但不强制中央视口立刻不同。
+  await toggle("相机模式 Tab", "Tab", "Tab", 9, false);
+  // 浏览器/egui 的 Tab 焦点遍历会把键盘交给控件（`keys_enabled=false`），
+  // 这是 egui 的正常焦点行为；探针到此结束，不再用 Tab 还原（会被焦点吃掉）。
+  // 关键是上面已经断言：Tab 事件确实到达了 winit，并把 Orbit 切成了 Fly。
 
   // 运行时错误/panic/GL 能力日志都要当失败（与 probe_webgl2 的判据一致）。
   const logs = events
