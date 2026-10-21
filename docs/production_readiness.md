@@ -2201,3 +2201,50 @@ if let Some(v) = doc.physics.static_friction_speed {
 * 像素证据：同一场景有/无 `waters` 的 `render` 对比 **25.9% 像素变化**，差异 y 范围
   154~419（画面下半部，即水面），平均绝对差 6.24；GIF（48 帧，640×420）帧间差异经 2px
   高斯模糊后集中在箱子区域（2.6%），排除 GIF 调色板抖动造成的假差异。
+
+## 21. 第 64 轮：`fluids` —— CPU PBF 粒子流体（M2）
+
+### 21.1 这轮交付了什么
+
+* **物理**：`quench3d-physics/src/fluid.rs` 的 `Fluid` / `FluidDesc` / `FluidStats`。
+  长方体晶格发射、空间哈希邻域、poly6 密度、spiky 梯度、密度约束迭代、边界投影、
+  XSPH 粘性、速度限幅。粒子质量按**晶格静止密度**校准（`m = rho0 / ΣW`），
+  不是 `rho0·spacing³`——后者只有 0.5~0.9 倍静止密度，会在"只压不拉"的 PBF 里
+  直接互相穿过、摊成一层。
+* **格式**：顶层 `fluids: [{ center, size, spacing, radius, rest_density, viscosity,
+  iterations, max_particles }]`；`deny_unknown_fields`；缺省值见 `FluidDoc`；校验覆盖
+  尺寸/间距/半径/密度/粘性/迭代/上限，`max_particles` 截断给警告。
+* **报告**：`simulate` / MCP 输出 `fluids[]`（`particles`、`avg_density_ratio`、
+  `max_speed`、`min_y`、`max_y`）；人读输出每个流体一行。
+* **编辑器/CLI 可达**：`build_world` 转成 `FluidDesc` 并 `add_fluid`；编辑器
+  `scene_roundtrip` 保留 `fluids`，`world.fluid_count()` 可见；`examples/fluid_pool.json`
+  可直接 `simulate`/`render`。
+* **文档/语法**：`schema.rs` 的 grammar、JSON Schema（`$defs/fluid`）、system prompt、
+  include 可合并段列表；README §6.3。
+
+### 21.2 算法与边界（诚实清单）
+
+* PBF（Macklin & Müller 2013）的**压缩**形式：`C = max(rho/rho0 - 1, 0)`，1% 死区；
+  `lambda` **每次迭代重算**（只算一次再反复加同一个 delta 会过冲，无重力也会炸）。
+* 边界投影放在**迭代内部**：粒子不会先陷进地面再被一次性弹出来；`Plane` 的 AABB
+  无效，不能拿它做拒绝测试。
+* **单向**：刚体 → 流体。粒子不会反推刚体，也不会把刚体叫醒。M3 才做两-way。
+* **没有表面张力 / 涡量 / 粒子间碰撞**。敞开的平地上水会摊成薄层（密度约束允许二维
+  密排），这是"液体在无限平面上的解"，不是穿地；围池（`examples/fluid_pool.json`）
+  才能堆出三维水堆。测试 `pool_holds_a_three_dimensional_pile` 覆盖这一点。
+* `TriMesh` 碰撞体不挡粒子（`Shape::closest_surface` 返回 `None`）；凸包/圆锥用 AABB
+  近似。粒子**渲染**在 M4，现在 `render` 还看不到粒子。
+* 统计里的 `avg_density_ratio` 是**求解后**密度（报告口径）；`max_speed` 限幅到
+  `MAX_SPEED`。睡眠概念不适用；多流体之间不互相作用。
+
+### 21.3 测试与证据
+
+* `quench3d-physics`：`fluid_spawns_a_deterministic_lattice`、`invalid_parameters_are_rejected`、
+  `particles_fall_and_stop_on_the_ground`、`wall_and_ground_keep_particles_out`、
+  `pool_holds_a_three_dimensional_pile`、`fluid_is_deterministic`；以及
+  `closest_surface_matches_primitive_geometry`。
+* CLI：`fluids_parse_validate_and_roundtrip`（缺省值/往返/8 条非法路径）、
+  `fluid_particles_settle_and_are_reported`（4000 粒子围池、报告字段、`fluids[0].spacing` 错误）。
+* 编辑器：`fluids_survive_editor_roundtrip`。
+* 示例：`examples/fluid_pool.json` 240 步 → 4000 粒子、密度比 1.01、最高速度 0.33 m/s、
+  y 0.05..1.25。

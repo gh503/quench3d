@@ -361,6 +361,12 @@ pub struct SceneDoc {
     /// 这是 M1 的解析水域；粒子流体（PBF）还没做。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waters: Vec<WaterDoc>,
+    /// 粒子流体（CPU PBF）：长方体发射器 + 粒子参数。
+    ///
+    /// 不写 = 没有粒子流体（物理结果与以前逐位相同）。流体按**排开体积**被刚体
+    /// 推开（M2 单向：刚体 → 流体），还不会反推刚体。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fluids: Vec<FluidDoc>,
     /// 具名材质。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub materials: BTreeMap<String, MaterialDoc>,
@@ -371,7 +377,7 @@ pub struct SceneDoc {
     ///    （文件目录 → `assets.search_paths` → `--asset-path` → 工作目录 → 引擎搜索路径）。
     /// 2. 片段必须是合法的 `quench3d.scene`（同样的字段集），但只能贡献**可合并的段**：
     ///    `materials` / `templates` / `cameras`（具名表，重名即错误）与
-    ///    `waters` / `objects` / `models` / `joints` / `actions` / `probes` / `animations`
+    ///    `waters` / `fluids` / `objects` / `models` / `joints` / `actions` / `probes` / `animations`
     ///    （数组，按顺序追加）。
     ///    根独有的段（`ground`/`camera`/`lighting`/`simulate`/`render`/`gravity`/`physics`/`name`/`assets`）
     ///    写在片段里是错误（根独有的段列在源码的 `ROOT_ONLY_SECTIONS` 常量里）。
@@ -914,6 +920,7 @@ impl Default for SceneDoc {
             physics: PhysicsDoc::default(),
             ground: None,
             waters: Vec::new(),
+            fluids: Vec::new(),
             materials: BTreeMap::new(),
             include: Vec::new(),
             objects: Vec::new(),
@@ -992,6 +999,83 @@ fn default_water_density() -> f32 {
 
 fn default_water_drag() -> f32 {
     6.0
+}
+
+/// 粒子流体（CPU PBF）。
+///
+/// 这是**粒子**流体，与 [`WaterDoc`] 的解析水域是两套东西：水域给刚体浮力，
+/// 流体给"看得见的一堆粒子"。两者可以同时出现，互不替换。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FluidDoc {
+    /// 发射体中心 `[x, y, z]`，缺省 `[0, 0, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f32; 3]>,
+    /// 发射体尺寸 `[x, y, z]`（米），必须为正。
+    pub size: [f32; 3],
+    /// 粒子间距（米），缺省 0.1。
+    #[serde(default = "default_fluid_spacing")]
+    pub spacing: f32,
+    /// 粒子碰撞半径（米），缺省 `spacing * 0.5`；必须不大于 `spacing`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    /// 静止密度（kg/m³），缺省 1000（水）。
+    #[serde(default = "default_fluid_density")]
+    pub rest_density: f32,
+    /// XSPH 粘性系数 0~1，缺省 0.05。
+    #[serde(default = "default_fluid_viscosity")]
+    pub viscosity: f32,
+    /// 密度约束迭代次数 1~8，缺省 4。
+    #[serde(default = "default_fluid_iterations")]
+    pub iterations: u32,
+    /// 粒子上限 1~20000，缺省 4000；超出按晶格顺序截断。
+    #[serde(default = "default_fluid_max_particles")]
+    pub max_particles: usize,
+}
+
+impl FluidDoc {
+    /// 实际使用的粒子半径。
+    pub fn radius(&self) -> f32 {
+        self.radius.unwrap_or(self.spacing * 0.5)
+    }
+
+    /// 按晶格估算的粒子数（**不**按 `max_particles` 截断）。
+    pub fn raw_particles(&self) -> usize {
+        let n = |size: f32| {
+            if !(size.is_finite() && self.spacing.is_finite() && self.spacing > 0.0) {
+                return 0;
+            }
+            ((size / self.spacing).floor() as usize).saturating_add(1)
+        };
+        n(self.size[0])
+            .saturating_mul(n(self.size[1]))
+            .saturating_mul(n(self.size[2]))
+    }
+
+    /// 实际会发射的粒子数（按 `max_particles` 截断）。
+    pub fn estimated_particles(&self) -> usize {
+        self.raw_particles().min(self.max_particles)
+    }
+}
+
+fn default_fluid_spacing() -> f32 {
+    0.1
+}
+
+fn default_fluid_density() -> f32 {
+    1000.0
+}
+
+fn default_fluid_viscosity() -> f32 {
+    0.05
+}
+
+fn default_fluid_iterations() -> u32 {
+    4
+}
+
+fn default_fluid_max_particles() -> usize {
+    4000
 }
 
 /// 材质（线性或 sRGB 由 `srgb` 控制，缺省按 sRGB 解释，符合直觉）。
@@ -2231,6 +2315,7 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     check_section::<[f32; 3]>(map.get("gravity"), "gravity", &mut out);
     check_section::<GroundDoc>(map.get("ground"), "ground", &mut out);
     check_array::<WaterDoc>(map.get("waters"), "waters", &mut out);
+    check_array::<FluidDoc>(map.get("fluids"), "fluids", &mut out);
     check_section::<CameraDoc>(map.get("camera"), "camera", &mut out);
     check_section::<Vec<AnimationDoc>>(map.get("animations"), "animations", &mut out);
     check_section::<BTreeMap<String, CameraDoc>>(map.get("cameras"), "cameras", &mut out);
@@ -2835,6 +2920,7 @@ impl IncludeCtx {
             self.insert_named(&mut into.cameras, "cameras", &k, &v, ref_path, label);
         }
         into.waters.extend(doc.waters.iter().cloned());
+        into.fluids.extend(doc.fluids.iter().cloned());
         into.objects.extend(doc.objects.iter().cloned());
         into.models.extend(doc.models.iter().cloned());
         into.joints.extend(doc.joints.iter().cloned());
@@ -3361,6 +3447,91 @@ impl SceneDoc {
                     format!("{p}.drag"),
                     "阻尼必须是有限的非负数",
                 ));
+            }
+        }
+        // 粒子流体：参数非法会让"加不进去/晶格爆炸"，必须当场报；粒子上限截断只警告。
+        for (i, f) in self.fluids.iter().enumerate() {
+            let p = format!("fluids[{i}]");
+            if let Some(c) = &f.center {
+                if !c.iter().all(|v| v.is_finite()) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.center"),
+                        "流体中心必须是有限数",
+                    ));
+                }
+            }
+            if !f.size.iter().all(|v| v.is_finite() && *v > 0.0) {
+                cam_diags.push(
+                    Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.size"),
+                        "流体发射体尺寸必须是有限正数",
+                    )
+                    .with_hint("例如 `\"size\": [2, 2, 2]`；只写 0 或负数等于没有粒子"),
+                );
+            }
+            if !(f.spacing.is_finite() && f.spacing > 0.0) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.spacing"),
+                    "粒子间距必须是有限正数",
+                ));
+            } else if f.spacing > f.size.iter().copied().fold(f32::INFINITY, f32::min) * 2.0 {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.spacing"),
+                    "粒子间距不能大于发射体最小边长（否则一颗粒子都放不下）",
+                ));
+            }
+            let r = f.radius();
+            if !(r.is_finite() && r > 0.0 && r <= f.spacing) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.radius"),
+                    "粒子半径必须是有限正数且不大于 spacing",
+                ));
+            }
+            if !(f.rest_density.is_finite() && f.rest_density > 0.0) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.rest_density"),
+                    "静止密度必须是有限正数（水 = 1000）",
+                ));
+            }
+            if !(f.viscosity.is_finite() && (0.0..=1.0).contains(&f.viscosity)) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.viscosity"),
+                    "粘性系数必须在 0~1 之间",
+                ));
+            }
+            if !(1..=8).contains(&f.iterations) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.iterations"),
+                    "密度约束迭代次数必须在 1~8 之间",
+                ));
+            }
+            if !(1..=20_000).contains(&f.max_particles) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.max_particles"),
+                    "粒子上限必须在 1~20000 之间",
+                ));
+            } else {
+                let raw = f.raw_particles();
+                if raw > f.max_particles {
+                    cam_diags.push(
+                        Diagnostic::warn(
+                            format!("{p}.max_particles"),
+                            format!(
+                                "按 spacing 估算有 {raw} 颗粒子，会被截断到 {} 颗（调大 max_particles 或调大 spacing）",
+                                f.max_particles
+                            ),
+                        ),
+                    );
+                }
             }
         }
         // 关键帧动画：轨道本身要自洽（长度一致、时间严格递增、>= 0、数值有限），
@@ -6425,6 +6596,69 @@ mod tests {
             ),
         ] {
             let doc = SceneDoc::from_value(json!({ "waters": [water] })).expect("结构合法");
+            let diags = doc.validate();
+            assert!(
+                diags.iter().any(|d| d.path == path),
+                "要报 {path}: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fluids_parse_validate_and_roundtrip() {
+        let doc = SceneDoc::from_value(json!({
+            "fluids": [
+                { "center": [0, 2, 0], "size": [1, 1, 1] },
+                { "size": [2, 1, 1], "spacing": 0.2, "radius": 0.08,
+                  "rest_density": 900, "viscosity": 0.1, "iterations": 6,
+                  "max_particles": 500 }
+            ]
+        }))
+        .expect("fluids 要能解析");
+        assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+        assert_eq!(doc.fluids[0].spacing, 0.1, "缺省间距");
+        assert_eq!(doc.fluids[0].radius(), 0.05, "缺省半径 = spacing/2");
+        assert_eq!(doc.fluids[0].rest_density, 1000.0);
+        assert_eq!(doc.fluids[0].iterations, 4);
+        let text = serde_json::to_string(&doc).expect("序列化");
+        let again = SceneDoc::from_json(&text).expect("往返");
+        assert_eq!(again.fluids.len(), 2);
+        assert_eq!(again.fluids[1].spacing, 0.2);
+        assert_eq!(again.fluids[1].radius, Some(0.08));
+        assert_eq!(again.fluids[1].max_particles, 500);
+
+        for (fluid, path) in [
+            (json!({"size": [0, 1, 1]}), "fluids[0].size"),
+            (
+                json!({"size": [1, 1, 1], "spacing": 0}),
+                "fluids[0].spacing",
+            ),
+            (
+                json!({"size": [1, 1, 1], "spacing": 3.0}),
+                "fluids[0].spacing",
+            ),
+            (
+                json!({"size": [1, 1, 1], "radius": 0.2}),
+                "fluids[0].radius",
+            ),
+            (
+                json!({"size": [1, 1, 1], "rest_density": 0}),
+                "fluids[0].rest_density",
+            ),
+            (
+                json!({"size": [1, 1, 1], "viscosity": 2}),
+                "fluids[0].viscosity",
+            ),
+            (
+                json!({"size": [1, 1, 1], "iterations": 0}),
+                "fluids[0].iterations",
+            ),
+            (
+                json!({"size": [1, 1, 1], "max_particles": 0}),
+                "fluids[0].max_particles",
+            ),
+        ] {
+            let doc = SceneDoc::from_value(json!({ "fluids": [fluid] })).expect("结构合法");
             let diags = doc.validate();
             assert!(
                 diags.iter().any(|d| d.path == path),

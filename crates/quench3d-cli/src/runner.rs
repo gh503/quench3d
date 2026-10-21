@@ -110,6 +110,21 @@ pub struct BodyState {
     pub submerged: f32,
 }
 
+/// 单个粒子流体的统计。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FluidReport {
+    /// 粒子数。
+    pub particles: usize,
+    /// 最大速度（m/s）。
+    pub max_speed: f32,
+    /// 平均密度比（1 = 静止密度；越小越膨胀）。
+    pub avg_density_ratio: f32,
+    /// 最低粒子 y。
+    pub min_y: f32,
+    /// 最高粒子 y。
+    pub max_y: f32,
+}
+
 /// 物理仿真报告。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimReport {
@@ -124,6 +139,9 @@ pub struct SimReport {
     /// 场景里的水域数（没写 `waters` 时不出现）。
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub waters: usize,
+    /// 粒子流体统计（没写 `fluids` 时不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fluids: Vec<FluidReport>,
     /// 动态刚体数。
     pub dynamic: usize,
     /// 已休眠数。
@@ -1609,6 +1627,27 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             return Err(err);
         }
     }
+    // 粒子流体：先装进物理世界；参数不可用的流体在校验阶段已经报错，这里再挡一次。
+    for (i, f) in doc.fluids.iter().enumerate() {
+        let c = f.center.unwrap_or([0.0, 0.0, 0.0]);
+        let desc = quench3d::physics::FluidDesc {
+            center: v3(c),
+            half_extents: Vec3::new(f.size[0] * 0.5, f.size[1] * 0.5, f.size[2] * 0.5),
+            spacing: f.spacing,
+            radius: f.radius(),
+            rest_density: f.rest_density,
+            viscosity: f.viscosity,
+            iterations: f.iterations,
+            max_particles: f.max_particles,
+        };
+        if world.add_fluid(desc).is_none() {
+            let mut err = RunError::io(format!(
+                "fluids[{i}] 的参数不可用（间距/半径/密度/迭代非法）"
+            ));
+            err.path = Some(format!("fluids[{i}]"));
+            return Err(err);
+        }
+    }
     // 世界级物理参数：不写就是引擎缺省（因此行为与这一节不存在时逐位相同）
     if let Some(r) = doc.physics.friction_combine {
         world.config.friction_combine = r.into();
@@ -2029,6 +2068,21 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         gravity: arr(build.world.gravity()),
         bodies: build.world.body_count(),
         waters: build.world.water_count(),
+        fluids: build
+            .world
+            .fluids()
+            .iter()
+            .map(|f| {
+                let s = f.stats();
+                FluidReport {
+                    particles: s.particles,
+                    max_speed: s.max_speed,
+                    avg_density_ratio: s.avg_density_ratio,
+                    min_y: s.min_y,
+                    max_y: s.max_y,
+                }
+            })
+            .collect(),
         dynamic,
         sleeping,
         contacts: build.world.contacts().len(),

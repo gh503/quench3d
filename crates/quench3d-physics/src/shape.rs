@@ -182,6 +182,127 @@ impl Shape {
         }
     }
 
+    /// 本地空间里离 `p` 最近的**表面点**与朝外的单位法线。
+    ///
+    /// 流体粒子碰撞用：`p` 可以在形状外（返回最近表面点，法线朝外），
+    /// 也可以在形状内（返回把点推出去的方向）。`Plane` 返回投影点与平面法线。
+    /// `TriMesh` 返回 `None`（薄壳没有可靠的"最近表面"语义，粒子直接穿过；
+    /// 这是 M2 的已知边界）。凸包/圆锥没有解析最近点，按 AABB 近似。
+    pub fn closest_surface(&self, p: Vec3) -> Option<(Vec3, Vec3)> {
+        if !p.is_finite() {
+            return None;
+        }
+        match self {
+            Shape::Sphere { radius } => {
+                let r = radius.abs();
+                if r < 1e-6 {
+                    return None;
+                }
+                let len = p.length();
+                if len < 1e-6 {
+                    Some((Vec3::X * r, Vec3::X))
+                } else {
+                    let n = p / len;
+                    Some((n * r, n))
+                }
+            }
+            Shape::Box { half_extents } => box_surface(p, *half_extents),
+            Shape::Capsule {
+                half_height,
+                radius,
+            } => {
+                let hh = half_height.abs();
+                let r = radius.abs();
+                if r < 1e-6 && hh < 1e-6 {
+                    return None;
+                }
+                let c = Vec3::new(0.0, p.y.clamp(-hh, hh), 0.0);
+                let d = p - c;
+                let len = d.length();
+                if len < 1e-6 {
+                    Some((c + Vec3::X * r, Vec3::X))
+                } else {
+                    let n = d / len;
+                    Some((c + n * r, n))
+                }
+            }
+            Shape::Cylinder {
+                half_height,
+                radius,
+            } => {
+                let hh = half_height.abs();
+                let r = radius.abs();
+                if r < 1e-6 && hh < 1e-6 {
+                    return None;
+                }
+                let radial = (p.x * p.x + p.z * p.z).sqrt();
+                let nxz = if radial < 1e-6 {
+                    Vec3::X
+                } else {
+                    Vec3::new(p.x / radial, 0.0, p.z / radial)
+                };
+                if radial > r {
+                    let y = p.y.clamp(-hh, hh);
+                    let q = Vec3::new(nxz.x * r, y, nxz.z * r);
+                    let d = p - q;
+                    let n = if d.length_squared() < 1e-12 {
+                        nxz
+                    } else {
+                        d.normalize()
+                    };
+                    Some((q, n))
+                } else if p.y.abs() > hh {
+                    let sy = if p.y >= 0.0 { 1.0 } else { -1.0 };
+                    let q = Vec3::new(p.x, sy * hh, p.z);
+                    Some((q, Vec3::Y * sy))
+                } else {
+                    // 在内部：侧面与端盖哪个更近就往哪推。
+                    let side_gap = r - radial;
+                    let cap_gap = hh - p.y.abs();
+                    if side_gap <= cap_gap {
+                        let q = Vec3::new(nxz.x * r, p.y, nxz.z * r);
+                        Some((q, nxz))
+                    } else {
+                        let sy = if p.y >= 0.0 { 1.0 } else { -1.0 };
+                        Some((Vec3::new(p.x, sy * hh, p.z), Vec3::Y * sy))
+                    }
+                }
+            }
+            Shape::Cone { .. } | Shape::ConvexHull { .. } => {
+                let local = self.local_aabb();
+                if !local.is_valid() {
+                    return None;
+                }
+                box_surface(p - local.center(), local.half_extents())
+                    .map(|(q, n)| (q + local.center(), n))
+            }
+            Shape::RoundedBox {
+                half_extents,
+                radius,
+            } => {
+                let he = half_extents.abs();
+                let r = radius.abs().min(he.min_element());
+                let inner = (he - Vec3::splat(r)).max(Vec3::ZERO);
+                let q = p.clamp(-inner, inner);
+                let d = p - q;
+                if d.length_squared() > 1e-12 {
+                    let n = d.normalize();
+                    Some((q + n * r, n))
+                } else {
+                    box_surface(p, inner).map(|(q, n)| (q + n * r, n))
+                }
+            }
+            Shape::Plane { normal } => {
+                let n = normal.normalize_or_zero();
+                if n.length_squared() < 0.5 {
+                    return None;
+                }
+                Some((p - n * n.dot(p), n))
+            }
+            Shape::TriMesh { .. } => None,
+        }
+    }
+
     /// 本地空间"点是否在形状内部"（浮力采样用）。
     ///
     /// `Plane` / `TriMesh` 恒为 `false`：它们是薄壳/边界，没有可排开的水体积。
@@ -779,6 +900,52 @@ fn rounded_box_mass_properties(half_extents: Vec3, radius: f32, density: f32) ->
     }
 }
 
+/// 轴对齐盒的最近表面点 + 朝外法线（`closest_surface` 的公共部分）。
+fn box_surface(p: Vec3, half_extents: Vec3) -> Option<(Vec3, Vec3)> {
+    let he = half_extents.abs();
+    if he.min_element() < 1e-6 {
+        return None;
+    }
+    let q = p.clamp(-he, he);
+    let d = p - q;
+    if d.length_squared() > 1e-12 {
+        return Some((q, d.normalize()));
+    }
+    // 在盒内/表面：选离得最近的那个面推出去。
+    let a = [p.x.abs(), p.y.abs(), p.z.abs()];
+    let h = [he.x, he.y, he.z];
+    let mut axis = 0usize;
+    let mut best = f32::INFINITY;
+    for i in 0..3 {
+        if h[i] - a[i] < best {
+            best = h[i] - a[i];
+            axis = i;
+        }
+    }
+    let sign = if [p.x, p.y, p.z][axis] >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let mut point = p;
+    let mut normal = Vec3::ZERO;
+    match axis {
+        0 => {
+            point.x = sign * he.x;
+            normal.x = sign;
+        }
+        1 => {
+            point.y = sign * he.y;
+            normal.y = sign;
+        }
+        _ => {
+            point.z = sign * he.z;
+            normal.z = sign;
+        }
+    }
+    Some((point, normal))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,6 +1286,66 @@ mod tests {
             mp.inertia.x
         );
         assert!(mp.center.length() < 0.05);
+    }
+
+    #[test]
+    fn closest_surface_matches_primitive_geometry() {
+        // 球：外面点、里面点都要回到半径上，法线朝外
+        let sphere = Shape::Sphere { radius: 2.0 };
+        let (q, n) = sphere.closest_surface(vec3(3.0, 0.0, 0.0)).unwrap();
+        assert!((q - vec3(2.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((n - Vec3::X).length() < 1e-5);
+        let (q, n) = sphere.closest_surface(vec3(0.0, 0.5, 0.0)).unwrap();
+        assert!((q - vec3(0.0, 2.0, 0.0)).length() < 1e-5);
+        assert!((n - Vec3::Y).length() < 1e-5);
+
+        // 盒子外面：最近点是角，法线是单位化的角方向
+        let b = Shape::Box {
+            half_extents: vec3(1.0, 1.0, 1.0),
+        };
+        let (q, n) = b.closest_surface(vec3(2.0, 2.0, 2.0)).unwrap();
+        assert!((q - vec3(1.0, 1.0, 1.0)).length() < 1e-5);
+        assert!((n.length() - 1.0).abs() < 1e-5);
+        // 盒子里面：推到最近的面（x 面最近）
+        let (q, n) = b.closest_surface(vec3(0.9, 0.1, 0.0)).unwrap();
+        assert!((q - vec3(1.0, 0.1, 0.0)).length() < 1e-5);
+        assert!((n - Vec3::X).length() < 1e-5);
+
+        // 胶囊：侧面 + 端盖
+        let c = Shape::Capsule {
+            half_height: 1.0,
+            radius: 0.5,
+        };
+        let (q, n) = c.closest_surface(vec3(1.0, 0.0, 0.0)).unwrap();
+        assert!((q - vec3(0.5, 0.0, 0.0)).length() < 1e-5);
+        assert!((n - Vec3::X).length() < 1e-5);
+        let (q, n) = c.closest_surface(vec3(0.0, 2.0, 0.0)).unwrap();
+        assert!((q - vec3(0.0, 1.5, 0.0)).length() < 1e-5);
+        assert!((n - Vec3::Y).length() < 1e-5);
+
+        // 平面：下方点投影到平面，法线就是平面法线
+        let plane = Shape::Plane { normal: Vec3::Y };
+        let (q, n) = plane.closest_surface(vec3(3.0, -2.0, 1.0)).unwrap();
+        assert!((q - vec3(3.0, 0.0, 1.0)).length() < 1e-5);
+        assert!((n - Vec3::Y).length() < 1e-5);
+
+        // 圆角盒：角上是 1/8 球面，点到角的距离等于半径
+        let rb = Shape::RoundedBox {
+            half_extents: vec3(1.0, 1.0, 1.0),
+            radius: 0.2,
+        };
+        let (q, n) = rb.closest_surface(vec3(1.2, 1.2, 1.2)).unwrap();
+        let corner = 0.8 + 0.2 / 3f32.sqrt();
+        assert!((q - Vec3::splat(corner)).length() < 1e-4, "{q:?}");
+        assert!((n.length() - 1.0).abs() < 1e-5);
+
+        // 薄壳没有最近表面语义
+        assert!(Shape::TriMesh {
+            vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+            indices: vec![0, 1, 2],
+        }
+        .closest_surface(Vec3::ZERO)
+        .is_none());
     }
 
     #[test]

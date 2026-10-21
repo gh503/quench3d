@@ -22,6 +22,20 @@
   （编辑器存读保留 + 水面物体存在）；`render` 有无水域对比：25.9% 像素变化，差异区域在画面
   下半部（水面），不是全屏噪声。
 
+- **`fluids`：CPU PBF 粒子流体（M2，单向耦合）**：场景新增 `fluids: [{ center, size, spacing,
+  radius, rest_density, viscosity, iterations, max_particles }]`，从长方体按固定晶格发射粒子，
+  用 **Position Based Fluids**（密度约束 + 迭代位置修正 + XSPH 粘性）求解；粒子被静态/动态
+  刚体推开（**单向**：刚体 → 流体，还不会反推刚体）。粒子质量按晶格静止密度校准（静止时
+  密度比≈1），边界投影放进迭代内部（先陷进地面再一次性弹出来会炸）。`simulate` 报告新增
+  `fluids[]`（`particles` / `avg_density_ratio` / `max_speed` / `min_y` / `max_y`），人读输出
+  有每个流体一行。**不写 = 没有粒子，物理结果与以前逐位相同**。边界：没有表面张力/涡量/
+  粒子间碰撞，敞开的平地上会摊成薄层（`examples/fluid_pool.json` 用四堵墙围成池子）；
+  `TriMesh` 碰撞体不挡粒子，凸包/圆锥用 AABB 近似；粒子**渲染**在 M4（现在 `render` 还看不到
+  粒子）。验证：`cargo test -p quench3d-physics fluid`（晶格确定性、落地不穿地、围池能堆成
+  三维水堆）、`cargo test -p quench3d-cli --test cli_e2e fluid`（报告字段与 `fluids[0].spacing`
+  校验路径）、`cargo test -p quench3d-editor --test scene_roundtrip fluids`（存读保留）；
+  `examples/fluid_pool.json` 240 步：4000 粒子、密度比 1.01、最高速度 0.33 m/s、y 0.05..1.25。
+
 ### 工程卫生
 
 - **CI 不再出现无法诊断的 Windows 假红**：在**没有 GPU 的 Windows runner** 上创建真实 wgpu

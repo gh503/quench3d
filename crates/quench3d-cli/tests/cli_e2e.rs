@@ -261,6 +261,68 @@ fn water_buoyancy_floats_light_bodies_and_sinks_dense_ones() {
 }
 
 #[test]
+fn fluid_particles_settle_and_are_reported() {
+    let dir = temp_dir("fluid");
+    let scene = dir.join("fluid.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "ground": { "size": 20, "y": 0 },
+          "fluids": [
+            { "center": [0, 1.2, 0], "size": [1.2, 1.2, 1.2],
+              "spacing": 0.1, "radius": 0.05, "max_particles": 2000 }
+          ],
+          "objects": [
+            { "name": "左壁", "shape": { "type": "box", "size": [0.2, 1, 1.8] },
+              "position": [-0.9, 0.5, 0], "body": "static" },
+            { "name": "右壁", "shape": { "type": "box", "size": [0.2, 1, 1.8] },
+              "position": [0.9, 0.5, 0], "body": "static" },
+            { "name": "前壁", "shape": { "type": "box", "size": [1.8, 1, 0.2] },
+              "position": [0, 0.5, 0.9], "body": "static" },
+            { "name": "后壁", "shape": { "type": "box", "size": [1.8, 1, 0.2] },
+              "position": [0, 0.5, -0.9], "body": "static" }
+          ],
+          "simulate": { "steps": 240, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let env = r.json();
+    let data = &env["data"];
+    let fluids = data["fluids"].as_array().expect("报告里要有 fluids");
+    assert_eq!(fluids.len(), 1, "{data}");
+    let f = &fluids[0];
+    let particles = f["particles"].as_u64().unwrap();
+    assert!(particles > 500, "粒子太少: {particles}");
+    let max_y = f["max_y"].as_f64().unwrap();
+    assert!(max_y > 0.25, "水应该堆起来，实际 max_y = {max_y}");
+    let min_y = f["min_y"].as_f64().unwrap();
+    assert!(min_y > 0.0, "粒子不应穿地，实际 min_y = {min_y}");
+    let ratio = f["avg_density_ratio"].as_f64().unwrap();
+    assert!((0.5..=2.0).contains(&ratio), "密度比异常: {ratio}");
+
+    // spacing 非法：当场报 fluids[0].spacing，而不是静默没有粒子。
+    let bad = dir.join("bad_fluid.json");
+    std::fs::write(
+        &bad,
+        r#"{"fluids": [{ "size": [1, 1, 1], "spacing": 0 }], "simulate": { "steps": 1 }}"#,
+    )
+    .unwrap();
+    let r = run(&["validate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    let env = r.json();
+    let diags = env["data"]["diagnostics"].as_array().unwrap();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["path"].as_str() == Some("fluids[0].spacing")),
+        "要报 fluids[0].spacing: {diags:?}"
+    );
+}
+
+#[test]
 fn invalid_scene_exits_with_code_2_and_reports_paths() {
     let dir = temp_dir("invalid");
     let scene = dir.join("bad.json");

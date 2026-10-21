@@ -22,6 +22,7 @@ use quench3d_math::*;
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{Broadphase, Proxy};
 use crate::contact::{ContactManifold, ContactPair, ContactPoint};
+use crate::fluid::{self, Fluid, FluidDesc, FluidStats};
 use crate::island::{IslandStats, Islands};
 use crate::joints::{Joint, JointEntry, JointHandle, JointImpulses, JointSolver};
 use crate::narrowphase;
@@ -74,9 +75,9 @@ impl crate::solver::BodyStore for Vec<BodySlot> {
 
 /// 刚体槽位。
 #[derive(Clone, Debug)]
-struct BodySlot {
+pub(crate) struct BodySlot {
     generation: u32,
-    body: Option<RigidBody>,
+    pub(crate) body: Option<RigidBody>,
 }
 
 /// 关节槽位。
@@ -282,6 +283,8 @@ pub struct PhysicsWorld {
     gravity: Vec3,
     /// 水域（浮力环境）：不写就是空，行为与没有这一节时逐位相同。
     waters: Vec<WaterVolume>,
+    /// 粒子流体（CPU PBF）：不写就是空，没有 `fluids` 时物理行为逐位不变。
+    fluids: Vec<Fluid>,
     fixed_dt: f32,
     accumulator: f32,
     /// 最近一次子步的接触对（公开只读）。
@@ -443,6 +446,7 @@ impl PhysicsWorld {
             joint_free: Vec::new(),
             gravity,
             waters: Vec::new(),
+            fluids: Vec::new(),
             fixed_dt: DEFAULT_FIXED_DT,
             accumulator: 0.0,
             contacts: Vec::new(),
@@ -549,6 +553,40 @@ impl PhysicsWorld {
     /// 水域数量。
     pub fn water_count(&self) -> usize {
         self.waters.len()
+    }
+
+    // -----------------------------------------------------------------
+    // 粒子流体
+    // -----------------------------------------------------------------
+
+    /// 添加一个 CPU PBF 粒子流体（参数非法时返回 `None`，不会静默降级）。
+    ///
+    /// 粒子在**添加时**按确定性晶格发射；之后每个子步在刚体位置积分之后推进，
+    /// 因此流体看到的是本步的刚体位姿。M2 是**单向**的：刚体推流体，流体不推刚体。
+    pub fn add_fluid(&mut self, desc: FluidDesc) -> Option<usize> {
+        let fluid = Fluid::new(desc)?;
+        self.fluids.push(fluid);
+        Some(self.fluids.len() - 1)
+    }
+
+    /// 清空所有流体。
+    pub fn clear_fluids(&mut self) {
+        self.fluids.clear();
+    }
+
+    /// 当前流体（只读）。
+    pub fn fluids(&self) -> &[Fluid] {
+        &self.fluids
+    }
+
+    /// 流体数量。
+    pub fn fluid_count(&self) -> usize {
+        self.fluids.len()
+    }
+
+    /// 某个流体的统计（下标越界返回 `None`）。
+    pub fn fluid_stats(&self, index: usize) -> Option<FluidStats> {
+        self.fluids.get(index).map(Fluid::stats)
     }
 
     // -----------------------------------------------------------------
@@ -1085,6 +1123,15 @@ impl PhysicsWorld {
     }
 
     /// 单个固定子步。
+    fn step_fluids(&mut self, dt: f32) {
+        if self.fluids.is_empty() {
+            return;
+        }
+        let mut fluids = std::mem::take(&mut self.fluids);
+        fluid::step_all(&mut fluids, &self.bodies, self.gravity, dt);
+        self.fluids = fluids;
+    }
+
     fn substep(&mut self, dt: f32) {
         if dt <= 0.0 || !dt.is_finite() {
             return;
@@ -1293,6 +1340,8 @@ impl PhysicsWorld {
         self.apply_ccd(dt);
         // 10. 位置积分
         solver::integrate_positions(&mut self.bodies, dt);
+        // 10.5 粒子流体：用本步刚体位置做边界（M2 单向：刚体 → 流体）。
+        self.step_fluids(dt);
         lap!(writeback_us);
         // 11. 更新接触冲量统计与缓存
         self.update_contact_impulses();

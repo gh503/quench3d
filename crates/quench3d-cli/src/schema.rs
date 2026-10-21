@@ -340,11 +340,22 @@ pub fn scene_grammar() -> Value {
                 "drag": "浸没部分线性阻尼 1/s，缺省 6；0 = 无阻尼",
                 "note": "一维浮力环境：y <= level 且在 XZ 范围内算浸没；没有粒子/流动/波浪（M1）。不写 = 没有水，物理结果与以前逐位相同",
             }],
+            "fluids": [{
+                "center": "[x, y, z]，缺省 [0, 0, 0]",
+                "size": "[x, y, z] 米，必须为正（长方体发射器）",
+                "spacing": "粒子间距（米），缺省 0.1；必须不大于发射体最小边长的 2 倍",
+                "radius": "粒子碰撞半径（米），缺省 spacing*0.5；必须不大于 spacing",
+                "rest_density": "静止密度 kg/m³，缺省 1000（水）",
+                "viscosity": "XSPH 粘性 0~1，缺省 0.05",
+                "iterations": "密度约束迭代次数 1~8，缺省 4",
+                "max_particles": "粒子上限 1~20000，缺省 4000；超出按晶格顺序截断",
+                "note": "CPU PBF 粒子流体（M2）：粒子被刚体推开（单向），还不会反推刚体；粒子渲染在 M4。不写 = 没有粒子，物理结果与以前逐位相同",
+            }],
             "materials": "名字 → 材质对象",
             "include": [
                 "被包含的外部场景片段路径数组（跨文件复用：把一份场景拆成多个文件）",
                 "相对路径以**写这一行的文件**所在目录为基准；片段可以再 include（最多 16 层，同一个文件只并入一次，成环报 include_cycle）",
-                "片段只能贡献可合并的段：materials/templates/cameras（重名 = duplicate_name 错误，不静默覆盖）+ waters/objects/models/joints/actions/probes/animations（按声明顺序追加：本文件自己的内容在前，被包含的内容在后）",
+                "片段只能贡献可合并的段：materials/templates/cameras（重名 = duplicate_name 错误，不静默覆盖）+ waters/fluids/objects/models/joints/actions/probes/animations（按声明顺序追加：本文件自己的内容在前，被包含的内容在后）",
                 "根独有的段（ground/camera/lighting/simulate/render/gravity/physics/name/assets）写在片段里是错误",
                 "片段里的贴图/模型相对路径按**片段自己的目录**解析（装载时重定基），不会因为被谁包含而指错地方",
                 "跨文件 prefab 的推荐写法：片段只放 templates，根场景用 objects[].template + instances 实例化",
@@ -695,6 +706,23 @@ pub fn json_schema() -> Value {
         d["required"] = json!(["size", "level"]);
         d
     });
+    defs.insert("fluid".into(), {
+        let mut d = def(&[
+            "center",
+            "size",
+            "spacing",
+            "radius",
+            "rest_density",
+            "viscosity",
+            "iterations",
+            "max_particles",
+        ]);
+        d["description"] = json!(
+            "一个 CPU PBF 粒子流体：长方体发射器 + 粒子参数；粒子被刚体推开（M2 单向），不反推刚体"
+        );
+        d["required"] = json!(["size"]);
+        d
+    });
     defs.insert("model".into(), {
         let mut d = def(&[
             "path",
@@ -879,10 +907,12 @@ pub fn json_schema() -> Value {
                 "ground": { "$ref": "#/$defs/ground" },
                 "waters": { "type": "array", "items": { "$ref": "#/$defs/water" },
                             "description": "水域（浮力环境）：只影响动态刚体的浮力/阻尼，不参与碰撞；不写 = 没有水" },
+                "fluids": { "type": "array", "items": { "$ref": "#/$defs/fluid" },
+                            "description": "CPU PBF 粒子流体：粒子被刚体推开（单向），不反推刚体；不写 = 没有粒子" },
                 "materials": { "type": "object",
                                "additionalProperties": { "$ref": "#/$defs/material" } },
                 "include": { "type": "array", "items": { "type": "string" },
-                             "description": "被包含的外部场景片段：只贡献可合并的段（材质/模板/相机/物体/模型/关节/动作/探针/动画），具名表重名报错、数组按「自己的在前」追加；相对路径以写这一行的文件所在目录为基准，片段的资源路径按片段自己的目录重定基；最多 16 层，成环报 include_cycle" },
+                             "description": "被包含的外部场景片段：只贡献可合并的段（材质/模板/相机/水域/流体/物体/模型/关节/动作/探针/动画），具名表重名报错、数组按「自己的在前」追加；相对路径以写这一行的文件所在目录为基准，片段的资源路径按片段自己的目录重定基；最多 16 层，成环报 include_cycle" },
                 "templates": { "type": "object",
                                "additionalProperties": { "$ref": "#/$defs/object" },
                                "description": "可复用的物体描述；objects[].template 引用它" },
@@ -932,6 +962,10 @@ pub fn system_prompt() -> String {
 - waters: [{ center: [0, 0], size: [10, 6], level: 0.0, density: 1000, drag: 6 }]
   // 水域（浮力环境，M1）：y <= level 且在 XZ 范围内算浸没；动态刚体按排开体积受浮力，
   // 睡眠体不受力。没有粒子/流动/波浪；不写 = 没有水。
+- fluids: [{ center: [0, 2, 0], size: [2, 2, 2], spacing: 0.1, radius: 0.05,
+            rest_density: 1000, viscosity: 0.05, iterations: 4, max_particles: 4000 }]
+  // CPU PBF 粒子流体（M2）：长方体发射器 + 粒子参数。粒子被刚体推开，但还不会反推刚体；
+  // 没有表面张力/涡量；粒子渲染在 M4。不写 = 没有粒子。
 - materials: { 名字: { color: [r,g,b]（sRGB）, metallic: 0~1, roughness: 0.05~1, emissive: 0,
              alpha: 0~1, emissive_color: [r,g,b], uv_scale: 1, normal_scale: 1,
              alpha_cutoff: 0, alpha_blend: false, unlit: false, double_sided: false,
@@ -941,7 +975,7 @@ pub fn system_prompt() -> String {
   物体写 "template": "名字" 引用；物体自己写的字段覆盖模板
   （模板里写 name/parent/position/rotation_deg 没有意义，会被忽略并警告）
 - include: ["parts/wall.json", "../shared/common.json"]   // 跨文件复用（可选）
-  被包含的片段只贡献可合并的段（materials/templates/cameras + waters/objects/models/
+  被包含的片段只贡献可合并的段（materials/templates/cameras + waters/fluids/objects/models/
   joints/actions/probes/animations）：具名表重名 = duplicate_name 错误（不静默覆盖），
   数组按声明顺序追加（**本文件自己的内容在前**，被包含的在后）。
   根独有的段（ground/camera/lighting/simulate/render/gravity/physics/name/assets）
@@ -1321,6 +1355,7 @@ mod tests {
             ("MaterialDoc", "material"),
             ("GroundDoc", "ground"),
             ("WaterDoc", "water"),
+            ("FluidDoc", "fluid"),
             ("ModelDoc", "model"),
             ("ModelAnimationDoc", "modelAnimation"),
             ("AssetsDoc", "assets"),
@@ -1463,6 +1498,7 @@ mod tests {
             "gravity",
             "ground",
             "waters",
+            "fluids",
             "materials",
             "templates",
             "instances",

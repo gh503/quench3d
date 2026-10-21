@@ -644,6 +644,16 @@ fn dispatch(args: &Args) -> i32 {
                     if report.waters > 0 {
                         human.push_str(&format!("水域      : {}\n", report.waters));
                     }
+                    for (i, f) in report.fluids.iter().enumerate() {
+                        human.push_str(&format!(
+                            "流体[{i}]   : {} 粒子，密度比 {:.2}，最高速度 {:.2} m/s，y {:.2}..{:.2}\n",
+                            f.particles,
+                            f.avg_density_ratio,
+                            f.max_speed,
+                            f.min_y,
+                            f.max_y
+                        ));
+                    }
                     for s in &report.states {
                         human.push_str(&format!(
                             "  {:<14} {:<9} 位置 ({:>7.2},{:>7.2},{:>7.2}) 速度 {:>6.2} 位移 {:>6.2}{}\n",
