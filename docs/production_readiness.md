@@ -2297,7 +2297,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 * **接入**：`runner::add_fluid_visuals` 在 `setup_visuals` 里建粒子/水面物体；CLI
   `render`/`movie`、编辑器共用 `Scene::sync_from_physics`，所以三条路径同一套。
 * **规模**：`examples/fluid_pool.json` 960×600：4909 实例、47.2 万三角形、约 10 s；
-  相对无流体基线 **7.6% 像素变化**（差异包围盒覆盖水池）。640×420、48 帧 GIF 约 39 s，
+  相对无流体基线 **7.4% 像素变化**（差异包围盒覆盖水池）。640×420、48 帧 GIF 约 39 s，
   帧间平均 7.6% 像素变化。
 
 ### 23.2 边界（诚实清单）
@@ -2314,6 +2314,6 @@ if let Some(v) = doc.physics.static_friction_speed {
 
 * `quench3d`：`scene::tests::fluid_visuals_follow_the_particle_cloud`（不建 GPU，
   直接验证粒子位置/缩放与水面高度同步）。
-* 像素：`render examples/fluid_pool.json` 对照无流体场景，7.6% 像素变化、平均绝对差
+* 像素：`render examples/fluid_pool.json` 对照无流体场景，7.4% 像素变化、平均绝对差
   3.66；GIF 48 帧（640×420，4 s）帧间平均 7.6% 变化、蓝像素占比 62%~73%。
 * 报告：`render` 的 `instances` 4909、`triangles` 472434，证明粒子确实进了提交列表。
