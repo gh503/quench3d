@@ -1329,6 +1329,32 @@ pub struct AssetsDoc {
     pub search_paths: Vec<PathBuf>,
 }
 
+/// 模型文件里一条 glTF 动画的**播放设置**。
+///
+/// 这是"视觉"动画：它只改模型展开出来的物体的变换，**不动物理**（模型的可选碰撞体
+/// 是绑定姿态下的静态三角网，不会跟着动）。名字是否存在于资产里，`validate` 判断不了
+/// （它不读资产），只能在装载后由 `simulate` / `render` 报告的
+/// `models[].animation.found` 给出。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAnimationDoc {
+    /// 动画名（glTF `animations[].name`；没有名字的资产用 `animation_{下标}`）。
+    pub name: String,
+    /// 从第几秒开始播放，缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f32>,
+    /// 播放倍速，缺省 1（必须 > 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// 是否循环，缺省 **true**（glTF 片段通常是循环的待机/行走）。
+    ///
+    /// 写 `false` = 播完停在最后一帧。注意与 `animations[].loop`（关键帧动画，缺省
+    /// false）方向相反：那边是"一次性动作"，这边是"片段循环"。两处都会在
+    /// `schema --json` 的字段表里写明缺省值。
+    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
+    pub looping: Option<bool>,
+}
+
 /// 一个外部模型文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1350,6 +1376,12 @@ pub struct ModelDoc {
     /// 参与碰撞时的摩擦系数，缺省 0.8。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub friction: Option<f32>,
+    /// 播放模型里的一条 glTF 动画；**不写 = 静止**（老行为逐字节不变）。
+    ///
+    /// 名字不存在不会让场景非法（`validate` 不读资产），但会在 `simulate` / `render`
+    /// 的 `models[].animation.found` 里报 `false`，几何保持绑定姿态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<ModelAnimationDoc>,
 }
 
 /// 关节类型。
@@ -4571,6 +4603,43 @@ impl SceneDoc {
                         format!("{p}.scale"),
                         "缩放必须是正数",
                     ));
+                }
+            }
+            // 模型动画：结构上能查的只有"名字非空 / 倍速为正 / 起始非负"。
+            // 名字在不在资产里、时长多少，`validate` 读不到（它不装载资产）——
+            // 那一条由 `simulate` / `render` 报告的 `models[].animation` 给出。
+            if let Some(a) = &m.animation {
+                let ap = format!("{p}.animation");
+                if a.name.trim().is_empty() {
+                    out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{ap}.name"),
+                            "动画名不能为空",
+                        )
+                        .with_hint(
+                            "写 glTF 里的 `animations[].name`；\
+                             用 `quench3d info 模型.glb` 能看到有哪些",
+                        ),
+                    );
+                }
+                if let Some(sp) = a.speed {
+                    if !(sp.is_finite() && sp > 0.0) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{ap}.speed"),
+                            "播放倍速必须是正的有限值",
+                        ));
+                    }
+                }
+                if let Some(st) = a.start {
+                    if !st.is_finite() || st < 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{ap}.start"),
+                            "起始时间必须是非负有限值",
+                        ));
+                    }
                 }
             }
         }

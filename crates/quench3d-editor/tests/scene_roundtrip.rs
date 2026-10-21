@@ -702,7 +702,8 @@ fn model_transform_edits_are_exported() {
         r#"{{
           "format": "quench3d.scene", "version": 2, "name": "model-panel",
           "models": [
-            {{ "path": "{obj_json}", "position": [0.0, 0.0, 0.0], "scale": 1.0, "collide": false }}
+            {{ "path": "{obj_json}", "position": [0.0, 0.0, 0.0], "scale": 1.0, "collide": false,
+               "animation": {{ "name": "摆动", "start": 0.5, "speed": 2.0, "loop": false }} }}
           ],
           "objects": []
         }}"#
@@ -735,6 +736,16 @@ fn model_transform_edits_are_exported() {
         Some(1.0),
         "没动过的模型缩放必须原样导出"
     );
+    // 模型动画是**编辑器不改也不该丢**的字段（录制/渲染时由 CLI 消费）：
+    // 存一次再读一次必须逐项还在，否则"在编辑器里打开过"就等于悄悄关掉了动画。
+    let anim = before_parsed.models[0]
+        .animation
+        .as_ref()
+        .expect("模型动画字段不许在导出时丢掉");
+    assert_eq!(anim.name, "摆动");
+    assert_eq!(anim.start, Some(0.5));
+    assert_eq!(anim.speed, Some(2.0));
+    assert_eq!(anim.looping, Some(false));
 
     // 编辑器"模型"面板做的事：直接改底稿里的模型变换。
     let base = doc.base_doc_mut().expect("应当有底稿");
@@ -767,6 +778,11 @@ fn model_transform_edits_are_exported() {
         "位置没读回来"
     );
     assert_eq!(base2.models[0].scale, Some(2.5), "缩放没读回来");
+    assert_eq!(
+        base2.models[0].animation.as_ref().map(|a| a.name.as_str()),
+        Some("摆动"),
+        "动画字段没读回来（编辑器存盘把动画丢了）"
+    );
 }
 
 /// 复合形状：导出要写 `shapes`，而"部件绘制物体"不许被当成独立物体写出去。

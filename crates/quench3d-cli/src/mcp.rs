@@ -821,6 +821,7 @@ fn annotate_tools(tools: &mut [Value]) {
                     ("vertices", "integer"),
                     ("triangles", "integer"),
                     ("bounds_size", "array"),
+                    ("animations", "array"),
                 ]),
             ),
             "quench3d_validate" => (
@@ -848,6 +849,7 @@ fn annotate_tools(tools: &mut [Value]) {
                     ("probes", "array"),
                     ("trajectories", "array"),
                     ("warnings", "array"),
+                    ("models", "array"),
                 ]),
             ),
             "quench3d_query" => (
@@ -881,6 +883,8 @@ fn annotate_tools(tools: &mut [Value]) {
                     ("probes", "array"),
                     ("dry_run", "boolean"),
                     ("would_write", "array"),
+                    ("models", "array"),
+                    ("warnings", "array"),
                 ]),
             ),
             "quench3d_movie" => (
@@ -896,6 +900,7 @@ fn annotate_tools(tools: &mut [Value]) {
                     ("last_frame", "object"),
                     ("probes", "array"),
                     ("notes", "array"),
+                    ("models", "array"),
                     ("dry_run", "boolean"),
                 ]),
             ),

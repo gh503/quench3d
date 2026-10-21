@@ -283,8 +283,13 @@ fn dispatch(args: &Args) -> i32 {
             match runner::run_info(&path) {
                 Ok(info) => {
                     let value = serde_json::to_value(&info).unwrap_or(Value::Null);
+                    let animations = if info.animations.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n动画      : {:?}", info.animations)
+                    };
                     let human = format!(
-                        "文件      : {}\n格式      : {}\n子网格    : {}（三角形 {:?}）\n材质/贴图 : {} / {}\n顶点      : {}\n三角形    : {}\n包围盒    : min {:?}  max {:?}\n尺寸      : {:?}",
+                        "文件      : {}\n格式      : {}\n子网格    : {}（三角形 {:?}）\n材质/贴图 : {} / {}\n顶点      : {}\n三角形    : {}\n包围盒    : min {:?}  max {:?}\n尺寸      : {:?}{}",
                         info.path,
                         info.format,
                         info.meshes,
@@ -295,7 +300,8 @@ fn dispatch(args: &Args) -> i32 {
                         info.triangles,
                         info.bounds_min,
                         info.bounds_max,
-                        info.bounds_size
+                        info.bounds_size,
+                        animations
                     );
                     finish(args, "info", Ok(value), started, |_| println!("{human}"))
                 }
@@ -411,8 +417,12 @@ fn dispatch(args: &Args) -> i32 {
             match runner::run_render(&doc, out.as_deref(), output_policy(args)) {
                 Ok(report) if report.dry_run => {
                     let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+                    let mut warnings = String::new();
+                    for w in &report.warnings {
+                        warnings.push_str(&format!("\n注意      : {w}"));
+                    }
                     let human = format!(
-                        "（dry-run）本会渲染 : {}（{}×{}）\n物理        : {} 步{}\n耗时        : {} ms",
+                        "（dry-run）本会渲染 : {}（{}×{}）\n物理        : {} 步{}\n耗时        : {} ms{}",
                         report.output,
                         report.width,
                         report.height,
@@ -425,14 +435,19 @@ fn dispatch(args: &Args) -> i32 {
                                 s.bodies, s.max_speed, s.nan_bodies
                             ))
                             .unwrap_or_default(),
-                        report.elapsed_ms
+                        report.elapsed_ms,
+                        warnings
                     );
                     finish(args, "render", Ok(value), started, |_| println!("{human}"))
                 }
                 Ok(report) => {
                     let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+                    let mut warnings = String::new();
+                    for w in &report.warnings {
+                        warnings.push_str(&format!("\n注意      : {w}"));
+                    }
                     let human = format!(
-                        "已渲染    : {}（{}×{}，{} KB）\n绘制/实例 : {} / {}\n三角形    : {}\n阴影实例  : {}\n场景物体  : {}\n相机位置  : {:?}\n耗时      : {} ms{}",
+                        "已渲染    : {}（{}×{}，{} KB）\n绘制/实例 : {} / {}\n三角形    : {}\n阴影实例  : {}\n场景物体  : {}\n相机位置  : {:?}\n耗时      : {} ms{}{}",
                         report.output,
                         report.width,
                         report.height,
@@ -451,7 +466,8 @@ fn dispatch(args: &Args) -> i32 {
                                 "\n物理      : {} 步，{} 个刚体，最大速度 {:.2} m/s，NaN {}",
                                 s.steps, s.bodies, s.max_speed, s.nan_bodies
                             ))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        warnings
                     );
                     finish(args, "render", Ok(value), started, |_| println!("{human}"))
                 }

@@ -105,17 +105,12 @@ fn native_path_loading_still_reports_missing_files() {
     }
 }
 
-/// 节点变换必须真的烘进几何：同一网格被多个节点引用 → 多个实例，各在各的位置。
-///
-/// 【曾经是 bug】加载器直接遍历 `doc.meshes()`、完全不看节点，于是所有部件堆在原点
-/// （单网格模型看不出来，两个轮子的车一眼就看出来），同一网格被 3 个节点引用也只画一次。
-/// 这条测试同时盖住：平移、旋转（法线跟着转）、父子累乘、同名网格的多实例。
+/// 手搓的「4 节点 + 2 轨道」GLB：平移、旋转、父子累乘、同一网格多实例，外加一条 1 秒动画。
 // 旋转关键帧里要写 0.7071068（sin45°），clippy 会建议用 `FRAC_1_SQRT_2`；但那段是
 // **JSON 字符串**，塞常量进去要把整个 JSON 改成 format!（引号/大括号全要转义）。
 // 这里明确允许近似常量，比为了一个测试把夹具搞得不可读更划算。
 #[allow(clippy::approx_constant)]
-#[test]
-fn gltf_node_transforms_are_baked_into_geometry() {
+fn nodes_with_animation_glb() -> Vec<u8> {
     // BIN：位置(36) + 法线(36) + 索引(6，u16 补齐到 8)
     let mut bin = Vec::new();
     for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
@@ -183,7 +178,18 @@ fn gltf_node_transforms_are_baked_into_geometry() {
     {"input":3,"output":5,"interpolation":"LINEAR"}
   ]}],
 "buffers":[{"byteLength":144}]}"#;
-    let model = load_model_from_bytes("nodes.glb", &glb_from_parts(json, bin)).expect("该能解析");
+    glb_from_parts(json, bin)
+}
+
+/// 节点变换必须真的烘进几何：同一网格被多个节点引用 → 多个实例，各在各的位置。
+///
+/// 【曾经是 bug】加载器直接遍历 `doc.meshes()`、完全不看节点，于是所有部件堆在原点
+/// （单网格模型看不出来，两个轮子的车一眼就看出来），同一网格被 3 个节点引用也只画一次。
+/// 这条测试同时盖住：平移、旋转（法线跟着转）、父子累乘、同名网格的多实例。
+#[test]
+fn gltf_node_transforms_are_baked_into_geometry() {
+    let glb = nodes_with_animation_glb();
+    let model = load_model_from_bytes("nodes.glb", &glb).expect("该能解析");
     assert_eq!(
         model.meshes.len(),
         4,
@@ -362,4 +368,73 @@ fn gltf_node_transforms_are_baked_into_geometry() {
     weird.speed = 0.0;
     weird.advance(f32::NAN);
     assert!(weird.time.is_finite(), "时间不该变 NaN：{}", weird.time);
+}
+
+/// 从**解析**到**场景物体真的动了**的整条链（CLI 的 `models[].animation` 与编辑器的
+/// 帧循环共用同一条）：
+/// GLB 字节 → `LoadedModel` → `player(name)` → `Scene::play_model_animation`
+/// → `advance_animations` → 物体变换。
+#[test]
+fn scene_animation_moves_the_spawned_meshes() {
+    use quench3d::math::{Quat, Transform};
+    use quench3d::scene::Scene;
+
+    let model = std::sync::Arc::new(
+        load_model_from_bytes("nodes.glb", &nodes_with_animation_glb()).expect("该能解析"),
+    );
+    let mut scene = Scene::new();
+    let base = Transform::new(Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+    // 真实 `spawn` 需要 GPU；这里用同一份"片段 → 物体下标、基础变换"的映射，
+    // 场景层的语义（base × 动画矩阵）完全一致。
+    let objects: Vec<usize> = (0..model.meshes.len())
+        .map(|i| scene.add_named(i as u32, 0, base, &format!("片段{i}")))
+        .collect();
+    let right = model
+        .meshes
+        .iter()
+        .position(|m| m.name.starts_with("右/"))
+        .expect("「右」片段该在");
+    let left = model
+        .meshes
+        .iter()
+        .position(|m| m.name.starts_with("左/"))
+        .expect("「左」片段该在");
+
+    let player = model.player("移动").expect("该有播放器");
+    scene.play_model_animation(
+        model.clone(),
+        objects.clone(),
+        vec![base; model.meshes.len()],
+        player,
+    );
+
+    // t = 0：保持基础变换（绑定姿态下动画矩阵是单位矩阵）。
+    assert_eq!(
+        scene.advance_animations(0.0),
+        objects.len(),
+        "每个片段都该算更新"
+    );
+    assert!(
+        (scene.objects[objects[right]].transform.position.x - 10.0).abs() < 1e-4,
+        "t=0 该保持基础位置"
+    );
+
+    // t = 0.5：节点 0 的平移从 2 走到 3.5，所以相对基础位置右移 1.5。
+    scene.advance_animations(0.5);
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!(
+        (x - 11.5).abs() < 1e-4,
+        "t=0.5 时「右」该在 11.5（基础 10 + 1.5），实际 {x}"
+    );
+    // 没有轨道覆盖的节点（「左」）一分不动。
+    let x = scene.objects[objects[left]].transform.position.x;
+    assert!((x - 10.0).abs() < 1e-4, "「左」不该动，实际 {x}");
+
+    // 循环：走满 1 秒会绕回 t=0 —— 位置回到基础变换（不是继续往前漂）。
+    scene.advance_animations(0.5);
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!(
+        (x - 10.0).abs() < 1e-4,
+        "循环走满 1 秒该绕回基础位置，实际 {x}"
+    );
 }

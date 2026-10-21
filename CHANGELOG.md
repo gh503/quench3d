@@ -54,6 +54,32 @@
 
 ### 新增
 
+- **模型动画接进场景格式与帧循环**（gap #23 的第三刀：`models[].animation`）
+  - **格式**：`models[i].animation = { "name": "走路", "start"?: 0, "speed"?: 1, "loop"?: true }`。
+    不写 = 静止，老场景逐字节不变；`loop` 缺省 **true**（与 `animations[].loop` 缺省 false 相反，
+    模型片段通常是循环的），写 `false` 播完停在最后一帧。
+  - **消费点同批落地**（不留"能解析、能校验、没人消费"的字段）：`Scene::advance_animations(dt)`
+    每帧推进所有登记过的模型动画，窗口循环（`Engine::tick`）与无头逐帧循环
+    （`render_sequence_with_game` / `movie`）都在 `sync_from_physics` 之后调一次、暂停时不推进；
+    单帧 `render` 用 `dt = 0` 摆一次起始姿态。`LoadedModel::spawn` 改返回
+    `SpawnedModel { objects, base }`，让"片段 → 物体下标 / 片段 → 出生变换"两份映射同源，
+    `base × 动画矩阵` 每帧重算（不是在上一帧结果上累乘，所以不会漂）。
+  - **名字不存在只能装载后判定**：`validate` 不读资产，只查结构（名字非空 / `speed > 0` /
+    `start` 有限且 ≥ 0，诊断路径逐项可对）；真正的对账在 `simulate` / `render` / `movie` 报告的
+    `models[]`：`found`、`duration`、`tracks`、资产里全部 `clips`，并在 `warnings` / `notes` 里
+    说明"不会播、模型保持绑定姿态"。写错名字**不是**校验错误（退出码 0）。
+    `quench3d info 模型.glb` 新增 `animations`（agent 发现可用名字的入口）。
+  - **边界（诚实）**：这是**视觉**动画 —— 只改模型展开物体的变换，不动物理；
+    `models[].collide` 的静态三角网碰撞体仍是绑定姿态，不会跟着动。`skins` + GPU 蒙皮、
+    混合（多轨道权重）、`CUBICSPLINE` 真值、morph target 仍未做。像素级"真的动了"留给有 GPU
+    的腿（本机 + macOS CI），本轮自动验证止于 CPU 与报告。
+  - 验证：`cargo test -p quench3d --lib -- anim_tests`、
+    `cargo test -p quench3d --test model_loading`（真 GLB 字节 → `Scene::play_model_animation`
+    → 物体真的移动/循环绕回）、`cargo test -p quench3d-cli --test cli_e2e -- model_animation`
+    （名字对/错/不写三态 + 结构校验 + `info` 列动画）、
+    `cargo test -p quench3d-editor --test scene_roundtrip -- model_transform_edits_are_exported`
+    （编辑器存一次再读一次不丢 `animation` 字段）。
+
 - **glTF 动画解析 + CPU 侧采样**（gap #23 的第一刀）
   - `LoadedModel` 现在带**节点表**（`nodes: Vec<LoadedNode>`：名字、父节点、局部 TRS）和
     **动画**（`animations: Vec<LoadedAnimation>`）；轨道覆盖平移/旋转/缩放，插值支持

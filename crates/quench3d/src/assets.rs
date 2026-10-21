@@ -485,21 +485,43 @@ impl LoadedModel {
     }
 
     /// 把模型注册为场景物体。
+    ///
+    /// 返回 [`SpawnedModel`] 而不是裸 `Vec<usize>`：动画要把 `world(t) × bind_inverse`
+    /// 乘到**每个片段自己的基础变换**上，所以调用方必须同时拿到"片段 → 物体下标"和
+    /// "片段 → 出生变换"两份映射。只给一份的话，动画只能靠猜或另抄一份映射。
     pub fn spawn(
         &self,
         renderer: &mut Renderer,
         ctx: &GpuContext,
         scene: &mut crate::scene::Scene,
         transform: Transform,
-    ) -> Vec<usize> {
-        self.upload(renderer, ctx)
+    ) -> SpawnedModel {
+        let objects: Vec<usize> = self
+            .upload(renderer, ctx)
             .into_iter()
             .enumerate()
             .map(|(i, (mesh, material))| {
                 scene.add_named(mesh, material, transform, &format!("{}_{}", self.name, i))
             })
-            .collect()
+            .collect();
+        SpawnedModel {
+            // 所有片段出生时用同一个变换（模型整体摆位），动画只在这个基础上叠加。
+            base: vec![transform; objects.len()],
+            objects,
+        }
     }
+}
+
+/// `LoadedModel::spawn` 的结果：片段 → 场景物体的两份**同序**映射。
+///
+/// 下标就是 `LoadedModel::meshes` 的下标；`objects[i]` 是那个片段在场景里的物体，
+/// `base[i]` 是它出生时的变换（`Scene::apply_animation` 的基准）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpawnedModel {
+    /// 每个网格片段对应的场景物体下标。
+    pub objects: Vec<usize>,
+    /// 每个网格片段出生时的基础变换。
+    pub base: Vec<Transform>,
 }
 
 /// 解析候选路径：直接路径、`assets/`、`quench3d/assets/`。

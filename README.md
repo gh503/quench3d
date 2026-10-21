@@ -831,6 +831,13 @@ NaN 刚体  : 0
   （fog 的 `density` 缺省 0.02，写 0 等于关）。
 * `objects[].static_friction` 缺省**跟随 `friction`**（只管动摩擦的老场景行为逐位不变）；
   想表达"推得动、但推住之后不会慢慢滑"就把它写得比 `friction` 大。
+* `models[].animation` 是**视觉**动画：`{ "name": "走路", "start": 0, "speed": 1, "loop": true }`。
+  名字在资产里存不存在**只有装载后才知道**（`validate` 不读资产），所以 `validate` 只查结构
+  （名字非空、`speed > 0`、`start >= 0`）；真正的对账在 `simulate`/`render`/`movie` 报告的
+  `models[]`（`found` / `duration` / `tracks` + 资产里可用的 `clips`）——名字写错只给警告，
+  几何保持绑定姿态，不会让场景非法。`loop` 缺省 **true**（与 `animations[].loop` 缺省 false
+  相反：模型片段通常是循环的）；`loop: false` 播完停在最后一帧。`collide: true` 的静态碰撞体
+  **不跟着动**。可用名字用 `quench3d info 模型.glb` 看。
 * `friction_combine` / `restitution_combine` 可写在世界级 `physics` 段（缺省）或单个物体上
   （覆盖缺省）。缺省规则是**几何平均**（摩擦）与**取大**（恢复）——正是老行为；
   改成 `average`/`min`/`max`/`multiply` 会改变已有场景的观感，属于**有意**调整。
@@ -1127,7 +1134,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 610 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 614 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1198,7 +1205,7 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（"要真建 GP
 
 资源层测试覆盖：OBJ 四边形三角化、负索引、MTL 解析（`Kd/Ks/Ns/d/map_Kd`）。
 
-命令行工具的 **195** 个测试（`cargo test -p quench3d-cli`：lib 99 + bin 6 + 7 个集成测试二进制共 89 + 1 个 doctest），按目的分这几块：
+命令行工具的 **197** 个测试（`cargo test -p quench3d-cli`：lib 99 + bin 6 + 7 个集成测试二进制共 91 + 1 个 doctest），按目的分这几块：
 
 * **契约测试**（`tests/cli_e2e.rs`，64 个）真的去 spawn `quench3d` 子进程，断言
   **单行 JSON 信封、退出码（0/2/3/4）、诊断带路径**、渲染出的确实是 PNG；
@@ -1612,6 +1619,8 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   导入的模型（glTF/OBJ）已经接进场景树：可整组选中、可聚焦、可在视口里实时拖动并写回
   `models[i]`（见 §1.1），但**一个模型只有一个变换** —— 不能单独挪模型里的某个子网格，
   也不能把非均匀缩放写回格式（`models[i].scale` 是单个浮点数）。
+  模型的 `animation` 字段能原样保留并播放（帧循环推进），但编辑器**还没有动画面板**：
+  不能在视口里选片段、调时间轴或换起始帧，只能改场景文件。
 * 编辑器能改**光照**（场景级）与**材质**（基础色/金属度/粗糙度/自发光 + 四个贴图槽 +
   UV 平铺/法线强度/alpha 裁剪与混合/无光照/双面），改不了的是材质节点图 / 自定义着色器，
   也没有贴图 UV 的可视化编辑（贴图按**路径**指定：原生端可从磁盘应用，Web 端写进场景文件）。

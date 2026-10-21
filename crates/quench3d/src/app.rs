@@ -290,7 +290,9 @@ impl Engine {
         model: &crate::assets::LoadedModel,
         transform: Transform,
     ) -> Vec<usize> {
-        model.spawn(&mut self.renderer, &self.gpu, &mut self.scene, transform)
+        model
+            .spawn(&mut self.renderer, &self.gpu, &mut self.scene, transform)
+            .objects
     }
 
     /// 加载模型，同时用**合并后的三角网格**创建一个静态刚体（关卡地形 / 建筑），
@@ -337,7 +339,9 @@ impl Engine {
             )
         };
 
-        let ids = model.spawn(&mut self.renderer, &self.gpu, &mut self.scene, transform);
+        let ids = model
+            .spawn(&mut self.renderer, &self.gpu, &mut self.scene, transform)
+            .objects;
         Ok((ids, body.unwrap_or_else(|| BodyHandle::new(0, 0))))
     }
 
@@ -528,6 +532,10 @@ impl Engine {
         if self.scene.auto_sync_physics {
             let world = &self.world;
             self.scene.sync_from_physics(world);
+        }
+        // 模型动画按**帧**时间推进（不是物理子步）：它是视觉量，暂停时也不该继续走。
+        if !self.paused {
+            self.scene.advance_animations(dt);
         }
 
         self.renderer.begin_frame();
@@ -1393,6 +1401,10 @@ pub fn render_sequence_with_game<G: Game>(
 
         if engine.scene.auto_sync_physics {
             engine.scene.sync_from_physics(&engine.world);
+        }
+        // 与窗口循环同一个口径：动画按帧时间推进，暂停时不走。
+        if !engine.paused {
+            engine.scene.advance_animations(frame_dt);
         }
 
         let camera = engine.camera();

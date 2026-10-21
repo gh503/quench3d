@@ -10,6 +10,7 @@
 //! （它负责把子孙提到祖父、保持它们的世界位姿、并把后面的父下标前移）。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use quench3d_math::{Mat4, Transform, Vec3, Vec4};
 use quench3d_physics::{BodyHandle, PhysicsWorld};
@@ -71,6 +72,22 @@ impl SceneObject {
     }
 }
 
+/// 场景里一个"正在播放 glTF 动画"的模型实例。
+///
+/// 一个模型会展开成多个场景物体（每个网格片段一个），动画要把每个片段自己的矩阵
+/// 乘到它**出生时**的变换上。`model` 用 `Arc` 共享：模型可能很大（顶点/贴图），
+/// 而播放器只读它。
+pub struct ModelAnimationInstance {
+    /// 模型（只读；与 `objects` 同一份切片的来源）。
+    pub model: Arc<crate::assets::LoadedModel>,
+    /// 片段 → 场景物体下标（与 `base` **同序**，下标就是 `model.meshes` 下标）。
+    pub objects: Vec<usize>,
+    /// 片段 → 出生变换（动画的基准，**不是**上一帧结果）。
+    pub base: Vec<Transform>,
+    /// 播放状态（时间 / 倍速 / 循环）。
+    pub player: crate::assets::ModelAnimationPlayer,
+}
+
 /// 场景。
 pub struct Scene {
     /// 全部物体。
@@ -79,6 +96,10 @@ pub struct Scene {
     pub lighting: Lighting,
     /// 物理步进后是否自动把刚体位姿同步到物体。
     pub auto_sync_physics: bool,
+    /// 正在播放的模型动画（每帧 [`Scene::advance_animations`] 推进）。
+    ///
+    /// 空 = 静态场景：`advance_animations` 一次循环都不进，逐字节零开销。
+    pub animations: Vec<ModelAnimationInstance>,
 }
 
 impl Default for Scene {
@@ -94,6 +115,7 @@ impl Scene {
             objects: Vec::new(),
             lighting: Lighting::default(),
             auto_sync_physics: true,
+            animations: Vec::new(),
         }
     }
 
@@ -159,8 +181,12 @@ impl Scene {
     }
 
     /// 清空。
+    ///
+    /// 动画登记也一起清：不清的话，重建场景后旧的"片段 → 物体下标"会指向新场景里
+    /// **别的**物体（典型症状：重新载入场景后，某块地板开始自己走）。
     pub fn clear(&mut self) {
         self.objects.clear();
+        self.animations.clear();
     }
 
     /// 物体数量。
@@ -181,15 +207,53 @@ impl Scene {
         player: &crate::assets::ModelAnimationPlayer,
     ) -> usize {
         let mats = player.mesh_matrices(model);
+        apply_matrices(&mut self.objects, objects, base, &mats)
+    }
+
+    /// 登记一个会播放的模型动画，返回登记序号。
+    ///
+    /// **名字不存在时不要调它**（`model.player(name)` 返回 `None`）：把几何摆到
+    /// "绑定姿态以外的某处"或静默不播都不该由这里猜。调用方拿到 `None` 时应当在
+    /// 报告里说明（`simulate` / `render` 的 `models[].animation.found = false`）。
+    pub fn play_model_animation(
+        &mut self,
+        model: Arc<crate::assets::LoadedModel>,
+        objects: Vec<usize>,
+        base: Vec<Transform>,
+        player: crate::assets::ModelAnimationPlayer,
+    ) -> usize {
+        let index = self.animations.len();
+        self.animations.push(ModelAnimationInstance {
+            model,
+            objects,
+            base,
+            player,
+        });
+        index
+    }
+
+    /// 推进所有模型动画 `dt` 秒并把当前帧落到物体上；返回更新的物体数。
+    ///
+    /// * 调用点：窗口帧循环与无头逐帧循环都**每帧一次**（暂停时不调）；
+    ///   单帧渲染调 `dt = 0.0`，等于"按播放器当前时间摆一次姿态"（时间初值是 `start`）。
+    /// * 顺序在 `sync_from_physics` **之后**：物理先定位，动画再叠加；模型展开的物体
+    ///   没有刚体（模型整体只有可选的静态三角网格碰撞体），两者不会互相覆盖。
+    /// * 没有登记任何动画时直接返回 0，不进循环（静态场景零开销）。
+    pub fn advance_animations(&mut self, dt: f32) -> usize {
+        if self.animations.is_empty() {
+            return 0;
+        }
+        // 拆成两个字段借用：动画表（读模型/播放器）与物体表（写变换）互不重叠。
+        let Scene {
+            objects,
+            animations,
+            ..
+        } = self;
         let mut updated = 0;
-        for (mesh_index, &object) in objects.iter().enumerate() {
-            let Some(obj) = self.objects.get_mut(object) else {
-                continue;
-            };
-            let m = mats.get(mesh_index).copied().unwrap_or(Mat4::IDENTITY);
-            let base = base.get(mesh_index).copied().unwrap_or(obj.transform);
-            obj.transform = compose(base, &m);
-            updated += 1;
+        for a in animations.iter_mut() {
+            a.player.advance(dt);
+            let mats = a.player.mesh_matrices(&a.model);
+            updated += apply_matrices(objects, &a.objects, &a.base, &mats);
         }
         updated
     }
@@ -749,6 +813,29 @@ mod tests {
     }
 }
 
+/// 把"每个片段该用的额外矩阵"落到对应物体上；返回真正更新的物体数。
+///
+/// `objects` 是场景物体表，`object_indices` 与 `mats` / `base` 同序（下标 = 模型片段下标）。
+/// 越界物体下标跳过（不 panic）；`base` 比 `objects` 短时用物体当前变换兜底。
+fn apply_matrices(
+    objects: &mut [SceneObject],
+    object_indices: &[usize],
+    base: &[Transform],
+    mats: &[Mat4],
+) -> usize {
+    let mut updated = 0;
+    for (mesh_index, &object) in object_indices.iter().enumerate() {
+        let Some(obj) = objects.get_mut(object) else {
+            continue;
+        };
+        let m = mats.get(mesh_index).copied().unwrap_or(Mat4::IDENTITY);
+        let base = base.get(mesh_index).copied().unwrap_or(obj.transform);
+        obj.transform = compose(base, &m);
+        updated += 1;
+    }
+    updated
+}
+
 /// `基础变换 × 额外矩阵`：先把基础变换变成矩阵、乘上动画矩阵、再分解回 `Transform`。
 ///
 /// 额外矩阵来自"动画后的节点世界 × 绑定姿态世界⁻¹"，是仿射变换（旋转 + 平移，
@@ -908,5 +995,56 @@ mod anim_tests {
         let n = scene.apply_animation(&model2, &objects, &[], &model2.player("转").unwrap());
         assert_eq!(n, 1);
         assert!(scene.objects[o].transform.position.is_finite());
+    }
+
+    /// 登记过的动画由 `advance_animations` 自己推时间：每帧一次，几何跟着走；
+    /// 没有登记的模型一分不动；`clear` 之后旧登记不能继续改动新场景。
+    #[test]
+    fn advance_animations_plays_registered_models_only() {
+        let model = std::sync::Arc::new(pulley_model());
+        let mut scene = Scene::new();
+        // 片段 0 是静止的父节点、片段 1 才是滑轮；两个都要有对应物体。
+        let root = scene.add_named(0, 0, Transform::IDENTITY, "根");
+        let base = Transform::new(Vec3::new(0.0, 5.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+        let o = scene.add_named(1, 0, base, "滑轮");
+        // 同一场景里的另一个物体：不属于这个模型，它必须一分不动。
+        let still = scene.add_named(2, 0, Transform::IDENTITY, "背景");
+
+        let player = model.player("转").expect("该有播放器");
+        scene.play_model_animation(
+            model.clone(),
+            vec![root, o],
+            vec![Transform::IDENTITY, base],
+            player,
+        );
+
+        // dt = 0：按当前时间（start = 0）摆一次 —— 仍是绑定姿态。
+        assert_eq!(scene.advance_animations(0.0), 2);
+        assert!((scene.objects[o].transform.position.x).abs() < 1e-5);
+        assert!((scene.objects[o].transform.position.y - 5.0).abs() < 1e-5);
+
+        // 0.25 秒：滑轮 2 → 2.5，即 +0.5；背景不动。
+        scene.advance_animations(0.25);
+        assert!(
+            (scene.objects[o].transform.position.x - 0.5).abs() < 1e-4,
+            "半秒该右移 0.5，实际 {}",
+            scene.objects[o].transform.position.x
+        );
+        assert!((scene.objects[o].transform.position.y - 5.0).abs() < 1e-4);
+        assert_eq!(scene.objects[still].transform.position, Vec3::ZERO);
+
+        // 再走 0.25 秒 → 累计 0.5 秒 = +1.0（不是在上一次结果上叠加成 +1.5）。
+        scene.advance_animations(0.25);
+        assert!(
+            (scene.objects[o].transform.position.x - 1.0).abs() < 1e-4,
+            "累计半秒该是 +1.0，实际 {}",
+            scene.objects[o].transform.position.x
+        );
+
+        // 重载场景时 `clear` 必须把登记一起清掉：否则旧下标会去动新场景的别的物体。
+        scene.clear();
+        assert!(scene.animations.is_empty(), "clear 要清掉动画登记");
+        assert_eq!(scene.advance_animations(1.0), 0);
+        assert!(scene.objects.is_empty());
     }
 }

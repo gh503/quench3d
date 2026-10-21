@@ -2132,21 +2132,30 @@ if let Some(v) = doc.physics.static_friction_speed {
 | CPU 侧**采样**（给定 t 求节点世界矩阵） | ✅ 第 61 轮 | `sample_animation(name, t)`；循环/时间推进仍由调用方做（`t.rem_euclid(duration)`） |
 | CPU 侧播放状态（循环/夹取/倍速） | ✅ 第 61 轮 | `ModelAnimationPlayer::advance(dt)` + `mesh_matrices(&model)`；**纯 CPU 可测**（循环用 `rem_euclid`、`duration <= 0` 不除零、非法 dt 不出 NaN） |
 | 场景层应用（`Scene::apply_animation`） | ✅ 第 61 轮 | 纯 CPU、可测：`base × 额外矩阵`（不累乘 → 不漂）、只动有轨道的片段、越界跳过 |
-| 渲染循环里的调用点 + 格式字段 | ❌ | 需要"每个网格片段 → 场景物体下标"的映射（`LoadedModel::spawn` 现在只返回 `Vec<usize>`），然后把 `mesh_matrices` 乘到片段基础变换上；格式字段必须与它**同一批**落地，否则就是"能解析但没人消费" |
-| 与场景格式的接口 | ❌ | 需要 `objects[].model.animation = { name, speed, loop }` 一类字段（**向后兼容**：不写 = 现在这样，静止） |
+| 渲染循环里的调用点 | ✅ 第 62 轮 | `Scene::advance_animations(dt)`；`Engine::tick`（窗口）与 `render_sequence_with_game`（无头 `movie`）每帧在 `sync_from_physics` 之后调一次，暂停不推进；单帧 `render` 用 `dt = 0` 摆起始姿态 |
+| 与场景格式的接口 | ✅ 第 62 轮 | `models[].animation = { name, start?, speed?, loop? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
+| 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
+| 编辑器可达 | ✅ 第 62 轮（只保字段） | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；**没有动画面板**（不能选片段 / 调时间轴） |
 | 混合（多轨道 / 权重） | ❌ | 至少要能"两条轨道按权重加权"，否则 #23 的"混合"没落地 |
-| GPU 蒙皮 | ❌ | 顶点着色器要读关节矩阵纹理/uniform；`MeshData` 要加两套顶点属性 |
+| `skins` + GPU 蒙皮 | ❌ | `LoadedMesh.data` 的 `Vertex` 里没有 joint/weight；顶点着色器要读关节矩阵纹理/uniform；`MeshData` 要加两套顶点属性。**带骨骼蒙皮的角色 GLB 仍然只能静止**（能播的是节点级 TRS 动画） |
+| `CUBICSPLINE` 真值 / morph target | ❌ | 前者仍退化线性（只取关键帧值、丢切线），后者跳过不猜 |
+| 动画 vs 物理 | ⚠️ 有意 | 模型动画是**视觉**的：`models[].collide` 的静态三角网碰撞体保持绑定姿态，不会跟着动 |
 | `LoadedModel` 的节点树 | ✅ 第 61 轮 | `nodes` + `bind_pose()` + `bind_inverse`（每网格）——静态烘焙与动画并存：`world(t) × bind_inverse` 在绑定姿态下是单位矩阵 |
 
-### 19.3 下一步的实现顺序（建议）
+### 19.3 实现顺序（第 61~63 轮，已走完前三步）
 
-1. **保留节点树**：`LoadedModel.nodes: Vec<LoadedNode { name, parent, local_trs, mesh_indices }>`
-   + 由它算世界变换。静态路径继续烘焙（零回归），但把树留着。
-2. **`animations` 解析 + CPU 播放**：只做 TRS 轨道（绝大多数资产就这个），先 STEP/LINEAR；
-   加 `--animation name --time t` 之类的 CLI 观察口径 + 一条"t=0 与 t=中点 的包围盒不同"的测试。
-3. **接进场景格式**（向后兼容的新字段）+ 编辑器保留 + 校验（动画名不存在 → `unknown_reference`）。
-4. **`skins` + GPU 蒙皮**（最大的一块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
-   绑定姿态对账测试（t=0 必须与不蒙皮的渲染逐像素近似）。
+1. ✅ **保留节点树**：`LoadedModel.nodes`（name / parent / local TRS）+ 由它算世界变换。
+   静态路径继续烘焙（零回归），树留着给动画用。
+2. ✅ **`animations` 解析 + CPU 播放**：TRS 轨道、STEP/LINEAR（旋转 slerp）；
+   `ModelAnimationPlayer` 的循环/夹取/倍速是**纯 CPU 可测**的，不需要显卡。
+3. ✅ **接进场景格式**：`models[].animation` + 每帧推进 + 编辑器保留 + 三处报告对账。
+   与最早设想的一处偏差：**"动画名不存在"不做成 `unknown_reference` 致命错误** ——
+   `validate` 的契约是"不读资产也能校验"，让它去装载每个 glTF 才能判断名字，会把
+   一次纯结构校验变成 N 次文件解析（Web 端还没有文件系统）。现在结构错误仍然致命，
+   名字错误降级为报告里的 `found: false` + 警告，退出码 0；这比"validate 忽然变慢/联网"
+   更符合既有契约。
+4. ❌ **`skins` + GPU 蒙皮**（最大的一块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
+   绑定姿态对账测试（t=0 必须与不蒙皮的渲染逐像素近似）。混合、CUBICSPLINE、morph 在它前后都行。
 
 **不要**从 GPU 蒙皮开始：没有节点树和 CPU 侧采样，着色器里的关节矩阵只能从常量来，
 调不动也测不了。

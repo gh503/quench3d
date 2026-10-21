@@ -154,6 +154,9 @@ pub struct SimReport {
     /// 模型缓存统计（场景里没有模型时不出现）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_cache: Option<ModelCacheReport>,
+    /// 模型动画的**装载后**对账（场景里没写 `models[].animation` 时这个字段不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelReport>,
 }
 
 /// 轨迹采样点。
@@ -286,6 +289,69 @@ fn resolve_model_path(
     }
 }
 
+/// 模型动画的**装载后**对账：每个写了 `models[].animation` 的模型，名字在资产里
+/// 到底存不存在、时长/轨道数多少。
+///
+/// * 只装载**写了 animation 的模型**：没写 `animation` 的场景一个字节的报告都不变，
+///   也不会为静态 OBJ 白解析一遍（发现可用动画名走 `quench3d info`）。
+/// * `validate` 不读资产，所以结构错误在那里报；这里补的是"读得到资产之后才知道"的部分。
+pub fn model_animation_reports(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunError> {
+    let resolved = resolve_includes(doc)?;
+    let expanded = resolved.expanded();
+    model_animation_reports_of(&expanded)
+}
+
+/// [`model_animation_reports`] 的内部版本：`doc` 已经合并过 include / 展开过模板。
+fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunError> {
+    let mut out = Vec::new();
+    for (i, m) in doc.models.iter().enumerate() {
+        let Some(requested) = &m.animation else {
+            continue;
+        };
+        let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
+        let model = load_model_cached(&resolved)?;
+        let clip = model.animation(&requested.name);
+        out.push(ModelReport {
+            model: i,
+            path: m.path.display().to_string(),
+            clips: model
+                .animation_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            animation: ModelAnimationStatus {
+                name: requested.name.clone(),
+                found: clip.is_some(),
+                duration: clip.map(|c| c.duration),
+                tracks: clip.map(|c| c.tracks.len()),
+                speed: requested.speed.unwrap_or(1.0),
+                looping: requested.looping.unwrap_or(true),
+                start: requested.start.unwrap_or(0.0),
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// 把"动画名不存在"翻译成一句人话（报告警告与人类可读输出共用同一份措辞）。
+fn animation_warnings(reports: &[ModelReport]) -> Vec<String> {
+    reports
+        .iter()
+        .filter(|r| !r.animation.found)
+        .map(|r| {
+            let available = if r.clips.is_empty() {
+                "资产里没有任何动画".to_string()
+            } else {
+                format!("资产里有：{}", r.clips.join("、"))
+            };
+            format!(
+                "models[{}].animation：动画 \"{}\" 不存在（{available}），模型保持绑定姿态",
+                r.model, r.animation.name
+            )
+        })
+        .collect()
+}
+
 /// 报告里的模型缓存统计（没有任何模型参与时**不出现**，老报告逐字节不变）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCacheReport {
@@ -301,6 +367,45 @@ pub struct ModelCacheReport {
     pub bytes: usize,
     /// 预算（估算字节）。
     pub budget: usize,
+}
+
+/// 一个模型的动画**装载后**对账结果（`simulate` / `render` / `movie` 报告里的 `models[]`）。
+///
+/// 为什么不能放进 `validate`：`validate` 不装载资产，它不知道 glTF 里到底有几条动画、
+/// 各叫什么。于是"动画名写错"只能在这里被看见 —— 写错名字不会让场景非法，但会静默不播，
+/// 这正是最需要一条诊断出口的那类错。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelReport {
+    /// `SceneDoc::models` 下标。
+    pub model: usize,
+    /// 场景文件里写的路径（原样，不重定基）。
+    pub path: String,
+    /// 资产里的动画名（按 glTF 顺序）。场景没写 `animation` 的模型不出现在报告里。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<String>,
+    /// 场景里请求的动画的装载结果。
+    pub animation: ModelAnimationStatus,
+}
+
+/// 请求的那条模型动画的装载结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelAnimationStatus {
+    /// 场景里请求的名字。
+    pub name: String,
+    /// 资产里有没有这个名字。`false` = 不会播，几何停在绑定姿态（报告里另有警告）。
+    pub found: bool,
+    /// 时长（秒）；`found = false` 时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f32>,
+    /// 轨道数；`found = false` 时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<usize>,
+    /// 播放倍速（场景里的值，缺省 1）。
+    pub speed: f32,
+    /// 是否循环（场景里的值，缺省 true）。
+    pub looping: bool,
+    /// 起始时间（秒，缺省 0）。
+    pub start: f32,
 }
 
 /// 取一份缓存统计；没有任何模型参与时返回 `None`（这样"没模型的场景"报告保持不变）。
@@ -369,6 +474,12 @@ pub struct RenderReport {
     /// 一次渲多张时的明细（不写 `render.outputs` 时为空，老报告一个字不变）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputReport>,
+    /// 模型动画的装载后对账（没写 `models[].animation` 时不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelReport>,
+    /// 非致命提示（目前主要是"动画名不存在，模型停在绑定姿态"）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// serde 辅助：`false` 不序列化（保证缺省行为下 JSON 逐字节不变）。
@@ -513,6 +624,9 @@ pub struct MovieReport {
     /// 需要提醒用户的口径/格式限制（例如 GIF 的 10 ms 延迟粒度）。
     #[serde(default)]
     pub notes: Vec<String>,
+    /// 模型动画的装载后对账（没写 `models[].animation` 时不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelReport>,
     /// 是否为 `--dry-run`（真：没有渲染、没有写盘，`digest` 为空串）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub dry_run: bool,
@@ -548,6 +662,9 @@ pub struct ModelInfo {
     pub bounds_size: [f32; 3],
     /// 各子网格三角形数。
     pub mesh_triangles: Vec<usize>,
+    /// 资产里的动画名（按 glTF 顺序；没有动画时不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animations: Vec<String>,
 }
 
 /// 环境自检报告。
@@ -1894,6 +2011,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         states,
         warnings,
         model_cache: model_cache_snapshot(),
+        models: Vec::new(),
     }
 }
 
@@ -2506,9 +2624,14 @@ pub fn run_simulate_traced(
         }
     }
 
+    // 动画名对不对只有装载后才知道；`validate` 读不到资产，这里是唯一出口。
+    // 放在 `summarize` **之前**：这份报告会装载模型，缓存统计要把这次装载算进去。
+    let models = model_animation_reports_of(doc)?;
     let mut report = summarize(&mut build, steps, dt);
     report.probes = script.report();
     report.sensors = script.sensor_report();
+    report.warnings.extend(animation_warnings(&models));
+    report.models = models;
     let trajectories = traced
         .into_iter()
         .map(|t| summarize_trace(t.name, t.shape.to_string(), t.samples, truncated))
@@ -2831,12 +2954,8 @@ pub fn setup_visuals(
             Vec3::splat(m.scale.unwrap_or(1.0)),
         );
         let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
-        match load_model_cached(&resolved).map(|model| engine.add_model(&model, transform)) {
-            Ok(objects) => instances.push(ModelInstance {
-                model: i,
-                path: m.path.clone(),
-                objects,
-            }),
+        let model = match load_model_cached(&resolved) {
+            Ok(model) => model,
             Err(e) => {
                 // 以前这里只往 stderr 打一行警告就继续渲染——用户拿到的图跟场景对不上却
                 // 以为成功了。宁可报错，也不要出一张"少了几件东西"的图。
@@ -2847,7 +2966,31 @@ pub fn setup_visuals(
                 err.path = Some(format!("models[{i}]"));
                 return Err(err);
             }
+        };
+        let objects = engine.add_model(&model, transform);
+        // 模型动画：名字不存在时**不登记**（报告里给 found=false），几何保持绑定姿态。
+        // 登记之后由引擎帧循环每帧推进（单帧渲染用 dt = 0 摆一次起始姿态）。
+        if let Some(a) = &m.animation {
+            if let Some(mut player) = model.player(&a.name) {
+                player.speed = a.speed.unwrap_or(1.0);
+                player.looping = a.looping.unwrap_or(true);
+                player.time = a.start.unwrap_or(0.0);
+                // 起始时间按播放器自己的规则归一化（循环取模 / 不循环夹到时长），
+                // 不在格式层再抄一份时间语义。
+                player.advance(0.0);
+                engine.scene.play_model_animation(
+                    model.clone(),
+                    objects.clone(),
+                    vec![transform; objects.len()],
+                    player,
+                );
+            }
         }
+        instances.push(ModelInstance {
+            model: i,
+            path: m.path.clone(),
+            objects,
+        });
     }
 
     apply_camera(engine, doc);
@@ -3313,6 +3456,10 @@ fn run_render_single(
     }
     let probes = script.report();
     let sensors = script.sensor_report();
+    // 装载后对账：动画名到底存不存在、时长多少。`validate` 读不到资产，只能在这里看。
+    // 放在 `summarize` 之前：这份报告会装载模型，缓存统计要把这次装载算进去。
+    let models = model_animation_reports(doc)?;
+    let warnings = animation_warnings(&models);
     let sim = if doc.simulate.steps > 0 {
         let mut rep = summarize(&mut build, doc.simulate.steps, doc.simulate.dt);
         rep.probes.clone_from(&probes);
@@ -3321,6 +3468,11 @@ fn run_render_single(
     } else {
         None
     };
+    let mut sim = sim;
+    if let Some(s) = sim.as_mut() {
+        s.warnings.extend(warnings.iter().cloned());
+        s.models.clone_from(&models);
+    }
     if policy.dry_run {
         // 只跑物理：不建 GPU 上下文、不写盘。渲染相关的统计保持 0，
         // 由 `dry_run: true` 与 `would_write` 说明"这些数不是真的没有，而是没测"。
@@ -3343,6 +3495,8 @@ fn run_render_single(
             dry_run: true,
             would_write: vec![output.display().to_string()],
             outputs: Vec::new(),
+            models,
+            warnings,
             elapsed_ms: started.elapsed().as_millis() as u64,
         });
     }
@@ -3380,6 +3534,8 @@ fn run_render_single(
             return;
         }
         engine.scene.sync_from_physics(&engine.world);
+        // 单帧渲染没有"帧时间"：按播放器当前时间（= 场景里的 start）摆一次姿态。
+        engine.scene.advance_animations(0.0);
         scene_objects = engine.scene.len();
         camera_position = arr(engine.camera().position);
     })
@@ -3427,6 +3583,8 @@ fn run_render_single(
         dry_run: false,
         would_write: Vec::new(),
         outputs: Vec::new(),
+        models,
+        warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -3705,6 +3863,10 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         }
     }
 
+    // 装载后对账：动画名到底存不存在（`validate` 读不到资产，只能在这里看）。
+    let models = model_animation_reports(doc)?;
+    let animation_warnings = animation_warnings(&models);
+
     if policy.dry_run {
         // 只跑物理 + 采探针：不建 GPU、不建目录、不写帧也不写 trace。
         let dt = doc.simulate.dt;
@@ -3724,6 +3886,9 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| opts.frames_dir.display().to_string())];
         would_write.push(trace_path.display().to_string());
+        let mut notes =
+            vec!["--dry-run：只跑了物理与校验，没有渲染、没有写盘（digest 为空）".into()];
+        notes.extend(animation_warnings.iter().cloned());
         return Ok(MovieReport {
             frames_dir: opts.frames_dir.display().to_string(),
             encoder: opts.encoder.as_str().to_string(),
@@ -3751,7 +3916,8 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             first_frame: None,
             last_frame: None,
             ffmpeg: String::new(),
-            notes: vec!["--dry-run：只跑了物理与校验，没有渲染、没有写盘（digest 为空）".into()],
+            notes,
+            models,
             dry_run: true,
             would_write,
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -3912,6 +4078,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
     } else {
         String::new()
     };
+    notes.extend(animation_warnings.iter().cloned());
 
     Ok(MovieReport {
         frames_dir: opts.frames_dir.display().to_string(),
@@ -3941,6 +4108,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         last_frame: rows.last().cloned(),
         ffmpeg,
         notes,
+        models,
         dry_run: false,
         would_write: Vec::new(),
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -3970,6 +4138,11 @@ pub fn run_info(path: &std::path::Path) -> Result<ModelInfo, RunError> {
             .meshes
             .iter()
             .map(|m| m.data.triangle_count())
+            .collect(),
+        animations: model
+            .animation_names()
+            .iter()
+            .map(|s| s.to_string())
             .collect(),
     })
 }

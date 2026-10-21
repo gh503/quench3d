@@ -431,7 +431,8 @@ pub fn scene_grammar() -> Value {
             "rotation_deg": "欧拉角，度",
             "scale": "均匀缩放，缺省 1",
             "collide": "true 时把模型合并成静态三角网格碰撞体，缺省 false",
-            "friction": "参与碰撞时的摩擦，缺省 0.8"
+            "friction": "参与碰撞时的摩擦，缺省 0.8",
+            "animation": "播放模型里的一条 glTF 动画：{ name, start?, speed?, loop? }。不写 = 静止（老行为）；loop 缺省 true（写 false = 播完停在最后一帧）；名字不存在**不是**校验错误（validate 不读资产），会在 simulate/render 报告的 models[].animation.found 里报 false"
         },
         "joint": {
             "type": ["fixed", "ball", "hinge", "distance", "slider"],
@@ -678,17 +679,24 @@ pub fn json_schema() -> Value {
         "ground".into(),
         def(&["size", "material", "y", "friction", "restitution"]),
     );
-    defs.insert(
-        "model".into(),
-        def(&[
+    defs.insert("model".into(), {
+        let mut d = def(&[
             "path",
             "position",
             "rotation_deg",
             "scale",
             "collide",
             "friction",
-        ]),
-    );
+            "animation",
+        ]);
+        d["properties"]["animation"] = json!({ "$ref": "#/$defs/modelAnimation" });
+        d
+    });
+    defs.insert("modelAnimation".into(), {
+        let mut d = def(&["name", "start", "speed", "loop"]);
+        d["required"] = json!(["name"]);
+        d
+    });
     defs.insert("assets".into(), def(&["search_paths"]));
     defs.insert(
         "coneLimit".into(),
@@ -975,7 +983,12 @@ pub fn system_prompt() -> String {
            radius: 1.0（球形）, size: [1,1,1]（盒形）, watch: ["球"] }
   （只读区域监测：报告里给出谁在第几步进入、第几步离开、区内最高速度。
    半空间（地面）没有有限包围盒，探针监测不到它）
-- models: 数组：{ path: "xx.glb"|"xx.obj", position, rotation_deg, scale, collide: false }
+- models: 数组：{ path: "xx.glb"|"xx.obj", position, rotation_deg, scale, collide: false,
+           animation: { name: "Walk", start: 0, speed: 1, loop: true } }
+  （animation 播放模型里的 glTF 动画片段，是**视觉**动画、不动物理；不写 = 静止。
+    loop 缺省 true（循环），写 false = 播完停在最后一帧；名字写错不会让场景非法，
+    但会在 simulate/render 报告的 models[].animation.found 里报 false ——
+    可用名字看 `quench3d info 模型.glb` 的 animations）
 - camera: { position: [x,y,z], look_at: [x,y,z], fov_deg: 50, near: 0.05, far: 5000,
 cameras: 命名相机表（名字 → 相机对象）；`--camera <名字>` 选一台渲染，缺省用 camera 段
 animations: [{ target, loop?, start?, speed?, weight?, position?: {times,values}, rotation?: {times,values} }]（关键帧动画；缺省空）
@@ -1287,6 +1300,7 @@ mod tests {
             ("MaterialDoc", "material"),
             ("GroundDoc", "ground"),
             ("ModelDoc", "model"),
+            ("ModelAnimationDoc", "modelAnimation"),
             ("AssetsDoc", "assets"),
             ("JointDoc", "joint"),
             ("ConeLimitDoc", "coneLimit"),

@@ -5858,3 +5858,231 @@ fn speculative_margin_reduces_penetration_on_impact() {
         v.stdout
     );
 }
+
+/// 手搓一个带 1 秒平移轨道的 GLB（单个三角形 + 单个节点）。
+///
+/// 与 `crates/quench3d/tests/model_loading.rs` 的夹具同源：这里只要"能装载、有一条
+/// 叫「摆动」的动画"，用来验**格式字段 → 报告**这条链；几何怎么动由引擎侧的
+/// `scene_animation_moves_the_spawned_meshes` 钉住（那一条不需要显卡）。
+fn animated_glb_bytes() -> Vec<u8> {
+    fn glb_from_parts(json: &str, mut bin: Vec<u8>) -> Vec<u8> {
+        let mut json_bytes = json.replace('\n', "").into_bytes();
+        while !json_bytes.len().is_multiple_of(4) {
+            json_bytes.push(b' ');
+        }
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb
+    }
+
+    let mut bin = Vec::new();
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 36 字节位置
+    }
+    for i in [0u16, 1, 2] {
+        bin.extend_from_slice(&i.to_le_bytes()); // 36..42 索引
+    }
+    while bin.len() < 44 {
+        bin.push(0); // 对齐到 4 字节（时间关键帧从 44 开始）
+    }
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 44..52 时间
+    }
+    for v in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]] {
+        for f in v {
+            bin.extend_from_slice(&f.to_le_bytes()); // 52..76 平移
+        }
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[0]}],
+"nodes":[{"mesh":0,"name":"块"}],
+"meshes":[{"name":"三角","primitives":[{"attributes":{"POSITION":0},"indices":1}]}],
+"accessors":[
+  {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+  {"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"},
+  {"bufferView":2,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+  {"bufferView":3,"componentType":5126,"count":2,"type":"VEC3"}
+],
+"bufferViews":[
+  {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+  {"buffer":0,"byteOffset":36,"byteLength":6,"target":34963},
+  {"buffer":0,"byteOffset":44,"byteLength":8},
+  {"buffer":0,"byteOffset":52,"byteLength":24}
+],
+"animations":[{"name":"摆动",
+  "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}],
+  "samplers":[{"input":2,"output":3,"interpolation":"LINEAR"}]}],
+"buffers":[{"byteLength":76}]}"#;
+    glb_from_parts(json, bin)
+}
+
+/// gap #23：`models[].animation` 是场景格式字段，而"动画名在不在资产里"**只能装载后判定**
+///（`validate` 不读资产）。这条钉住三个契约：
+///
+/// 1. 名字对 → `simulate` 报告的 `models[].animation` 给出 `found/duration/tracks`；
+/// 2. 名字错 → **不是**校验错误（退出码 0），报告 `found=false` + 警告里列出可用名字；
+/// 3. 不写 `animation` → 报告里**没有** `models` 字段（老报告逐字节不变）。
+#[test]
+fn model_animation_status_is_reported_after_loading() {
+    let dir = temp_dir("model_animation");
+    std::fs::write(dir.join("anim.glb"), animated_glb_bytes()).expect("写夹具 GLB");
+    let scene = |name: &str, model: serde_json::Value| {
+        write_scene(
+            &dir,
+            name,
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2, "name": "动画",
+                "models": [model],
+                "simulate": { "steps": 2, "dt": 0.01666667 }
+            }),
+        )
+    };
+
+    // 1) 名字对：报告给出装载后才有的时长/轨道数，场景里写的播放参数原样回显
+    let p = scene(
+        "ok.json",
+        serde_json::json!({
+            "path": "anim.glb",
+            "animation": { "name": "摆动", "speed": 2.0, "loop": false, "start": 0.25 }
+        }),
+    );
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    let m = &d["data"]["models"][0];
+    assert_eq!(m["model"], 0, "{d}");
+    assert_eq!(m["animation"]["name"], "摆动", "{d}");
+    assert_eq!(m["animation"]["found"], true, "{d}");
+    assert!(
+        (m["animation"]["duration"].as_f64().unwrap() - 1.0).abs() < 1e-6,
+        "时长该是 1 秒：{d}"
+    );
+    assert_eq!(m["animation"]["tracks"], 1, "{d}");
+    assert_eq!(m["animation"]["speed"], 2.0, "{d}");
+    assert_eq!(m["animation"]["looping"], false, "{d}");
+    assert_eq!(m["animation"]["start"], 0.25, "{d}");
+    assert_eq!(m["clips"][0], "摆动", "报告要列出资产里有哪些动画：{d}");
+
+    // 2) 名字错：场景仍然合法（validate 不读资产），但报告必须说清楚不会播
+    let p = scene(
+        "wrong_name.json",
+        serde_json::json!({
+            "path": "anim.glb",
+            "animation": { "name": "没有这条" }
+        }),
+    );
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        r.code, 0,
+        "动画名写错不是校验错误（validate 读不到资产）：{}",
+        r.stderr
+    );
+    let d = r.json();
+    let m = &d["data"]["models"][0];
+    assert_eq!(m["animation"]["found"], false, "{d}");
+    assert!(
+        m["animation"].get("duration").is_none(),
+        "found=false 时不该给时长：{d}"
+    );
+    assert!(
+        m["clips"].as_array().is_some_and(|a| a.len() == 1),
+        "即使名字错了也要列出可用动画名：{d}"
+    );
+    let warnings = d["data"]["warnings"].to_string();
+    assert!(
+        warnings.contains("没有这条") && warnings.contains("摆动"),
+        "警告要点名错的名字与可用名字：{warnings}"
+    );
+
+    // 3) 不写 animation：老行为，报告里没有 models 字段（静态模型不白解析）
+    let p = scene("static.json", serde_json::json!({ "path": "anim.glb" }));
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    assert!(
+        d["data"].get("models").is_none(),
+        "没写 animation 就不该有动画报告：{d}"
+    );
+
+    // 4) `info` 也要能列出可用动画名（agent 发现名字的入口）
+    let r = run(&["info", dir.join("anim.glb").to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    assert_eq!(d["data"]["animations"][0], "摆动", "{d}");
+}
+
+/// `models[].animation` 的**结构**校验（能在不读资产时判断的部分）。
+#[test]
+fn model_animation_structure_is_validated() {
+    let dir = temp_dir("model_animation_validate");
+    std::fs::write(dir.join("anim.glb"), animated_glb_bytes()).expect("写夹具 GLB");
+    let scene = |name: &str, animation: serde_json::Value| {
+        write_scene(
+            &dir,
+            name,
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{ "path": "anim.glb", "animation": animation }]
+            }),
+        )
+    };
+    let diagnostics = |p: &std::path::Path| -> (i32, Vec<String>) {
+        let r = run(&["validate", p.to_str().unwrap(), "--json"]);
+        let d = r.json();
+        let paths = d["data"]["diagnostics"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|x| x["severity"] == "error")
+                    .filter_map(|x| x["path"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (r.code, paths)
+    };
+
+    let p = scene("empty_name.json", serde_json::json!({ "name": "  " }));
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 2, "空动画名要拦下");
+    assert!(
+        paths.contains(&"models[0].animation.name".to_string()),
+        "诊断路径要对得上：{paths:?}"
+    );
+
+    let p = scene(
+        "bad_speed.json",
+        serde_json::json!({ "name": "摆动", "speed": 0 }),
+    );
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 2, "倍速 0 要拦下");
+    assert!(paths.contains(&"models[0].animation.speed".to_string()));
+
+    let p = scene(
+        "bad_start.json",
+        serde_json::json!({ "name": "摆动", "start": -1.0 }),
+    );
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 2, "负起始时间要拦下");
+    assert!(paths.contains(&"models[0].animation.start".to_string()));
+
+    // 名字不存在**不是**结构错误：这条必须留给装载后（否则 validate 要读资产）
+    let p = scene(
+        "unknown_name.json",
+        serde_json::json!({ "name": "资产里没有" }),
+    );
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 0, "名字不存在不该让场景非法：{paths:?}");
+    assert!(paths.is_empty(), "{paths:?}");
+}
