@@ -49,6 +49,10 @@ struct PostParams {
     water_color: vec4<f32>,
     // 视空间 → 世界：用于由屏幕坐标算视线方向（菲涅耳）
     inv_view: mat4x4<f32>,
+    // x = 泡沫强度，y = 折射强度，z = 太阳高光强度，w = 预留
+    water_extra: vec4<f32>,
+    // xyz = 太阳方向（从光源射向场景），w = 强度
+    water_sun: vec4<f32>,
 };
 
 /// Narkowicz 2015 的 ACES 近似（全项目唯一一份）。
@@ -182,47 +186,87 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
     }
 
     // ---------- 屏幕空间水面 ----------
-    // mask 由水面平面写进主 pass 的第二颜色附件；它已经过了深度测试，所以这里
-    // 只负责"水面像素长什么样"：折射、吸收、菲涅耳、边缘泡沫。
-    // 不依赖深度纹理，GL/WebGL2 也能跑。
+    // mask 由水面平面写进主 pass 的第二颜色附件：r = 覆盖，g = 世界高度。
+    // 这里用相机射线与水面的交点重建世界坐标，据此生成程序化波面法线，
+    // 再做折射/吸收/菲涅耳/太阳高光/泡沫。仍然不读深度纹理（GL/WebGL2 可用）。
     if (post.water.x > 0.5) {
         let m = textureLoad(water_mask_texture, coord, 0).r;
         let visible = smoothstep(0.15, 0.85, m);
         if (visible > 0.001) {
-            let strength = max(post.water.z, 0.0);
-            let t = post.water.y;
-            let ripple_px = vec2<f32>(
-                sin(uv.y * 37.0 + t * 2.0),
-                cos(uv.x * 29.0 + t * 1.7),
-            ) * (5.0 * strength);
-            let refracted = textureSampleLevel(
-                hdr_texture, hdr_sampler, uv + ripple_px * texel, 0.0,
-            ).rgb;
+            let tt = post.water.y;
+            let wave = max(post.water.z, 0.0);
+            let foam_strength = max(post.water.w, 0.0);
+            let refraction = max(post.water_extra.y, 0.0);
 
-            // 视线方向（世界空间）：相机看向 -Z，屏幕 NDC 的 z = -1 取近平面方向。
+            // 屏幕射线（世界空间）与水面高度（mask.g）。
             let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
             let ray = normalize((post.inv_view * vec4<f32>(ndc, -1.0, 0.0)).xyz);
-            let up = vec3<f32>(0.0, 1.0, 0.0);
-            let cos_v = clamp(abs(dot(up, ray)), 0.0, 1.0);
-            // 水平水面的 Schlick 近似：正视更透，掠射更亮。
-            let fresnel = pow(1.0 - cos_v, 5.0);
+            let cam = post.inv_view[3].xyz;
+            let level = textureLoad(water_mask_texture, coord, 0).g;
+            var wp = cam + ray * 10.0;
+            if (abs(ray.y) > 1e-4) {
+                let hit = (level - cam.y) / ray.y;
+                if (hit > 0.0) {
+                    wp = cam + ray * hit;
+                }
+            }
 
-            // 吸收：水体越厚（这里用固定厚度近似）越偏水色；再按菲涅耳提亮反射。
-            let body = mix(refracted, refracted * post.water_color.rgb, 0.55);
-            let water_col = mix(body, post.water_color.rgb * 0.72, 0.22 + 0.42 * fresnel);
+            // 两个八度的程序化波面斜率；波峰由法线倾角间接给出。
+            let p = wp.xz;
+            let sx = 0.10 * wave * cos(p.x * 6.0 + p.y * 2.0 + tt * 1.2)
+                + 0.04 * wave * cos(p.x * 17.0 - p.y * 3.0 - tt * 2.1);
+            let sz = 0.10 * wave * cos(p.y * 7.0 - p.x * 1.5 + tt * 1.7)
+                + 0.04 * wave * cos(p.y * 19.0 + p.x * 4.0 + tt * 1.3);
+            let n = normalize(vec3<f32>(-sx, 1.0, -sz));
 
-            // 边缘泡沫：mask 的 2px 邻域里只要有一个不是水，就认为是水面边缘。
+            // 折射：沿法线在屏幕空间偏移背景；再叠一点随时间的细波纹。
+            let ripple = vec2<f32>(
+                sin(uv.y * 37.0 + tt * 2.0),
+                cos(uv.x * 29.0 + tt * 1.7),
+            ) * (2.5 * wave);
+            let bend = vec2<f32>(n.x, -n.z) * (10.0 * refraction);
+            let refracted = textureSampleLevel(
+                hdr_texture, hdr_sampler, uv + (ripple + bend) * texel, 0.0,
+            ).rgb;
+
+            // 菲涅耳：F0 = 0.02（水），正视更透、掠射更亮。
+            let view_dir = -ray;
+            let cos_v = clamp(dot(n, view_dir), 0.0, 1.0);
+            let fresnel = 0.02 + 0.98 * pow(1.0 - cos_v, 5.0);
+
+            // 吸收：clarity 越高越清澈（吸收越弱）；固定厚度近似。
+            let clarity = clamp(post.water_color.a, 0.0, 1.0);
+            let absorb = mix(0.82, 0.34, clarity);
+            let body = mix(refracted, refracted * post.water_color.rgb, absorb);
+            let reflect_col = post.water_color.rgb * 1.15 + vec3<f32>(0.02);
+            var water_col = mix(body, reflect_col, 0.06 + 0.58 * fresnel);
+
+            // 太阳高光：用半程向量，只在太阳方向有效时计算。
+            let sun_len = length(post.water_sun.xyz);
+            if (sun_len > 1e-4) {
+                // water_sun 是"从光源射向场景"的方向；半程向量要的是"指向光源"。
+                let sun_dir = -post.water_sun.xyz / sun_len;
+                let half_dir = normalize(sun_dir + view_dir);
+                let spec = pow(max(dot(n, half_dir), 0.0), 120.0)
+                    * max(post.water_sun.w, 0.0) * post.water_extra.z * 0.35;
+                water_col = water_col + vec3<f32>(1.0, 0.96, 0.88) * spec;
+            }
+
+            // 边缘泡沫：mask 2px 邻域里只要有一个不是水，就认为是水面边缘；
+            // 再叠一点"波峰白水"（法线越斜越容易起泡）。
             let size = vec2<i32>(post.target_texel.zw) - vec2<i32>(1);
             let ml = textureLoad(water_mask_texture, clamp(coord - vec2<i32>(2, 0), vec2<i32>(0), size), 0).r;
             let mr = textureLoad(water_mask_texture, clamp(coord + vec2<i32>(2, 0), vec2<i32>(0), size), 0).r;
             let mu = textureLoad(water_mask_texture, clamp(coord + vec2<i32>(0, 2), vec2<i32>(0), size), 0).r;
             let md = textureLoad(water_mask_texture, clamp(coord - vec2<i32>(0, 2), vec2<i32>(0), size), 0).r;
             let edge = 1.0 - min(min(ml, mr), min(mu, md));
-            let foam = smoothstep(0.45, 0.95, edge)
-                * (0.55 + 0.45 * sin(uv.x * 90.0 + uv.y * 70.0 + t * 3.0));
+            let foam_noise = 0.55 + 0.45 * sin(uv.x * 90.0 + uv.y * 70.0 + tt * 3.0);
+            let crest = smoothstep(0.08, 0.36, 1.0 - n.y);
+            let foam = (smoothstep(0.45, 0.95, edge) * foam_noise + crest * 0.25)
+                * foam_strength;
             let foam_col = vec3<f32>(0.82, 0.90, 0.92);
 
-            hdr = mix(hdr, water_col + foam_col * foam * 0.35, visible * (0.52 + 0.32 * fresnel));
+            hdr = mix(hdr, water_col + foam_col * foam * 0.35, visible * (0.58 + 0.24 * fresnel));
         }
     }
 

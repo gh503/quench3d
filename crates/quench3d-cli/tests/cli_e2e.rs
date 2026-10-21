@@ -761,6 +761,9 @@ fn render_produces_png_or_reports_missing_gpu_cleanly() {
                   "position": [0, 3, 0], "body": "dynamic", "density": 500 }
             ],
             "camera": { "position": [6, 3.5, 7], "look_at": [0, 0.8, 0] },
+            "waters": [{ "center": [0, 0], "size": [20, 20], "level": 0.2 }],
+            "water": { "color": [0.08, 0.32, 0.52], "clarity": 0.7,
+                       "wave_strength": 1.2, "foam": 0.8, "refraction": 0.9 },
             "simulate": { "steps": 120 },
             "render": { "output": "ignored.png", "width": 480, "height": 320, "msaa": 1 }
         }"#,
@@ -794,6 +797,10 @@ fn render_produces_png_or_reports_missing_gpu_cleanly() {
     assert!(data["draw_calls"].as_u64().unwrap() >= 1);
     assert!(data["triangles"].as_u64().unwrap() > 0);
     assert_eq!(data["simulate"]["steps"], 120);
+    assert_eq!(
+        data["water_post"], true,
+        "有 waters 时应当启用屏幕空间水后处理"
+    );
     // 相机反解应当精确还原
     let cp: Vec<f64> = data["camera_position"]
         .as_array()

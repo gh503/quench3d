@@ -707,6 +707,19 @@ pub fn json_schema() -> Value {
         d["required"] = json!(["size", "level"]);
         d
     });
+    defs.insert("waterStyle".into(), {
+        let mut d = def(&["color", "clarity", "wave_strength", "foam", "refraction"]);
+        d["description"] = json!("屏幕空间水外观：所有 waters/fluids 共用；只影响画面，不影响物理");
+        d["properties"]["color"] = json!({
+            "type": "array", "items": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minItems": 3, "maxItems": 3
+        });
+        d["properties"]["clarity"] = json!({ "type": "number", "minimum": 0, "maximum": 1 });
+        d["properties"]["wave_strength"] = json!({ "type": "number", "minimum": 0, "maximum": 4 });
+        d["properties"]["foam"] = json!({ "type": "number", "minimum": 0, "maximum": 2 });
+        d["properties"]["refraction"] = json!({ "type": "number", "minimum": 0, "maximum": 2 });
+        d
+    });
     defs.insert("fluid".into(), {
         let mut d = def(&[
             "center",
@@ -911,6 +924,8 @@ pub fn json_schema() -> Value {
                             "description": "水域（浮力环境）：只影响动态刚体的浮力/阻尼，不参与碰撞；不写 = 没有水" },
                 "fluids": { "type": "array", "items": { "$ref": "#/$defs/fluid" },
                             "description": "CPU PBF 粒子流体：粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；不写 = 没有粒子" },
+                "water": { "$ref": "#/$defs/waterStyle",
+                           "description": "屏幕空间水外观（颜色/清澈度/波浪/泡沫/折射）；只影响画面，不影响物理；根独有段" },
                 "materials": { "type": "object",
                                "additionalProperties": { "$ref": "#/$defs/material" } },
                 "include": { "type": "array", "items": { "type": "string" },
@@ -968,7 +983,11 @@ pub fn system_prompt() -> String {
             rest_density: 1000, viscosity: 0.05, drag: 6, iterations: 4,
             max_particles: 4000 }]
   // CPU PBF 粒子流体（M3 双向）：长方体发射器 + 粒子参数。粒子被刚体推开并反推冲量；
-  // 没有表面张力/涡量；渲染为低模球 + 屏幕空间水面（M4.1）。不写 = 没有粒子。
+  // 没有表面张力/涡量；渲染为低模球 + 屏幕空间水面（M4.2）。不写 = 没有粒子。
+- water: { color: [r, g, b]（线性 0~1）, clarity: 0~1, wave_strength: 0~4,
+           foam: 0~2, refraction: 0~2 }
+  // 屏幕空间水外观（M4.2）：所有 waters/fluids 共用一份风格；只影响画面，不影响物理。
+  // 不写 = 缺省（color [0.06,0.28,0.48]、clarity/wave/foam/refraction 都是 1）。
 - materials: { 名字: { color: [r,g,b]（sRGB）, metallic: 0~1, roughness: 0.05~1, emissive: 0,
              alpha: 0~1, emissive_color: [r,g,b], uv_scale: 1, normal_scale: 1,
              alpha_cutoff: 0, alpha_blend: false, unlit: false, double_sided: false,

@@ -3224,12 +3224,28 @@ fn add_water_visuals(engine: &mut Engine, doc: &SceneDoc) {
 /// 第二颜色附件，后处理据此做折射/吸收/菲涅耳/边缘泡沫。没有水域时关闭，
 /// 后处理完全不走水面分支（像素与旧版一致）。
 fn apply_water_options(engine: &mut Engine, doc: &SceneDoc) {
+    engine.renderer.options.water = water_options_for(doc);
+}
+
+/// 把场景里的 `water` 风格映射成渲染器选项（纯函数，方便不建 GPU 的单元测试）。
+///
+/// 没有 `waters` / `fluids` 时一律关闭：`water` 段只改外观，不能凭空造出水。
+fn water_options_for(doc: &SceneDoc) -> WaterOptions {
     let has_water = !doc.waters.is_empty() || !doc.fluids.is_empty();
-    engine.renderer.options.water = WaterOptions {
+    let defaults = WaterOptions::default();
+    let style = doc.water.as_ref();
+    WaterOptions {
         enabled: has_water,
-        color: [0.06, 0.28, 0.48],
-        strength: 1.0,
-    };
+        color: style.and_then(|s| s.color).unwrap_or(defaults.color),
+        strength: style
+            .and_then(|s| s.wave_strength)
+            .unwrap_or(defaults.strength),
+        clarity: style.and_then(|s| s.clarity).unwrap_or(defaults.clarity),
+        foam: style.and_then(|s| s.foam).unwrap_or(defaults.foam),
+        refraction: style
+            .and_then(|s| s.refraction)
+            .unwrap_or(defaults.refraction),
+    }
 }
 
 /// 单位水面网格：XZ 平面上 `N×N` 个格子（y = 0，法线朝上）。
@@ -4822,5 +4838,32 @@ mod tests {
             ..doc
         };
         assert!(!spot_light_from_doc(&explicit).cast_shadows);
+    }
+    #[test]
+    fn water_style_maps_to_renderer_options() {
+        let doc = SceneDoc::from_json(
+            r#"{
+                "waters": [{ "size": [4, 4], "level": 0 }],
+                "water": { "color": [0.1, 0.3, 0.5], "clarity": 0.6,
+                           "wave_strength": 1.5, "foam": 0.7, "refraction": 0.8 }
+            }"#,
+        )
+        .expect("合法场景");
+        let w = water_options_for(&doc);
+        assert!(w.enabled, "有 waters 时必须启用屏幕空间水");
+        assert_eq!(w.color, [0.1, 0.3, 0.5]);
+        assert_eq!(w.clarity, 0.6);
+        assert_eq!(w.strength, 1.5);
+        assert_eq!(w.foam, 0.7);
+        assert_eq!(w.refraction, 0.8);
+
+        // `water` 只改外观：没有水域时后处理必须关闭，否则全屏会无故变蓝。
+        let empty =
+            SceneDoc::from_json(r#"{ "water": { "color": [0.1, 0.3, 0.5] } }"#).expect("合法场景");
+        let w = water_options_for(&empty);
+        assert!(!w.enabled, "没有 waters/fluids 时不能启用");
+        assert_eq!(w.color, [0.1, 0.3, 0.5]);
+        assert_eq!(w.strength, 1.0, "没写的字段用缺省");
+        assert_eq!(w.clarity, 1.0);
     }
 }

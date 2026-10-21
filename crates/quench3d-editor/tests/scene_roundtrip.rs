@@ -940,6 +940,8 @@ fn waters_survive_editor_roundtrip_and_render_a_surface() {
       "ground": { "size": 20, "y": -2 },
       "waters": [{ "center": [1, -2], "size": [8, 6], "level": 0.4,
                    "density": 900, "drag": 2.5 }],
+      "water": { "color": [0.1, 0.3, 0.5], "clarity": 0.6,
+                 "wave_strength": 1.5, "foam": 0.8, "refraction": 0.9 },
       "objects": [
         { "name": "浮球", "shape": { "type": "sphere", "radius": 0.5 },
           "position": [0, 2, 0], "body": "dynamic", "density": 400 }
@@ -966,6 +968,10 @@ fn waters_survive_editor_roundtrip_and_render_a_surface() {
     assert_eq!(w.level, 0.4);
     assert_eq!(w.density, 900.0);
     assert_eq!(w.drag, 2.5);
+    let style = parsed.water.as_ref().expect("屏幕空间水风格要保留");
+    assert_eq!(style.color, Some([0.1, 0.3, 0.5]));
+    assert_eq!(style.clarity, Some(0.6));
+    assert_eq!(style.wave_strength, Some(1.5));
 }
 
 #[test]

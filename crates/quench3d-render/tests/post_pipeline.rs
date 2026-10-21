@@ -1014,18 +1014,14 @@ fn water_post_uses_the_mask_and_changes_pixels() {
         return;
     };
 
-    let image = |ctx: &mut GpuContext, enabled: bool| {
+    let image = |ctx: &mut GpuContext, water: WaterOptions, level: f32| {
         let mut renderer = Renderer::new(
             ctx,
             RendererOptions {
                 grid: false,
                 shadows: false,
                 sky: false,
-                water: WaterOptions {
-                    enabled,
-                    color: [1.0, 0.0, 0.0],
-                    strength: 0.0,
-                },
+                water,
                 ..Default::default()
             },
         );
@@ -1043,7 +1039,7 @@ fn water_post_uses_the_mask_and_changes_pixels() {
         renderer.draw(
             cube,
             water,
-            InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 100.0),
+            InstanceDesc::from_position(vec3(0.0, level, 0.0), 100.0),
         );
         let mut camera = Camera::perspective(W as f32 / H as f32);
         camera.position = vec3(0.0, 0.0, 60.0);
@@ -1062,19 +1058,119 @@ fn water_post_uses_the_mask_and_changes_pixels() {
             .expect("离屏渲染")
     };
 
-    let off = image(&mut ctx, false);
-    let on = image(&mut ctx, true);
+    let flat = WaterOptions {
+        enabled: true,
+        color: [1.0, 0.0, 0.0],
+        strength: 0.0,
+        clarity: 1.0,
+        foam: 0.0,
+        refraction: 0.0,
+    };
+    let off = image(
+        &mut ctx,
+        WaterOptions {
+            enabled: false,
+            ..flat
+        },
+        0.0,
+    );
+    let on = image(&mut ctx, flat, 0.0);
+    let wavy = image(
+        &mut ctx,
+        WaterOptions {
+            strength: 3.0,
+            foam: 1.0,
+            refraction: 1.0,
+            ..flat
+        },
+        0.0,
+    );
     let a = pixel(&off, W / 2, H / 2);
     let b = pixel(&on, W / 2, H / 2);
     assert!(
         b[0] > a[0] + 10,
         "水面后处理没有生效：on={b:?} off={a:?}（红通道应当明显升高）"
     );
-    // 水面 mask 覆盖全屏（alpha=0 的水面立方体），不应只改中心一个像素。
     let corner_off = pixel(&off, 4, 4);
     let corner_on = pixel(&on, 4, 4);
     assert!(
         corner_on[0] > corner_off[0] + 5,
         "角落也没有水面效果：on={corner_on:?} off={corner_off:?}"
+    );
+    // 波面法线/折射/高光必须真的起作用：同一水面只改风格参数，像素应当不同。
+    let flat_center = pixel(&on, W / 2, H / 2);
+    let wavy_center = pixel(&wavy, W / 2, H / 2);
+    assert_ne!(
+        flat_center, wavy_center,
+        "波浪/折射参数没有改变画面：flat={flat_center:?} wavy={wavy_center:?}"
+    );
+}
+
+/// mask.g 存的是水面世界高度：把水面抬高后，屏幕射线与水面交点变化，
+/// 波面法线/折射也必须变化。这个测试用**水平面**（真实水面几何），
+/// 避免立方体竖直面把 `level` 变成逐像素变化的值。
+#[test]
+fn water_mask_height_reconstructs_the_screen_ray() {
+    let Some(mut ctx) = context(1, "水面高度重建（真的创建 wgpu 上下文）") else {
+        return;
+    };
+    let image = |ctx: &mut GpuContext, level: f32| {
+        let mut renderer = Renderer::new(
+            ctx,
+            RendererOptions {
+                grid: false,
+                shadows: false,
+                sky: false,
+                water: WaterOptions {
+                    enabled: true,
+                    color: [0.1, 0.45, 0.7],
+                    strength: 3.0,
+                    clarity: 0.8,
+                    foam: 1.0,
+                    refraction: 1.0,
+                },
+                ..Default::default()
+            },
+        );
+        let bg = renderer.add_material(ctx, MaterialDesc::from_srgb(0.2, 0.2, 0.2, 1.0).unlit());
+        let mut water_desc = MaterialDesc::from_srgb(0.1, 0.4, 0.7, 0.0).unlit();
+        water_desc.alpha_blend = true;
+        water_desc.water_mask = true;
+        let water = renderer.add_material(ctx, water_desc);
+        let cube = renderer.add_mesh(ctx, &MeshData::cube(1.0));
+        let plane = renderer.add_mesh(ctx, &MeshData::plane(1.0, 1));
+        renderer.draw(
+            cube,
+            bg,
+            InstanceDesc::from_position(vec3(0.0, 0.0, -20.0), 80.0),
+        );
+        renderer.draw(
+            plane,
+            water,
+            InstanceDesc::from_position(vec3(0.0, level, 0.0), 100.0),
+        );
+        let mut camera = Camera::perspective(W as f32 / H as f32);
+        camera.position = vec3(0.0, 30.0, 40.0);
+        camera.look_at(vec3(0.0, 0.0, 0.0));
+        renderer
+            .capture(
+                ctx,
+                W,
+                H,
+                &camera,
+                &Lighting {
+                    exposure: 1.0,
+                    ..Default::default()
+                },
+            )
+            .expect("离屏渲染")
+    };
+    let low = image(&mut ctx, 0.0);
+    let high = image(&mut ctx, 5.0);
+    let low_px = pixel(&low, W / 2, H / 2 + 20);
+    let high_px = pixel(&high, W / 2, H / 2 + 20);
+    assert_ne!(
+        low_px, high_px,
+        "水面抬高后像素不变，mask.g 没参与射线-平面重建：low={low_px:?} high={high_px:?}"
     );
 }

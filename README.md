@@ -761,6 +761,8 @@ NaN 刚体  : 0
   "ground": { "size": 40, "material": "floor" },
   "waters": [{ "center": [0, 0], "size": [10, 6], "level": 0.0 }],
   "fluids": [{ "center": [0, 2, 0], "size": [1.6, 1.6, 1.6], "spacing": 0.1 }],
+  "water": { "color": [0.06, 0.28, 0.48], "clarity": 1.0, "wave_strength": 1.0,
+             "foam": 1.0, "refraction": 1.0 },
   "materials": {
     "floor": { "color": [0.55, 0.58, 0.62], "roughness": 0.9 },
     "wood":  { "color": [0.78, 0.48, 0.26], "roughness": 0.55 },
@@ -858,12 +860,20 @@ NaN 刚体  : 0
   `TriMesh` 碰撞体目前不挡粒子（`closest_surface` 返回 `None`），凸包/圆锥用 AABB 近似。
   粒子**渲染**（M4）：每颗粒子画成低模球（8×6），速度越快颜色越偏青白；另加一张
   跟着最高粒子走的半透明水面。
-  屏幕空间水（M4.1）：主 pass 的第二颜色附件写水面 mask（`MaterialDesc.water_mask`），
-  后处理按 mask 做屏幕空间折射、吸收、菲涅耳与边缘泡沫；`waters` / `fluids` 都接，
-  不需要读深度纹理（GL/WebGL2 也能用）。**边界**：吸收厚度固定、折射是 UV 波纹不是
-  真实光线折射、法线按水平面近似、泡沫只在 mask 边缘；没有焦散/水下体积光/真实波浪。
+  屏幕空间水（M4.2）：主 pass 的第二颜色附件写水面 mask（`MaterialDesc.water_mask`，
+  `Rgba16Float`），r = 覆盖、g = 世界高度；后处理用屏幕射线与 g 求交重建水面世界坐标，据此生成
+  程序化波面法线，再做屏幕空间折射、吸收、菲涅耳、太阳高光与波峰/边缘泡沫；
+  `waters` / `fluids` 都接，不需要读深度纹理（GL/WebGL2 也能用）。
+  顶层 `water` 段可调 `color` / `clarity` / `wave_strength` / `foam` / `refraction`
+  （缺省值见 §6.3；只影响画面，不影响物理）。**边界**：吸收厚度固定、折射仍是
+  屏幕空间偏移而不是光线追踪、水面几何仍是平面；相机在水下时重建不成立；
+  没有焦散/水下体积光/真实波浪。
   `waters` 与 `fluids` 可以同时写，互不替换；两者都给刚体浮力时
   取较大的浸没占比，不会叠加浮力（M3 口径）。
+* 顶层 `water` 是**屏幕空间水外观**（不是第二个水域）：`{ "color": [r,g,b],
+  "clarity": 0~1, "wave_strength": 0~4, "foam": 0~2, "refraction": 0~2 }`。
+  所有 `waters` / `fluids` 共用这份风格；只影响后处理画面，浮力/粒子结果逐位不变。
+  不写 = 渲染器缺省；非法值在 `validate` 报 `water.*`。
 * `friction_combine` / `restitution_combine` 可写在世界级 `physics` 段（缺省）或单个物体上
   （覆盖缺省）。缺省规则是**几何平均**（摩擦）与**取大**（恢复）——正是老行为；
   改成 `average`/`min`/`max`/`multiply` 会改变已有场景的观感，属于**有意**调整。
@@ -1160,7 +1170,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 645 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 648 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1636,7 +1646,7 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   LM Studio / vLLM，或云端）；`https://` 端点依赖系统 `curl`。模型输出质量取决于所选模型，
   本仓库的测试用假服务覆盖协议与校验，不评价模型本身。
   场景语法有 `waters` 的解析浮力/半透明水面与 `fluids` 的 CPU PBF 粒子（M3 双向耦合 +
-  M4 低模球粒子，M4.1 屏幕空间水后处理），
+  M4 低模球粒子，M4.2 可配置屏幕空间水后处理），
   也没有程序化材质。
 * 编辑器：**已有拖拽式变换 gizmo、撤销/重做与父子层级**（见 §1.1），但
   **手柄不支持拖拽中键入数值、不支持轴心切换、不支持多选成组变换**（多选还没做；

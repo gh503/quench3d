@@ -335,7 +335,8 @@ fn sample_spot_shadow(world: vec3<f32>, n: vec3<f32>, n_dot_l: f32) -> f32 {
 
 struct FragOut {
     @location(0) color: vec4<f32>,
-    // 水面 mask（主 pass 第二颜色附件）：只有水面平面写 1，其余材质写 0。
+    // 水面 mask（主 pass 第二颜色附件）：r = 1 表示水面，g = 水面世界高度；
+    // 其余材质写全 0。g 用来在后处理里做屏幕射线-平面重建。
     @location(1) mask: vec4<f32>,
 }
 
@@ -512,6 +513,6 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
     // 这样半透明/网格线的混合发生在线性空间，而不是"tonemap 之后再混"。
     var out: FragOut;
     out.color = vec4<f32>(lo, alpha);
-    out.mask = vec4<f32>(material.params2.w, 0.0, 0.0, 0.0);
+    out.mask = vec4<f32>(material.params2.w, in.world_position.y, 0.0, 0.0);
     return out;
 }

@@ -55,6 +55,13 @@
       "max_particles": 5000
     }
   ],
+  "water": {
+    "color": [0.08, 0.32, 0.52],
+    "clarity": 0.75,
+    "wave_strength": 1.2,
+    "foam": 1.0,
+    "refraction": 1.0
+  },
   "objects": [
     {
       "name": "左壁",

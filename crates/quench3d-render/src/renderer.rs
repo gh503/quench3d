@@ -99,11 +99,11 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// 而半透明与网格线都要混合。f16 的精度对"tonemap 之前"的值完全够用
 /// （相对误差 ~1e-3，落在 8 位输出的 1 个色阶以内，见 `post_pass` 的像素测试）。
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// 水面 mask（主 pass 第二颜色附件）：r = 1 表示水面平面覆盖。
+/// 水面 mask（主 pass 第二颜色附件）：r = 1 表示水面平面覆盖，g = 水面世界高度。
 ///
-/// 用 `Rgba8Unorm` 而不是 `R8Unorm`：部分后端对单通道 MSAA resolve 支持不一致，
-/// 四通道最稳，代价只有每像素 4 字节。
-pub const WATER_MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// 用 `Rgba16Float` 而不是 8 位：g 要存世界 Y 坐标（浮点），8 位归一化会把水面
+/// 高度量化成几十厘米，射线-平面重建直接失真；同时它是可渲染/可 MSAA resolve 的格式。
+pub const WATER_MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// 阴影级联的最大级数（图集是 2x2 分块，所以最多 4 级）。
 pub const MAX_SHADOW_CASCADES: usize = 4;
 
@@ -432,6 +432,10 @@ pub struct PostUniforms {
     pub water_color: [f32; 4],
     /// 视空间 → 世界：由屏幕坐标算视线方向（菲涅耳）。
     pub inv_view: [[f32; 4]; 4],
+    /// x = 泡沫强度，y = 折射强度，z = 太阳高光强度，w = 预留。
+    pub water_extra: [f32; 4],
+    /// xyz = 太阳方向（从光源射向场景），w = 强度。
+    pub water_sun: [f32; 4],
 }
 
 /// 屏幕空间水面选项。
@@ -441,8 +445,14 @@ pub struct WaterOptions {
     pub enabled: bool,
     /// 水色（线性 RGB）。
     pub color: [f32; 3],
-    /// 波纹/泡沫强度（0 = 平静水面）。
+    /// 波浪强度（0 = 平静水面）；驱动法线扰动幅度。
     pub strength: f32,
+    /// 清澈度（0 = 浑浊/强吸收，1 = 清澈）；映射到吸收混合比例。
+    pub clarity: f32,
+    /// 泡沫强度（0 = 无泡沫）。
+    pub foam: f32,
+    /// 折射强度（0 = 不扰动背景）。
+    pub refraction: f32,
 }
 
 impl Default for WaterOptions {
@@ -451,6 +461,9 @@ impl Default for WaterOptions {
             enabled: false,
             color: [0.06, 0.28, 0.48],
             strength: 1.0,
+            clarity: 1.0,
+            foam: 1.0,
+            refraction: 1.0,
         }
     }
 }
@@ -2674,13 +2687,13 @@ impl Renderer {
                 if self.options.water.enabled { 1.0 } else { 0.0 },
                 self.time,
                 self.options.water.strength.max(0.0),
-                0.0,
+                self.options.water.foam.max(0.0),
             ],
             water_color: [
                 self.options.water.color[0],
                 self.options.water.color[1],
                 self.options.water.color[2],
-                1.0,
+                self.options.water.clarity.clamp(0.0, 1.0),
             ],
             inv_view: {
                 let v = camera.view().inverse();
@@ -2690,6 +2703,19 @@ impl Renderer {
                     v.cols[2].to_array(),
                     v.cols[3].to_array(),
                 ]
+            },
+            water_extra: [
+                self.options.water.foam.max(0.0),
+                self.options.water.refraction.max(0.0),
+                1.0,
+                0.0,
+            ],
+            water_sun: {
+                let (d, i) = lighting
+                    .sun
+                    .map(|s| (s.direction.normalize_or_zero(), s.intensity))
+                    .unwrap_or((Vec3::new(0.42, -0.78, 0.46), 0.0));
+                [d.x, d.y, d.z, i]
             },
         };
         ctx.queue
@@ -3525,10 +3551,11 @@ mod tests {
     }
 
     /// `PostParams` 的 Rust/WGSL 布局必须一致：6 个 vec4 + 2 个 mat4 +
-    /// water/water_color 2 个 vec4 + inv_view 1 个 mat4 = 320 字节。
+    /// water/water_color 2 个 vec4 + inv_view 1 个 mat4 + water_extra/water_sun
+    /// 2 个 vec4 = 352 字节。
     #[test]
     fn post_uniforms_size_matches_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<PostUniforms>(), 320);
+        assert_eq!(std::mem::size_of::<PostUniforms>(), 352);
         assert_eq!(std::mem::size_of::<PostUniforms>() % 16, 0);
     }
 
@@ -3770,6 +3797,11 @@ mod tests {
                 src.contains("textureLoad(water_mask_texture"),
                 "post 变体里水面 mask 没有被读取"
             );
+            assert!(
+                src.contains("textureLoad(water_mask_texture, coord, 0).g"),
+                "post 变体没有用 mask.g 的水面高度做射线-平面重建"
+            );
+            assert!(src.contains("post.water_sun"), "post 变体没有太阳高光参数");
         }
     }
 
@@ -3779,6 +3811,9 @@ mod tests {
         assert!(!w.enabled);
         assert_eq!(w.color, [0.06, 0.28, 0.48]);
         assert_eq!(w.strength, 1.0);
+        assert_eq!(w.clarity, 1.0);
+        assert_eq!(w.foam, 1.0);
+        assert_eq!(w.refraction, 1.0);
     }
 
     /// GL 变体里不许再出现任何深度纹理（正向 + 反向都断言）。

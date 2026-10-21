@@ -64,8 +64,9 @@ pub const MAX_INCLUDE_DEPTH: usize = 16;
 /// 判据不是"能不能合并"，而是"合并语义会不会含糊"：`lighting`/`render`/`simulate`
 /// 这些段只有一个实例，两个文件同时写就等于"谁赢"没有答案。宁可报错让作者把配置
 /// 放到根文件里，也不要静默地按"根赢"或"先来后到"处理 —— 那是查不出来的坑。
-const ROOT_ONLY_SECTIONS: [&str; 9] = [
+const ROOT_ONLY_SECTIONS: [&str; 10] = [
     "name", "gravity", "physics", "ground", "assets", "camera", "lighting", "simulate", "render",
+    "water",
 ];
 
 /// 场景文件格式标识。
@@ -367,6 +368,12 @@ pub struct SceneDoc {
     /// 推开，并把法向冲量反推给动态刚体；粒子的自由表面还给刚体浮力/阻尼（M3 双向）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fluids: Vec<FluidDoc>,
+    /// 屏幕空间水的全局风格（颜色/清澈度/波浪/泡沫/折射）。
+    ///
+    /// 不写 = 使用渲染器缺省值；写了只影响**画面**，不影响物理（浮力/粒子结果逐位相同）。
+    /// 这是根独有段：`include` 片段里写会报错（与 `lighting`/`render` 一样）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub water: Option<WaterStyleDoc>,
     /// 具名材质。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub materials: BTreeMap<String, MaterialDoc>,
@@ -379,7 +386,7 @@ pub struct SceneDoc {
     ///    `materials` / `templates` / `cameras`（具名表，重名即错误）与
     ///    `waters` / `fluids` / `objects` / `models` / `joints` / `actions` / `probes` / `animations`
     ///    （数组，按顺序追加）。
-    ///    根独有的段（`ground`/`camera`/`lighting`/`simulate`/`render`/`gravity`/`physics`/`name`/`assets`）
+    ///    根独有的段（`ground`/`camera`/`lighting`/`simulate`/`render`/`water`/`gravity`/`physics`/`name`/`assets`）
     ///    写在片段里是错误（根独有的段列在源码的 `ROOT_ONLY_SECTIONS` 常量里）。
     /// 3. 顺序：**本文件自己的内容在前**，被 include 的内容在后（按声明顺序先序深度优先）。
     /// 4. 片段里的相对资源路径（4 个贴图槽、`models[].path`）在装载时按**片段自己的目录**
@@ -921,6 +928,7 @@ impl Default for SceneDoc {
             ground: None,
             waters: Vec::new(),
             fluids: Vec::new(),
+            water: None,
             materials: BTreeMap::new(),
             include: Vec::new(),
             objects: Vec::new(),
@@ -999,6 +1007,30 @@ fn default_water_density() -> f32 {
 
 fn default_water_drag() -> f32 {
     6.0
+}
+
+/// 屏幕空间水的全局外观。
+///
+/// 所有 `waters` / `fluids` 共用这一份风格：后处理是逐像素的，水面 mask 不携带
+/// "这是哪个水域"的索引，所以不做逐水域颜色。缺省值由渲染器提供。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WaterStyleDoc {
+    /// 水色（线性 RGB，0~1）；缺省 `[0.06, 0.28, 0.48]`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
+    /// 清澈度 0~1（0 = 浑浊/强吸收，1 = 清澈）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clarity: Option<f32>,
+    /// 波浪强度 0~4（0 = 平静水面）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wave_strength: Option<f32>,
+    /// 泡沫强度 0~2（0 = 无泡沫）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub foam: Option<f32>,
+    /// 折射强度 0~2（0 = 不扰动背景）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refraction: Option<f32>,
 }
 
 /// 粒子流体（CPU PBF）。
@@ -3195,6 +3227,7 @@ impl SceneDoc {
         merged.lighting = self.lighting.clone();
         merged.simulate = self.simulate.clone();
         merged.render = self.render.clone();
+        merged.water = self.water.clone();
         merged.base_dir = self.base_dir.clone();
         merged.source_path = self.source_path.clone();
         merged.extra_asset_paths = self.extra_asset_paths.clone();
@@ -3413,6 +3446,41 @@ impl SceneDoc {
             let _ = i;
         }
         // 水域：尺寸/密度/阻尼非法会让"浮力静默不生效"，必须当场报。
+        // `water` 是画面风格，不影响物理；非法值必须在 validate 就挡下，
+        // 否则 post uniform 里会出现 NaN/负强度，水面整块变黑或闪烁。
+        if let Some(style) = &self.water {
+            if let Some(c) = style.color {
+                if !c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
+                    cam_diags.push(
+                        Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            "water.color",
+                            "水色必须是 0~1 的有限线性 RGB",
+                        )
+                        .with_hint("例如 `[0.06, 0.28, 0.48]`"),
+                    );
+                }
+            }
+            for (key, value, max) in [
+                ("clarity", style.clarity, 1.0),
+                ("wave_strength", style.wave_strength, 4.0),
+                ("foam", style.foam, 2.0),
+                ("refraction", style.refraction, 2.0),
+            ] {
+                if let Some(v) = value {
+                    if !v.is_finite() || v < 0.0 || v > max {
+                        cam_diags.push(
+                            Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("water.{key}"),
+                                format!("必须在 0~{max} 之间（有限数）"),
+                            )
+                            .with_hint("0 表示关闭这一项"),
+                        );
+                    }
+                }
+            }
+        }
         for (i, w) in self.waters.iter().enumerate() {
             let p = format!("waters[{i}]");
             if let Some(c) = &w.center {
@@ -9282,6 +9350,26 @@ mod include_tests {
         assert!(resolved.doc.is_none());
         let _ = std::fs::remove_dir_all(&dir);
 
+        // ②b `water` 也是根独有：片段里写必须报错，不能静默按"根赢"。
+        let dir = temp_scene_dir(
+            "rootonly-water",
+            &[
+                ("main.json", r#"{ "include": ["frag.json"] }"#),
+                ("frag.json", r#"{ "water": { "clarity": 0.5 } }"#),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| { d.code == ErrorCode::InvalidValue && d.path == "include[0].water" }),
+            "{:?}",
+            resolved.diagnostics
+        );
+        assert!(resolved.doc.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+
         // ③ 材质重名（静默覆盖是本仓库最在意的那类坑）
         let dir = temp_scene_dir(
             "dup",
@@ -9429,5 +9517,53 @@ mod include_tests {
             !doc.to_json_pretty().contains("include"),
             "不写就不该出现这个键"
         );
+    }
+}
+
+#[cfg(test)]
+mod water_style_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn water_style_roundtrips_and_rejects_bad_values() {
+        let doc = SceneDoc::from_value(json!({
+            "waters": [{ "size": [4.0, 4.0], "level": 0.0 }],
+            "water": {
+                "color": [0.1, 0.3, 0.5],
+                "clarity": 0.75,
+                "wave_strength": 1.5,
+                "foam": 1.2,
+                "refraction": 0.9
+            }
+        }))
+        .expect("结构合法");
+        let style = doc.water.as_ref().expect("water 应当解析");
+        assert_eq!(style.color, Some([0.1, 0.3, 0.5]));
+        assert_eq!(style.clarity, Some(0.75));
+        assert_eq!(style.wave_strength, Some(1.5));
+        assert_eq!(style.foam, Some(1.2));
+        assert_eq!(style.refraction, Some(0.9));
+        let again = SceneDoc::from_json(&doc.to_json_pretty()).expect("往返");
+        assert_eq!(again.water.unwrap().wave_strength, Some(1.5));
+
+        for (water, path) in [
+            (json!({"color": [1.2, 0.0, 0.0]}), "water.color"),
+            (json!({"clarity": -0.1}), "water.clarity"),
+            (json!({"wave_strength": 5.0}), "water.wave_strength"),
+            (json!({"foam": 3.0}), "water.foam"),
+            (json!({"refraction": -1.0}), "water.refraction"),
+        ] {
+            let doc = SceneDoc::from_value(json!({ "water": water })).expect("结构合法");
+            let diags = doc.validate();
+            assert!(
+                diags.iter().any(|d| d.path == path),
+                "期望 {path} 被挡下，实际: {:?}",
+                diags
+                    .iter()
+                    .map(|d| (&d.path, &d.message))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 }
