@@ -32,6 +32,14 @@
 
 ### 新增
 
+- **状态/过渡增删（第 87 轮）**：状态机面板新增「加状态」「加过渡」按钮和每条
+  状态/过渡右侧的「删」。新状态自动命名为 `状态N` 并选模型第一个 clip；新过渡
+  从当前状态指向下一个状态（0.5s 等待、无淡入）。删除状态会删除引用它的过渡、
+  调整当前/待进入下标，如果删的是当前状态就重建播放器；只剩一个状态时拒绝删除。
+  通过 `Doc::add_animator_state` / `remove_animator_state` /
+  `add_animator_transition` / `remove_animator_transition` 写回底稿（可撤销、
+  存盘生效）。回归：`add_remove_animator_states_and_transitions` + `ui_smoke` 的
+  「加状态」「加过渡」按钮文本断言。
 - **状态 clip/起始编辑（第 86 轮）**：状态机实例的「状态」列表现在逐行显示
   `#i 状态名`、clip 下拉和「起始」时间；改当前状态会重建播放器（保留 speed/loop/
   start，重置 finished）并刷新蒙皮/morph，改非当前状态只影响之后进入该状态时。

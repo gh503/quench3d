@@ -1516,6 +1516,37 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .small()
                         .weak(),
                     );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!clips[index].is_empty(), egui::Button::new("加状态"))
+                            .clicked()
+                        {
+                            let mut n = animator.states.len() + 1;
+                            let name = loop {
+                                let candidate = format!("状态{n}");
+                                if !animator.states.iter().any(|s| s.name == candidate) {
+                                    break candidate;
+                                }
+                                n += 1;
+                            };
+                            animator.states.push(quench3d::scene::ModelAnimatorState {
+                                name: name.clone(),
+                                animation: clips[index][0].clone(),
+                                speed: 1.0,
+                                looping: true,
+                                start: 0.0,
+                            });
+                            if models[index].is_some() {
+                                if let Some(path) =
+                                    doc.add_animator_state(&objects, &name, &clips[index][0])
+                                {
+                                    changed_model = Some(path);
+                                }
+                            }
+                            record_edit = true;
+                        }
+                    });
+                    let mut remove_state = None;
                     ui.label(RichText::new("状态").small().strong());
                     for si in 0..animator.states.len() {
                         let name = animator.states[si].name.clone();
@@ -1558,6 +1589,9 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             if response.drag_stopped() {
                                 end_edit = true;
                             }
+                            if animator.states.len() > 1 && ui.small_button("删").clicked() {
+                                remove_state = Some(si);
+                            }
                         });
                         if changed {
                             let clip_changed = selected != old_clip;
@@ -1594,9 +1628,98 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             record_edit = true;
                         }
                     }
+                    if let Some(remove) = remove_state {
+                        let removed = animator.states.remove(remove).name;
+                        animator
+                            .transitions
+                            .retain(|t| t.from != removed && t.to != removed);
+                        let current_changed = animator.current == remove;
+                        if current_changed {
+                            animator.current = 0;
+                        } else if animator.current > remove {
+                            animator.current -= 1;
+                        }
+                        let pending_removed = animator.pending == Some(remove);
+                        if pending_removed {
+                            animator.pending = None;
+                        } else if let Some(pending) = animator.pending {
+                            if pending > remove {
+                                animator.pending = Some(pending - 1);
+                            }
+                        }
+                        if current_changed {
+                            if let Some(state) = animator.states.get(animator.current) {
+                                if let Some(mut player) = animation.model.player(&state.animation) {
+                                    player.speed = state.speed;
+                                    player.looping = state.looping;
+                                    player.time = state.start;
+                                    player.finished = false;
+                                    player.advance(0.0);
+                                    animation.player = player;
+                                }
+                            }
+                            animation.secondary = None;
+                            animation.blend_weight = 0.0;
+                            animation.blend_target = 0.0;
+                            animation.blend_fade = 0.0;
+                            animation.blend_elapsed = 0.0;
+                        } else if pending_removed {
+                            animation.secondary = None;
+                            animation.blend_weight = 0.0;
+                            animation.blend_target = 0.0;
+                            animation.blend_fade = 0.0;
+                            animation.blend_elapsed = 0.0;
+                        }
+                        animator.elapsed = 0.0;
+                        if models[index].is_some() {
+                            if let Some(path) = doc.remove_animator_state(&objects, remove) {
+                                changed_model = Some(path);
+                            }
+                        }
+                        refresh = true;
+                        record_edit = true;
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(animator.states.len() >= 2, egui::Button::new("加过渡"))
+                            .clicked()
+                        {
+                            if let Some(from) = animator
+                                .states
+                                .get(animator.current)
+                                .map(|s| s.name.clone())
+                            {
+                                if let Some(to) = animator
+                                    .states
+                                    .iter()
+                                    .map(|s| s.name.clone())
+                                    .find(|name| *name != from)
+                                {
+                                    animator.transitions.push(
+                                        quench3d::scene::ModelAnimatorTransition {
+                                            from: from.clone(),
+                                            to: to.clone(),
+                                            after: 0.5,
+                                            on_finished: false,
+                                            fade: 0.0,
+                                        },
+                                    );
+                                    if models[index].is_some() {
+                                        if let Some(path) = doc.add_animator_transition(
+                                            &objects, &from, &to, 0.5, 0.0, false,
+                                        ) {
+                                            changed_model = Some(path);
+                                        }
+                                    }
+                                    record_edit = true;
+                                }
+                            }
+                        }
+                    });
                     if !animator.transitions.is_empty() {
                         ui.label(RichText::new("过渡").small().strong());
                     }
+                    let mut remove_transition = None;
                     for ti in 0..animator.transitions.len() {
                         let from = animator.transitions[ti].from.clone();
                         let to = animator.transitions[ti].to.clone();
@@ -1650,6 +1773,9 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                 changed = true;
                                 record_edit = true;
                             }
+                            if ui.small_button("删").clicked() {
+                                remove_transition = Some(ti);
+                            }
                         });
                         if changed && models[index].is_some() {
                             if let Some(path) = doc.set_animator_transition(
@@ -1662,6 +1788,30 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                 changed_model = Some(path);
                             }
                         }
+                    }
+                    if let Some(remove) = remove_transition {
+                        let to = animator.transitions[remove].to.clone();
+                        animator.transitions.remove(remove);
+                        let active = animator
+                            .pending
+                            .and_then(|i| animator.states.get(i))
+                            .map(|s| s.name.as_str())
+                            == Some(to.as_str());
+                        if active {
+                            animator.pending = None;
+                            animation.secondary = None;
+                            animation.blend_weight = 0.0;
+                            animation.blend_target = 0.0;
+                            animation.blend_fade = 0.0;
+                            animation.blend_elapsed = 0.0;
+                            refresh = true;
+                        }
+                        if models[index].is_some() {
+                            if let Some(path) = doc.remove_animator_transition(&objects, remove) {
+                                changed_model = Some(path);
+                            }
+                        }
+                        record_edit = true;
                     }
                 }
                 ui.add_space(4.0);

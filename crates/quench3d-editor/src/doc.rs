@@ -243,6 +243,119 @@ impl Doc {
             .map(|i| i.model)
     }
 
+    /// 追加一个状态机状态（名重复/空名/没有 animator 时返回 `None`）。
+    pub fn add_animator_state(
+        &mut self,
+        objects: &[usize],
+        name: &str,
+        clip: &str,
+    ) -> Option<String> {
+        if name.is_empty() {
+            return None;
+        }
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let animator = doc.animator.as_mut()?;
+        if animator.states.iter().any(|s| s.name == name) {
+            return None;
+        }
+        animator
+            .states
+            .push(quench3d_cli::scene_doc::ModelAnimatorStateDoc {
+                name: name.to_string(),
+                animation: clip.to_string(),
+                speed: None,
+                looping: None,
+                start: None,
+            });
+        Some(path)
+    }
+
+    /// 删除一个状态机状态；同时删掉引用它的过渡，并在需要时改写 `initial`。
+    ///
+    /// 只剩一个状态时拒绝删除（状态机至少要有一个状态）。
+    pub fn remove_animator_state(&mut self, objects: &[usize], index: usize) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let animator = doc.animator.as_mut()?;
+        if animator.states.len() <= 1 || index >= animator.states.len() {
+            return None;
+        }
+        let removed = animator.states.remove(index).name;
+        animator
+            .transitions
+            .retain(|t| t.from != removed && t.to != removed);
+        if animator.initial == removed {
+            animator.initial = animator.states[0].name.clone();
+        }
+        Some(path)
+    }
+
+    /// 追加一条状态机过渡；`from/to` 必须都存在，且不能自环。
+    pub fn add_animator_transition(
+        &mut self,
+        objects: &[usize],
+        from: &str,
+        to: &str,
+        after: f32,
+        fade: f32,
+        on_finished: bool,
+    ) -> Option<String> {
+        if from == to {
+            return None;
+        }
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let animator = doc.animator.as_mut()?;
+        if !animator.states.iter().any(|s| s.name == from)
+            || !animator.states.iter().any(|s| s.name == to)
+        {
+            return None;
+        }
+        animator
+            .transitions
+            .push(quench3d_cli::scene_doc::ModelAnimatorTransitionDoc {
+                from: from.to_string(),
+                to: to.to_string(),
+                after,
+                on_finished,
+                fade: Some(fade),
+            });
+        Some(path)
+    }
+
+    /// 删除第 `index` 条状态机过渡。
+    pub fn remove_animator_transition(
+        &mut self,
+        objects: &[usize],
+        index: usize,
+    ) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let animator = doc.animator.as_mut()?;
+        if index >= animator.transitions.len() {
+            return None;
+        }
+        animator.transitions.remove(index);
+        Some(path)
+    }
+
     /// 把状态机第 `index` 个状态的 clip 名与起始时间写回底稿。
     ///
     /// 返回模型路径；没有映射、模型没有 animator 或下标越界时返回 `None`。
@@ -1217,5 +1330,80 @@ mod tests {
         assert_eq!(state.start, Some(0.75));
         assert!(doc.set_animator_state(&[8], 9, "run", 0.0).is_none());
         assert!(doc.set_animator_state(&[99], 0, "run", 0.0).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn add_remove_animator_states_and_transitions() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{"path": "a.glb", "animator": {
+                    "initial": "idle",
+                    "states": [
+                        {"name": "idle", "animation": "idle"},
+                        {"name": "walk", "animation": "walk"}
+                    ],
+                    "transitions": [
+                        {"from": "idle", "to": "walk", "after": 0.0}
+                    ]
+                }}]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![quench3d_cli::runner::ModelInstance {
+            model: 0,
+            path: "a.glb".into(),
+            objects: vec![8],
+        }]);
+        assert_eq!(
+            doc.add_animator_state(&[8], "run", "walk").as_deref(),
+            Some("a.glb")
+        );
+        assert!(doc.add_animator_state(&[8], "run", "idle").is_none());
+        assert_eq!(
+            doc.add_animator_transition(&[8], "run", "idle", 0.5, 0.1, false)
+                .as_deref(),
+            Some("a.glb")
+        );
+        assert!(doc
+            .add_animator_transition(&[8], "run", "run", 0.0, 0.0, false)
+            .is_none());
+        assert!(doc
+            .add_animator_transition(&[8], "run", "nope", 0.0, 0.0, false)
+            .is_none());
+        // 删掉 idle→walk，再删 idle：引用 idle 的 run→idle 也要一起删，initial 改写。
+        assert!(doc.remove_animator_transition(&[8], 0).is_some());
+        assert!(doc.remove_animator_transition(&[8], 9).is_none());
+        assert!(doc.remove_animator_state(&[8], 0).is_some());
+        {
+            let animator = doc.base_doc.as_ref().unwrap().models[0]
+                .animator
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                animator
+                    .states
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["walk", "run"]
+            );
+            assert!(animator.transitions.is_empty());
+            assert_eq!(animator.initial, "walk");
+        }
+        assert!(doc.remove_animator_state(&[8], 0).is_some());
+        assert_eq!(
+            doc.base_doc.as_ref().unwrap().models[0]
+                .animator
+                .as_ref()
+                .unwrap()
+                .states
+                .len(),
+            1
+        );
+        assert!(doc.remove_animator_state(&[8], 0).is_none());
+        assert!(doc.add_animator_state(&[99], "x", "x").is_none());
     }
 }

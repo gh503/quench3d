@@ -245,6 +245,14 @@ fn all_editor_panels_draw_in_one_frame() {
         "动画循环控件没有出现在面板内容里"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "加状态"),
+        "加状态按钮没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "加过渡"),
+        "加过渡按钮没有出现在面板内容里"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "#0 待机"),
         "状态机状态行没有出现在面板内容里"
     );
