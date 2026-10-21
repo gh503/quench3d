@@ -13,7 +13,7 @@ tools/verify_all.sh
 ```
 
 它依次跑：`tools/gate.sh` → `tools/probe_webgl2.sh` → `tools/probe_web_ui.sh` →
-`python -m unittest discover -s tools/camera_mocap`。没有 Chrome 的机器上前两条会
+`python -m unittest discover -s tools/camera_mocap` → `tools/probe_deployed.sh`。没有 Chrome 的机器上前两条会
 **跳过并返回 0**（与仓库其它 GPU 测试一致），不会假装绿；看输出里的「跳过」。
 
 ## 1. 引擎 / 渲染（像素证据）
@@ -68,6 +68,7 @@ tools/verify_all.sh
 | --- | --- | --- |
 | wasm 构建 + 产物自检 | `tools/build_web.sh web_client`；`node tools/check_web.mjs` | 符号/实例化/内存都在 |
 | WebGL2 启动 | `tools/probe_webgl2.sh` | 第一帧日志 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式 |
+| 线上 Pages 启动 | `tools/probe_deployed.sh [URL]` | HTTP 200 + 线上 wasm 第一帧 + 遮罩收起；网络不通跳过 |
 | Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/P 前后 UI 状态与中央视口截图都必须变；F5 只断言状态（默认场景可能没有接触），Tab 断言相机模式（Orbit→Fly） |
 | 浏览器场景往返（纯 CPU） | `cargo test -p quench3d-editor --lib` / wasm 导出探针 | 场景 JSON 往返 |
 
