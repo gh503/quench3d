@@ -729,9 +729,19 @@ impl Scene {
                 continue;
             };
             // morph 动画按节点给权重；场景里手工写的 `morph_weights` 优先级更高，
-            // 用于覆盖资产动画（此时动画的 morph 轨道被忽略）。双 clip 混合时只取
-            // 主 clip 的 morph 轨道，不对两条 clip 的权重插值。
-            let sampled = a.model.morph_weights_at(&a.player.animation, a.player.time);
+            // 用于覆盖资产动画（此时动画的 morph 轨道被忽略）。双 clip 混合时按
+            // `blend_weight` 逐 target 插值两条 clip 的权重（见
+            // `LoadedModel::blended_morph_weights_at`）。
+            let sampled = match &a.secondary {
+                Some(secondary) => a.model.blended_morph_weights_at(
+                    &a.player.animation,
+                    &secondary.animation,
+                    a.blend_weight,
+                    a.player.time,
+                    secondary.time,
+                ),
+                None => a.model.morph_weights_at(&a.player.animation, a.player.time),
+            };
             for (mesh_index, &object_index) in a.objects.iter().enumerate() {
                 let Some(mesh) = a.model.meshes.get(mesh_index) else {
                     continue;

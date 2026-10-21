@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **683** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **684** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -60,6 +60,7 @@ tools/verify_all.sh
 | 状态机校验 | `cargo test -p quench3d-cli --test cli_e2e scene_animator_is_validated` | 初始状态不存在、to 不存在、after 负数、fade 负数各有诊断 |
 | CUBICSPLINE 采样 | `cargo test -p quench3d --lib cubic_spline_uses_tangents` | 出切线 2/s、入切线 0 时 u=.5 为 .75（线性只会 .5）；切线缺失退回线性 |
 | CUBICSPLINE 解析链路 | `cargo test -p quench3d --test model_loading cubic_spline_tangents_survive_parsing_and_sampling` | 解析后 in/out 切线保留，`sample_animation(t=.5)` 的 x=.75 |
+| 双 clip morph 混合 | `cargo test -p quench3d --test model_loading blended_morph_weights_interpolate_both_clips` | 主 clip .5、第二 clip 1、blend=.5 → 权重 .75；形变位移 .375 |
 | 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
 | 场景双时间线 | `cargo test -p quench3d --test model_loading scene_blended_animation_advances_both_clips` | `Scene::advance_animations` 同时推进两条 clip，t=.5 落在 base+2.5 |
@@ -107,7 +108,7 @@ python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 
 ## 6. 明确未覆盖（不要当成绿）
 
-* **GPU 蒙皮 / 动画混合**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，且有 **CPU 蒙皮**（每顶点最多 4 关节，逐帧变形后写回顶点缓冲）；但**顶点着色器里没有关节矩阵**，混合/状态机、IK 仍未做。**morph target** 已支持静态权重和 glTF `weights` 权重动画（先 morph 后蒙皮），但双 clip 不混合 morph 权重，也没有编辑器滑杆。CPU 路径在角色面数高时会把开销放在 CPU。
+* **GPU 蒙皮 / 动画混合**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，且有 **CPU 蒙皮**（每顶点最多 4 关节，逐帧变形后写回顶点缓冲）；但**顶点着色器里没有关节矩阵**，混合/状态机、IK 仍未做。**morph target** 已支持静态权重和 glTF `weights` 权重动画（先 morph 后蒙皮），双 clip 也按 `blend_weight` 插值 morph 权重；但还没有编辑器滑杆。CPU 路径在角色面数高时会把开销放在 CPU。
 * **IBL / HDRI / 环境 cubemap**：只有解析式环境高光。
 * **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除。
 * **音频、脚本层、粒子、贴花、地形、多视口**：没有。

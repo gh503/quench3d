@@ -445,6 +445,61 @@ impl LoadedModel {
         )
     }
 
+    /// 双 clip 的 morph 权重混合：逐节点按 `blend`（0 = 主 clip，1 = 第二 clip）插值。
+    ///
+    /// * 两条 clip 都有该节点的轨道：逐 target 线性插值（长度不足按 0）。
+    /// * 只有主 clip 有：用主 clip（与单 clip 行为一致）。
+    /// * 只有第二 clip 有：按 `blend` 缩放（`blend = 0` 时不会凭空把第二 clip 的形变加上去）。
+    /// * 两条都没有：不返回该节点，调用方保持资产默认权重。
+    ///
+    /// `blend` 会被夹到 0..=1；时间非法时由 [`Self::morph_weights_at`] 夹到片段范围。
+    pub fn blended_morph_weights_at(
+        &self,
+        primary: &str,
+        secondary: &str,
+        blend: f32,
+        primary_time: f32,
+        secondary_time: f32,
+    ) -> Option<Vec<(usize, Vec<f32>)>> {
+        let a = self.morph_weights_at(primary, primary_time);
+        let b = self.morph_weights_at(secondary, secondary_time);
+        if a.is_none() && b.is_none() {
+            return None;
+        }
+        let blend = if blend.is_finite() {
+            blend.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let a = a.unwrap_or_default();
+        let b = b.unwrap_or_default();
+        let mut out: Vec<(usize, Vec<f32>)> = Vec::new();
+        for (node, wa) in &a {
+            let wb = b.iter().find(|(n, _)| n == node).map(|(_, w)| w);
+            let weights = match wb {
+                Some(wb) => {
+                    let len = wa.len().max(wb.len());
+                    let mut w = Vec::with_capacity(len);
+                    for k in 0..len {
+                        let x = wa.get(k).copied().unwrap_or(0.0);
+                        let y = wb.get(k).copied().unwrap_or(0.0);
+                        w.push(x * (1.0 - blend) + y * blend);
+                    }
+                    w
+                }
+                None => wa.clone(),
+            };
+            out.push((*node, weights));
+        }
+        for (node, wb) in &b {
+            if a.iter().any(|(n, _)| n == node) {
+                continue;
+            }
+            out.push((*node, wb.iter().map(|x| x * blend).collect::<Vec<f32>>()));
+        }
+        Some(out)
+    }
+
     /// 采样某条动画在 `time` 秒时的**局部**变换（每个节点一项）。
     ///
     /// 这是 [`Self::sample_animation`] 的第一步；单独抽出来是给动画混合用：

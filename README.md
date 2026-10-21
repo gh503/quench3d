@@ -130,8 +130,8 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   （0~1，缺项按 0）。glTF 的 `weights` 动画轨道会随 `models[].animation` 自动采样，
   按节点应用到对应网格；蒙皮模型按"先 morph、再乘关节矩阵"的顺序变形，静态模型
   在装载后立即写回 GPU 顶点缓冲。手工 `morph_weights` 优先于动画轨道。
-  边界：双 clip 混合只取主 clip 的 morph 轨道、不做权重混合；没有编辑器滑杆；
-  `models[].collide` 的碰撞体仍是绑定姿态。`info` 会报 `morph_targets`，动画报告
+  边界：双 clip 混合会按 `blend_weight` 逐 target 插值两条 clip 的 morph 权重；
+  没有编辑器滑杆；`models[].collide` 的碰撞体仍是绑定姿态。`info` 会报 `morph_targets`，动画报告
   会报 `animation.morph_tracks`。
 * **时间驱动动画状态机**：场景里用 `models[].animator` 声明 `states` 与
   `transitions`；当前状态停留 `after` 秒后切到目标状态，`fade` 秒内从旧 clip
@@ -1223,7 +1223,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 683 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 684 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

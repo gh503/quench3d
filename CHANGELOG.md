@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **双 clip morph 权重混合（第 77 轮）**：之前双 clip 只取主 clip 的 morph 轨道；现在
+  `LoadedModel::blended_morph_weights_at` 按 `blend_weight` 逐节点、逐 target 插值两条
+  clip 的权重（只有主/第二 clip 有轨道的节点按各自规则处理，`blend=0` 不会凭空加上
+  第二 clip 的形变），`Scene::advance_animations_with_renderer` 在淡入期间即按权重
+  变形。回归：`blended_morph_weights_interpolate_both_clips`（.5 与 1 混合 → .75，
+  位移 .375）。边界：morph 权重的 CUBICSPLINE 切线仍按线性取关键帧值。
 - **CUBICSPLINE 真值（第 76 轮）**：glTF TRS 动画不再只取中间关键帧值。解析器保留每个
   关键帧的 `[入切线, 值, 出切线]`，`AnimationTrack` 新增 `in_tangents` / `out_tangents`；
   `Interpolation::CubicSpline` 用 Hermite 基函数按区间时长缩放切线，旋转分量求值后

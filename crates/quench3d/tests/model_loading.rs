@@ -267,6 +267,44 @@ fn morph_animation_interpolates_weights() {
     assert!((deformed.vertices[0].position[1] - base.vertices[0].position[1] - 0.25).abs() < 1e-6);
 }
 
+/// 双 clip 的 morph 权重按 blend 插值：主 clip t=.5 是 .5，第二 clip 恒 1，
+/// blend=.5 时权重 .75（形变位移 .375）。
+#[test]
+fn blended_morph_weights_interpolate_both_clips() {
+    let mut model = load_model_from_bytes("morph.glb", &morph_glb()).expect("morph GLB 应当能解析");
+    let mut second = model.animations[0].clone();
+    second.name = "pulse2".into();
+    for track in &mut second.morph_tracks {
+        for value in &mut track.values {
+            value[0] = 1.0;
+        }
+    }
+    model.animations.push(second);
+
+    let primary_only = model
+        .blended_morph_weights_at("pulse", "pulse2", 0.0, 0.5, 0.5)
+        .expect("主 clip 有轨道");
+    assert!(
+        (primary_only[0].1[0] - 0.5).abs() < 1e-6,
+        "{primary_only:?}"
+    );
+    let second_only = model
+        .blended_morph_weights_at("pulse", "pulse2", 1.0, 0.5, 0.5)
+        .expect("第二 clip 有轨道");
+    assert!((second_only[0].1[0] - 1.0).abs() < 1e-6, "{second_only:?}");
+    let half = model
+        .blended_morph_weights_at("pulse", "pulse2", 0.5, 0.5, 0.5)
+        .expect("两条 clip 都有轨道");
+    assert!((half[0].1[0] - 0.75).abs() < 1e-6, "{half:?}");
+
+    let base = model.morphed_mesh(0, None).expect("基础网格");
+    let deformed = model.morphed_mesh(0, Some(&half[0].1)).expect("混合网格");
+    assert!(
+        (deformed.vertices[0].position[1] - base.vertices[0].position[1] - 0.375).abs() < 1e-6,
+        "权重 .75 × 位移 .5 = .375"
+    );
+}
+
 #[test]
 fn skinned_glb_deforms_vertices_from_joint_animation() {
     let model = load_model_from_bytes("skinned.glb", &skinned_glb()).expect("蒙皮 GLB 应当能解析");
