@@ -32,6 +32,15 @@
 
 ### 新增
 
+- **静态 morph target（第 73 轮）**：解析 glTF primitive 的 `targets`
+  （POSITION/NORMAL/TANGENT 位移，按节点世界方向变换），新增
+  `LoadedModel::morphed_mesh` 与 `deformed_mesh`；场景格式新增
+  `models[].morph_weights`（0~1，按 target 顺序，缺项 0），静态模型装载后立即写回
+  GPU 顶点缓冲，蒙皮模型按"先 morph、再乘关节矩阵"变形。`info` 报 `morph_targets`。
+  回归：`morph_targets_displace_vertices_by_weight`（权重 0/0.5/1 的顶点对账）、
+  `info_reports_morph_targets`、`scene_morph_weights_change_cli_render`（0 与 1 的 PNG
+  必须有可见差异）、`scene_morph_weights_are_validated`。边界：**静态权重**，没有
+  morph 动画轨道/关键帧/编辑器滑杆；碰撞体仍是绑定姿态。
 - **双 clip 一次性淡入（第 72 轮）**：`models[].animation.blend.fade` 给出淡入秒数；
   第二条 clip 的权重从第一帧的 0 按 smoothstep 升到 `weight`，`fade=0` 或省略
   保持上一轮的立即生效行为。场景层新增

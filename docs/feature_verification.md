@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **672** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **676** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -49,6 +49,10 @@ tools/verify_all.sh
 | 场景 include / 模板 / 实例 | `cargo test -p quench3d-cli --test scene_fixtures` | 合并、重名、路径、往返 |
 | 模型动画对账 | `cargo test -p quench3d-cli --test cli_e2e model` | 动画名存在/不存在、时长/轨道 |
 | 蒙皮资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_skins` | `info --json` 的 `skins=1` / `skinned_meshes=1`，人类可读输出有「蒙皮」行 |
+| morph 位移数学 | `cargo test -p quench3d --test model_loading morph_targets_displace_vertices_by_weight` | 手搓 GLB 的 `targets[0]` 解析；权重 0 原样、1 整体 +0.5、0.5 +0.25 |
+| morph 资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_morph_targets` | `info --json` 的 `morph_targets=1`，人类可读输出有「morph target」行 |
+| 场景 morph → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e scene_morph_weights_change_cli_render` | 同一个静态模型 `morph_weights:[0]` 与 `[1]` 的 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
+| morph 权重校验 | `cargo test -p quench3d-cli --test cli_e2e scene_morph_weights_are_validated` | `validate` 报 `models[0].morph_weights[0]` / `[1]` 的 `out_of_range`，退出码 2 |
 | 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
 | 场景双时间线 | `cargo test -p quench3d --test model_loading scene_blended_animation_advances_both_clips` | `Scene::advance_animations` 同时推进两条 clip，t=.5 落在 base+2.5 |
@@ -96,7 +100,7 @@ python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 
 ## 6. 明确未覆盖（不要当成绿）
 
-* **GPU 蒙皮 / 动画混合**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，且有 **CPU 蒙皮**（每顶点最多 4 关节，逐帧变形后写回顶点缓冲）；但**顶点着色器里没有关节矩阵**，混合/状态机、IK、morph target 仍未做。CPU 路径在角色面数高时会把开销放在 CPU。
+* **GPU 蒙皮 / 动画混合**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，且有 **CPU 蒙皮**（每顶点最多 4 关节，逐帧变形后写回顶点缓冲）；但**顶点着色器里没有关节矩阵**，混合/状态机、IK 仍未做。**静态 morph target** 已支持（`targets` + `models[].morph_weights`，先 morph 后蒙皮），但 **morph 动画轨道**仍跳过，且没有编辑器滑杆。CPU 路径在角色面数高时会把开销放在 CPU。
 * **IBL / HDRI / 环境 cubemap**：只有解析式环境高光。
 * **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除。
 * **音频、脚本层、粒子、贴花、地形、多视口**：没有。

@@ -78,6 +78,20 @@ pub struct LoadedSkin {
     pub inverse_bind: Vec<Mat4>,
 }
 
+/// glTF 的一个 morph target：逐顶点的位置/法线/切线位移。
+///
+/// 数据已经按节点的绑定姿态世界变换烘过（位置是方向变换，法线/切线只转方向），
+/// 与 [`LoadedMesh::data`] 的坐标系一致。缺失的分量用空表表示。
+#[derive(Clone, Debug, Default)]
+pub struct LoadedMorphTarget {
+    /// 逐顶点位置位移。
+    pub positions: Vec<[f32; 3]>,
+    /// 逐顶点法线位移。
+    pub normals: Vec<[f32; 3]>,
+    /// 逐顶点切线位移。
+    pub tangents: Vec<[f32; 3]>,
+}
+
 /// CPU 端的一个网格片段。
 #[derive(Clone, Debug)]
 pub struct LoadedMesh {
@@ -103,6 +117,10 @@ pub struct LoadedMesh {
     pub joints: Vec<[u16; 4]>,
     /// 每顶点的 4 个关节权重（`WEIGHTS_0`；没有皮肤时为空）。
     pub weights: Vec<[f32; 4]>,
+    /// morph target 位移（按 glTF 顺序；没有时为空）。
+    pub morph_targets: Vec<LoadedMorphTarget>,
+    /// 资产的默认 morph 权重（glTF `mesh.weights` / node.weights；缺省 0）。
+    pub morph_weights: Vec<f32>,
 }
 
 impl Default for LoadedMesh {
@@ -116,6 +134,8 @@ impl Default for LoadedMesh {
             skin: None,
             joints: Vec::new(),
             weights: Vec::new(),
+            morph_targets: Vec::new(),
+            morph_weights: Vec::new(),
         }
     }
 }
@@ -503,6 +523,81 @@ impl LoadedModel {
         self.meshes.iter().any(|m| m.skin.is_some())
     }
 
+    /// 这个模型是否含 morph target。
+    pub fn has_morph_targets(&self) -> bool {
+        self.meshes.iter().any(|m| !m.morph_targets.is_empty())
+    }
+
+    /// 按 `weights` 计算某个片段的 **morph 变形**网格（绑定姿态坐标系）。
+    ///
+    /// `weights = None` 用资产里的默认权重；显式数组按 target 下标对应，缺项按 0。
+    /// 没有 morph target 的片段返回原始几何的克隆（不是 `None`，调用方可以无条件取）。
+    /// 位移只加在位置/法线/切线上，索引与拓扑不变；法线/切线最后重新归一化。
+    pub fn morphed_mesh(&self, mesh_index: usize, weights: Option<&[f32]>) -> Option<MeshData> {
+        let mesh = self.meshes.get(mesh_index)?;
+        let mut out = mesh.data.clone();
+        if mesh.morph_targets.is_empty() {
+            return Some(out);
+        }
+        for (ti, target) in mesh.morph_targets.iter().enumerate() {
+            let weight = match weights {
+                Some(w) => w.get(ti).copied().unwrap_or(0.0),
+                None => mesh.morph_weights.get(ti).copied().unwrap_or(0.0),
+            };
+            if !weight.is_finite() || weight == 0.0 {
+                continue;
+            }
+            for (vi, vertex) in out.vertices.iter_mut().enumerate() {
+                if let Some(d) = target.positions.get(vi) {
+                    vertex.position[0] += d[0] * weight;
+                    vertex.position[1] += d[1] * weight;
+                    vertex.position[2] += d[2] * weight;
+                }
+                if let Some(d) = target.normals.get(vi) {
+                    vertex.normal[0] += d[0] * weight;
+                    vertex.normal[1] += d[1] * weight;
+                    vertex.normal[2] += d[2] * weight;
+                }
+                if let Some(d) = target.tangents.get(vi) {
+                    vertex.tangent[0] += d[0] * weight;
+                    vertex.tangent[1] += d[1] * weight;
+                    vertex.tangent[2] += d[2] * weight;
+                }
+            }
+        }
+        for vertex in &mut out.vertices {
+            let n = Vec3::from_array(vertex.normal).normalize_or_zero();
+            if n != Vec3::ZERO {
+                vertex.normal = n.to_array();
+            }
+            let t = Vec3::from_array([vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]])
+                .normalize_or_zero();
+            if t != Vec3::ZERO {
+                vertex.tangent = [t.x, t.y, t.z, vertex.tangent[3]];
+            }
+        }
+        Some(out)
+    }
+
+    /// 先 morph 再蒙皮；没有蒙皮时返回 morph 后的绑定姿态网格。
+    ///
+    /// 这是"morph target + skin"同时存在时的正确顺序：位移定义在绑定姿态，
+    /// 必须先进骨架空间再乘关节矩阵，不能反过来。
+    pub fn deformed_mesh(
+        &self,
+        mesh_index: usize,
+        node_worlds: &[Mat4],
+        weights: Option<&[f32]>,
+    ) -> Option<MeshData> {
+        let mesh = self.meshes.get(mesh_index)?;
+        let base = self.morphed_mesh(mesh_index, weights)?;
+        if mesh.skin.is_some() {
+            self.skin_data(mesh, &base, node_worlds)
+        } else {
+            Some(base)
+        }
+    }
+
     /// 按当前节点世界矩阵计算某个蒙皮片段的**变形后**网格。
     ///
     /// 返回 `None` 表示这个片段不是蒙皮网格（调用方继续走刚性矩阵路径）。
@@ -514,11 +609,21 @@ impl LoadedModel {
     /// 不是严格的逆转置，和装载时烘节点变换的取舍一致），顶点位置是精确的。
     pub fn skinned_mesh(&self, mesh_index: usize, node_worlds: &[Mat4]) -> Option<MeshData> {
         let mesh = self.meshes.get(mesh_index)?;
+        mesh.skin?;
+        let base = self.morphed_mesh(mesh_index, None)?;
+        self.skin_data(mesh, &base, node_worlds)
+    }
+
+    /// 蒙皮内核算子：`base` 是绑定姿态（可已做 morph）的网格。
+    fn skin_data(
+        &self,
+        mesh: &LoadedMesh,
+        base: &MeshData,
+        node_worlds: &[Mat4],
+    ) -> Option<MeshData> {
         let skin_index = mesh.skin?;
         let skin = self.skins.get(skin_index)?;
-        if mesh.joints.len() != mesh.data.vertices.len()
-            || mesh.weights.len() != mesh.data.vertices.len()
-        {
+        if mesh.joints.len() != base.vertices.len() || mesh.weights.len() != base.vertices.len() {
             return None;
         }
         // 每个关节的 `world × inverseBind × bindInverse` 只算一次。
@@ -528,7 +633,7 @@ impl LoadedModel {
             let inverse_bind = skin.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY);
             joint_mats.push(world * inverse_bind * mesh.bind_inverse);
         }
-        let mut out = mesh.data.clone();
+        let mut out = base.clone();
         for (vi, vertex) in out.vertices.iter_mut().enumerate() {
             let p = vertex.pos();
             let n = vertex.nrm();
@@ -623,8 +728,13 @@ impl LoadedModel {
         // 2. 网格
         let fallback = || MaterialDesc::new(Vec4::new(0.8, 0.8, 0.8, 1.0)).pbr(0.0, 0.6);
         let mut out = Vec::with_capacity(self.meshes.len());
-        for mesh in &self.meshes {
-            let mesh_id = renderer.add_mesh_named(ctx, &mesh.data, &mesh.name);
+        for (i, mesh) in self.meshes.iter().enumerate() {
+            // 上传的是"默认 morph 权重"下的几何；场景覆盖权重后再调
+            // `update_mesh_vertices`，与动画路径共用同一个 MeshId。
+            let data = self
+                .morphed_mesh(i, None)
+                .unwrap_or_else(|| mesh.data.clone());
+            let mesh_id = renderer.add_mesh_named(ctx, &data, &mesh.name);
             let material_id = mesh
                 .material
                 .and_then(|i| material_ids.get(i).copied())
@@ -1083,7 +1193,14 @@ fn model_from_gltf(
 
     // 每份实例带上**节点**标签：同一个网格被多个节点引用时，标签才分得清左右轮
     /// 一个待展开的「网格 + 节点变换 + 节点/皮肤下标」条目。
-    type NodeMeshEntry = (usize, Matrix, String, Option<usize>, Option<usize>);
+    type NodeMeshEntry = (
+        usize,
+        Matrix,
+        String,
+        Option<usize>,
+        Option<usize>,
+        Option<Vec<f32>>,
+    );
     let mut node_meshes: Vec<NodeMeshEntry> = Vec::new();
     for node in doc.nodes() {
         if let Some(mesh) = node.mesh() {
@@ -1098,6 +1215,7 @@ fn model_from_gltf(
                 label,
                 Some(node.index()),
                 node.skin().map(|s| s.index()),
+                node.weights().map(|w| w.to_vec()),
             ));
         }
     }
@@ -1105,10 +1223,10 @@ fn model_from_gltf(
     // 免得"以前能看见、现在看不见"。引擎宁可多画一个，也不静默吞掉几何。
     for (i, used) in used_meshes.iter().enumerate() {
         if !used {
-            node_meshes.push((i, IDENTITY, mesh_label(doc, i), None, None));
+            node_meshes.push((i, IDENTITY, mesh_label(doc, i), None, None, None));
         }
     }
-    for (mesh_index, world, label, node_index, skin_index) in node_meshes {
+    for (mesh_index, world, label, node_index, skin_index, node_weights) in node_meshes {
         let mesh = doc.meshes().nth(mesh_index).expect("下标来自 doc.meshes()");
         for (pi, prim) in mesh.primitives().enumerate() {
             let reader = prim.reader(|b| buffers.get(b.index()).map(|b| b.0.as_slice()));
@@ -1146,6 +1264,37 @@ fn model_from_gltf(
             } else {
                 Vec::new()
             };
+            // morph target：positions 必须逐顶点对齐，否则整条 target 丢弃（宁可不动，
+            // 也不能让一部分顶点被推走）；法线/切线缺失时保持 0 位移。
+            let vertex_count = positions.len();
+            let mut morph_targets: Vec<LoadedMorphTarget> = Vec::new();
+            for (p, n, t) in reader.read_morph_targets() {
+                let Some(p) = p else { continue };
+                let p: Vec<[f32; 3]> = p.collect();
+                if p.len() != vertex_count {
+                    continue;
+                }
+                let n: Vec<[f32; 3]> = n
+                    .map(|it| it.collect::<Vec<_>>())
+                    .filter(|v| v.len() == vertex_count)
+                    .unwrap_or_default();
+                let t: Vec<[f32; 3]> = t
+                    .map(|it| it.collect::<Vec<_>>())
+                    .filter(|v| v.len() == vertex_count)
+                    .unwrap_or_default();
+                morph_targets.push(LoadedMorphTarget {
+                    positions: p,
+                    normals: n,
+                    tangents: t,
+                });
+            }
+            let mut morph_weights: Vec<f32> = node_weights
+                .clone()
+                .or_else(|| mesh.weights().map(|w| w.to_vec()))
+                .unwrap_or_default();
+            if morph_targets.is_empty() {
+                morph_weights.clear();
+            }
 
             let mut data = MeshData::new();
             for (i, p) in positions.iter().enumerate() {
@@ -1194,6 +1343,19 @@ fn model_from_gltf(
                     v.tangent = [tv.x, tv.y, tv.z, v.tangent[3]];
                 }
             }
+            // morph 位移与顶点在同一个坐标系：位置按方向变换（不含平移），
+            // 法线/切线只转方向。target 的权重稍后由场景覆盖。
+            for target in &mut morph_targets {
+                for p in &mut target.positions {
+                    *p = transform_dir(&world, *p);
+                }
+                for n in &mut target.normals {
+                    *n = transform_dir(&world, *n);
+                }
+                for t in &mut target.tangents {
+                    *t = transform_dir(&world, *t);
+                }
+            }
             // 皮肤数据必须与顶点一一对应；缺一个顶点就整体退回刚性路径，
             // 而不是让一部分顶点蒙皮、一部分不动（那会撕裂网格）。
             let skin = skin_index.filter(|s| {
@@ -1215,6 +1377,8 @@ fn model_from_gltf(
                 skin,
                 joints: if skin.is_some() { joints } else { Vec::new() },
                 weights: if skin.is_some() { weights } else { Vec::new() },
+                morph_targets,
+                morph_weights,
             });
         }
     }
@@ -1562,6 +1726,8 @@ pub fn parse_obj(text: &str, name: &str) -> Result<LoadedModel, AssetError> {
             skin: None,
             joints: Vec::new(),
             weights: Vec::new(),
+            morph_targets: Vec::new(),
+            morph_weights: Vec::new(),
         });
     }
 

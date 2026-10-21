@@ -173,6 +173,8 @@ pub struct ModelAnimationInstance {
     pub blend_fade: f32,
     /// 淡入已累计的时间（秒）。
     pub blend_elapsed: f32,
+    /// 场景覆盖的 morph 权重；`None` = 用资产的默认值。
+    pub morph_weights: Option<Vec<f32>>,
 }
 
 /// 取一个动画实例当前该用的节点世界矩阵（单 clip 或双 clip 混合）。
@@ -380,6 +382,7 @@ impl Scene {
             blend_target: 0.0,
             blend_fade: 0.0,
             blend_elapsed: 0.0,
+            morph_weights: None,
         });
         index
     }
@@ -447,8 +450,25 @@ impl Scene {
             blend_target: target,
             blend_fade: fade,
             blend_elapsed: 0.0,
+            morph_weights: None,
         });
         index
+    }
+
+    /// 覆盖某个动画实例的 morph 权重（下标来自 `play_model_animation*`）。
+    ///
+    /// 只影响几何；权重为 `None` 时仍用资产默认值。没有 morph target 的模型
+    /// 调用它没有副作用。返回 `false` 表示下标不存在。
+    pub fn set_model_morph_weights(
+        &mut self,
+        animation_index: usize,
+        weights: Option<Vec<f32>>,
+    ) -> bool {
+        let Some(a) = self.animations.get_mut(animation_index) else {
+            return false;
+        };
+        a.morph_weights = weights;
+        true
     }
 
     /// 推进所有模型动画 `dt` 秒并把当前帧落到物体上；返回更新的物体数。
@@ -502,7 +522,11 @@ impl Scene {
         ctx: &quench3d_render::GpuContext,
     ) -> usize {
         let updated = self.advance_animations(dt);
-        if !self.animations.iter().any(|a| a.model.has_skinning()) {
+        if !self
+            .animations
+            .iter()
+            .any(|a| a.model.has_skinning() || a.model.has_morph_targets())
+        {
             return updated;
         }
         let Scene {
@@ -515,7 +539,17 @@ impl Scene {
                 continue;
             };
             for (mesh_index, &object_index) in a.objects.iter().enumerate() {
-                let Some(data) = a.model.skinned_mesh(mesh_index, &worlds) else {
+                let Some(mesh) = a.model.meshes.get(mesh_index) else {
+                    continue;
+                };
+                // 只有蒙皮/morph 片段需要每帧重传；普通刚性片段仍靠实例矩阵。
+                if mesh.skin.is_none() && mesh.morph_targets.is_empty() {
+                    continue;
+                }
+                let Some(data) =
+                    a.model
+                        .deformed_mesh(mesh_index, &worlds, a.morph_weights.as_deref())
+                else {
                     continue;
                 };
                 let Some(object) = objects.get_mut(object_index) else {

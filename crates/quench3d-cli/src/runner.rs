@@ -789,6 +789,9 @@ pub struct ModelInfo {
     /// 绑定皮肤的网格片段数；没有蒙皮时不出现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skinned_meshes: Option<usize>,
+    /// 资产里的 morph target 总数；没有时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morph_targets: Option<usize>,
 }
 
 /// 环境自检报告。
@@ -3155,6 +3158,7 @@ pub fn setup_visuals(
         let objects = engine.add_model(&model, transform);
         // 模型动画：名字不存在时**不登记**（报告里给 found=false），几何保持绑定姿态。
         // 登记之后由引擎帧循环每帧推进（单帧渲染用 dt = 0 摆一次起始姿态）。
+        let mut animation_index = None;
         if let Some(a) = &m.animation {
             if let Some(mut player) = model.player(&a.name) {
                 player.speed = a.speed.unwrap_or(1.0);
@@ -3172,7 +3176,7 @@ pub fn setup_visuals(
                         secondary.looping = b.looping.unwrap_or(true);
                         secondary.time = b.start.unwrap_or(0.0);
                         secondary.advance(0.0);
-                        engine.scene.play_model_animation_blend_with_fade(
+                        animation_index = Some(engine.scene.play_model_animation_blend_with_fade(
                             model.clone(),
                             objects.clone(),
                             base,
@@ -3182,13 +3186,36 @@ pub fn setup_visuals(
                                 b.weight.unwrap_or(0.5),
                                 b.fade.unwrap_or(0.0),
                             ),
-                        );
+                        ));
                     }
                 } else {
-                    engine
-                        .scene
-                        .play_model_animation(model.clone(), objects.clone(), base, player);
+                    animation_index = Some(engine.scene.play_model_animation(
+                        model.clone(),
+                        objects.clone(),
+                        base,
+                        player,
+                    ));
                 }
+            }
+        }
+        if let Some(weights) = &m.morph_weights {
+            // 场景覆盖：先把 GPU 上的绑定姿态网格换成 morph 后的几何（静态模型
+            // 也要生效）；动画实例则同时记住权重，之后每帧 morph + skin。
+            let mesh_ids: Vec<_> = objects
+                .iter()
+                .filter_map(|&o| engine.scene.objects.get(o).map(|obj| obj.mesh))
+                .collect();
+            for (i, &mesh_id) in mesh_ids.iter().enumerate() {
+                if let Some(data) = model.morphed_mesh(i, Some(weights)) {
+                    engine
+                        .renderer
+                        .update_mesh_vertices(&engine.gpu, mesh_id, &data.vertices);
+                }
+            }
+            if let Some(index) = animation_index {
+                engine
+                    .scene
+                    .set_model_morph_weights(index, Some(weights.clone()));
             }
         }
         instances.push(ModelInstance {
@@ -4673,6 +4700,9 @@ pub fn run_info(path: &std::path::Path) -> Result<ModelInfo, RunError> {
         skins: (!model.skins.is_empty()).then_some(model.skins.len()),
         skinned_meshes: (model.has_skinning())
             .then(|| model.meshes.iter().filter(|m| m.skin.is_some()).count()),
+        morph_targets: model
+            .has_morph_targets()
+            .then(|| model.meshes.iter().map(|m| m.morph_targets.len()).sum()),
     })
 }
 

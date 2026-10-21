@@ -1578,6 +1578,12 @@ pub struct ModelDoc {
     /// 参与碰撞时的摩擦系数，缺省 0.8。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub friction: Option<f32>,
+    /// 覆盖 glTF morph target 的权重（0..=1，按 target 顺序）。
+    ///
+    /// 不写 = 用资产默认值（通常是 0）；数组缺项按 0，超出 target 数的项忽略。
+    /// 这是**静态**权重，不是 morph 动画；`models[].collide` 的碰撞体仍是绑定姿态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morph_weights: Option<Vec<f32>>,
     /// 播放模型里的一条 glTF 动画；**不写 = 静止**（老行为逐字节不变）。
     ///
     /// 名字不存在不会让场景非法（`validate` 不读资产），但会在 `simulate` / `render`
@@ -5068,6 +5074,17 @@ impl SceneDoc {
                                 "淡入时长必须是非负有限值（0 = 立即生效）",
                             ));
                         }
+                    }
+                }
+            }
+            if let Some(ws) = &m.morph_weights {
+                for (k, w) in ws.iter().enumerate() {
+                    if !w.is_finite() || !(0.0..=1.0).contains(w) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.morph_weights[{k}]"),
+                            "morph 权重必须在 0~1 之间",
+                        ));
                     }
                 }
             }

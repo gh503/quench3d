@@ -6266,6 +6266,161 @@ fn skinned_glb_bytes() -> Vec<u8> {
     glb_from_parts(json, bin)
 }
 
+/// 手搓一个带 1 个 morph target 的 GLB：三个顶点整体 +y 0.5（静态形变）。
+fn morph_glb_bytes() -> Vec<u8> {
+    fn glb_from_parts(json: &str, mut bin: Vec<u8>) -> Vec<u8> {
+        let mut json_bytes = json.replace('\n', "").into_bytes();
+        while !json_bytes.len().is_multiple_of(4) {
+            json_bytes.push(b' ');
+        }
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb
+    }
+    let mut bin = Vec::new();
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 0..36 POSITION
+    }
+    for _ in 0..3 {
+        for f in [0.0f32, 0.0, 1.0] {
+            bin.extend_from_slice(&f.to_le_bytes()); // 36..72 NORMAL
+        }
+    }
+    for i in [0u16, 1, 2] {
+        bin.extend_from_slice(&i.to_le_bytes()); // 72..78 INDICES
+    }
+    bin.extend_from_slice(&[0, 0]); // 对齐到 80
+    for _ in 0..3 {
+        for f in [0.0f32, 0.5, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes()); // 80..116 MORPH POSITION
+        }
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"tri","mesh":0}],
+"meshes":[{"name":"morph","weights":[0.0],"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"targets":[{"POSITION":3}]}]}],
+"accessors":[
+ {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+ {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+ {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
+ {"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"}],
+"bufferViews":[
+ {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":36,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":72,"byteLength":6,"target":34963},
+ {"buffer":0,"byteOffset":80,"byteLength":36,"target":34962}],
+"buffers":[{"byteLength":116}]}"#;
+    glb_from_parts(json, bin)
+}
+
+#[test]
+fn info_reports_morph_targets() {
+    let dir = temp_dir("info_morph");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    let path = dir.join("morph.glb");
+    let r = run(&["info", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    assert_eq!(d["data"]["morph_targets"], 1, "{d}");
+    let human = run(&["info", path.to_str().unwrap()]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("morph target"),
+        "人类可读输出要有形变行：{}",
+        human.stdout
+    );
+}
+
+/// morph 权重必须真的改画面：同一个静态模型，权重 0 与 1 的 PNG 不同。
+#[test]
+fn scene_morph_weights_change_cli_render() {
+    let dir = temp_dir("morph_render");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    let render_with = |weight: f32| {
+        let scene = write_scene(
+            &dir,
+            &format!("morph-{weight}.json"),
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{ "path": "morph.glb", "morph_weights": [weight] }],
+                "camera": { "position": [0.5, 0.75, 4.0], "look_at": [0.5, 0.75, 0.0], "fov_deg": 45.0 },
+                "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+            }),
+        );
+        let png = dir.join(format!("morph-{weight}.png"));
+        let r = run(&[
+            "render",
+            scene.to_str().unwrap(),
+            "--out",
+            png.to_str().unwrap(),
+        ]);
+        (r, png)
+    };
+    let (r0, png0) = render_with(0.0);
+    if r0.code == 3 {
+        return; // 无 GPU
+    }
+    assert_eq!(r0.code, 0, "stderr={} stdout={}", r0.stderr, r0.stdout);
+    let (r1, png1) = render_with(1.0);
+    assert_eq!(r1.code, 0, "stderr={} stdout={}", r1.stderr, r1.stdout);
+    let (w, h, a) = decode_rgba(&png0);
+    let (w2, h2, b) = decode_rgba(&png1);
+    assert_eq!((w, h), (w2, h2));
+    let changed = a
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
+        .filter(|(x, y)| x != y)
+        .count();
+    assert!(
+        changed > 10,
+        "morph 权重 0 与 1 应当改变画面，实际 {changed} 像素"
+    );
+}
+
+#[test]
+fn scene_morph_weights_are_validated() {
+    let dir = temp_dir("morph_validate");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    let scene = write_scene(
+        &dir,
+        "bad-morph.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{ "path": "morph.glb", "morph_weights": [1.5, -0.25] }]
+        }),
+    );
+    let r = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    let diags = d["data"]["diagnostics"].as_array().unwrap();
+    assert!(
+        diags
+            .iter()
+            .any(|x| x["path"] == "models[0].morph_weights[0]" && x["code"] == "out_of_range"),
+        "{d}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|x| x["path"] == "models[0].morph_weights[1]" && x["code"] == "out_of_range"),
+        "{d}"
+    );
+}
+
 #[test]
 fn info_reports_skins_and_skinned_meshes() {
     let dir = temp_dir("info_skin");

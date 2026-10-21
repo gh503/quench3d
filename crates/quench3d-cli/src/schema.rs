@@ -452,6 +452,7 @@ pub fn scene_grammar() -> Value {
             "scale": "均匀缩放，缺省 1",
             "collide": "true 时把模型合并成静态三角网格碰撞体，缺省 false",
             "friction": "参与碰撞时的摩擦，缺省 0.8",
+            "morph_weights": "覆盖 glTF morph target 的权重数组（0~1，按 target 顺序；缺省用资产默认值，缺项按 0）；静态权重，不是 morph 动画",
             "animation": "播放模型里的一条 glTF 动画：{ name, start?, speed?, loop?, blend? }。不写 = 静止（老行为）；loop 缺省 true（写 false = 播完停在最后一帧）；blend: { name, start?, speed?, loop?, weight?, fade? } 是第二条 clip 的交叉淡化（weight 缺省 0.5，fade 缺省 0 = 立即生效）；名字不存在**不是**校验错误（validate 不读资产），会在 simulate/render 报告的 models[].animation.found / models[].blend.found 里报 false"
         },
         "joint": {
@@ -746,8 +747,13 @@ pub fn json_schema() -> Value {
             "scale",
             "collide",
             "friction",
+            "morph_weights",
             "animation",
         ]);
+        d["properties"]["morph_weights"] = json!({
+            "type": "array",
+            "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+        });
         d["properties"]["animation"] = json!({ "$ref": "#/$defs/modelAnimation" });
         d
     });
@@ -1067,6 +1073,7 @@ pub fn system_prompt() -> String {
   （只读区域监测：报告里给出谁在第几步进入、第几步离开、区内最高速度。
    半空间（地面）没有有限包围盒，探针监测不到它）
 - models: 数组：{ path: "xx.glb"|"xx.obj", position, rotation_deg, scale, collide: false,
+           morph_weights: [0.0, 0.5],
            animation: { name: "Walk", start: 0, speed: 1, loop: true,
                         blend: { name: "Run", weight: 0.5, fade: 0.25 } } }
   （animation 播放模型里的 glTF 动画片段，是**视觉**动画、不动物理；不写 = 静止。

@@ -130,6 +130,69 @@ fn skinned_glb() -> Vec<u8> {
     glb_from_parts(json, bin)
 }
 
+/// 手搓一个带 1 个 morph target 的 GLB：三角形所有顶点 y 方向 +0.5。
+fn morph_glb() -> Vec<u8> {
+    let mut bin = Vec::new();
+    // 位置
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // 法线
+    for _ in 0..3 {
+        for f in [0.0f32, 0.0, 1.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    // 索引 u16 + 2 字节对齐
+    for i in [0u16, 1, 2] {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    bin.extend_from_slice(&[0, 0]);
+    // morph 位置位移
+    for _ in 0..3 {
+        for f in [0.0f32, 0.5, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"tri","mesh":0}],
+"meshes":[{"name":"morph","weights":[0.0],"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"targets":[{"POSITION":3}]}]}],
+"accessors":[
+ {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+ {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+ {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
+ {"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"}],
+"bufferViews":[
+ {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":36,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":72,"byteLength":6,"target":34963},
+ {"buffer":0,"byteOffset":80,"byteLength":36,"target":34962}],
+"buffers":[{"byteLength":116}]}"#;
+    glb_from_parts(json, bin)
+}
+
+#[test]
+fn morph_targets_displace_vertices_by_weight() {
+    let model = load_model_from_bytes("morph.glb", &morph_glb()).expect("morph GLB 应当能解析");
+    assert!(model.has_morph_targets(), "应当识别出 morph target");
+    assert_eq!(model.meshes[0].morph_targets.len(), 1);
+    assert_eq!(model.meshes[0].morph_weights, vec![0.0]);
+    let base = model.morphed_mesh(0, None).expect("基础网格");
+    assert!((base.vertices[0].position[1] - 0.0).abs() < 1e-6);
+    let one = model.morphed_mesh(0, Some(&[1.0])).expect("权重 1");
+    for (i, v) in one.vertices.iter().enumerate() {
+        let want = base.vertices[i].position[1] + 0.5;
+        assert!(
+            (v.position[1] - want).abs() < 1e-6,
+            "顶点 {i} 应当相对基础上移 0.5（期望 {want}）：{:?}",
+            v.position
+        );
+    }
+    let half = model.morphed_mesh(0, Some(&[0.5])).expect("权重 0.5");
+    assert!((half.vertices[0].position[1] - 0.25).abs() < 1e-6);
+}
+
 #[test]
 fn skinned_glb_deforms_vertices_from_joint_animation() {
     let model = load_model_from_bytes("skinned.glb", &skinned_glb()).expect("蒙皮 GLB 应当能解析");
