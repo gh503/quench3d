@@ -34,6 +34,35 @@ class DepthTests(unittest.TestCase):
         self.assertEqual(u8.shape, src.shape)
 
 
+class PointCloudTests(unittest.TestCase):
+    def test_deprojects_center_and_flips_y(self):
+        intr = {"fx": 1.0, "fy": 1.0, "cx": 1.0, "cy": 1.0}
+        pts = cm.depth_to_points(np.zeros((3, 3), dtype=np.uint8), intr, 1)
+        self.assertEqual(pts.shape, (9, 3))
+        self.assertEqual(pts.dtype, np.float32)
+        # 中心像素（y=1,x=1）在主轴：x/y 都是 0，深度 0 → 最远 z=-3。
+        center = pts[4]
+        self.assertAlmostEqual(float(center[0]), 2.2, places=5)
+        self.assertAlmostEqual(float(center[1]), 1.0, places=5)
+        self.assertAlmostEqual(float(center[2]), -3.0, places=5)
+        # 左上像素：相机 y 向下，引擎 y 向上，所以应 +1y（不是 -1）。
+        top_left = pts[0]
+        self.assertAlmostEqual(float(top_left[0]), 2.2 - 3.0, places=5)
+        self.assertAlmostEqual(float(top_left[1]), 1.0 + 3.0, places=5)
+
+    def test_near_depth_and_step(self):
+        intr = {"fx": 1.0, "fy": 1.0, "cx": 1.0, "cy": 1.0}
+        near = np.full((3, 3), 255, dtype=np.uint8)
+        pts = cm.depth_to_points(near, intr, 1)
+        self.assertAlmostEqual(float(pts[0][2]), -cm.POINT_Z_NEAR, places=5)
+        coarse = cm.depth_to_points(near, intr, 2)
+        self.assertEqual(coarse.shape[0], 4)  # 2x2 下采样
+
+    def test_bad_shape_is_rejected(self):
+        with self.assertRaises(ValueError):
+            cm.depth_to_points(np.zeros((3,), dtype=np.uint8), {}, 1)
+
+
 class ContourTests(unittest.TestCase):
     def test_rectangle_contour_is_normalized(self):
         mask = np.zeros((100, 200), dtype=np.uint8)

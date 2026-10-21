@@ -13,12 +13,14 @@
     latest.json   本帧的元数据 + 姿态 + 轮廓 + 深度统计
     latest.rgb    原始 RGB24 像素，长度 = width * height * 3
     latest.depth  归一化到 0..255 的深度图（只有启用深度时存在）
+    latest.points 深度反投影点云，xyz_f32_le（可选，缺省开启）
 
-写入顺序是 **rgb/depth 先、json 后**，且每个文件都是临时文件 + `os.replace`，
+写入顺序是 **rgb/depth/points 先、json 后**，且每个文件都是临时文件 + `os.replace`，
 读端看到合法 json 时像素文件已经完整。编辑器不会依赖 Python 进程的 stdout。
 
 诚实边界：
-* 单目深度是相对逆深度，不是米；不能直接当真实距离用。
+* 单目深度是相对逆深度，不是米；不能直接当真实距离用。点云只是把 0..255 的
+  相对值反投影到 0.3~3.0 的**任意尺度**，没有米制含义。
 * 没有做时间同步/IMU 融合；RGB、姿态、深度来自同一帧，但深度可能隔几帧才更新。
 * 不包含 SMPL/SMPL-X 体型拟合；3D 骨骼是 MediaPipe 的 33 点世界坐标。
 * 所有推理在本机完成，不把画面发到网络；深度模型需要你手动下载一次。
@@ -64,6 +66,12 @@ DEFAULT_DEPTH_URL = (
     "https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"
 )
 
+# 点云落在编辑器骨架同一块区域；z 只是把相对逆深度映射到 0.3~3.0 的任意尺度，
+# 不是米制深度。原点与 Rust 侧 MOCAP_ORIGIN 保持一致。
+POINT_ORIGIN = (2.2, 1.0, 0.0)
+POINT_Z_NEAR = 0.3
+POINT_Z_FAR = 3.0
+
 
 def depth_to_u8(depth: np.ndarray) -> tuple[np.ndarray, float, float]:
     """把任意范围的深度图归一化到 uint8。
@@ -83,6 +91,44 @@ def depth_to_u8(depth: np.ndarray) -> tuple[np.ndarray, float, float]:
     out = (clean - lo) / (hi - lo)
     out = np.clip(out * 255.0, 0, 255).astype(np.uint8)
     return out, lo, hi
+
+
+def depth_to_points(
+    depth_u8: np.ndarray,
+    intrinsics: dict[str, float],
+    step: int = 6,
+) -> np.ndarray:
+    """把 u8 相对逆深度反投影成引擎坐标点云 `(N,3) float32`。
+
+    深度 255（最近）→ z = `POINT_Z_NEAR`；0（最远）→ `POINT_Z_FAR`。这是**任意
+    尺度**，只用来观察结构，不是米。像素按 `step` 下采样；坐标已经加上
+    `POINT_ORIGIN`，并转成引擎的 x 右 / y 上 / z 向屏幕外（相机朝 -z 看）。
+    """
+    d = np.asarray(depth_u8, dtype=np.uint8)
+    if d.ndim != 2:
+        raise ValueError("depth_u8 必须是二维")
+    h, w = d.shape
+    step = max(1, int(step))
+    ys = np.arange(0, h, step, dtype=np.int32)
+    xs = np.arange(0, w, step, dtype=np.int32)
+    grid = d[np.ix_(ys, xs)].astype(np.float32) / 255.0
+    z = POINT_Z_NEAR + (1.0 - grid) * (POINT_Z_FAR - POINT_Z_NEAR)
+    fx = max(float(intrinsics.get("fx", 1.0)), 1e-6)
+    fy = max(float(intrinsics.get("fy", 1.0)), 1e-6)
+    cx = float(intrinsics.get("cx", (w - 1) * 0.5))
+    cy = float(intrinsics.get("cy", (h - 1) * 0.5))
+    gx = (xs.astype(np.float32)[None, :] - cx) / fx * z
+    gy = -(ys.astype(np.float32)[:, None] - cy) / fy * z
+    ox, oy, oz = POINT_ORIGIN
+    out = np.stack(
+        [
+            (gx + ox).ravel(),
+            (gy + oy).ravel(),
+            (-z + oz).ravel(),
+        ],
+        axis=1,
+    )
+    return np.ascontiguousarray(out, dtype="<f4")
 
 
 def largest_contour_polygon(
@@ -460,11 +506,15 @@ def write_feed(
     depth_u8: np.ndarray | None,
     depth_lo: float | None,
     depth_hi: float | None,
+    points: np.ndarray | None,
+    point_step: int,
 ) -> None:
     """写一帧。先写像素，最后写 json；读端以 json 为准。"""
     atomic_write(out_dir / "latest.rgb", np.ascontiguousarray(rgb).tobytes())
     if depth_u8 is not None:
         atomic_write(out_dir / "latest.depth", np.ascontiguousarray(depth_u8).tobytes())
+    if points is not None:
+        atomic_write(out_dir / "latest.points", np.ascontiguousarray(points).tobytes())
     payload: dict[str, Any] = {
         "schema": "quench3d.mocap/1",
         "version": 1,
@@ -488,6 +538,27 @@ def write_feed(
         "silhouette": silhouette
         if silhouette is not None
         else {"present": False, "polygon": [], "bbox": None, "area": 0.0},
+        "points": {
+            "present": points is not None and len(points) > 0,
+            "path": "latest.points" if points is not None and len(points) > 0 else None,
+            "count": int(len(points)) if points is not None else 0,
+            "layout": "xyz_f32_le",
+            "space": "engine",
+            "step": int(point_step),
+            "bounds": (
+                [
+                    round(float(points[:, 0].min()), 4),
+                    round(float(points[:, 1].min()), 4),
+                    round(float(points[:, 2].min()), 4),
+                    round(float(points[:, 0].max()), 4),
+                    round(float(points[:, 1].max()), 4),
+                    round(float(points[:, 2].max()), 4),
+                ]
+                if points is not None and len(points) > 0
+                else None
+            ),
+            "note": "由相对逆深度反投影，z 是 0.3~3.0 的任意尺度，不是米制距离。",
+        },
         "depth": {
             "present": depth_u8 is not None,
             "kind": "relative_inverse_depth",
@@ -543,6 +614,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-depth", action="store_true", help="关闭单目深度")
     ap.add_argument("--depth-model", default="target/models/midas_small.onnx")
     ap.add_argument("--depth-every", type=int, default=3, help="每 N 帧跑一次深度")
+    ap.add_argument("--no-points", action="store_true", help="不写深度反投影点云")
+    ap.add_argument("--point-step", type=int, default=6, help="点云像素下采样步长，缺省 6")
     ap.add_argument("--download-depth-model", action="store_true")
     ap.add_argument("--no-mirror", action="store_true", help="不水平翻转画面（缺省镜像，像照镜子）")
     args = ap.parse_args(argv)
@@ -618,6 +691,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.source == "synthetic":
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
+            points = None
+            if not args.no_points and depth_u8 is not None:
+                points = depth_to_points(
+                    depth_u8,
+                    approximate_intrinsics(rgb.shape[1], rgb.shape[0]),
+                    args.point_step,
+                )
+
             now = time.time()
             fps = 1.0 / max(now - t_last, 1e-6)
             t_last = now
@@ -635,6 +716,8 @@ def main(argv: list[str] | None = None) -> int:
                 depth_u8,
                 depth_lo,
                 depth_hi,
+                points,
+                args.point_step,
             )
             frame_index += 1
 

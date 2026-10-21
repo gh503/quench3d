@@ -8,6 +8,7 @@
 //! target/camera/latest.json   元数据 + 33 个 2D/3D 关键点 + 轮廓多边形
 //! target/camera/latest.rgb    width*height*3 的 RGB24
 //! target/camera/latest.depth  width*height 的 u8 归一化深度（可选）
+//! target/camera/latest.points 深度反投影点云 xyz_f32_le（可选）
 //! ```
 //!
 //! 用文件而不是 stdout/socket 是刻意的：Python 可以独立起停、崩溃不影响编辑器，
@@ -136,6 +137,25 @@ struct DepthJson {
     raw_max: Option<f32>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, Default, Deserialize)]
+struct PointsJson {
+    #[serde(default)]
+    present: bool,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    count: usize,
+    #[serde(default)]
+    layout: String,
+    #[serde(default)]
+    space: String,
+    #[serde(default)]
+    step: u32,
+    #[serde(default)]
+    bounds: Option<[f32; 6]>,
+}
+
 /// `latest.json` 的反序列化目标。
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -173,6 +193,8 @@ pub struct FeedJson {
     silhouette: SilhouetteJson,
     #[serde(default)]
     depth: DepthJson,
+    #[serde(default)]
+    points: PointsJson,
 }
 
 /// 一帧已经读入内存的动捕数据。
@@ -185,6 +207,8 @@ pub struct FeedFrame {
     pub rgb: Vec<u8>,
     /// 可选的 u8 深度图。
     pub depth: Option<Vec<u8>>,
+    /// 可选的点云（引擎坐标）。
+    pub points: Option<Vec<Vec3>>,
     /// 读入时刻，用于判断数据是否已经停更。
     pub loaded_at: Instant,
 }
@@ -220,6 +244,7 @@ pub struct CameraFeed {
     depth_texture: Option<TextureHandle>,
     depth_frame: u64,
     show_depth: bool,
+    show_points: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -247,6 +272,7 @@ impl CameraFeed {
             depth_texture: None,
             depth_frame: u64::MAX,
             show_depth: false,
+            show_points: false,
         }
     }
 
@@ -277,6 +303,11 @@ impl CameraFeed {
         };
         if frame.loaded_at.elapsed() > Duration::from_secs(2) {
             return;
+        }
+        if self.show_points {
+            if let Some(points) = &frame.points {
+                add_point_lines(lines, points);
+            }
         }
         let pose = &frame.json.pose;
         if !pose.present || pose.world.len() < 33 {
@@ -406,6 +437,32 @@ impl CameraFeed {
                 ui.label("采集端没写 latest.depth（加 --no-depth 时正常）。");
             }
         }
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.show_points, "显示点云（深度反投影）");
+            if frame.json.points.present {
+                let hover = frame
+                    .json
+                    .points
+                    .bounds
+                    .map(|b| format!("bounds [{b:?}]"))
+                    .unwrap_or_else(|| "bounds 未提供".to_string());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} 点 · 步长 {} · {}",
+                        frame.json.points.count, frame.json.points.step, frame.json.points.space
+                    ))
+                    .small()
+                    .weak(),
+                )
+                .on_hover_text(hover);
+            } else {
+                ui.label(
+                    egui::RichText::new("没有点云（--no-points 或未启用深度）")
+                        .small()
+                        .weak(),
+                );
+            }
+        });
         ui.label(
             egui::RichText::new(format!(
                 "源：{} · 镜像：{} · 目录：{}",
@@ -632,12 +689,84 @@ fn read_frame(dir: &Path) -> Result<Option<FeedFrame>, String> {
     } else {
         None
     };
+    let points = if json.points.present {
+        if !json.points.layout.is_empty() && json.points.layout != "xyz_f32_le" {
+            return Err(format!("不支持的点云布局：{}", json.points.layout));
+        }
+        if !json.points.space.is_empty() && json.points.space != "engine" {
+            return Err(format!("不支持的点云坐标系：{}", json.points.space));
+        }
+        let expected = json
+            .points
+            .count
+            .checked_mul(12)
+            .ok_or_else(|| "点云数量溢出".to_string())?;
+        if json.points.count > 1_000_000 {
+            return Err(format!("点云数量过大：{}", json.points.count));
+        }
+        let path = if json.points.path.is_empty() {
+            dir.join("latest.points")
+        } else {
+            dir.join(&json.points.path)
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) if bytes.len() == expected => {
+                let mut out = Vec::with_capacity(json.points.count);
+                for chunk in bytes.as_chunks::<12>().0 {
+                    let x = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let y = f32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                    let z = f32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
+                    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                        return Err("点云含非有限坐标".to_string());
+                    }
+                    out.push(Vec3::new(x, y, z));
+                }
+                Some(out)
+            }
+            Ok(bytes) => {
+                return Err(format!(
+                    "latest.points 长度 {} 与 {} 点×12 不符",
+                    bytes.len(),
+                    json.points.count
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("读 {} 失败：{e}", path.display())),
+        }
+    } else {
+        None
+    };
     Ok(Some(FeedFrame {
         json,
         rgb,
         depth,
+        points,
         loaded_at: Instant::now(),
     }))
+}
+
+/// 把点云画成小十字。深度反投影没有拓扑，点本身就是最小可读单元。
+#[cfg(not(target_arch = "wasm32"))]
+fn add_point_lines(lines: &mut DebugLines, points: &[Vec3]) {
+    let color = quench3d_math::Vec4::new(0.3, 0.85, 1.0, 0.85);
+    let d = 0.006;
+    for p in points {
+        lines.line(
+            *p - Vec3::new(d, 0.0, 0.0),
+            *p + Vec3::new(d, 0.0, 0.0),
+            color,
+        );
+        lines.line(
+            *p - Vec3::new(0.0, d, 0.0),
+            *p + Vec3::new(0.0, d, 0.0),
+            color,
+        );
+        lines.line(
+            *p - Vec3::new(0.0, 0.0, d),
+            *p + Vec3::new(0.0, 0.0, d),
+            color,
+        );
+    }
 }
 
 /// 把 33 个世界点画成骨骼与关节点；抽出来是为了能脱离轮询线程做单测。
@@ -802,6 +931,64 @@ mod tests {
         assert_eq!(frame.json.frame, 1);
         assert_eq!(frame.rgb.len(), 12);
         assert_eq!(frame.depth.as_deref(), Some([3u8; 4].as_slice()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn points_json_parses() {
+        let text = r#"{
+          "schema":"quench3d.mocap/1","version":1,"frame":7,
+          "timestamp_ms":123,"source":"synthetic","width":2,"height":2,
+          "fps":29.5,"mirrored":true,
+          "pose":{"present":false},"silhouette":{"present":false},
+          "depth":{"present":false},
+          "points":{"present":true,"path":"latest.points","count":2,
+            "layout":"xyz_f32_le","space":"engine","step":6,
+            "bounds":[-1.0,-1.0,-3.0,1.0,1.0,0.0]}
+        }"#;
+        let json: FeedJson = serde_json::from_str(text).expect("解析");
+        assert!(json.points.present);
+        assert_eq!(json.points.count, 2);
+        assert_eq!(json.points.layout, "xyz_f32_le");
+        assert_eq!(json.points.bounds, Some([-1.0, -1.0, -3.0, 1.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn point_cloud_draws_three_cross_segments_per_point() {
+        let mut lines = DebugLines::new();
+        add_point_lines(&mut lines, &[Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0)]);
+        assert_eq!(lines.line_count(), 6);
+    }
+
+    #[test]
+    fn read_frame_accepts_point_cloud() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "quench3d-camera-points-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let json = r#"{"schema":"quench3d.mocap/1","version":1,"frame":2,
+            "timestamp_ms":0,"source":"test","width":2,"height":2,"fps":30,
+            "pose":{"present":false},"silhouette":{"present":false},
+            "depth":{"present":false},
+            "points":{"present":true,"path":"latest.points","count":2,
+              "layout":"xyz_f32_le","space":"engine","step":1}}"#;
+        std::fs::write(dir.join("latest.json"), json).expect("写 json");
+        std::fs::write(dir.join("latest.rgb"), [0u8; 12]).expect("写 rgb");
+        let mut bytes = Vec::new();
+        for v in [2.0f32, 1.0, -3.0, -0.5, 2.5, -1.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(dir.join("latest.points"), bytes).expect("写 points");
+        let frame = read_frame(&dir).expect("读").expect("有帧");
+        let points = frame.points.expect("点云应被读入");
+        assert_eq!(points.len(), 2);
+        assert!((points[0].x - 2.0).abs() < 1e-6);
+        assert!((points[1].z + 1.0).abs() < 1e-6);
         std::fs::remove_dir_all(&dir).ok();
     }
 

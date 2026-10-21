@@ -48,7 +48,7 @@
 | 相机 | 全部 | 透视 + 正交（`camera.rs:7`）；**一次 render 只吃一个相机**，无多视口 | 🟡 |
 | 天空 / 环境反射 | 全部 | 程序化天空 + 常量环境项（`light.rs:107`）+ **解析式环境高光**（反射方向取同一套天空，`RendererOptions.environment`）；**仍无 HDRI/IBL/cubemap 预滤波、无 SSR** | 🟠 |
 | 调试叠加层 | 全部 | 网格 / 坐标轴 / 接触点 / 包围盒线框；**动捕 3D 骨骼**也走调试线段 | 🟡 |
-| 摄像头/动捕 | Unity + MediaPipe/SMPL-X | **实验**：普通 RGB → MediaPipe Pose 33 点（2D/3D）+ 分割轮廓 + 可选 MiDaS 相对深度；编辑器显示画面/轮廓/骨架并叠 3D 骨骼。单帧、单人、无体型拟合、无米制深度、无点云/TSDF、Web 未接 | 🟡 |
+| 摄像头/动捕 | Unity + MediaPipe/SMPL-X | **实验**：普通 RGB → MediaPipe Pose 33 点（2D/3D）+ 分割轮廓 + 可选 MiDaS 相对深度；编辑器显示画面/轮廓/骨架并叠 3D 骨骼；深度可按内参反投影成相对尺度点云并在视口显示。单帧、单人、无体型拟合、无米制深度、无 TSDF、Web 未接 | 🟡 |
 
 ### 1.2 光照
 
@@ -2490,7 +2490,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**684** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**687** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

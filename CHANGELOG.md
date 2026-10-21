@@ -32,6 +32,14 @@
 
 ### 新增
 
+- **摄像头深度点云（第 78 轮）**：采集端把 MiDaS 相对逆深度按相机内参反投影成
+  `latest.points`（`N*3` little-endian f32，缺省每 6 像素一点，约 8.5k 点），
+  z 映射到 0.3~3.0 的任意尺度并在 `latest.json` 里写 `points.{count,layout,space,step,bounds}`；
+  新增 `--no-points` / `--point-step`。编辑器读端校验长度/布局/坐标系，勾选
+  「显示点云」后把每点画成 3 条青色小十字。回归：Python `PointCloudTests`（中心主轴、
+  y 向上翻转、近深度 z=-0.3、步长下采样）+ Rust `read_frame_accepts_point_cloud` /
+  `point_cloud_draws_three_cross_segments_per_point`。边界：不是米制深度，没有 TSDF；
+  Web 仍只有桌面文件协议。
 - **双 clip morph 权重混合（第 77 轮）**：之前双 clip 只取主 clip 的 morph 轨道；现在
   `LoadedModel::blended_morph_weights_at` 按 `blend_weight` 逐节点、逐 target 插值两条
   clip 的权重（只有主/第二 clip 有轨道的节点按各自规则处理，`blend=0` 不会凭空加上

@@ -6,11 +6,13 @@
 * **2D 姿态**：33 个归一化关键点；
 * **3D 姿态**：33 个以髋部为原点的世界点（近似米，MediaPipe 输出）；
 * **深度**：可选的 MiDaS small 单目**相对逆深度**（0..255，不是米）；
+* **点云**：把深度按相机内参反投影成 `latest.points`（缺省每 6 像素取一点）；
+  z 被映射到 0.3~3.0 的任意尺度，只用于观察结构；
 * **编辑器叠加**：`quench3d-editor` 显示摄像头画面 + 轮廓/骨架，并把 3D 世界点画成
-  青绿色骨骼、黄色关节点。
+  青绿色骨骼、黄色关节点；勾选「显示点云」后画出深度反投影点。
 
 这是**单帧单人的参考实现**，不是产品级动作捕捉：没有 SMPL/SMPL-X 体型、没有
-多相机/多人体、没有米制深度、没有时间同步/IMU 融合、没有点云/TSDF 重建。
+多相机/多人体、没有米制深度、没有时间同步/IMU 融合、没有 TSDF 网格重建。
 
 ## 1. 安装
 
@@ -34,6 +36,7 @@ ffmpeg -f v4l2 -i /dev/video0 -frames:v 1 -f null -
 ```bash
 # 真摄像头（0 = /dev/video0）
 target/tmp/camvenv/bin/python tools/camera_mocap/camera_mocap.py --source 0
+# 不要点云时加 --no-points；改下采样步长用 --point-step 6
 
 # 没有摄像头时，用合成源验证编辑器协议
 target/tmp/camvenv/bin/python tools/camera_mocap/camera_mocap.py --source synthetic
@@ -76,8 +79,9 @@ CPU 上 MiDaS small 约 **0.2~0.3 秒/帧**，所以缺省每 3 帧跑一次（`
 预览里的深色图和骨骼仍按相机帧率刷新。
 
 **深度语义**：MiDaS 输出的是**相对逆深度**（值越大越近），每帧被归一化到 0..255。
-它没有米制尺度，不能直接用来量距离/做物理碰撞；下一步做点云/TSDF 前必须解决尺度
-（已知相机内参 + 平面标定，或 RGB-D 硬件）。
+它没有米制尺度，不能直接用来量距离/做物理碰撞；点云也只是把相对值映射到
+0.3~3.0 的任意尺度。下一步做米制点云/TSDF 前必须解决尺度（已知相机内参 + 平面
+标定，或 RGB-D 硬件）。
 
 ## 4. 输出协议
 
@@ -86,6 +90,7 @@ target/camera/
   latest.json    元数据 + 33 个 2D/3D 关键点 + 轮廓多边形 + 深度统计
   latest.rgb     width*height*3 的 RGB24（已按 --no-mirror 决定是否镜像）
   latest.depth   width*height 的 u8 归一化深度（可选）
+  latest.points  N*3 的 little-endian f32 点云（可选，缺省开启）
 ```
 
 `latest.json` 的关键字段：
@@ -115,6 +120,12 @@ target/camera/
     "present": true, "kind": "relative_inverse_depth", "path": "latest.depth",
     "width": 640, "height": 480, "raw_min": 0.0, "raw_max": 737.6,
     "note": "MiDaS 相对逆深度，归一化到 0..255；不是米制距离。"
+  },
+  "points": {
+    "present": true, "path": "latest.points", "count": 8560,
+    "layout": "xyz_f32_le", "space": "engine", "step": 6,
+    "bounds": [0.4679, 0.7813, -3.0, 3.9104, 2.299, -0.3318],
+    "note": "由相对逆深度反投影，z 是 0.3~3.0 的任意尺度，不是米制距离。"
   }
 }
 ```
@@ -133,8 +144,9 @@ target/camera/
 `quench3d-editor` 的 `camera.rs`：
 
 * 后台线程每 33 ms 读一次 `latest.json` + `latest.rgb`；帧号变化才更新；
-* egui 浮动窗口：RGB + 2D 骨架 + 轮廓；可选深度图；
-* `add_lines`：把 33 个 world 点画成 35 根骨 + 关节小球，数据停更 2 秒自动消失；
+* egui 浮动窗口：RGB + 2D 骨架 + 轮廓；可选深度图与点云；
+* `add_lines`：把 33 个 world 点画成 35 根骨 + 关节小球；勾选点云时把
+  `latest.points` 画成小十字；数据停更 2 秒自动消失；
 * Web 端是空实现（浏览器没有本地文件轮询；Web 摄像头是另一条管线）。
 
 回归测试（不需要摄像头）：
@@ -144,8 +156,8 @@ cargo test -p quench3d-editor --lib camera
 target/tmp/camvenv/bin/python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 ```
 
-Rust 侧测了协议解析、像素长度校验、坐标翻转、35 根骨 + 33 个关节的线段数量；
-Python 侧测了深度归一化、轮廓提取、关键点连接表。
+Rust 侧测了协议解析、像素/点云长度校验、坐标翻转、35 根骨 + 33 个关节的线段数量、
+每个点 3 条十字线段；Python 侧测了深度归一化、点云反投影、轮廓提取、关键点连接表。
 
 ## 6. 隐私与许可
 
