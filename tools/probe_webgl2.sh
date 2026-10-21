@@ -66,6 +66,14 @@ first_frame=0
 grep -aq '编辑器第一帧已渲染' "$LOG" && first_frame=1
 panicked=0
 grep -aq 'panicked at' "$LOG" && panicked=1
+# 第 67 轮的线上事故：alpha 管线的两个颜色目标 blend 不一致，
+# WebGL2 没有 INDEPENDENT_BLEND，create_render_pipeline 直接报错。
+# 这类错误有时只打日志、不一定 panic，所以单独判。
+independent_blend=0
+grep -aq 'INDEPENDENT_BLEND' "$LOG" && independent_blend=1
+# 6 层正方形 D2 纹理被 GL 猜成 Cube、却按 D2Array 绑定；即使不致命也会污染日志。
+cube_heuristic=0
+grep -aq 'heuristics assumed that' "$LOG" && cube_heuristic=1
 
 echo "== 探针：真实 WebGL2（$QUERY）=="
 grep -ao '\[Quench3D\] 后端选择：[^"]*' "$LOG" | head -1
@@ -82,6 +90,14 @@ if [[ "$CHROME_EXIT" != 0 && "$first_frame" != 1 ]]; then
 fi
 if [[ "$panicked" = 1 ]]; then
   echo "FAIL probe-webgl2（wasm 里 panic 了；完整日志 $LOG）" >&2
+  exit 1
+fi
+if [[ "$independent_blend" = 1 ]]; then
+  echo "FAIL probe-webgl2（alpha 管线的颜色目标 blend 不一致，WebGL2 没有 INDEPENDENT_BLEND；完整日志 $LOG）" >&2
+  exit 1
+fi
+if [[ "$cube_heuristic" = 1 ]]; then
+  echo "FAIL probe-webgl2（6 层正方形纹理被 GL 猜成 Cube，却按 D2Array 绑定；完整日志 $LOG）" >&2
   exit 1
 fi
 if [[ "$first_frame" != 1 || "$overlay_hidden" != 1 ]]; then

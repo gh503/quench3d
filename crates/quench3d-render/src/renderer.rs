@@ -20,6 +20,37 @@ use crate::point_shadow::{plan_point_shadow, PointShadowPlan, POINT_SHADOW_FACES
 use crate::spot_shadow::{plan_spot_shadow, SpotShadowPlan};
 use crate::texture::{default_texture, GpuTexture, ImageData};
 
+/// 主 pass 的两个颜色目标：HDR + 水面 mask。
+///
+/// 两个目标的 blend 必须**相同**：WebGL2 的 downlevel 设备没有
+/// `DownlevelFlags::INDEPENDENT_BLEND`，只要两个目标一个 `Some`、一个 `None`，
+/// `create_render_pipeline` 就会报 "INDEPENDENT_BLEND are required"。
+/// 所以 alpha 管线的 mask 也走 ALPHA_BLENDING；着色器把 mask 的 alpha 写成
+/// 覆盖（非水面 0、水面 1），在 alpha 混合下等价于"非水面不动、水面覆盖"。
+fn main_pass_color_targets(
+    format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+) -> Vec<Option<wgpu::ColorTargetState>> {
+    vec![
+        Some(wgpu::ColorTargetState {
+            format,
+            blend,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        Some(wgpu::ColorTargetState {
+            format: WATER_MASK_FORMAT,
+            blend,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+    ]
+}
+
+/// 点光源阴影纹理的层数：6 个面 + 1 个填充层。
+///
+/// 7 不是 6 的倍数，wgpu-hal 的 GL 后端就不会把这张正方形纹理猜成 Cube；
+/// 着色器绑定的是 `texture_depth_2d_array`，视图也明确只取前 6 层。
+const POINT_SHADOW_TEXTURE_LAYERS: u32 = POINT_SHADOW_FACES as u32 + 1;
+
 const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
 const PBR_WGSL: &str = include_str!("shaders/pbr.wgsl");
 const SHADOW_WGSL: &str = include_str!("shaders/shadow.wgsl");
@@ -1230,7 +1261,11 @@ impl Renderer {
             size: wgpu::Extent3d {
                 width: point_shadow_map_size,
                 height: point_shadow_map_size,
-                depth_or_array_layers: POINT_SHADOW_FACES as u32,
+                // 7 层而不是 6 层：wgpu-hal 的 GL 后端会把"正方形 + 6 层"的 D2
+                // 纹理猜成 Cube，而这里要绑定成 D2Array（着色器是
+                // texture_depth_2d_array）。多留一层让启发式走 D2Array，代价是
+                // 一张面大小的深度图（默认 512×512×4 ≈ 1 MB）。
+                depth_or_array_layers: POINT_SHADOW_TEXTURE_LAYERS,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -1246,6 +1281,8 @@ impl Renderer {
             point_shadow_texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("quench3d-point-shadow-array-view"),
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
+                // 明确只绑定 6 个面，7 层里多出的一层只是躲开 GL 的 Cube 启发式。
+                array_layer_count: Some(POINT_SHADOW_FACES as u32),
                 ..Default::default()
             });
         let mut point_shadow_face_views = Vec::with_capacity(POINT_SHADOW_FACES);
@@ -1315,23 +1352,7 @@ impl Renderer {
         let mesh_buffer = Some(vertex_layout());
         let instance_buffer_layout = Self::instance_layout();
 
-        let color_targets = |format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
-            vec![
-                Some(wgpu::ColorTargetState {
-                    format,
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-                // 第二颜色附件：水面 mask。主 pass 的所有管线都必须有同一个
-                // attachment 数量（WebGPU 校验），所以 sky/grid/line/pbr 都写这一路，
-                // 非水面材质写 0。mask 不做混合：水面写 1，后处理按像素读。
-                Some(wgpu::ColorTargetState {
-                    format: WATER_MASK_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-            ]
-        };
+        let color_targets = main_pass_color_targets;
         let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
         let depth_state = |write: bool, compare: wgpu::CompareFunction, bias: i32| {
             Some(wgpu::DepthStencilState {
@@ -3707,6 +3728,28 @@ mod tests {
                 .map_err(|e| format!("入口点 {name}（{stage:?}）翻译失败：{e:?}"))?;
         }
         Ok(entries.len())
+    }
+
+    #[test]
+    fn main_pass_targets_share_blend_for_webgl2() {
+        // WebGL2 没有 INDEPENDENT_BLEND：两个颜色目标的 blend 必须同为 Some/None。
+        let opaque = main_pass_color_targets(HDR_FORMAT, None);
+        assert_eq!(opaque.len(), 2);
+        assert!(opaque[0].as_ref().unwrap().blend.is_none());
+        assert!(opaque[1].as_ref().unwrap().blend.is_none());
+        let alpha = main_pass_color_targets(HDR_FORMAT, Some(wgpu::BlendState::ALPHA_BLENDING));
+        assert!(alpha[0].as_ref().unwrap().blend.is_some());
+        assert!(alpha[1].as_ref().unwrap().blend.is_some());
+        assert_eq!(
+            alpha[0].as_ref().unwrap().blend,
+            alpha[1].as_ref().unwrap().blend
+        );
+    }
+
+    #[test]
+    fn point_shadow_texture_avoids_the_gl_cube_heuristic() {
+        assert_eq!(POINT_SHADOW_TEXTURE_LAYERS, 7);
+        assert_ne!(POINT_SHADOW_TEXTURE_LAYERS % 6, 0);
     }
 
     /// **在 GL/WebGL2 上建的每一条管线，其 WGSL 都必须能被 GLSL 后端翻译出来。**

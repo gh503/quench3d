@@ -554,6 +554,13 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
     // 这样半透明/网格线的混合发生在线性空间，而不是"tonemap 之后再混"。
     var out: FragOut;
     out.color = vec4<f32>(lo, alpha);
-    out.mask = vec4<f32>(material.params2.w, in.world_position.y, 0.0, 0.0);
+    // alpha = 覆盖（0 或 1）：alpha 管线的 mask 走 ALPHA_BLENDING（为了避开
+    // WebGL2 没有 INDEPENDENT_BLEND），非水面 alpha=0 保持目标值，水面 alpha=1 覆盖。
+    out.mask = vec4<f32>(
+        material.params2.w,
+        in.world_position.y,
+        0.0,
+        material.params2.w,
+    );
     return out;
 }

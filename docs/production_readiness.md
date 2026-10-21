@@ -282,7 +282,7 @@
 | **H1** | **色彩管理**：输入/输出色彩空间、色调映射算子、曝光是否可声明与可选 | 只有一条固定 ACES 路径，README 未声明色彩约定 | **低（文档）+ 中（可选算子）** | ① 在文档里写清：工作空间线性、base color sRGB、输出 ACES；② 增加"tonemap 算子可选 + 曝光"两个开关即可进入 H1 门槛 |
 | **H2** | **无损往返**：存一次读一次之后场景不变 | **本轮已关闭编辑器侧的主要漏洞**：以前导出会把 `lighting`/`simulate`/`render`/`models`/`probes` 与材质 4 个贴图槽 + 7 个开关静默清零；现在以原文档为底稿，只覆盖编辑器管得着的字段，并有"存→读→再存字节相同"的固定点测试。**仍缺**：导入的 glTF 模型在编辑器里被移动后，位置改动写不回 `models` 引用 | **中** | 已做：固定点测试 + 底稿合并 + 悬空关节/动作清理。待做：模型实例的"位置回写引用"或"展开为 objects"二选一并测试 |
 | **H3** | **可复现构建**：别人拿到 commit 能构建出同样东西 | 无 `rust-toolchain.toml`、CI 未 `--locked`、无 `deny.toml`/SBOM | **低**（本轮做掉大半） | `rust-toolchain.toml` + CI `--locked`（本轮）→ 许可审计与 SBOM 留待下一轮 |
-| **H4** | **真机设备矩阵**：真浏览器/真 GPU 上跑过 | 只有 headless Chrome + SwiftShader（软件光栅）。**第 57 轮之前这一行其实是不成立的**：WebGL2 上编辑器**启动即 panic**（SSAO 读深度、MSAA 多采样纹理两条 GL 不支持的路），而门禁与 CI 都跑在 Vulkan 上 —— "矩阵里有一行"不等于"那一行绿"。现在有一条可复现的真 WebGL2 探针（`tools/probe_webgl2.sh`，判据 = 第一帧已渲染 + 遮罩收起），且 GL 上会真正降级的能力都有关卡（§12.7）；**仍然全是软件光栅**（llvmpipe / SwiftShader），没有真 GPU 记录 | **中** | 至少一条"真机 WebGPU/真机 WebGL2"人工验证记录 + 一张矩阵表（Chrome/Firefox/Safari × 独显/核显），每行都要有一条能重跑的命令（`tools/probe_webgl2.sh` 是 WebGL2 那行的模板） |
+| **H4** | **真机设备矩阵**：真浏览器/真 GPU 上跑过 | 只有 headless Chrome + SwiftShader（软件光栅）。**第 57 轮之前这一行其实是不成立的**：WebGL2 上编辑器**启动即 panic**（SSAO 读深度、MSAA 多采样纹理两条 GL 不支持的路），而门禁与 CI 都跑在 Vulkan 上 —— "矩阵里有一行"不等于"那一行绿"。现在有一条可复现的真 WebGL2 探针（`tools/probe_webgl2.sh`，判据 = 第一帧已渲染 + 遮罩收起 + 没有 `INDEPENDENT_BLEND`/Cube 启发式日志），且 GL 上会真正降级的能力都有关卡（§12.7）；**仍然全是软件光栅**（llvmpipe / SwiftShader），没有真 GPU 记录 | **中** | 至少一条"真机 WebGPU/真机 WebGL2"人工验证记录 + 一张矩阵表（Chrome/Firefox/Safari × 独显/核显），每行都要有一条能重跑的命令（`tools/probe_webgl2.sh` 是 WebGL2 那行的模板） |
 | **H5** | **确定性边界**：哪些维度上确定、哪些不确定 | 同机同线程数有测试；跨平台/跨线程数未声明 | **低** | 文档写清边界 + 一条"跨线程数一致"的用例（已有）作为对照 |
 | **H6** | **单位与轴向约定** | 引擎内部 Y-up / 右手 / 1 单位 = 1 米（代码如此），文档未声明；导入不做轴向转换 | **低（声明）+ 中（导入选项）** | 文档声明 + 导入时的缩放/轴向选项 |
 | **H7** | **存档/格式迁移** | 有 `VERSION` 字段，无迁移代码 | **中** | 加迁移函数表 + 一条"v1 文件能读进 v2"的测试 |
@@ -1170,6 +1170,37 @@ tools/probe_webgl2.sh
 4. 还有一处**没查**的：原生 GL 上 MSAA 解析出黑帧的根因（wgpu-hal 的 gles 解析路径 vs llvmpipe）
    —— 现在 GL 上不建多采样纹理了，这条路径在项目里再也走不到，本轮**没有**继续往下挖
    （挖它要去改 `wgpu-hal`，不在围栏内）。
+
+#### 12.7.7 2026-10-21 线上事故：WebGL2 的 `INDEPENDENT_BLEND` 与 Cube 启发式
+
+用户真实 ANGLE/Intel HD 630 上报了两条错误，第一条直接 panic：
+
+1. `quench3d-alpha` 的 `create_render_pipeline` 报
+   `DownlevelFlags(INDEPENDENT_BLEND) are required but not supported`。
+   根因是主 pass 有两个颜色目标：颜色 0（HDR）在 alpha 管线用 `ALPHA_BLENDING`，
+   颜色 1（水面 mask）却是 `blend: None`。wgpu 把"两个目标 blend 不同"翻译成
+   independent blend；WebGL2 没有这个 downlevel 能力，于是建管线失败。
+   **修法**：`main_pass_color_targets` 让两个目标共用同一个 blend；alpha 管线的
+   mask 也走 `ALPHA_BLENDING`，同时 `pbr.wgsl` 把 mask 的 alpha 写成覆盖
+   （非水面 0、水面 1）。这样非水面在 alpha 混合下保持目标值，水面仍然覆盖，
+   语义与原来的"mask 不混合"一致。不透明管线两个目标都是 `None`，不受影响。
+   守卫：`main_pass_targets_share_blend_for_webgl2`（不需要显卡）。
+2. GL 后端把"正方形 + 6 层"的 D2 点光源阴影纹理猜成 `Cube`，而我们按
+   `D2Array` 建视图，日志报 `heuristics assumed that the view dimension will be
+   equal to Cube rather than D2Array`。**修法**：纹理分配 **7 层**（6 个面 + 1 个
+   填充层），数组视图明确 `array_layer_count: Some(6)`；7 不是 6 的倍数，
+   wgpu-hal 的 `is_cube_compatible()` 不再成立，GL 会建 `TEXTURE_2D_ARRAY`。
+   代价是一张面大小的深度图（默认 512×512×4 ≈ 1 MB）。
+   守卫：`point_shadow_texture_avoids_the_gl_cube_heuristic`。
+
+**验证**：
+
+* `WGPU_BACKEND=gl QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test
+  post_pipeline water`——原生 GL 上水 mask 两条测试通过；
+* `tools/probe_webgl2.sh` 新增两条判据：日志里出现 `INDEPENDENT_BLEND` 或
+  `heuristics assumed` 即 FAIL。本机 SwiftShader 实测 PASS（第一帧已渲染、遮罩已收，
+  两条错误都没有出现）；
+* 用户那台 ANGLE/Intel HD 630 仍需刷新页面确认，因为探针是软件光栅、不是同一块 GPU。
 
 ### 12.6 聚光灯阴影（第 54 轮）：一张图、一盏灯、为什么
 

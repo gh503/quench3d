@@ -2935,3 +2935,21 @@ analytic_environment`——同一金属球只切开关，像素必须变化；`c
 边界：单帧单人、无 SMPL 体型、无米制深度、无点云/TSDF、固定位置；这是采集/叠加
 原型，不是产品级动捕。下一步优先级：深度尺度/点云、骨骼重定向到角色、多人、
 Web getUserMedia。
+
+
+---
+
+## 72. WebGL2 线上事故修复（2026-10-21）
+
+用户真实 ANGLE/Intel HD 630 上报：
+
+1. `quench3d-alpha` 建管线失败：`INDEPENDENT_BLEND` 是 WebGL2 downlevel 没有的能力。
+   原因是颜色 0（HDR）用 alpha blend、颜色 1（水面 mask）用 `blend: None`。
+   修法不是"给 GL 特判"，而是让两个目标共用同一个 blend，并把 mask 的 alpha 写成
+   覆盖值；这样 alpha 混合的语义仍是"非水面保持、水面覆盖"。
+2. GL 把 6 层正方形 D2 点光阴影猜成 Cube，与 D2Array 视图冲突。分配 7 层
+   （6 + 1 填充）绕开 `is_cube_compatible()`，数组视图明确只取 6 层。
+
+守卫：`main_pass_targets_share_blend_for_webgl2`、
+`point_shadow_texture_avoids_the_gl_cube_heuristic`；`tools/probe_webgl2.sh` 新增两条
+日志判据。本机 SwiftShader 探针 PASS，用户真机仍需刷新确认。

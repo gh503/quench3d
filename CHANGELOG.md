@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **WebGL2 启动即 panic：alpha 管线的两个颜色目标 blend 不一致**。`quench3d-alpha`
+  的颜色 0 用 `ALPHA_BLENDING`、水面 mask 用 `blend: None`，wgpu 因此要求
+  `INDEPENDENT_BLEND`；WebGL2 downlevel 没有这个能力，`create_render_pipeline`
+  直接失败。现在两个目标共用同一个 blend，mask 的 alpha 写成覆盖（非水面 0、
+  水面 1），语义不变。新增 `main_pass_targets_share_blend_for_webgl2` 守卫。
+- **点光源阴影纹理被 GL 猜成 Cube**。6 层正方形 D2 纹理触发 wgpu-hal 的
+  `is_cube_compatible()`，与 `D2Array` 视图冲突并刷错误日志。分配改为 7 层
+  （6 面 + 1 填充），数组视图明确只取 6 层；新增
+  `point_shadow_texture_avoids_the_gl_cube_heuristic` 守卫。`tools/probe_webgl2.sh`
+  现在把 `INDEPENDENT_BLEND` 与 `heuristics assumed` 都判为 FAIL。
+
 ### 新增
 
 - **摄像头动捕（实验，桌面 Linux）**：新增 `tools/camera_mocap/` 采集端——普通 RGB
