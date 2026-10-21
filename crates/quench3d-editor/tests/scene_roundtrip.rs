@@ -984,10 +984,16 @@ fn fluids_survive_editor_roundtrip() {
     let mut doc = Doc::new();
     scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
     assert_eq!(engine.world.fluid_count(), 1, "物理世界要装上粒子流体");
+    assert!(engine.scene.len() > 100, "粒子应当已经进了可视场景");
 
     let out = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
     let parsed = SceneDoc::from_json(&out.json).expect("导出的必须是合法场景 JSON");
     assert_eq!(parsed.fluids.len(), 1, "存一次不许把流体丢掉");
+    assert_eq!(
+        parsed.objects.len(),
+        0,
+        "粒子/水面是渲染代理，存回去不许变成几千个球体物体"
+    );
     let f = &parsed.fluids[0];
     assert_eq!(f.center, Some([0.0, 1.2, 0.0]));
     assert_eq!(f.size, [1.2, 1.2, 1.2]);

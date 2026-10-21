@@ -2233,7 +2233,7 @@ if let Some(v) = doc.physics.static_friction_speed {
   密排），这是"液体在无限平面上的解"，不是穿地；围池（`examples/fluid_pool.json`）
   才能堆出三维水堆。测试 `pool_holds_a_three_dimensional_pile` 覆盖这一点。
 * `TriMesh` 碰撞体不挡粒子（`Shape::closest_surface` 返回 `None`）；凸包/圆锥用 AABB
-  近似。粒子**渲染**在 M4，现在 `render` 还看不到粒子。
+  近似。粒子渲染在 M4 已补（见 §23）。
 * 统计里的 `avg_density_ratio` 是**求解后**密度（报告口径）；`max_speed` 限幅到
   `MAX_SPEED`。睡眠概念不适用；多流体之间不互相作用。
 
@@ -2272,7 +2272,7 @@ if let Some(v) = doc.physics.static_friction_speed {
   这是有意的：两套水体描述同一个池子时不该双倍托举）。
 * 反推只作用于动态刚体；静态刚体只挡粒子。睡眠体被粒子撞到会醒；只有浮力（没有新接触）
   不会叫醒它，和 M1 的取舍一致。
-* 粒子之间仍无碰撞，敞开平地上会摊成薄层；`TriMesh` 仍不挡粒子。`render` 仍看不到粒子（M4）。
+* 粒子之间仍无碰撞，敞开平地上会摊成薄层；`TriMesh` 仍不挡粒子。渲染见 §23。
 
 ### 22.3 测试与证据
 
@@ -2282,3 +2282,38 @@ if let Some(v) = doc.physics.static_friction_speed {
 * CLI e2e：`fluid_buoyancy_floats_a_light_body`（300 kg/m³ 球 > 0.5 m、报告 `contacts` > 0）、
   `fluid_particles_settle_and_are_reported`（围池接触数）。
 * 示例：`examples/fluid_pool.json` 240 步浮球已在水面，480 步收敛到 26% 浸没。
+
+## 23. 第 66 轮：粒子/水面渲染（M4）
+
+### 23.1 这轮交付了什么
+
+* **粒子可视**：`SceneObject` 新增 `fluid_particle: Option<FluidParticleVisual>`；
+  `Scene::sync_from_physics` 每帧从 `world.fluids()` 读粒子位置/速度，写回物体的
+  平移与缩放，并按速度给颜色加一点青白。每颗粒子一个场景物体，网格是 8×6 的低模球
+  （80 三角形；4000 颗约 32 万三角形，软件光栅化可接受）。
+* **水面可视**：`fluid_surface: Option<FluidSurfaceVisual>`；每帧把半透明平面抬到该
+  流体粒子的最高 y，尺寸取 `fluids[].size` 的 XZ。走渲染器已有的 alpha 混合批次
+  （`depth_write=false`、排在 opaque 之后）。
+* **接入**：`runner::add_fluid_visuals` 在 `setup_visuals` 里建粒子/水面物体；CLI
+  `render`/`movie`、编辑器共用 `Scene::sync_from_physics`，所以三条路径同一套。
+* **规模**：`examples/fluid_pool.json` 960×600：4909 实例、47.2 万三角形、约 10 s；
+  相对无流体基线 **7.6% 像素变化**（差异包围盒覆盖水池）。640×420、48 帧 GIF 约 39 s，
+  帧间平均 7.6% 像素变化。
+
+### 23.2 边界（诚实清单）
+
+* **不是屏幕空间水**：没有读深度做吸收/折射、没有泡沫/焦散、没有法线扰动的波面；
+  水面就是一个跟着最高粒子走的 alpha 平面。
+* 粒子球是**视觉代理**：可视半径 `radius * 1.4`，比物理半径大，为了少留缝；它不改变
+  碰撞/浮力。
+* 4000 个场景物体对编辑器 UI/拾取不是免费午餐：这是"先能看见"的实现，不是最终
+  GPU instancing 方案；渲染器已经按 `(mesh, material)` 合批，绘制调用只有 5 个。
+* 水面高度取**最高粒子**，飞溅时会被抬高；和 M3 浮力用的是同一个近似。
+
+### 23.3 测试与证据
+
+* `quench3d`：`scene::tests::fluid_visuals_follow_the_particle_cloud`（不建 GPU，
+  直接验证粒子位置/缩放与水面高度同步）。
+* 像素：`render examples/fluid_pool.json` 对照无流体场景，7.6% 像素变化、平均绝对差
+  3.66；GIF 48 帧（640×420，4 s）帧间平均 7.6% 变化、蓝像素占比 62%~73%。
+* 报告：`render` 的 `instances` 4909、`triangles` 472434，证明粒子确实进了提交列表。

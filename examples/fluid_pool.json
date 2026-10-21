@@ -2,32 +2,173 @@
   "format": "quench3d.scene",
   "version": 2,
   "name": "粒子水池（M2）",
-  "ground": { "size": 20, "y": 0, "material": "floor" },
+  "ground": {
+    "size": 20,
+    "y": 0,
+    "material": "floor"
+  },
   "materials": {
-    "floor": { "color": [0.42, 0.45, 0.5], "roughness": 0.9 },
-    "wall": { "color": [0.62, 0.58, 0.5], "roughness": 0.8 },
-    "water": { "color": [0.25, 0.55, 0.85], "roughness": 0.15, "metallic": 0.05 }
+    "floor": {
+      "color": [
+        0.42,
+        0.45,
+        0.5
+      ],
+      "roughness": 0.9
+    },
+    "wall": {
+      "color": [
+        0.62,
+        0.58,
+        0.5
+      ],
+      "roughness": 0.8
+    },
+    "water": {
+      "color": [
+        0.25,
+        0.55,
+        0.85
+      ],
+      "roughness": 0.15,
+      "metallic": 0.05
+    }
   },
   "fluids": [
-    { "center": [0, 1.3, 0], "size": [1.6, 1.6, 1.6], "spacing": 0.1,
-      "radius": 0.05, "rest_density": 1000, "viscosity": 0.05, "drag": 6,
-      "iterations": 4, "max_particles": 5000 }
+    {
+      "center": [
+        0,
+        1.3,
+        0
+      ],
+      "size": [
+        1.6,
+        1.6,
+        1.6
+      ],
+      "spacing": 0.1,
+      "radius": 0.05,
+      "rest_density": 1000,
+      "viscosity": 0.05,
+      "drag": 6,
+      "iterations": 4,
+      "max_particles": 5000
+    }
   ],
   "objects": [
-    { "name": "左壁", "shape": { "type": "box", "size": [0.2, 1.2, 2.4] },
-      "position": [-1.2, 0.6, 0], "material": "wall", "body": "static" },
-    { "name": "右壁", "shape": { "type": "box", "size": [0.2, 1.2, 2.4] },
-      "position": [1.2, 0.6, 0], "material": "wall", "body": "static" },
-    { "name": "前壁", "shape": { "type": "box", "size": [2.4, 1.2, 0.2] },
-      "position": [0, 0.6, 1.2], "material": "wall", "body": "static" },
-    { "name": "后壁", "shape": { "type": "box", "size": [2.4, 1.2, 0.2] },
-      "position": [0, 0.6, -1.2], "material": "wall", "body": "static" },
-    { "name": "浮球", "shape": { "type": "sphere", "radius": 0.25 },
-      "position": [0, 1.2, 0], "material": "water", "body": "dynamic",
-      "density": 300 }
+    {
+      "name": "左壁",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.2,
+          1.2,
+          2.4
+        ]
+      },
+      "position": [
+        -1.2,
+        0.6,
+        0
+      ],
+      "material": "wall",
+      "body": "static"
+    },
+    {
+      "name": "右壁",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.2,
+          1.2,
+          2.4
+        ]
+      },
+      "position": [
+        1.2,
+        0.6,
+        0
+      ],
+      "material": "wall",
+      "body": "static"
+    },
+    {
+      "name": "前壁",
+      "shape": {
+        "type": "box",
+        "size": [
+          2.4,
+          1.2,
+          0.2
+        ]
+      },
+      "position": [
+        0,
+        0.6,
+        1.2
+      ],
+      "material": "wall",
+      "body": "static"
+    },
+    {
+      "name": "后壁",
+      "shape": {
+        "type": "box",
+        "size": [
+          2.4,
+          1.2,
+          0.2
+        ]
+      },
+      "position": [
+        0,
+        0.6,
+        -1.2
+      ],
+      "material": "wall",
+      "body": "static"
+    },
+    {
+      "name": "浮球",
+      "shape": {
+        "type": "sphere",
+        "radius": 0.25
+      },
+      "position": [
+        0,
+        1.2,
+        0
+      ],
+      "material": "water",
+      "body": "dynamic",
+      "density": 300
+    }
   ],
-  "camera": { "position": [4.2, 3.4, 4.6], "look_at": [0, 0.7, 0], "fov_deg": 50 },
-  "lighting": { "preset": "studio", "shadows": true },
-  "simulate": { "steps": 240, "dt": 0.0166667 },
-  "render": { "output": "fluid_pool.png", "width": 960, "height": 600, "msaa": 4 }
+  "camera": {
+    "position": [
+      2.6,
+      2.0,
+      2.9
+    ],
+    "look_at": [
+      0,
+      0.7,
+      0
+    ],
+    "fov_deg": 45
+  },
+  "lighting": {
+    "preset": "studio",
+    "shadows": true
+  },
+  "simulate": {
+    "steps": 240,
+    "dt": 0.0166667
+  },
+  "render": {
+    "output": "fluid_pool.png",
+    "width": 960,
+    "height": 600,
+    "msaa": 4
+  }
 }

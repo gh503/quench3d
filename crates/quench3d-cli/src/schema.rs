@@ -350,7 +350,7 @@ pub fn scene_grammar() -> Value {
                 "drag": "浸没刚体线性阻尼 1/s，缺省 6；0 = 无阻尼",
                 "iterations": "密度约束迭代次数 1~8，缺省 4",
                 "max_particles": "粒子上限 1~20000，缺省 4000；超出按晶格顺序截断",
-                "note": "CPU PBF 粒子流体（M3 双向）：粒子被刚体推开并反推冲量；粒子自由表面给刚体浮力/阻尼。粒子渲染在 M4。不写 = 没有粒子，物理结果与以前逐位相同",
+                "note": "CPU PBF 粒子流体（M3 双向）：粒子被刚体推开并反推冲量；粒子自由表面给刚体浮力/阻尼；渲染为低模球粒子 + 半透明水面（不是折射）。不写 = 没有粒子，物理结果与以前逐位相同",
             }],
             "materials": "名字 → 材质对象",
             "include": [
@@ -968,7 +968,7 @@ pub fn system_prompt() -> String {
             rest_density: 1000, viscosity: 0.05, drag: 6, iterations: 4,
             max_particles: 4000 }]
   // CPU PBF 粒子流体（M3 双向）：长方体发射器 + 粒子参数。粒子被刚体推开并反推冲量；
-  // 没有表面张力/涡量；粒子渲染在 M4。不写 = 没有粒子。
+  // 没有表面张力/涡量；渲染为低模球 + 半透明水面。不写 = 没有粒子。
 - materials: { 名字: { color: [r,g,b]（sRGB）, metallic: 0~1, roughness: 0.05~1, emissive: 0,
              alpha: 0~1, emissive_color: [r,g,b], uv_scale: 1, normal_scale: 1,
              alpha_cutoff: 0, alpha_blend: false, unlit: false, double_sided: false,

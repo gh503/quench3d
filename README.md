@@ -856,8 +856,10 @@ NaN 刚体  : 0
   **边界**：没有表面张力/涡量/粒子间碰撞，敞开的平地上水会摊成薄层（这是"液体在无限
   平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   `TriMesh` 碰撞体目前不挡粒子（`closest_surface` 返回 `None`），凸包/圆锥用 AABB 近似。
-  粒子**渲染**在 M4；现在 `render` 只画水域平面与刚体。`waters` 与 `fluids` 可以同时写，
-  互不替换；两者都给刚体浮力时取较大的浸没占比，不会叠加浮力（M3 口径）。
+  粒子**渲染**（M4）：每颗粒子画成低模球（8×6），速度越快颜色越偏青白；另加一张
+  跟着最高粒子走的半透明水面。**不是**屏幕空间折射/泡沫/焦散——没有读深度做吸收，
+  水面就是 alpha 平面。`waters` 与 `fluids` 可以同时写，互不替换；两者都给刚体浮力时
+  取较大的浸没占比，不会叠加浮力（M3 口径）。
 * `friction_combine` / `restitution_combine` 可写在世界级 `physics` 段（缺省）或单个物体上
   （覆盖缺省）。缺省规则是**几何平均**（摩擦）与**取大**（恢复）——正是老行为；
   改成 `average`/`min`/`max`/`multiply` 会改变已有场景的观感，属于**有意**调整。
@@ -1154,7 +1156,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 639 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 640 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1629,7 +1631,7 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 * CLI / 大模型：`ask` 需要有一个正在运行的 OpenAI 兼容服务（本地 Ollama / llama.cpp /
   LM Studio / vLLM，或云端）；`https://` 端点依赖系统 `curl`。模型输出质量取决于所选模型，
   本仓库的测试用假服务覆盖协议与校验，不评价模型本身。
-  场景语法有 `waters` 的解析浮力/半透明水面与 `fluids` 的 CPU PBF 粒子（M3 双向耦合；粒子渲染在 M4），
+  场景语法有 `waters` 的解析浮力/半透明水面与 `fluids` 的 CPU PBF 粒子（M3 双向耦合 + M4 低模球粒子/半透明水面渲染），
   也没有程序化材质。
 * 编辑器：**已有拖拽式变换 gizmo、撤销/重做与父子层级**（见 §1.1），但
   **手柄不支持拖拽中键入数值、不支持轴心切换、不支持多选成组变换**（多选还没做；

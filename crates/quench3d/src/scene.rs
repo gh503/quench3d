@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use quench3d_math::{Mat4, Transform, Vec3, Vec4};
+use quench3d_math::{Mat4, Quat, Transform, Vec2, Vec3, Vec4};
 use quench3d_physics::{BodyHandle, PhysicsWorld};
 use quench3d_render::{InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshId, Renderer};
 
@@ -58,6 +58,62 @@ pub struct SceneObject {
     pub roughness: Option<f32>,
     /// 自发光强度。
     pub emissive_strength: f32,
+    /// 粒子流体的可视绑定（`None` = 普通物体）。
+    ///
+    /// 有它时 [`Scene::sync_from_physics`] 直接从 `world.fluids()` 读粒子位置，
+    /// 不需要把粒子伪装成刚体；物体本身不参与物理。
+    pub fluid_particle: Option<FluidParticleVisual>,
+    /// 粒子流体的**水面**可视绑定（`None` = 不是水面）。
+    ///
+    /// 每帧把水面抬到该流体粒子的最高点；它只是一张半透明平面，不是真正的
+    /// 自由表面网格/屏幕空间折射（M4 的边界）。
+    pub fluid_surface: Option<FluidSurfaceVisual>,
+}
+
+/// 添加粒子物体时的参数（避免 8 个位置参数）。
+#[derive(Clone, Copy, Debug)]
+pub struct FluidParticleSpec {
+    /// 流体下标。
+    pub fluid: usize,
+    /// 粒子下标。
+    pub particle: usize,
+    /// 可视半径（米）。
+    pub radius: f32,
+    /// 初始位置。
+    pub position: Vec3,
+}
+
+/// 添加水面物体时的参数。
+#[derive(Clone, Copy, Debug)]
+pub struct FluidSurfaceSpec {
+    /// 流体下标。
+    pub fluid: usize,
+    /// 水面半尺寸 `(x, z)`。
+    pub half_size: Vec2,
+    /// 水面中心（只用 XZ；Y 由流体最高粒子决定）。
+    pub center: Vec3,
+    /// 初始高度。
+    pub level: f32,
+}
+
+/// 一个粒子可视绑定：第 `fluid` 个流体的第 `particle` 颗粒子。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluidParticleVisual {
+    /// 流体下标（`world.fluids()` 的顺序）。
+    pub fluid: usize,
+    /// 粒子下标（与 `Fluid::particles()` 同序）。
+    pub particle: usize,
+    /// 可视半径（米）；物理半径可以更小，渲染时允许略微重叠。
+    pub radius: f32,
+}
+
+/// 粒子流体的水面可视绑定。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluidSurfaceVisual {
+    /// 流体下标（`world.fluids()` 的顺序）。
+    pub fluid: usize,
+    /// 水面半尺寸 `(x, z)`（米）。
+    pub half_size: Vec2,
 }
 
 impl SceneObject {
@@ -146,6 +202,8 @@ impl Scene {
             metallic: None,
             roughness: None,
             emissive_strength: 1.0,
+            fluid_particle: None,
+            fluid_surface: None,
         });
         index
     }
@@ -162,6 +220,46 @@ impl Scene {
         let transform = world.body(body).map(|b| b.transform()).unwrap_or_default();
         let index = self.add_named(mesh, material, transform, name);
         self.objects[index].body = Some(body);
+        index
+    }
+
+    /// 添加一颗粒子的可视物体（不参与物理，由 `sync_from_physics` 跟随流体）。
+    pub fn add_fluid_particle(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        spec: FluidParticleSpec,
+        name: &str,
+    ) -> usize {
+        let radius = spec.radius.max(1e-4);
+        let transform = Transform::new(spec.position, Quat::IDENTITY, Vec3::splat(radius * 2.0));
+        let index = self.add_named(mesh, material, transform, name);
+        self.objects[index].fluid_particle = Some(FluidParticleVisual {
+            fluid: spec.fluid,
+            particle: spec.particle,
+            radius,
+        });
+        index
+    }
+
+    /// 添加一个跟随流体最高点的水面（半透明平面）。
+    pub fn add_fluid_surface(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        spec: FluidSurfaceSpec,
+        name: &str,
+    ) -> usize {
+        let transform = Transform::new(
+            Vec3::new(spec.center.x, spec.level, spec.center.z),
+            Quat::IDENTITY,
+            Vec3::new(spec.half_size.x * 2.0, 1.0, spec.half_size.y * 2.0),
+        );
+        let index = self.add_named(mesh, material, transform, name);
+        self.objects[index].fluid_surface = Some(FluidSurfaceVisual {
+            fluid: spec.fluid,
+            half_size: spec.half_size,
+        });
         index
     }
 
@@ -279,6 +377,37 @@ impl Scene {
                 obj.name
             );
             if obj.parent.is_some() {
+                continue;
+            }
+            if let Some(visual) = obj.fluid_surface {
+                if let Some(f) = world.fluids().get(visual.fluid) {
+                    let level = f
+                        .particles()
+                        .iter()
+                        .map(|p| p.y)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    if level.is_finite() {
+                        obj.transform.position.y = level;
+                    }
+                }
+                continue;
+            }
+            if let Some(visual) = obj.fluid_particle {
+                if let Some(fluid) = world.fluids().get(visual.fluid) {
+                    if let Some(p) = fluid.particles().get(visual.particle) {
+                        obj.transform.position = *p;
+                        obj.transform.rotation = Quat::IDENTITY;
+                        obj.transform.scale = Vec3::splat(visual.radius * 2.0);
+                        // 速度越快越偏青白：静止的水是深蓝，水花有一点亮边。
+                        let speed = fluid
+                            .velocities()
+                            .get(visual.particle)
+                            .map(|v| v.length())
+                            .unwrap_or(0.0);
+                        let tint = (speed * 0.05).clamp(0.0, 0.35);
+                        obj.color = Vec4::new(0.10 + tint, 0.34 + tint * 0.6, 0.72, 1.0);
+                    }
+                }
                 continue;
             }
             if let Some(handle) = obj.body {
@@ -810,6 +939,49 @@ mod tests {
             .unwrap_or_else(|| panic!("尾物体应当还在，实际有 {}", scene.len()));
         assert!(tail_now < tail);
         assert_eq!(scene.len(), 2);
+    }
+
+    #[test]
+    fn fluid_visuals_follow_the_particle_cloud() {
+        use quench3d_physics::FluidDesc;
+
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_fluid(FluidDesc {
+            center: Vec3::new(0.0, 2.0, 0.0),
+            half_extents: Vec3::splat(0.3),
+            spacing: 0.1,
+            radius: 0.05,
+            ..FluidDesc::default()
+        });
+        for _ in 0..5 {
+            world.step(1.0 / 60.0);
+        }
+        let fluid = &world.fluids()[0];
+        let expected = fluid.particles()[0];
+        let top = fluid
+            .particles()
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::MIN, f32::max);
+
+        let mut scene = Scene::new();
+        let p = scene.add_named(1u32, 1u32, Transform::IDENTITY, "粒子");
+        scene.objects[p].fluid_particle = Some(FluidParticleVisual {
+            fluid: 0,
+            particle: 0,
+            radius: 0.07,
+        });
+        let s = scene.add_named(1u32, 1u32, Transform::IDENTITY, "水面");
+        scene.objects[s].fluid_surface = Some(FluidSurfaceVisual {
+            fluid: 0,
+            half_size: Vec2::new(0.3, 0.3),
+        });
+
+        scene.sync_from_physics(&world);
+        assert_eq!(scene.objects[p].transform.position, expected);
+        assert_eq!(scene.objects[p].transform.scale, Vec3::splat(0.14));
+        assert!((scene.objects[s].transform.position.y - top).abs() < 1e-6);
     }
 }
 

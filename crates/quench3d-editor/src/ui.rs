@@ -437,6 +437,10 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 let mut children: Vec<Vec<usize>> = vec![Vec::new(); count];
                 let mut roots: Vec<usize> = Vec::new();
                 for (index, object) in engine.scene.objects.iter().enumerate() {
+                    // 粒子/水面是渲染代理：几万个列表项既点不过来，也不该被当成场景物体。
+                    if object.fluid_particle.is_some() || object.fluid_surface.is_some() {
+                        continue;
+                    }
                     match object.parent.filter(|p| *p < count) {
                         Some(p) => children[p].push(index),
                         None => roots.push(index),
@@ -460,6 +464,12 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 // 兜底：父链成环或引用越界的物体不会被上面的遍历碰到，
                 // 但它们确实还在场景里 —— 照样画出来，藏起来的物体比画错更难查。
                 for index in 0..count {
+                    let Some(object) = engine.scene.objects.get(index) else {
+                        continue;
+                    };
+                    if object.fluid_particle.is_some() || object.fluid_surface.is_some() {
+                        continue;
+                    }
                     draw_subtree(
                         ui,
                         engine,

@@ -3084,8 +3084,94 @@ pub fn setup_visuals(
     }
 
     add_water_visuals(engine, doc);
+    add_fluid_visuals(engine, doc);
     apply_camera(engine, doc);
     Ok(instances)
+}
+
+/// 把 `fluids` 的粒子画成小球（每颗一个场景物体，`sync_from_physics` 每帧跟随）。
+///
+/// 用低细分球（8×6）而不是默认的 32×20：4000 颗粒子 × 1200 三角形会让软件
+/// 光栅化直接跪；80 三角形的球在 640×420 下已经看不出棱角。可视半径比物理半径
+/// 略大（`radius * 1.4`），粒子之间才不会有缝。
+fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
+    if doc.fluids.is_empty() {
+        return;
+    }
+    let mesh = engine.assets.mesh(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$fluid_particle",
+        &MeshData::sphere(0.5, 8, 6),
+    );
+    let desc = MaterialDesc {
+        base_color: Vec4::new(0.16, 0.42, 0.78, 1.0),
+        metallic: 0.0,
+        roughness: 0.22,
+        ..MaterialDesc::default()
+    };
+    let material =
+        engine
+            .assets
+            .material(&mut engine.renderer, &engine.gpu, "$fluid_particle", desc);
+    for (fi, fluid) in engine.world.fluids().iter().enumerate() {
+        let radius = doc.fluids.get(fi).map(|f| f.radius()).unwrap_or(0.05) * 1.4;
+        for (pi, p) in fluid.particles().iter().enumerate() {
+            engine.scene.add_fluid_particle(
+                mesh,
+                material,
+                quench3d::scene::FluidParticleSpec {
+                    fluid: fi,
+                    particle: pi,
+                    radius,
+                    position: *p,
+                },
+                &format!("流体{fi}.{pi}"),
+            );
+        }
+        // 水面：半透明平面跟着最高粒子走。它不是折射/泡沫，只是让"水面"有个位置。
+        if let Some(spec) = doc.fluids.get(fi) {
+            let c = spec.center.unwrap_or([0.0, 0.0, 0.0]);
+            let level = fluid
+                .particles()
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let surface_mesh = engine.assets.mesh(
+                &mut engine.renderer,
+                &engine.gpu,
+                "$water_surface",
+                &water_surface_mesh(),
+            );
+            let surface_desc = MaterialDesc {
+                base_color: Vec4::new(0.10, 0.34, 0.58, 0.32),
+                metallic: 0.0,
+                roughness: 0.08,
+                alpha_blend: true,
+                double_sided: true,
+                ..MaterialDesc::default()
+            };
+            let surface_material = engine.assets.material(
+                &mut engine.renderer,
+                &engine.gpu,
+                "$fluid_surface",
+                surface_desc,
+            );
+            if level.is_finite() {
+                engine.scene.add_fluid_surface(
+                    surface_mesh,
+                    surface_material,
+                    quench3d::scene::FluidSurfaceSpec {
+                        fluid: fi,
+                        half_size: Vec2::new(spec.size[0] * 0.5, spec.size[2] * 0.5),
+                        center: Vec3::new(c[0], 0.0, c[2]),
+                        level,
+                    },
+                    &format!("流体水面{fi}"),
+                );
+            }
+        }
+    }
 }
 
 /// 把 `waters` 画成半透明水面（一单元网格，按水域尺寸缩放）。
