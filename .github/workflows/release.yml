@@ -140,6 +140,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      # `gh release create --generate-notes` 要读**本地 git 历史**来生成发布说明；
+      # 这个 job 若不 checkout，会报 `fatal: not a git repository`（首次验证时踩到的）。
+      # `fetch-depth: 0` 是为了让说明能用到完整历史（默认浅克隆只有 1 个提交）。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -152,11 +159,14 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           ls -l dist
+          # 只发布归档：artifact 里还带着未压缩的目录，直接 `dist/*` 会把目录也当资产传。
+          mapfile -t ASSETS < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          printf '待发布：%s\n' "${ASSETS[@]}"
           if gh release view "$TAG" > /dev/null 2>&1; then
             # 重跑/补传：clobber 覆盖同名资产
-            gh release upload "$TAG" dist/* --clobber
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
-            gh release create "$TAG" dist/* \
+            gh release create "$TAG" "${ASSETS[@]}" \
               --title "quench3d ${TAG#v}" \
               --generate-notes \
               --verify-tag
