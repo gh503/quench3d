@@ -210,7 +210,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 11968465 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12313269 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
