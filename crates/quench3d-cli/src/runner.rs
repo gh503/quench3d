@@ -343,6 +343,19 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
         let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
         let model = load_model_cached(&resolved)?;
         let clip = model.animation(&requested.name);
+        let blend = requested.blend.as_ref().map(|b| {
+            let second = model.animation(&b.name);
+            ModelBlendStatus {
+                name: b.name.clone(),
+                found: second.is_some(),
+                duration: second.map(|c| c.duration),
+                tracks: second.map(|c| c.tracks.len()),
+                weight: b.weight.unwrap_or(0.5),
+                speed: b.speed.unwrap_or(1.0),
+                looping: b.looping.unwrap_or(true),
+                start: b.start.unwrap_or(0.0),
+            }
+        });
         out.push(ModelReport {
             model: i,
             path: m.path.display().to_string(),
@@ -360,6 +373,7 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
                 looping: requested.looping.unwrap_or(true),
                 start: requested.start.unwrap_or(0.0),
             },
+            blend,
         });
     }
     Ok(out)
@@ -367,21 +381,29 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
 
 /// 把"动画名不存在"翻译成一句人话（报告警告与人类可读输出共用同一份措辞）。
 fn animation_warnings(reports: &[ModelReport]) -> Vec<String> {
-    reports
-        .iter()
-        .filter(|r| !r.animation.found)
-        .map(|r| {
-            let available = if r.clips.is_empty() {
-                "资产里没有任何动画".to_string()
-            } else {
-                format!("资产里有：{}", r.clips.join("、"))
-            };
-            format!(
+    let mut out = Vec::new();
+    for r in reports {
+        let available = if r.clips.is_empty() {
+            "资产里没有任何动画".to_string()
+        } else {
+            format!("资产里有：{}", r.clips.join("、"))
+        };
+        if !r.animation.found {
+            out.push(format!(
                 "models[{}].animation：动画 \"{}\" 不存在（{available}），模型保持绑定姿态",
                 r.model, r.animation.name
-            )
-        })
-        .collect()
+            ));
+        }
+        if let Some(b) = &r.blend {
+            if !b.found {
+                out.push(format!(
+                    "models[{}].animation.blend：第二条动画 \"{}\" 不存在（{available}），模型保持绑定姿态",
+                    r.model, b.name
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// 报告里的模型缓存统计（没有任何模型参与时**不出现**，老报告逐字节不变）。
@@ -417,6 +439,9 @@ pub struct ModelReport {
     pub clips: Vec<String>,
     /// 场景里请求的动画的装载结果。
     pub animation: ModelAnimationStatus,
+    /// 可选的第二条 clip 的装载结果；没写 `animation.blend` 时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<ModelBlendStatus>,
 }
 
 /// 请求的那条模型动画的装载结果。
@@ -437,6 +462,29 @@ pub struct ModelAnimationStatus {
     /// 是否循环（场景里的值，缺省 true）。
     pub looping: bool,
     /// 起始时间（秒，缺省 0）。
+    pub start: f32,
+}
+
+/// 请求的第二条模型动画（交叉淡化）的装载结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelBlendStatus {
+    /// 场景里请求的名字。
+    pub name: String,
+    /// 资产里有没有这个名字；`false` 时整个模型保持绑定姿态并给警告。
+    pub found: bool,
+    /// 时长（秒）；`found = false` 时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f32>,
+    /// 轨道数；`found = false` 时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<usize>,
+    /// 第二条 clip 的权重（0 = 只用第一条，1 = 只用第二条）。
+    pub weight: f32,
+    /// 播放倍速（缺省 1）。
+    pub speed: f32,
+    /// 是否循环（缺省 true）。
+    pub looping: bool,
+    /// 起始时间（缺省 0）。
     pub start: f32,
 }
 
@@ -3112,12 +3160,29 @@ pub fn setup_visuals(
                 // 起始时间按播放器自己的规则归一化（循环取模 / 不循环夹到时长），
                 // 不在格式层再抄一份时间语义。
                 player.advance(0.0);
-                engine.scene.play_model_animation(
-                    model.clone(),
-                    objects.clone(),
-                    vec![transform; objects.len()],
-                    player,
-                );
+                let base = vec![transform; objects.len()];
+                if let Some(b) = &a.blend {
+                    // 第二条名字不存在就**不登记**（报告给 found=false，几何保持绑定姿态）；
+                    // 不能只播第一条，否则用户以为混合生效了。
+                    if let Some(mut secondary) = model.player(&b.name) {
+                        secondary.speed = b.speed.unwrap_or(1.0);
+                        secondary.looping = b.looping.unwrap_or(true);
+                        secondary.time = b.start.unwrap_or(0.0);
+                        secondary.advance(0.0);
+                        engine.scene.play_model_animation_blend(
+                            model.clone(),
+                            objects.clone(),
+                            base,
+                            player,
+                            secondary,
+                            b.weight.unwrap_or(0.5),
+                        );
+                    }
+                } else {
+                    engine
+                        .scene
+                        .play_model_animation(model.clone(), objects.clone(), base, player);
+                }
             }
         }
         instances.push(ModelInstance {

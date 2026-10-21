@@ -142,6 +142,28 @@ pub struct ModelAnimationInstance {
     pub base: Vec<Transform>,
     /// 播放状态（时间 / 倍速 / 循环）。
     pub player: crate::assets::ModelAnimationPlayer,
+    /// 可选的**第二条**动画（交叉淡化）；`None` = 单 clip。
+    pub secondary: Option<crate::assets::ModelAnimationPlayer>,
+    /// 第二条动画的权重（0 = 只用第一条，1 = 只用第二条）。
+    pub blend_weight: f32,
+}
+
+/// 取一个动画实例当前该用的节点世界矩阵（单 clip 或双 clip 混合）。
+fn animation_worlds(a: &ModelAnimationInstance) -> Option<Vec<Mat4>> {
+    match &a.secondary {
+        Some(secondary) => a
+            .model
+            .blended_node_worlds(&a.player, secondary, a.blend_weight),
+        None => a.player.node_worlds(&a.model),
+    }
+}
+
+/// 取一个动画实例当前该用的逐网格刚性矩阵。
+fn animation_matrices(a: &ModelAnimationInstance) -> Vec<Mat4> {
+    match animation_worlds(a) {
+        Some(worlds) => a.model.mesh_matrices_from_worlds(&worlds),
+        None => vec![Mat4::IDENTITY; a.model.meshes.len()],
+    }
 }
 
 /// 场景。
@@ -326,6 +348,41 @@ impl Scene {
             objects,
             base,
             player,
+            secondary: None,
+            blend_weight: 0.0,
+        });
+        index
+    }
+
+    /// 登记**两条**动画并交叉淡化：`weight` 是第二条的权重（0..=1）。
+    ///
+    /// 与 [`Self::play_model_animation`] 的区别只在采样：两条 clip 各自推进自己的
+    /// 时间，再对局部 TRS 插值（旋转 slerp），最后只做一次父子累乘。蒙皮网格用混合后的
+    /// 节点世界矩阵重算顶点；没有第二条时仍走原来的单 clip 路径。
+    ///
+    /// 名字不存在时**不要**调它；调用方应先确认两条 clip 都在资产里，否则模型会
+    /// 保持绑定姿态（与单 clip 的契约一致）。
+    pub fn play_model_animation_blend(
+        &mut self,
+        model: Arc<crate::assets::LoadedModel>,
+        objects: Vec<usize>,
+        base: Vec<Transform>,
+        primary: crate::assets::ModelAnimationPlayer,
+        secondary: crate::assets::ModelAnimationPlayer,
+        weight: f32,
+    ) -> usize {
+        let index = self.animations.len();
+        self.animations.push(ModelAnimationInstance {
+            model,
+            objects,
+            base,
+            player: primary,
+            secondary: Some(secondary),
+            blend_weight: if weight.is_finite() {
+                weight.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
         });
         index
     }
@@ -350,7 +407,10 @@ impl Scene {
         let mut updated = 0;
         for a in animations.iter_mut() {
             a.player.advance(dt);
-            let mats = a.player.mesh_matrices(&a.model);
+            if let Some(secondary) = &mut a.secondary {
+                secondary.advance(dt);
+            }
+            let mats = animation_matrices(a);
             updated += apply_matrices(objects, &a.objects, &a.base, &mats);
         }
         updated
@@ -378,7 +438,7 @@ impl Scene {
             ..
         } = self;
         for a in animations.iter() {
-            let Some(worlds) = a.player.node_worlds(&a.model) else {
+            let Some(worlds) = animation_worlds(a) else {
                 continue;
             };
             for (mesh_index, &object_index) in a.objects.iter().enumerate() {

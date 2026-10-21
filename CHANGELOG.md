@@ -28,6 +28,17 @@
 
 ### 新增
 
+- **双 clip 固定权重动画混合（第 71 轮）**：`models[].animation.blend =
+  { name, start?, speed?, loop?, weight? }` 给第二条 glTF clip；两条各自推进自己的
+  时间，先对**局部** TRS 插值（平移/缩放 lerp、旋转 slerp），再统一累乘父子链。
+  `weight` 缺省 0.5，0 = 只用第一条，1 = 只用第二条；报告新增
+  `models[].blend`（`found` / `weight` / `duration` / `tracks`），第二条名字写错时
+  两条都不登记并给警告（几何保持绑定姿态，不会偷偷只播第一条）。场景层新增
+  `Scene::play_model_animation_blend`，蒙皮与刚性片段共用同一份混合世界矩阵。
+  边界：**固定权重**，没有时变权重曲线、>2 条 clip、状态机、根运动/事件。
+  回归：`blended_clips_interpolate_skinned_pose`（局部 TRS 数学：w=0.5 位移 1.5，
+  w=0/1 精确取两条）+ `model_animation_blend_is_reported_and_rendered`（报告字段、
+  名字错误警告、混合 PNG 与纯主 clip 有可见像素差）+ 结构校验用例。
 - **glTF 骨骼蒙皮（CPU 路径，第 70 轮）**：装载 `skins`、`inverseBindMatrices`、
   `JOINTS_0`、`WEIGHTS_0`；每个蒙皮片段的顶点按
   `Σ w·world(joint)·inverseBind·bindInverse` 逐帧变形，再通过新的

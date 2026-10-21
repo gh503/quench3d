@@ -248,15 +248,10 @@ impl ModelAnimationPlayer {
     ///
     /// 没动画、采样失败、或片段不属于任何节点时给单位矩阵 —— 也就是"保持烘焙好的样子"。
     pub fn mesh_matrices(&self, model: &LoadedModel) -> Vec<Mat4> {
-        let worlds = model.sample_animation(&self.animation, self.time);
-        (0..model.meshes.len())
-            .map(|i| match &worlds {
-                Some(w) if model.meshes.get(i).and_then(|m| m.skin).is_none() => {
-                    model.mesh_matrix(i, w)
-                }
-                _ => Mat4::IDENTITY,
-            })
-            .collect()
+        match model.sample_animation(&self.animation, self.time) {
+            Some(worlds) => model.mesh_matrices_from_worlds(&worlds),
+            None => vec![Mat4::IDENTITY; model.meshes.len()],
+        }
     }
 
     /// 当前时刻的**节点世界矩阵**（蒙皮要用；与 [`Self::mesh_matrices`] 同源）。
@@ -380,13 +375,23 @@ impl LoadedModel {
     /// 时间会被夹到 `[0, duration]`（循环是调用方的事：`time.rem_euclid(duration)`）。
     /// 没被任何轨道覆盖的节点保持绑定姿态 —— 这正是"只动一部分关节"的资产需要的。
     pub fn sample_animation(&self, name: &str, time: f32) -> Option<Vec<Mat4>> {
+        let locals = self.sample_animation_locals(name, time)?;
+        Some(self.worlds_from_locals(&locals))
+    }
+
+    /// 采样某条动画在 `time` 秒时的**局部**变换（每个节点一项）。
+    ///
+    /// 这是 [`Self::sample_animation`] 的第一步；单独抽出来是给动画混合用：
+    /// 两条 clip 先各自得到局部 TRS，再对平移/缩放做 lerp、对旋转做 slerp，
+    /// 最后只做一次父子累乘。直接混世界矩阵会让旋转/缩放以错误的方式插值。
+    fn sample_animation_locals(&self, name: &str, time: f32) -> Option<Vec<(Vec3, Quat, Vec3)>> {
         let clip = self.animation(name)?;
         let t = if self.nodes.is_empty() {
             0.0
         } else {
             time.clamp(0.0, clip.duration.max(0.0))
         };
-        // ① 从绑定姿态的局部变换出发，把轨道采样覆盖上去
+        // 从绑定姿态的局部变换出发，把轨道采样覆盖上去
         let mut locals: Vec<(Vec3, Quat, Vec3)> = self
             .nodes
             .iter()
@@ -408,13 +413,55 @@ impl LoadedModel {
                 }
             }
         }
-        // ② 局部 → 世界（按 parent 链；父在子之前算好）
+        Some(locals)
+    }
+
+    /// 局部变换 → 节点世界矩阵（按 parent 链；父在子之前算好）。
+    fn worlds_from_locals(&self, locals: &[(Vec3, Quat, Vec3)]) -> Vec<Mat4> {
         let mut worlds: Vec<Mat4> = vec![Mat4::IDENTITY; self.nodes.len()];
         let mut done: Vec<bool> = vec![false; self.nodes.len()];
         for i in 0..self.nodes.len() {
-            resolve(i, &self.nodes, &locals, &mut worlds, &mut done, 0);
+            resolve(i, &self.nodes, locals, &mut worlds, &mut done, 0);
         }
-        Some(worlds)
+        worlds
+    }
+
+    /// 两条动画按 `weight` 混合后的节点世界矩阵；任一动画名不存在返回 `None`。
+    ///
+    /// `weight` 是**后一条**（secondary）的权重，夹到 `0..=1`。0 = 完全是第一条，
+    /// 1 = 完全是第二条；中间在局部 TRS 上插值（旋转用 slerp），再统一累乘父子链。
+    /// 两条 clip 的关节集合可以不同：没被覆盖的节点各自保持绑定姿态。
+    pub fn blended_node_worlds(
+        &self,
+        primary: &ModelAnimationPlayer,
+        secondary: &ModelAnimationPlayer,
+        weight: f32,
+    ) -> Option<Vec<Mat4>> {
+        let a = self.sample_animation_locals(&primary.animation, primary.time)?;
+        let b = self.sample_animation_locals(&secondary.animation, secondary.time)?;
+        let w = if weight.is_finite() {
+            weight.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if w <= 0.0 {
+            return Some(self.worlds_from_locals(&a));
+        }
+        if w >= 1.0 {
+            return Some(self.worlds_from_locals(&b));
+        }
+        let locals: Vec<(Vec3, Quat, Vec3)> = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| {
+                (
+                    x.0 + (y.0 - x.0) * w,
+                    x.1.slerp(y.1, w),
+                    x.2 + (y.2 - x.2) * w,
+                )
+            })
+            .collect();
+        Some(self.worlds_from_locals(&locals))
     }
 
     /// 画某个网格片段该用的**刚性**矩阵：`world(t) × bind_inverse`。
@@ -439,6 +486,16 @@ impl LoadedModel {
             Some(world) => *world * mesh.bind_inverse,
             None => Mat4::IDENTITY,
         }
+    }
+
+    /// 给定节点世界矩阵，一次性算出所有网格片段的**刚性**矩阵。
+    ///
+    /// 与 [`Self::mesh_matrix`] 同一条规则（蒙皮片段为单位矩阵）；单独提供是因为
+    /// 混合动画已经算过一份世界矩阵，不该再为每个片段重新采样两遍。
+    pub fn mesh_matrices_from_worlds(&self, node_worlds: &[Mat4]) -> Vec<Mat4> {
+        (0..self.meshes.len())
+            .map(|i| self.mesh_matrix(i, node_worlds))
+            .collect()
     }
 
     /// 这个模型是否含可蒙皮网格。

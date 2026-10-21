@@ -184,6 +184,51 @@ fn skinned_glb_deforms_vertices_from_joint_animation() {
 ///
 /// 同一条 `lift` 动画，t=0 与 t=0.25 各渲染一张 64×64；如果只改了 `SceneObject`
 /// 的变换、或 `update_mesh_vertices` 没接上，两张图会逐字节相同（这条会红）。
+/// 两条 clip 的局部 TRS 混合：primary y=1、secondary y=2，w=0.5 → y=1.5。
+///
+/// 用一个派生 clip（同一条动画的平移翻倍）而不是再手搓 GLB：这里要验的是采样/混合
+/// 数学，不是解析；解析已由 `skinned_glb_deforms_vertices_from_joint_animation` 钉住。
+#[test]
+fn blended_clips_interpolate_skinned_pose() {
+    let mut model = load_model_from_bytes("skinned.glb", &skinned_glb()).expect("蒙皮 GLB");
+    let mut second = model.animations[0].clone();
+    second.name = "lift4".into();
+    for track in &mut second.tracks {
+        if track.property == quench3d::assets::AnimatedProperty::Translation {
+            for value in &mut track.values {
+                value[1] *= 2.0;
+            }
+        }
+    }
+    model.animations.push(second);
+
+    let mut primary = model.player("lift").expect("primary");
+    primary.time = 0.5;
+    let mut secondary = model.player("lift4").expect("secondary");
+    secondary.time = 0.5;
+
+    let at = |weight: f32| {
+        let worlds = model
+            .blended_node_worlds(&primary, &secondary, weight)
+            .expect("两条 clip 都存在");
+        model.skinned_mesh(0, &worlds).expect("蒙皮片段")
+    };
+    let half = at(0.5);
+    let bind = &model.meshes[0].data.vertices;
+    for (i, vertex) in half.vertices.iter().enumerate() {
+        let dy = vertex.position[1] - bind[i].position[1];
+        assert!(
+            (dy - 1.5).abs() < 1e-5,
+            "w=0.5 应当在 y=1 与 y=2 中间（顶点 {i} 的位移 {dy}）：{:?}",
+            vertex.position
+        );
+    }
+    let only_primary = at(0.0);
+    assert!((only_primary.vertices[0].position[1] - 1.0).abs() < 1e-5);
+    let only_secondary = at(1.0);
+    assert!((only_secondary.vertices[0].position[1] - 2.0).abs() < 1e-5);
+}
+
 #[test]
 fn skinned_mesh_changes_rendered_pixels() {
     let rendered = with_gpu_tests(
@@ -620,5 +665,55 @@ fn scene_animation_moves_the_spawned_meshes() {
     assert!(
         (x - 10.0).abs() < 1e-4,
         "循环走满 1 秒该绕回基础位置，实际 {x}"
+    );
+}
+
+/// 场景层也真的推进**两条**时间线：primary 在 t=.5 位移 1.5，secondary 位移 3.5，
+/// weight=0.5 时物体应落在 base + 2.5。CLI 的 `dt=0` 只能证明起始姿态，这里证明
+/// `Scene::advance_animations` 会同时 `advance` 两条 clip 并走混合采样。
+#[test]
+fn scene_blended_animation_advances_both_clips() {
+    use quench3d::math::{Quat, Transform};
+    use quench3d::scene::Scene;
+
+    let mut model =
+        load_model_from_bytes("nodes.glb", &nodes_with_animation_glb()).expect("该能解析");
+    let mut second = model.animations[0].clone();
+    second.name = "移动2".into();
+    for track in &mut second.tracks {
+        if track.property == quench3d::assets::AnimatedProperty::Translation {
+            for value in &mut track.values {
+                value[0] += 2.0;
+            }
+        }
+    }
+    model.animations.push(second);
+    let model = std::sync::Arc::new(model);
+
+    let mut scene = Scene::new();
+    let base = Transform::new(Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+    let objects: Vec<usize> = (0..model.meshes.len())
+        .map(|i| scene.add_named(i as u32, 0, base, &format!("片段{i}")))
+        .collect();
+    let right = model
+        .meshes
+        .iter()
+        .position(|m| m.name.starts_with("右/"))
+        .expect("「右」片段该在");
+
+    scene.play_model_animation_blend(
+        model.clone(),
+        objects.clone(),
+        vec![base; model.meshes.len()],
+        model.player("移动").expect("primary"),
+        model.player("移动2").expect("secondary"),
+        0.5,
+    );
+
+    scene.advance_animations(0.5);
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!(
+        (x - 12.5).abs() < 1e-4,
+        "t=.5 混合后该在 10 + (1.5+3.5)/2 = 12.5，实际 {x}"
     );
 }

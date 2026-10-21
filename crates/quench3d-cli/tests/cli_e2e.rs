@@ -6337,6 +6337,106 @@ fn skinned_model_animation_changes_cli_render() {
     );
 }
 
+/// `animation.blend`：报告字段 + 场景渲染必须真的混出第三个姿态。
+///
+/// 同一个 `lift` 用两次（start 0 与 0.5），weight=0.5：t=0 时主 clip 在 0、
+/// 第二 clip 已在半程，混合后应落在两者中间。只验报告字段不够，必须看到 PNG 变化。
+#[test]
+fn model_animation_blend_is_reported_and_rendered() {
+    let dir = temp_dir("model_blend");
+    std::fs::write(dir.join("skin.glb"), skinned_glb_bytes()).expect("写蒙皮夹具");
+    let scene = write_scene(
+        &dir,
+        "blend.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{
+                "path": "skin.glb",
+                "animation": {
+                    "name": "lift",
+                    "blend": { "name": "lift", "start": 0.5, "weight": 0.5 }
+                }
+            }],
+            "camera": { "position": [0.5, 1.2, 4.0], "look_at": [0.5, 1.2, 0.0], "fov_deg": 45.0 },
+            "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+        }),
+    );
+
+    // 1) 报告：两条 clip 都要 found，weight 原样回显
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    let m = &d["data"]["models"][0];
+    assert_eq!(m["animation"]["found"], true, "{d}");
+    assert_eq!(m["blend"]["found"], true, "{d}");
+    assert_eq!(m["blend"]["weight"], 0.5, "{d}");
+    assert_eq!(m["blend"]["start"], 0.5, "{d}");
+    assert!(m["blend"]["duration"].is_number(), "{d}");
+
+    // 2) 第二节 clip 名字写错：validate 仍然通过，报告与警告必须点名
+    let bad = write_scene(
+        &dir,
+        "blend-bad.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{ "path": "skin.glb", "animation": { "name": "lift",
+                "blend": { "name": "没有这条", "weight": 0.25 } } }]
+        }),
+    );
+    let r = run(&["simulate", bad.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "名字不存在不是结构错误：{}", r.stderr);
+    let d = r.json();
+    assert_eq!(d["data"]["models"][0]["blend"]["found"], false, "{d}");
+    let warnings = d["data"]["warnings"].to_string();
+    assert!(warnings.contains("没有这条"), "{warnings}");
+    assert!(warnings.contains("绑定姿态"), "{warnings}");
+
+    // 3) 渲染：混合姿态与纯主 clip 的 start=0 必须不同
+    let baseline = write_scene(
+        &dir,
+        "single.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{ "path": "skin.glb", "animation": { "name": "lift" } }],
+            "camera": { "position": [0.5, 1.2, 4.0], "look_at": [0.5, 1.2, 0.0], "fov_deg": 45.0 },
+            "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+        }),
+    );
+    let blend_png = dir.join("blend.png");
+    let r = run(&[
+        "render",
+        scene.to_str().unwrap(),
+        "--out",
+        blend_png.to_str().unwrap(),
+    ]);
+    if r.code == 3 {
+        return; // 无 GPU
+    }
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let base_png = dir.join("single.png");
+    let r = run(&[
+        "render",
+        baseline.to_str().unwrap(),
+        "--out",
+        base_png.to_str().unwrap(),
+    ]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let (w, h, a) = decode_rgba(&blend_png);
+    let (w2, h2, b) = decode_rgba(&base_png);
+    assert_eq!((w, h), (w2, h2));
+    let changed = a
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
+        .filter(|(x, y)| x != y)
+        .count();
+    assert!(
+        changed > 10,
+        "混合与纯主 clip 应有可见差异，实际 {changed} 像素"
+    );
+}
+
 /// 手搓一个带 1 秒平移轨道的 GLB（单个三角形 + 单个节点）。
 ///
 /// 与 `crates/quench3d/tests/model_loading.rs` 的夹具同源：这里只要"能装载、有一条
@@ -6554,6 +6654,40 @@ fn model_animation_structure_is_validated() {
     let (code, paths) = diagnostics(&p);
     assert_eq!(code, 2, "负起始时间要拦下");
     assert!(paths.contains(&"models[0].animation.start".to_string()));
+
+    // 第二条 clip 的结构校验（路径必须落在 animation.blend.*）
+    let p = scene(
+        "blend_empty.json",
+        serde_json::json!({ "name": "摆动", "blend": { "name": " " } }),
+    );
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 2, "空的第二条动画名要拦下");
+    assert!(
+        paths.contains(&"models[0].animation.blend.name".to_string()),
+        "{paths:?}"
+    );
+
+    let p = scene(
+        "blend_weight.json",
+        serde_json::json!({ "name": "摆动", "blend": { "name": "摆动", "weight": 1.5 } }),
+    );
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 2, "越界权重要拦下");
+    assert!(
+        paths.contains(&"models[0].animation.blend.weight".to_string()),
+        "{paths:?}"
+    );
+
+    let p = scene(
+        "blend_speed.json",
+        serde_json::json!({ "name": "摆动", "blend": { "name": "摆动", "speed": 0 } }),
+    );
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 2, "第二条 clip 的倍速 0 要拦下");
+    assert!(
+        paths.contains(&"models[0].animation.blend.speed".to_string()),
+        "{paths:?}"
+    );
 
     // 名字不存在**不是**结构错误：这条必须留给装载后（否则 validate 要读资产）
     let p = scene(

@@ -865,13 +865,18 @@ NaN 刚体  : 0
   （fog 的 `density` 缺省 0.02，写 0 等于关）。
 * `objects[].static_friction` 缺省**跟随 `friction`**（只管动摩擦的老场景行为逐位不变）；
   想表达"推得动、但推住之后不会慢慢滑"就把它写得比 `friction` 大。
-* `models[].animation` 是**视觉**动画：`{ "name": "走路", "start": 0, "speed": 1, "loop": true }`。
-  名字在资产里存不存在**只有装载后才知道**（`validate` 不读资产），所以 `validate` 只查结构
-  （名字非空、`speed > 0`、`start >= 0`）；真正的对账在 `simulate`/`render`/`movie` 报告的
-  `models[]`（`found` / `duration` / `tracks` + 资产里可用的 `clips`）——名字写错只给警告，
+* `models[].animation` 是**视觉**动画：`{ "name": "走路", "start": 0, "speed": 1, "loop": true,
+  "blend": { "name": "跑步", "weight": 0.5 } }`。名字在资产里存不存在**只有装载后才知道**
+  （`validate` 不读资产），所以 `validate` 只查结构（名字非空、`speed > 0`、`start >= 0`、
+  `weight` 在 0~1）；真正的对账在 `simulate`/`render`/`movie` 报告的 `models[]`
+  （`found` / `duration` / `tracks` / `blend` + 资产里可用的 `clips`）——名字写错只给警告，
   几何保持绑定姿态，不会让场景非法。`loop` 缺省 **true**（与 `animations[].loop` 缺省 false
-  相反：模型片段通常是循环的）；`loop: false` 播完停在最后一帧。`collide: true` 的静态碰撞体
-  **不跟着动**。可用名字用 `quench3d info 模型.glb` 看。
+  相反：模型片段通常是循环的）；`loop: false` 播完停在最后一帧。
+  `blend` 是**第二条 clip 的固定权重交叉淡化**：两条 clip 各自推进自己的时间，再对局部 TRS
+  插值（旋转 slerp），最后统一累乘父子链；`weight` 缺省 0.5，0 = 只用第一条，1 = 只用第二条。
+  没有随时间变化的权重曲线/状态机；第二条名字写错时**两条都不登记**（保持绑定姿态），不会
+  偷偷只播第一条。`collide: true` 的静态碰撞体**不跟着动**。可用名字用
+  `quench3d info 模型.glb` 看。
 * `waters` 是**解析浮力环境**，不是流体求解器：`{ "center": [x, z], "size": [x, z], "level": y,
   "density": 1000, "drag": 6 }`。`size` 是水面范围（**半空间**，没有池底），动态刚体按
   **排开体积**受浮力、按浸没比例受线性阻尼；密度小于水会浮、大于水会沉。睡眠体**不受浮力**
@@ -1201,7 +1206,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 668 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 671 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

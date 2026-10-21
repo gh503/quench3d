@@ -1523,6 +1523,33 @@ pub struct ModelAnimationDoc {
     /// `schema --json` 的字段表里写明缺省值。
     #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
     pub looping: Option<bool>,
+    /// 可选的第二条动画：与 `name` 按 `weight` 交叉淡化（缺省不混合）。
+    ///
+    /// 两条 clip 各自推进自己的时间；最终姿态 = 局部 TRS 插值（旋转 slerp）。
+    /// 名字不存在不会让 `validate` 失败，但 `simulate`/`render` 报告的
+    /// `models[].blend.found = false` 会说明它没生效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<ModelAnimationBlendDoc>,
+}
+
+/// 模型动画的第二条 clip（交叉淡化）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAnimationBlendDoc {
+    /// 第二条动画名。
+    pub name: String,
+    /// 从第几秒开始播放，缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f32>,
+    /// 播放倍速，缺省 1（必须 > 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// 是否循环，缺省 true。
+    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
+    pub looping: Option<bool>,
+    /// 第二条 clip 的权重（0..=1，缺省 0.5）。0 = 只用第一条，1 = 只用第二条。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
 }
 
 /// 一个外部模型文件。
@@ -4987,6 +5014,46 @@ impl SceneDoc {
                             format!("{ap}.start"),
                             "起始时间必须是非负有限值",
                         ));
+                    }
+                }
+                if let Some(b) = &a.blend {
+                    let bp = format!("{ap}.blend");
+                    if b.name.trim().is_empty() {
+                        out.push(
+                            Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{bp}.name"),
+                                "第二条动画名不能为空",
+                            )
+                            .with_hint("写 glTF 里的 `animations[].name`"),
+                        );
+                    }
+                    if let Some(sp) = b.speed {
+                        if !(sp.is_finite() && sp > 0.0) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{bp}.speed"),
+                                "播放倍速必须是正的有限值",
+                            ));
+                        }
+                    }
+                    if let Some(st) = b.start {
+                        if !st.is_finite() || st < 0.0 {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{bp}.start"),
+                                "起始时间必须是非负有限值",
+                            ));
+                        }
+                    }
+                    if let Some(w) = b.weight {
+                        if !w.is_finite() || !(0.0..=1.0).contains(&w) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{bp}.weight"),
+                                "混合权重必须在 0~1 之间（0 = 只用第一条，1 = 只用第二条）",
+                            ));
+                        }
                     }
                 }
             }

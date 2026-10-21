@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **668** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **671** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -50,6 +50,10 @@ tools/verify_all.sh
 | 模型动画对账 | `cargo test -p quench3d-cli --test cli_e2e model` | 动画名存在/不存在、时长/轨道 |
 | 蒙皮资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_skins` | `info --json` 的 `skins=1` / `skinned_meshes=1`，人类可读输出有「蒙皮」行 |
 | 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
+| 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
+| 场景双时间线 | `cargo test -p quench3d --test model_loading scene_blended_animation_advances_both_clips` | `Scene::advance_animations` 同时推进两条 clip，t=.5 落在 base+2.5 |
+| 场景混合 → CLI 报告/PNG | `cargo test -p quench3d-cli --test cli_e2e model_animation_blend_is_reported_and_rendered` | `models[].blend.found/weight/start` 正确；名字写错给警告；混合 PNG 与纯主 clip 有可见像素差 |
+| 混合结构校验 | `cargo test -p quench3d-cli --test cli_e2e model_animation_structure_is_validated` | 空第二条名字 / 越界 weight / 非正 speed 落在 `models[0].animation.blend.*` |
 | 物理 / 关节 / 复合形状 / CCD | `cargo test -p quench3d-physics` | 确定性、休眠、过滤、传感器、关节 |
 | MCP / ask 工具 | `cargo test -p quench3d-cli --test agent_tools`、`mcp` | 工具清单、stdio 握手、模拟 LLM |
 | JSON Schema | `cargo test -p quench3d-cli schema` | 文档/schema/系统提示三处对账 |
