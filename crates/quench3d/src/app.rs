@@ -535,7 +535,8 @@ impl Engine {
         }
         // 模型动画按**帧**时间推进（不是物理子步）：它是视觉量，暂停时也不该继续走。
         if !self.paused {
-            self.scene.advance_animations(dt);
+            self.scene
+                .advance_animations_with_renderer(dt, &mut self.renderer, &self.gpu);
         }
 
         self.renderer.begin_frame();
@@ -1406,7 +1407,11 @@ pub fn render_sequence_with_game<G: Game>(
         }
         // 与窗口循环同一个口径：动画按帧时间推进，暂停时不走。
         if !engine.paused {
-            engine.scene.advance_animations(frame_dt);
+            engine.scene.advance_animations_with_renderer(
+                frame_dt,
+                &mut engine.renderer,
+                &engine.gpu,
+            );
         }
 
         let camera = engine.camera();

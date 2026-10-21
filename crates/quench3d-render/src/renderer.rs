@@ -1834,7 +1834,7 @@ impl Renderer {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("quench3d-vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("quench3d-indices"),
@@ -2019,6 +2019,46 @@ impl Renderer {
     /// 材质名称（调试用）。
     pub fn material_name(&self, id: MaterialId) -> Option<&str> {
         self.materials.get(id as usize).map(|m| m.name.as_str())
+    }
+
+    /// 原地更新一个网格的顶点（CPU 蒙皮/形变用）；索引与拓扑保持不变。
+    ///
+    /// 返回 `false` 表示网格下标越界。顶点数不变时只写缓冲区（不重建、不换句柄）；
+    /// 顶点数变化时才重建顶点缓冲，并更新包围盒。索引缓冲按**旧拓扑**继续使用，
+    /// 所以调用方必须保证索引仍然有效（蒙皮正是这样：只动顶点，不动面）。
+    pub fn update_mesh_vertices(
+        &mut self,
+        ctx: &GpuContext,
+        id: MeshId,
+        vertices: &[crate::Vertex],
+    ) -> bool {
+        let Some(mesh) = self.meshes.get_mut(id as usize) else {
+            return false;
+        };
+        let bytes = bytemuck::cast_slice(vertices);
+        let needed = bytes.len() as wgpu::BufferAddress;
+        if needed <= mesh.vertex_buffer.size() {
+            ctx.queue.write_buffer(&mesh.vertex_buffer, 0, bytes);
+        } else {
+            mesh.vertex_buffer = ctx
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("quench3d-vertices"),
+                    contents: bytes,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+        }
+        if !vertices.is_empty() {
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for v in vertices {
+                let p = Vec3::from_array(v.position);
+                min = min.min(p);
+                max = max.max(p);
+            }
+            mesh.bounds = Aabb::new(min, max);
+        }
+        true
     }
 
     /// 网格信息 `(名称, 索引数, 包围盒)`。

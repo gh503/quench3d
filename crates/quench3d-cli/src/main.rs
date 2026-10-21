@@ -310,8 +310,14 @@ fn dispatch(args: &Args) -> i32 {
                     } else {
                         format!("\n动画      : {:?}", info.animations)
                     };
+                    let skins = match (info.skins, info.skinned_meshes) {
+                        (Some(skins), Some(skinned)) => {
+                            format!("\n蒙皮      : {skins} 个皮肤 / {skinned} 个蒙皮网格")
+                        }
+                        _ => String::new(),
+                    };
                     let human = format!(
-                        "文件      : {}\n格式      : {}\n子网格    : {}（三角形 {:?}）\n材质/贴图 : {} / {}\n顶点      : {}\n三角形    : {}\n包围盒    : min {:?}  max {:?}\n尺寸      : {:?}{}",
+                        "文件      : {}\n格式      : {}\n子网格    : {}（三角形 {:?}）\n材质/贴图 : {} / {}\n顶点      : {}\n三角形    : {}\n包围盒    : min {:?}  max {:?}\n尺寸      : {:?}{}{}",
                         info.path,
                         info.format,
                         info.meshes,
@@ -323,7 +329,8 @@ fn dispatch(args: &Args) -> i32 {
                         info.bounds_min,
                         info.bounds_max,
                         info.bounds_size,
-                        animations
+                        animations,
+                        skins
                     );
                     finish(args, "info", Ok(value), started, |_| println!("{human}"))
                 }

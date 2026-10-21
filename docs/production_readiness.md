@@ -41,7 +41,7 @@
 | 阴影可调参数 | Blender / Unity | bias 是编译期常量（`renderer.rs:795`），**没有公开字段**；只有 `DirectionalLight.cast_shadows` + 全局开关 | 🟠 |
 | 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO 与深度解析两趟按能力整体关闭**（§12.7） | 🟡 |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4；**GL/WebGL2 上按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧，§12.7） | 🟡 |
-| 网格与顶点属性 | 全部 | position/normal/uv/tangent（`mesh.rs:14`）；**无顶点色、无骨骼蒙皮、无 morph** | 🟡 |
+| 网格与顶点属性 | 全部 | position/normal/uv/tangent（`mesh.rs:14`）+ **CPU 蒙皮**（glTF `JOINTS_0/WEIGHTS_0`，≤4 关节/顶点，`LoadedModel::skinned_mesh`）；**无顶点色、无 GPU 蒙皮、无 morph** | 🟡 |
 | 实例化 | 全部 | 不透明有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
 | 透明排序 | 全部 | 半透明按实例 AABB 中心到相机的距离**全局由远到近**逐实例绘制，不同材质/网格之间也正确；代价是透明物体不合批 | ✅ |
 | LOD | 引擎级 | 无 | ❌ |
@@ -83,8 +83,8 @@
 | 拖拽改父级 | 全部 | 属性面板里用"父物体"下拉改（**保世界位姿**）；场景树内拖放还没有 | 🟡 |
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
-| 关键帧动画 | 全部 | 无（`animations()` 全仓 0 命中） | ❌ |
-| 骨骼 / 蒙皮 | 全部 | 无 | ❌ |
+| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ 皮肤蒙皮；**无编辑器时间轴/混合** | 🟡 |
+| 骨骼 / 蒙皮 | 全部 | **CPU 蒙皮可用**（`skins` + 逆绑定矩阵 + 每帧顶点变形 + 写回 GPU）；**GPU 蒙皮、动画混合/状态机、IK、morph 仍无** | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
 
@@ -2161,7 +2161,9 @@ if let Some(v) = doc.physics.static_friction_speed {
 | --- | --- | --- |
 | glTF 节点层级 / 节点变换 | ✅ 本轮 | 静态几何正确了 |
 | glTF `animations` 解析 | ✅ 第 61 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 退化线性、morph 跳过） |
-| glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ❌ | `LoadedMesh.data` 的 `Vertex` 里没有 joint/weight 字段；要加 4 个关节下标 + 4 个权重 |
+| glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ✅ 第 70 轮（CPU） | `LoadedSkin` + `LoadedMesh.skin/joints/weights`；缺任何顶点数据时整体退回刚性路径（不撕裂网格） |
+| CPU 蒙皮变形 + 顶点回写 | ✅ 第 70 轮 | `LoadedModel::skinned_mesh` 算 `Σ w·world(joint)·IBM·bindInverse`；`Scene::advance_animations_with_renderer` 调 `Renderer::update_mesh_vertices` 原地更新同一个 `MeshId`。GPU 像素回归 t=0/t=0.25 |
+| GPU 蒙皮（顶点着色器关节矩阵） | ❌ | 现在是 CPU 变形；大角色每帧在 CPU 上重算并上传全部顶点。要做 GPU：`JOINTS_0/WEIGHTS_0` 顶点属性 + 关节矩阵 storage/uniform + WGSL 分支 |
 | CPU 侧**采样**（给定 t 求节点世界矩阵） | ✅ 第 61 轮 | `sample_animation(name, t)`；循环/时间推进仍由调用方做（`t.rem_euclid(duration)`） |
 | CPU 侧播放状态（循环/夹取/倍速） | ✅ 第 61 轮 | `ModelAnimationPlayer::advance(dt)` + `mesh_matrices(&model)`；**纯 CPU 可测**（循环用 `rem_euclid`、`duration <= 0` 不除零、非法 dt 不出 NaN） |
 | 场景层应用（`Scene::apply_animation`） | ✅ 第 61 轮 | 纯 CPU、可测：`base × 额外矩阵`（不累乘 → 不漂）、只动有轨道的片段、越界跳过 |
@@ -2170,7 +2172,8 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
 | 编辑器可达 | ✅ 第 62 轮（只保字段） | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；**没有动画面板**（不能选片段 / 调时间轴） |
 | 混合（多轨道 / 权重） | ❌ | 至少要能"两条轨道按权重加权"，否则 #23 的"混合"没落地 |
-| `skins` + GPU 蒙皮 | ❌ | `LoadedMesh.data` 的 `Vertex` 里没有 joint/weight；顶点着色器要读关节矩阵纹理/uniform；`MeshData` 要加两套顶点属性。**带骨骼蒙皮的角色 GLB 仍然只能静止**（能播的是节点级 TRS 动画） |
+| `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
+| `skins` + GPU 蒙皮 | ❌ | 顶点着色器还没有关节矩阵；CPU 路径在角色面数高时是瓶颈。要做顶点属性 + 关节矩阵上传 + WGSL 分支 |
 | `CUBICSPLINE` 真值 / morph target | ❌ | 前者仍退化线性（只取关键帧值、丢切线），后者跳过不猜 |
 | 动画 vs 物理 | ⚠️ 有意 | 模型动画是**视觉**的：`models[].collide` 的静态三角网碰撞体保持绑定姿态，不会跟着动 |
 | `LoadedModel` 的节点树 | ✅ 第 61 轮 | `nodes` + `bind_pose()` + `bind_inverse`（每网格）——静态烘焙与动画并存：`world(t) × bind_inverse` 在绑定姿态下是单位矩阵 |
@@ -2187,11 +2190,12 @@ if let Some(v) = doc.physics.static_friction_speed {
    一次纯结构校验变成 N 次文件解析（Web 端还没有文件系统）。现在结构错误仍然致命，
    名字错误降级为报告里的 `found: false` + 警告，退出码 0；这比"validate 忽然变慢/联网"
    更符合既有契约。
-4. ❌ **`skins` + GPU 蒙皮**（最大的一块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
-   绑定姿态对账测试（t=0 必须与不蒙皮的渲染逐像素近似）。混合、CUBICSPLINE、morph 在它前后都行。
-
-**不要**从 GPU 蒙皮开始：没有节点树和 CPU 侧采样，着色器里的关节矩阵只能从常量来，
-调不动也测不了。
+4. ✅ **`skins` + CPU 蒙皮**（第 70 轮）：解析 + 逐帧变形 + 写回顶点缓冲，t=0/t=0.25
+   的 GPU 像素回归；t=0 与绑定姿态一致。**仍缺 GPU 蒙皮**（顶点属性 + 关节矩阵 +
+   WGSL）、动画混合、CUBICSPLINE 真值、morph target。
+5. ❌ **`skins` + GPU 蒙皮**（下一个大块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
+   绑定姿态对账。CPU 路径已经证明"数据链/场景/报告"是对的，GPU 只是把变形搬到显卡；
+   不要在还没有动画混合/蒙皮测试的情况下先重写着色器。
 
 ## 20. 第 63 轮：`waters` —— 解析水域 + 浮力（M1）
 
@@ -2477,7 +2481,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**664** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**668** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
@@ -2485,7 +2489,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
   `camera` Orbit→Fly。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
-**仍未做**：GPU 蒙皮/骨骼动画、IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、
+**仍未做**：GPU 蒙皮（CPU 蒙皮已做）/动画混合、IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、
 单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---

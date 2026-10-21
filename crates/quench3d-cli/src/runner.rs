@@ -732,6 +732,12 @@ pub struct ModelInfo {
     /// 资产里的动画名（按 glTF 顺序；没有动画时不出现）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub animations: Vec<String>,
+    /// glTF 皮肤数；没有蒙皮时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skins: Option<usize>,
+    /// 绑定皮肤的网格片段数；没有蒙皮时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skinned_meshes: Option<usize>,
 }
 
 /// 环境自检报告。
@@ -3881,7 +3887,9 @@ fn run_render_single(
         }
         engine.scene.sync_from_physics(&engine.world);
         // 单帧渲染没有"帧时间"：按播放器当前时间（= 场景里的 start）摆一次姿态。
-        engine.scene.advance_animations(0.0);
+        engine
+            .scene
+            .advance_animations_with_renderer(0.0, &mut engine.renderer, &engine.gpu);
         scene_objects = engine.scene.len();
         camera_position = arr(engine.camera().position);
         water_post = engine.renderer.options.water.enabled;
@@ -4591,6 +4599,9 @@ pub fn run_info(path: &std::path::Path) -> Result<ModelInfo, RunError> {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        skins: (!model.skins.is_empty()).then_some(model.skins.len()),
+        skinned_meshes: (model.has_skinning())
+            .then(|| model.meshes.iter().filter(|m| m.skin.is_some()).count()),
     })
 }
 

@@ -66,6 +66,18 @@ impl From<std::io::Error> for AssetError {
     }
 }
 
+/// 一个 glTF 皮肤（关节 + 逆绑定矩阵）。
+///
+/// `joints` 是节点下标，`inverse_bind[j]` 与 `joints[j]` 一一对应。没有
+/// `inverseBindMatrices` 的资产按规范当作单位矩阵（表示顶点已经预乘过）。
+#[derive(Clone, Debug, Default)]
+pub struct LoadedSkin {
+    /// 关节节点下标。
+    pub joints: Vec<usize>,
+    /// 每个关节的逆绑定矩阵。
+    pub inverse_bind: Vec<Mat4>,
+}
+
 /// CPU 端的一个网格片段。
 #[derive(Clone, Debug)]
 pub struct LoadedMesh {
@@ -85,6 +97,12 @@ pub struct LoadedMesh {
     /// 这一个矩阵；存逆矩阵而不是运行时求逆，是因为求逆在每帧每网格都做一次、还会在
     /// 退化节点（零缩放）上出 NaN。
     pub bind_inverse: Mat4,
+    /// 这个片段绑定的皮肤下标（`None` = 普通刚性网格）。
+    pub skin: Option<usize>,
+    /// 每顶点的 4 个关节下标（`JOINTS_0`；没有皮肤时为空）。
+    pub joints: Vec<[u16; 4]>,
+    /// 每顶点的 4 个关节权重（`WEIGHTS_0`；没有皮肤时为空）。
+    pub weights: Vec<[f32; 4]>,
 }
 
 impl Default for LoadedMesh {
@@ -95,6 +113,9 @@ impl Default for LoadedMesh {
             material: None,
             node: None,
             bind_inverse: Mat4::IDENTITY,
+            skin: None,
+            joints: Vec::new(),
+            weights: Vec::new(),
         }
     }
 }
@@ -230,10 +251,19 @@ impl ModelAnimationPlayer {
         let worlds = model.sample_animation(&self.animation, self.time);
         (0..model.meshes.len())
             .map(|i| match &worlds {
-                Some(w) => model.mesh_matrix(i, w),
-                None => Mat4::IDENTITY,
+                Some(w) if model.meshes.get(i).and_then(|m| m.skin).is_none() => {
+                    model.mesh_matrix(i, w)
+                }
+                _ => Mat4::IDENTITY,
             })
             .collect()
+    }
+
+    /// 当前时刻的**节点世界矩阵**（蒙皮要用；与 [`Self::mesh_matrices`] 同源）。
+    ///
+    /// 动画名不存在/模型没有节点时返回 `None`；调用方应保持绑定姿态而不是猜。
+    pub fn node_worlds(&self, model: &LoadedModel) -> Option<Vec<Mat4>> {
+        model.sample_animation(&self.animation, self.time)
     }
 }
 
@@ -308,6 +338,8 @@ pub struct LoadedModel {
     pub nodes: Vec<LoadedNode>,
     /// 动画（glTF 的 `animations`；没有就是空）。
     pub animations: Vec<LoadedAnimation>,
+    /// 皮肤（glTF 的 `skins`；没有就是空）。
+    pub skins: Vec<LoadedSkin>,
 }
 
 impl LoadedModel {
@@ -385,15 +417,21 @@ impl LoadedModel {
         Some(worlds)
     }
 
-    /// 画某个网格片段该用的矩阵：`world(t) × bind_inverse`。
+    /// 画某个网格片段该用的**刚性**矩阵：`world(t) × bind_inverse`。
     ///
     /// * 绑定姿态（或没有动画）时它**恰好是单位矩阵** —— 静态路径逐位不变。
     /// * 几何是按绑定姿态烘过的，所以乘上"当前世界 × 绑定世界⁻¹"就是动画后的位置。
     /// * 非节点片段（OBJ、兜底）永远返回单位矩阵。
+    /// * **蒙皮片段也返回单位矩阵**：它的顶点由 [`Self::skinned_mesh`] 按关节矩阵
+    ///   直接算到骨架空间（再乘出生时的 `base` 摆放），若这里再乘一次节点动画就是
+    ///   动了两遍。蒙皮网格由 `advance_animations_with_renderer` 更新顶点。
     pub fn mesh_matrix(&self, mesh_index: usize, node_worlds: &[Mat4]) -> Mat4 {
         let Some(mesh) = self.meshes.get(mesh_index) else {
             return Mat4::IDENTITY;
         };
+        if mesh.skin.is_some() {
+            return Mat4::IDENTITY;
+        }
         let Some(node) = mesh.node else {
             return Mat4::IDENTITY;
         };
@@ -401,6 +439,75 @@ impl LoadedModel {
             Some(world) => *world * mesh.bind_inverse,
             None => Mat4::IDENTITY,
         }
+    }
+
+    /// 这个模型是否含可蒙皮网格。
+    pub fn has_skinning(&self) -> bool {
+        self.meshes.iter().any(|m| m.skin.is_some())
+    }
+
+    /// 按当前节点世界矩阵计算某个蒙皮片段的**变形后**网格。
+    ///
+    /// 返回 `None` 表示这个片段不是蒙皮网格（调用方继续走刚性矩阵路径）。
+    /// 几何在装载时已经烘进绑定姿态的节点世界变换，所以每个顶点的最终变换是
+    /// `Σ w_j · world(joint_j) · inverseBind_j · bind_inverse(mesh)`；
+    /// 权重和为 0 的坏顶点保持绑定姿态，不产生 NaN。
+    ///
+    /// **CPU 蒙皮**：法线/切线用每个关节矩阵的线性部分变换后归一化（非均匀缩放下
+    /// 不是严格的逆转置，和装载时烘节点变换的取舍一致），顶点位置是精确的。
+    pub fn skinned_mesh(&self, mesh_index: usize, node_worlds: &[Mat4]) -> Option<MeshData> {
+        let mesh = self.meshes.get(mesh_index)?;
+        let skin_index = mesh.skin?;
+        let skin = self.skins.get(skin_index)?;
+        if mesh.joints.len() != mesh.data.vertices.len()
+            || mesh.weights.len() != mesh.data.vertices.len()
+        {
+            return None;
+        }
+        // 每个关节的 `world × inverseBind × bindInverse` 只算一次。
+        let mut joint_mats = Vec::with_capacity(skin.joints.len());
+        for (j, &node) in skin.joints.iter().enumerate() {
+            let world = node_worlds.get(node).copied().unwrap_or(Mat4::IDENTITY);
+            let inverse_bind = skin.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY);
+            joint_mats.push(world * inverse_bind * mesh.bind_inverse);
+        }
+        let mut out = mesh.data.clone();
+        for (vi, vertex) in out.vertices.iter_mut().enumerate() {
+            let p = vertex.pos();
+            let n = vertex.nrm();
+            let t = Vec3::from_array([vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]]);
+            let mut pos = Vec3::ZERO;
+            let mut nrm = Vec3::ZERO;
+            let mut tan = Vec3::ZERO;
+            let mut total = 0.0f32;
+            for k in 0..4 {
+                let weight = mesh.weights[vi][k];
+                if !weight.is_finite() || weight <= 0.0 {
+                    continue;
+                }
+                let joint = mesh.joints[vi][k] as usize;
+                let Some(m) = joint_mats.get(joint) else {
+                    continue;
+                };
+                pos += m.transform_point3(p) * weight;
+                nrm += m.to_mat3().mul_vec3(n) * weight;
+                tan += m.to_mat3().mul_vec3(t) * weight;
+                total += weight;
+            }
+            if total > 1e-8 {
+                let inv = 1.0 / total;
+                vertex.position = (pos * inv).to_array();
+                let n = nrm.normalize_or_zero();
+                vertex.normal = if n == Vec3::ZERO {
+                    Vec3::Y.to_array()
+                } else {
+                    n.to_array()
+                };
+                let t = tan.normalize_or_zero();
+                vertex.tangent = [t.x, t.y, t.z, vertex.tangent[3]];
+            }
+        }
+        Some(out)
     }
 
     /// 顶点总数。
@@ -771,6 +878,22 @@ fn model_from_gltf(
         model.images.push(data);
     }
 
+    // 皮肤：关节节点下标 + 逆绑定矩阵。逆矩阵缺失时按规范补单位矩阵。
+    for skin in doc.skins() {
+        let joints: Vec<usize> = skin.joints().map(|n| n.index()).collect();
+        let inverse_bind: Vec<Mat4> = skin
+            .reader(|b| buffers.get(b.index()).map(|b| b.0.as_slice()))
+            .read_inverse_bind_matrices()
+            .map(|it| it.map(|m| matrix_to_mat4(&m)).collect())
+            .unwrap_or_default();
+        let mut inverse_bind = inverse_bind;
+        inverse_bind.resize(joints.len(), Mat4::IDENTITY);
+        model.skins.push(LoadedSkin {
+            joints,
+            inverse_bind,
+        });
+    }
+
     for mat in doc.materials() {
         let pbr = mat.pbr_metallic_roughness();
         let base = pbr.base_color_factor();
@@ -902,7 +1025,9 @@ fn model_from_gltf(
     }
 
     // 每份实例带上**节点**标签：同一个网格被多个节点引用时，标签才分得清左右轮
-    let mut node_meshes: Vec<(usize, Matrix, String, Option<usize>)> = Vec::new();
+    /// 一个待展开的「网格 + 节点变换 + 节点/皮肤下标」条目。
+    type NodeMeshEntry = (usize, Matrix, String, Option<usize>, Option<usize>);
+    let mut node_meshes: Vec<NodeMeshEntry> = Vec::new();
     for node in doc.nodes() {
         if let Some(mesh) = node.mesh() {
             used_meshes[mesh.index()] = true;
@@ -915,6 +1040,7 @@ fn model_from_gltf(
                 worlds[node.index()].unwrap_or(IDENTITY),
                 label,
                 Some(node.index()),
+                node.skin().map(|s| s.index()),
             ));
         }
     }
@@ -922,10 +1048,10 @@ fn model_from_gltf(
     // 免得"以前能看见、现在看不见"。引擎宁可多画一个，也不静默吞掉几何。
     for (i, used) in used_meshes.iter().enumerate() {
         if !used {
-            node_meshes.push((i, IDENTITY, mesh_label(doc, i), None));
+            node_meshes.push((i, IDENTITY, mesh_label(doc, i), None, None));
         }
     }
-    for (mesh_index, world, label, node_index) in node_meshes {
+    for (mesh_index, world, label, node_index, skin_index) in node_meshes {
         let mesh = doc.meshes().nth(mesh_index).expect("下标来自 doc.meshes()");
         for (pi, prim) in mesh.primitives().enumerate() {
             let reader = prim.reader(|b| buffers.get(b.index()).map(|b| b.0.as_slice()));
@@ -945,6 +1071,24 @@ fn model_from_gltf(
                 .read_tangents()
                 .map(|t| t.collect())
                 .unwrap_or_default();
+            // JOINTS_0 / WEIGHTS_0 只在有皮肤时读；下标必须是 u16（u8 会由
+            // gltf crate 的 into_u16 升位），权重归一化交给运行时。
+            let joints: Vec<[u16; 4]> = if skin_index.is_some() {
+                reader
+                    .read_joints(0)
+                    .map(|j| j.into_u16().collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let weights: Vec<[f32; 4]> = if skin_index.is_some() {
+                reader
+                    .read_weights(0)
+                    .map(|w| w.into_f32().collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
 
             let mut data = MeshData::new();
             for (i, p) in positions.iter().enumerate() {
@@ -993,6 +1137,13 @@ fn model_from_gltf(
                     v.tangent = [tv.x, tv.y, tv.z, v.tangent[3]];
                 }
             }
+            // 皮肤数据必须与顶点一一对应；缺一个顶点就整体退回刚性路径，
+            // 而不是让一部分顶点蒙皮、一部分不动（那会撕裂网格）。
+            let skin = skin_index.filter(|s| {
+                model.skins.get(*s).is_some()
+                    && joints.len() == data.vertices.len()
+                    && weights.len() == data.vertices.len()
+            });
             model.meshes.push(LoadedMesh {
                 name: match mesh.name() {
                     Some(n) if mesh.primitives().len() > 1 => format!("{label}/{n}_{pi}"),
@@ -1004,6 +1155,9 @@ fn model_from_gltf(
                 node: node_index,
                 // 几何烘的是节点**绑定姿态**的世界变换，逆矩阵留给运行时算动画
                 bind_inverse: matrix_to_mat4(&world).inverse(),
+                skin,
+                joints: if skin.is_some() { joints } else { Vec::new() },
+                weights: if skin.is_some() { weights } else { Vec::new() },
             });
         }
     }
@@ -1348,6 +1502,9 @@ pub fn parse_obj(text: &str, name: &str) -> Result<LoadedModel, AssetError> {
             material: g.material,
             node: None,
             bind_inverse: Mat4::IDENTITY,
+            skin: None,
+            joints: Vec::new(),
+            weights: Vec::new(),
         });
     }
 

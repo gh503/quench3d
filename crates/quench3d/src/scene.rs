@@ -356,6 +356,44 @@ impl Scene {
         updated
     }
 
+    /// 推进动画并**把蒙皮顶点写回 GPU**；窗口/无头渲染都应该用这个入口。
+    ///
+    /// 变换与顶点更新分开：`advance_animations` 只摆物体的刚性位姿（绑定姿态时是
+    /// 单位矩阵），这里再按关节矩阵重算蒙皮顶点。没有蒙皮网格时第二步是空循环，
+    /// 与旧路径的可见行为逐位一致。`renderer.update_mesh_vertices` 保留同一个
+    /// `MeshId`，所以编辑器选择、材质绑定、包围盒引用都不需要换句柄。
+    pub fn advance_animations_with_renderer(
+        &mut self,
+        dt: f32,
+        renderer: &mut Renderer,
+        ctx: &quench3d_render::GpuContext,
+    ) -> usize {
+        let updated = self.advance_animations(dt);
+        if !self.animations.iter().any(|a| a.model.has_skinning()) {
+            return updated;
+        }
+        let Scene {
+            objects,
+            animations,
+            ..
+        } = self;
+        for a in animations.iter() {
+            let Some(worlds) = a.player.node_worlds(&a.model) else {
+                continue;
+            };
+            for (mesh_index, &object_index) in a.objects.iter().enumerate() {
+                let Some(data) = a.model.skinned_mesh(mesh_index, &worlds) else {
+                    continue;
+                };
+                let Some(object) = objects.get_mut(object_index) else {
+                    continue;
+                };
+                renderer.update_mesh_vertices(ctx, object.mesh, &data.vertices);
+            }
+        }
+        updated
+    }
+
     /// 物体数量。
     pub fn len(&self) -> usize {
         self.objects.len()

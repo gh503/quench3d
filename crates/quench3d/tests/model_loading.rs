@@ -3,8 +3,12 @@
 //! 这里手搓一个最小 GLB（一个三角形）而不是塞二进制固件进仓库：
 //! 格式的每个字节都在测试里看得见，改了格式也知道哪里断了。
 
+use std::sync::Arc;
+
 use quench3d::assets::{load_model, load_model_from_bytes, AssetError};
-use quench3d::math::Vec3;
+use quench3d::math::{Mat4, Transform, Vec3};
+use quench3d::render::context::with_gpu_tests;
+use quench3d::EngineConfig;
 
 /// 手搓一个 GLB：12 字节头 + JSON 块 + BIN 块。
 fn glb_from_parts(json: &str, mut bin: Vec<u8>) -> Vec<u8> {
@@ -64,6 +68,186 @@ fn glb_bytes_load_without_touching_the_filesystem() {
     // 没有材质 → 补一个缺省材质，别让上传时下标落空
     assert_eq!(model.materials.len(), 1);
     assert_eq!(mesh.material, None);
+}
+
+/// 手搓一个「1 关节 + 1 蒙皮网格 + 1 秒平移动画」的 GLB。
+///
+/// 关节 `node 0` 从 y=0 平移到 y=2，网格顶点在绑定姿态 y=0；如果蒙皮真的生效，
+/// `skinned_mesh` 在 t=1 时顶点 y 必须整体 +2，而 `mesh_matrices` 必须仍是单位矩阵
+/// （否则物体变换会和蒙皮叠加，动两遍）。
+fn skinned_glb() -> Vec<u8> {
+    let mut bin = Vec::new();
+    // POSITION：3 个 vec3
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // JOINTS_0：3 × [u8;4]，全部绑到关节 0
+    for _ in 0..3 {
+        bin.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    // WEIGHTS_0：3 × vec4，全部权重 1
+    for _ in 0..3 {
+        for f in [1.0f32, 0.0, 0.0, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    // 逆绑定矩阵：单位矩阵（列主序）
+    for f in [
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // 动画输入：t=0,1
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // 动画输出：y=0 → y=2
+    for f in [0.0f32, 0.0, 0.0, 0.0, 2.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[1]}],
+"nodes":[{"name":"joint"},{"name":"skin","mesh":0,"skin":0}],
+"meshes":[{"name":"tri","primitives":[{"attributes":{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2}}]}],
+"skins":[{"joints":[0],"inverseBindMatrices":3}],
+"accessors":[
+ {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+ {"bufferView":1,"componentType":5121,"count":3,"type":"VEC4"},
+ {"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"},
+ {"bufferView":3,"componentType":5126,"count":1,"type":"MAT4"},
+ {"bufferView":4,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+ {"bufferView":5,"componentType":5126,"count":2,"type":"VEC3"}],
+"bufferViews":[
+ {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":36,"byteLength":12,"target":34962},
+ {"buffer":0,"byteOffset":48,"byteLength":48,"target":34962},
+ {"buffer":0,"byteOffset":96,"byteLength":64},
+ {"buffer":0,"byteOffset":160,"byteLength":8},
+ {"buffer":0,"byteOffset":168,"byteLength":24}],
+"buffers":[{"byteLength":192}],
+"animations":[{"name":"lift","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
+ "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#;
+    glb_from_parts(json, bin)
+}
+
+#[test]
+fn skinned_glb_deforms_vertices_from_joint_animation() {
+    let model = load_model_from_bytes("skinned.glb", &skinned_glb()).expect("蒙皮 GLB 应当能解析");
+    assert!(model.has_skinning(), "应当识别出蒙皮网格");
+    let mesh = &model.meshes[0];
+    assert_eq!(mesh.skin, Some(0), "片段应当绑定到 skin 0");
+    assert_eq!(mesh.joints.len(), 3, "每个顶点都要有 JOINTS_0");
+    assert_eq!(mesh.weights.len(), 3, "每个顶点都要有 WEIGHTS_0");
+    assert_eq!(model.skins[0].joints, vec![0]);
+    assert_eq!(model.skins[0].inverse_bind.len(), 1);
+
+    let player = model.player("lift").expect("动画名应当能查到");
+    let worlds = player.node_worlds(&model).expect("应当能采样节点世界矩阵");
+    // 蒙皮网格不再走刚性矩阵，否则会和顶点蒙皮叠加。
+    assert_eq!(player.mesh_matrices(&model), vec![Mat4::IDENTITY]);
+    assert_eq!(
+        model.mesh_matrix(0, &worlds),
+        Mat4::IDENTITY,
+        "直接调用 mesh_matrix 也必须跳过蒙皮片段"
+    );
+
+    let bind = model
+        .skinned_mesh(0, &worlds)
+        .expect("蒙皮网格应当返回变形数据");
+    assert!((bind.vertices[1].position[0] - 1.0).abs() < 1e-5);
+    assert!((bind.vertices[1].position[1] - 0.0).abs() < 1e-5);
+
+    let mut at_one = player.clone();
+    at_one.time = 1.0;
+    let worlds = at_one.node_worlds(&model).expect("t=1 也要能采样");
+    let posed = model.skinned_mesh(0, &worlds).expect("t=1 应当有变形数据");
+    for (i, v) in posed.vertices.iter().enumerate() {
+        let bind_y = bind.vertices[i].position[1];
+        assert!(
+            (v.position[1] - (bind_y + 2.0)).abs() < 1e-5,
+            "顶点 {i} 应当被关节抬高 2：{:?}",
+            v.position
+        );
+    }
+    // 法线不跟随平移变化，必须仍是单位向量（不能变成 NaN/0）。
+    for v in &posed.vertices {
+        let n = Vec3::from_array(v.normal);
+        assert!(
+            (n.length() - 1.0).abs() < 1e-4,
+            "法线必须归一化：{:?}",
+            v.normal
+        );
+    }
+}
+
+/// 蒙皮不是只改 CPU 数据：它必须把新顶点写回 GPU，画面真的动。
+///
+/// 同一条 `lift` 动画，t=0 与 t=0.25 各渲染一张 64×64；如果只改了 `SceneObject`
+/// 的变换、或 `update_mesh_vertices` 没接上，两张图会逐字节相同（这条会红）。
+#[test]
+fn skinned_mesh_changes_rendered_pixels() {
+    let rendered = with_gpu_tests(
+        "蒙皮顶点写回 GPU（真的创建 wgpu 上下文）",
+        || {
+            let model = Arc::new(
+                load_model_from_bytes("skinned.glb", &skinned_glb()).expect("蒙皮 GLB 应当能解析"),
+            );
+            let config = EngineConfig {
+                width: 64,
+                height: 64,
+                msaa_samples: 1,
+                ..Default::default()
+            };
+            let render_at = |time: f32| {
+                quench3d::render_offscreen(64, 64, &config, |engine| {
+                    let spawned = model.spawn(
+                        &mut engine.renderer,
+                        &engine.gpu,
+                        &mut engine.scene,
+                        Transform::default(),
+                    );
+                    let mut player = model.player("lift").expect("动画存在");
+                    player.time = time;
+                    engine.scene.play_model_animation(
+                        Arc::clone(&model),
+                        spawned.objects,
+                        spawned.base,
+                        player,
+                    );
+                    engine.scene.lighting.sun = None;
+                    engine.scene.lighting.ambient_color = Vec3::ONE;
+                    engine.scene.lighting.ambient_intensity = 2.0;
+                    engine.orbit.focus = Vec3::new(0.5, 0.75, 0.0);
+                    engine.orbit.distance = 3.0;
+                    engine.orbit.yaw = 0.0;
+                    engine.orbit.pitch = 0.0;
+                    engine.scene.advance_animations_with_renderer(
+                        0.0,
+                        &mut engine.renderer,
+                        &engine.gpu,
+                    );
+                })
+            };
+            let a = render_at(0.0).expect("t=0 渲染");
+            let b = render_at(0.25).expect("t=0.25 渲染");
+            (a, b)
+        },
+    );
+    let Some((a, b)) = rendered else {
+        return;
+    };
+    let changed = a
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.rgba.as_chunks::<4>().0)
+        .filter(|(x, y)| x != y)
+        .count();
+    assert!(
+        changed > 20,
+        "蒙皮后画面至少要有几十个像素变化，实际 {changed}（顶点没有写回 GPU？）"
+    );
 }
 
 #[test]

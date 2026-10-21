@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **664** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **668** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -31,6 +31,7 @@ tools/verify_all.sh
 | 解析式环境高光 | `cargo test -p quench3d-render --test post_pipeline analytic_environment` | 金属球开关像素不同 |
 | 透明排序 | `cargo test -p quench3d-render --test post_pipeline transparent` | 远蓝后画、近红先画仍得到正确混合 |
 | 网格深度 | `cargo test -p quench3d-render --test post_pipeline grid_writes_depth` | 地面下方线段被遮住、上方可见 |
+| 骨骼蒙皮（CPU）+ 顶点回写 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --test model_loading skinned` | 手搓 GLB 的 `skins/JOINTS_0/WEIGHTS_0` 被解析；关节 t=1 时顶点 y+2；t=0 与 t=0.25 的 64×64 渲染**像素确实变化**（没写回 GPU 这条会红） |
 | 材质 alpha / 双面 | `cargo test -p quench3d-render --test material_pipeline_traits` | 左右半幅像素不同 |
 | 后端回退 / GL 翻译 | `cargo test -p quench3d-render --test backend_fallback`；`cargo test -p quench3d-render --lib gl_pipelines` | 候选过滤、所有 WGSL 能翻译到 GLSL |
 
@@ -47,6 +48,8 @@ tools/verify_all.sh
 | 动画 / 动作 / 探针 | `cargo test -p quench3d-cli --test cli_e2e`（animation/probe/action 用例） | 状态/探针结果随步数变化 |
 | 场景 include / 模板 / 实例 | `cargo test -p quench3d-cli --test scene_fixtures` | 合并、重名、路径、往返 |
 | 模型动画对账 | `cargo test -p quench3d-cli --test cli_e2e model` | 动画名存在/不存在、时长/轨道 |
+| 蒙皮资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_skins` | `info --json` 的 `skins=1` / `skinned_meshes=1`，人类可读输出有「蒙皮」行 |
+| 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
 | 物理 / 关节 / 复合形状 / CCD | `cargo test -p quench3d-physics` | 确定性、休眠、过滤、传感器、关节 |
 | MCP / ask 工具 | `cargo test -p quench3d-cli --test agent_tools`、`mcp` | 工具清单、stdio 握手、模拟 LLM |
 | JSON Schema | `cargo test -p quench3d-cli schema` | 文档/schema/系统提示三处对账 |
@@ -88,7 +91,7 @@ python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 
 ## 6. 明确未覆盖（不要当成绿）
 
-* **GPU 蒙皮 / 骨骼动画**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 仍未实现；带骨骼角色只能静止。
+* **GPU 蒙皮 / 动画混合**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，且有 **CPU 蒙皮**（每顶点最多 4 关节，逐帧变形后写回顶点缓冲）；但**顶点着色器里没有关节矩阵**，混合/状态机、IK、morph target 仍未做。CPU 路径在角色面数高时会把开销放在 CPU。
 * **IBL / HDRI / 环境 cubemap**：只有解析式环境高光。
 * **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除。
 * **音频、脚本层、粒子、贴花、地形、多视口**：没有。

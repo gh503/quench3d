@@ -6195,6 +6195,148 @@ fn speculative_margin_reduces_penetration_on_impact() {
     );
 }
 
+/// 手搓一个带 1 关节蒙皮 + 1 秒平移动画的 GLB，用于验 `info` 的蒙皮字段。
+fn skinned_glb_bytes() -> Vec<u8> {
+    fn glb_from_parts(json: &str, mut bin: Vec<u8>) -> Vec<u8> {
+        let mut json_bytes = json.replace('\n', "").into_bytes();
+        while !json_bytes.len().is_multiple_of(4) {
+            json_bytes.push(b' ');
+        }
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb
+    }
+    let mut bin = Vec::new();
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 0..36 POSITION
+    }
+    for _ in 0..3 {
+        bin.extend_from_slice(&[0, 0, 0, 0]); // 36..48 JOINTS_0
+    }
+    for _ in 0..3 {
+        for f in [1.0f32, 0.0, 0.0, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes()); // 48..96 WEIGHTS_0
+        }
+    }
+    for f in [
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 96..160 单位逆绑定矩阵
+    }
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 160..168 时间
+    }
+    for f in [0.0f32, 0.0, 0.0, 0.0, 2.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 168..192 平移
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[1]}],
+"nodes":[{"name":"joint"},{"name":"skin","mesh":0,"skin":0}],
+"meshes":[{"name":"tri","primitives":[{"attributes":{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2}}]}],
+"skins":[{"joints":[0],"inverseBindMatrices":3}],
+"accessors":[
+ {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+ {"bufferView":1,"componentType":5121,"count":3,"type":"VEC4"},
+ {"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"},
+ {"bufferView":3,"componentType":5126,"count":1,"type":"MAT4"},
+ {"bufferView":4,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+ {"bufferView":5,"componentType":5126,"count":2,"type":"VEC3"}],
+"bufferViews":[
+ {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":36,"byteLength":12,"target":34962},
+ {"buffer":0,"byteOffset":48,"byteLength":48,"target":34962},
+ {"buffer":0,"byteOffset":96,"byteLength":64},
+ {"buffer":0,"byteOffset":160,"byteLength":8},
+ {"buffer":0,"byteOffset":168,"byteLength":24}],
+"buffers":[{"byteLength":192}],
+"animations":[{"name":"lift","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
+ "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#;
+    glb_from_parts(json, bin)
+}
+
+#[test]
+fn info_reports_skins_and_skinned_meshes() {
+    let dir = temp_dir("info_skin");
+    std::fs::write(dir.join("skin.glb"), skinned_glb_bytes()).expect("写蒙皮夹具");
+    let path = dir.join("skin.glb");
+    let r = run(&["info", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    assert_eq!(d["data"]["skins"], 1, "{d}");
+    assert_eq!(d["data"]["skinned_meshes"], 1, "{d}");
+    let human = run(&["info", path.to_str().unwrap()]);
+    assert_eq!(human.code, 0, "{}", human.stderr);
+    assert!(
+        human.stdout.contains("蒙皮"),
+        "人类可读输出要有蒙皮行：{}",
+        human.stdout
+    );
+}
+
+/// CLI 端的蒙皮正向验证：同一条 `lift`，start=0 与 start=0.5 的 PNG 必须不同。
+///
+/// 只测 `skinned_mesh` 不够——要证明场景里的 `models[].animation` 真的经过
+/// `render_offscreen_stats` 的 setup、`advance_animations_with_renderer` 写回 GPU、
+/// 再被 `--out` 写成用户能看的图。没有 GPU 时按既有口径退出码 3，跳过断言。
+#[test]
+fn skinned_model_animation_changes_cli_render() {
+    let dir = temp_dir("skin_render");
+    std::fs::write(dir.join("skin.glb"), skinned_glb_bytes()).expect("写蒙皮夹具");
+    let render_at = |start: f32| {
+        let scene = write_scene(
+            &dir,
+            &format!("scene-{start}.json"),
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{ "path": "skin.glb", "animation": { "name": "lift", "start": start } }],
+                "camera": { "position": [0.5, 1.2, 4.0], "look_at": [0.5, 1.2, 0.0], "fov_deg": 45.0 },
+                "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+            }),
+        );
+        let out = dir.join(format!("skin-{start}.png"));
+        let r = run(&[
+            "render",
+            scene.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ]);
+        (r, out)
+    };
+    let (a, a_png) = render_at(0.0);
+    if a.code == 3 {
+        return; // 无 GPU
+    }
+    assert_eq!(a.code, 0, "stderr={} stdout={}", a.stderr, a.stdout);
+    let (b, b_png) = render_at(0.5);
+    assert_eq!(b.code, 0, "stderr={} stdout={}", b.stderr, b.stdout);
+    let (w, h, pa) = decode_rgba(&a_png);
+    let (w2, h2, pb) = decode_rgba(&b_png);
+    assert_eq!((w, h), (w2, h2));
+    let changed = pa
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pb.as_chunks::<4>().0)
+        .filter(|(x, y)| x != y)
+        .count();
+    assert!(
+        changed > 10,
+        "start=0 与 start=0.5 应当有可见差异，实际 {changed} 像素"
+    );
+}
+
 /// 手搓一个带 1 秒平移轨道的 GLB（单个三角形 + 单个节点）。
 ///
 /// 与 `crates/quench3d/tests/model_loading.rs` 的夹具同源：这里只要"能装载、有一条

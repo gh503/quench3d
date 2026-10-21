@@ -28,6 +28,19 @@
 
 ### 新增
 
+- **glTF 骨骼蒙皮（CPU 路径，第 70 轮）**：装载 `skins`、`inverseBindMatrices`、
+  `JOINTS_0`、`WEIGHTS_0`；每个蒙皮片段的顶点按
+  `Σ w·world(joint)·inverseBind·bindInverse` 逐帧变形，再通过新的
+  `Renderer::update_mesh_vertices` 原地写回同一个 `MeshId`（不换句柄、不动索引，
+  选择/材质/阴影都跟着变）。蒙皮片段不再乘节点动画矩阵，避免"顶点蒙皮 + 物体动画"
+  动两遍；刚性片段路径逐位不变。`info` 报告新增 `skins` / `skinned_meshes`，
+  人类可读输出多一行"蒙皮"。
+  边界（诚实）：**这是 CPU 蒙皮**，每顶点最多 4 关节；没有 GPU 关节矩阵、动画混合/
+  状态机、IK、morph target；`models[].collide` 的静态碰撞体仍是绑定姿态。
+  回归：`skinned_glb_deforms_vertices_from_joint_animation`（纯 CPU 顶点对账）+
+  `skinned_mesh_changes_rendered_pixels`（GPU 上 t=0/t=0.25 两张图必须有像素差）+
+  `info_reports_skins_and_skinned_meshes` + `skinned_model_animation_changes_cli_render`
+  （场景 `models[].animation` 经 CLI 出图，start=0/0.5 的 PNG 必须不同）。
 - **单帧黄金图回归（`render --golden`）**：渲染后把 PNG 与参考图逐像素比对，
   报告 `golden: { matched, changed_pixels, total_pixels, max_channel_diff, tolerance }`；
   超出 `--golden-tolerance`（0..255，缺省 0）退出码 1，并提示"确认是有意变化后更新
