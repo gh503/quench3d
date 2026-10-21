@@ -10,6 +10,36 @@
 
 ### 修复
 
+- **网格不写深度，调试线段会从地面下穿出来**。`grid.wgsl` 写了 `frag_depth`，但
+  `quench3d-grid` 管线是 `depth_write_enabled: false`——网格只按深度测试、不写回，
+  地面下方的坐标轴/包围盒/骨架线全部可见。现在网格真正写深度；地面**下方**的线段
+  被遮住、上方仍可见。回归：`grid_writes_depth_and_hides_lines_below_the_floor`
+  （把 `Some(true)` 改回 `false` 这条会红，已实测）。
+- **F3/F4 快捷键时灵时不灵（开→关，看起来没反应）**。原来事件回调和
+  `Game::update` 各调一次 `handle_engine_keys`，而 `tick` 开头才清瞬时按键；同一次
+  "按下 + 抬起"落在同一帧时 keydown/keyup 各处理一次，正好抵消。现在只在**按下
+  事件**里处理一次（忽略 auto-repeat），`Game::update` 不再重复处理；`tick` 开头的
+  `begin_frame` 顺序保持不变。回归：`press_and_release_lifecycle`（基础语义）+
+  浏览器探针 `tools/probe_web_ui.sh`。
+- **单级阴影的纹素吸附用了太阳自己的贴图尺寸，而不是实际建出来的那张图**。
+  `DirectionalLight.shadow_map_size` 与 `RendererOptions.shadow_map_size` 可以不同，
+  两者不一致时阴影会随相机轻微抖动、PCF 偏移也算错。单级路径改用
+  `shadow_matrix_with_map_size(..., options.shadow_map_size)`。
+
+### 新增
+
+- **`render` / `render.outputs[]` 报告 `camera_name`**：`--camera`、`default` 别名或
+  每张输出自己的 `camera` 都会如实写进报告；不传旗标的老场景不多出字段。
+  回归：`camera_flag_reports_unknown_names_without_touching_the_gpu` 与
+  `multiple_render_outputs_resolve_before_writing_and_honour_no_clobber`。
+- **编辑器 UI 正向冒烟 + Web 按键探针**：`ui_smoke` 在无窗口引擎上把整块
+  `ui::panels` 真跑一帧（工具栏/场景树/属性/视口/帮助/摄像头窗口）；新增
+  `tools/probe_web_ui.sh` 用 CDP 在暂停态依次按 F3/F4/R，要求 `<body data-quench3d-ui>`
+  状态与中央视口截图**同时**变化，避免"截图自己动了"的假绿。`?ui_debug=1` 才暴露
+  这个只读状态属性（默认不污染页面）。
+- **`tools/verify_all.sh` + [`docs/feature_verification.md`](docs/feature_verification.md)**：
+  一条命令串起门禁、WebGL2 启动、Web UI 按键、摄像头纯函数测试，并给出每类功能的
+  可复现命令与"未覆盖"清单。
 - **WebGL2 启动即 panic：alpha 管线的两个颜色目标 blend 不一致**。`quench3d-alpha`
   的颜色 0 用 `ALPHA_BLENDING`、水面 mask 用 `blend: None`，wgpu 因此要求
   `INDEPENDENT_BLEND`；WebGL2 downlevel 没有这个能力，`create_render_pipeline`

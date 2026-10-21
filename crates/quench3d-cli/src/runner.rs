@@ -262,6 +262,9 @@ pub struct OutputReport {
     pub height: u32,
     /// 字节数（`--dry-run` 时为 0）。
     pub bytes: u64,
+    /// 这一张实际使用的相机名（`--camera` / `render.outputs[].camera`；缺省不写）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_name: Option<String>,
 }
 
 /// 进程内的模型缓存。
@@ -506,6 +509,9 @@ pub struct RenderReport {
     /// 一次渲多张时的明细（不写 `render.outputs` 时为空，老报告一个字不变）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OutputReport>,
+    /// 这一张实际使用的相机名（`--camera` / `render.outputs[].camera`；缺省不写）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_name: Option<String>,
     /// 模型动画的装载后对账（没写 `models[].animation` 时不出现）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelReport>,
@@ -3695,6 +3701,7 @@ pub fn run_render(
             width: r.width,
             height: r.height,
             bytes: r.bytes,
+            camera_name: r.camera_name.clone(),
         });
         if first.is_none() {
             first = Some(r);
@@ -3703,6 +3710,7 @@ pub fn run_render(
     let mut agg = first.ok_or_else(|| RunError::scene("render.outputs 是空的"))?;
     agg.output = reports[0].output.clone();
     agg.bytes = reports.iter().map(|o| o.bytes).sum();
+    agg.camera_name = reports[0].camera_name.clone();
     agg.would_write = reports.iter().map(|o| o.output.clone()).collect();
     agg.outputs = reports;
     Ok(agg)
@@ -3778,6 +3786,7 @@ fn run_render_single(
             dry_run: true,
             would_write: vec![output.display().to_string()],
             outputs: Vec::new(),
+            camera_name: doc.selected_camera.clone(),
             models,
             warnings,
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -3869,6 +3878,7 @@ fn run_render_single(
         dry_run: false,
         would_write: Vec::new(),
         outputs: Vec::new(),
+        camera_name: doc.selected_camera.clone(),
         models,
         warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,

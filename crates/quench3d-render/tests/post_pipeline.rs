@@ -1331,3 +1331,64 @@ fn water_mask_height_reconstructs_the_screen_ray() {
         "水面抬高后像素不变，mask.g 没参与射线-平面重建：low={low_px:?} high={high_px:?}"
     );
 }
+
+/// 网格写了 `frag_depth`，管线也必须真的允许写深度。
+///
+/// 失败表现：地面下的调试线段穿过地面画出来（网格看起来"不挡东西"）。
+/// 这里用两条只有 y 不同的线段做对照：地面**下方**的必须被遮住，
+/// 地面上方的必须可见。修之前下方那条会露出来。
+#[test]
+fn grid_writes_depth_and_hides_lines_below_the_floor() {
+    let Some((mut ctx, _)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    // 重新建一个开网格的渲染器：`setup` 关掉了网格。
+    let mut renderer = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: true,
+            shadows: false,
+            sky: false,
+            ..Default::default()
+        },
+    );
+    renderer.lines.enabled = true;
+
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 4.0, 8.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+
+    let lighting = Lighting {
+        exposure: 1.0,
+        ..Default::default()
+    };
+    let blank = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("空白地面");
+    renderer.lines.line(
+        vec3(-3.0, -0.6, 0.0),
+        vec3(3.0, -0.6, 0.0),
+        Vec4::new(0.0, 0.0, 1.0, 1.0),
+    );
+    let hidden = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("地面下方线段");
+    renderer.lines.clear();
+    renderer.lines.line(
+        vec3(-1.0, 0.8, 0.0),
+        vec3(1.0, 0.8, 0.0),
+        Vec4::new(0.0, 0.0, 1.0, 1.0),
+    );
+    let visible = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("地面上方线段");
+
+    assert_eq!(
+        hidden.rgba, blank.rgba,
+        "地面下方的线段被画出来了：网格深度没有写入"
+    );
+    assert_ne!(
+        visible.rgba, blank.rgba,
+        "地面上方的线段也没画出来：线段渲染本身坏了"
+    );
+}

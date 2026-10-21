@@ -1197,7 +1197,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 661 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 663 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1210,6 +1210,14 @@ cargo test -p quench3d-editor   # 编辑器：场景存读往返（"要真建 GP
 进程直接死掉、`Result::Err` 接不住，CI 只能报 `process didn't exit successfully`。
 所以 CI 只在**能建出上下文**的腿（ubuntu / macOS）上打开它，windows 腿关掉；
 `tools/gate.sh` 在本机默认打开，没有显卡的机器用 `QUENCH3D_GPU_TESTS=0 tools/gate.sh`
+
+**一条命令跑完可自动化的正向验证**（门禁 + WebGL2 启动 + Web UI 按键/截图 + 摄像头）：
+
+```bash
+tools/verify_all.sh
+```
+
+每类功能的可复现命令与明确未覆盖项见 [`docs/feature_verification.md`](docs/feature_verification.md)。
 （细节与判据见 `docs/overnight_report.md` §52）。
 
 `crates/quench3d/tests/readme_api.rs` 是**文档守卫**：它把 README 第 3 节的代码

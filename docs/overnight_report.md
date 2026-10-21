@@ -2953,3 +2953,18 @@ Web getUserMedia。
 守卫：`main_pass_targets_share_blend_for_webgl2`、
 `point_shadow_texture_avoids_the_gl_cube_heuristic`；`tools/probe_webgl2.sh` 新增两条
 日志判据。本机 SwiftShader 探针 PASS，用户真机仍需刷新确认。
+
+## 73. 第 68 轮：网格深度、快捷键生命周期与正向验证入口
+
+这轮不是加新玩法，而是补**"看起来有、实际没生效"**的最后一类：
+
+1. 网格的 `frag_depth` 写了但管线不写深度 → 地面下的调试线穿出来；已修为写深度，
+   并用"线下/线上"两帧对照钉住（改回 `false` 会红）。
+2. `Input::on_key_up` 没清 `keys_pressed`，同一次按下+抬起落在同一帧时快捷键会处理
+   两次；F3/F4 表现为"开了又关"。现在抬起即清瞬时按下，编辑器只在事件回调处理一次。
+   这条是浏览器 CDP 探针先抓到的（状态不变、截图却因其它动画而变，典型假绿）。
+3. 单级阴影的纹素吸附用错尺寸（太阳字段 vs 实际纹理），已统一。
+4. `render` 报告补 `camera_name`，多相机/多输出排查不用再靠猜。
+
+验证入口：`tools/verify_all.sh`（门禁 + WebGL2 + Web UI 按键/截图 + 摄像头纯函数）。
+功能矩阵与**明确未覆盖**清单见 `docs/feature_verification.md`。

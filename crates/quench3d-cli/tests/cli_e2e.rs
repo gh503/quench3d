@@ -4325,6 +4325,23 @@ fn camera_flag_reports_unknown_names_without_touching_the_gpu() {
         "--json",
     ]);
     assert_ne!(ok.code, 2, "default 不该报 unknown_camera：{}", ok.stdout);
+    assert_eq!(
+        ok.json()["data"]["camera_name"],
+        "default",
+        "显式选 default 也要在报告里说清"
+    );
+
+    // 已知名字：报告要说清实际用的是哪台（多输出/多相机排查靠这个）
+    let known = run(&[
+        "render",
+        path.to_str().unwrap(),
+        "--dry-run",
+        "--camera",
+        "正面",
+        "--json",
+    ]);
+    assert_eq!(known.code, 0, "{}", known.stderr);
+    assert_eq!(known.json()["data"]["camera_name"], "正面");
 }
 
 /// 多输出（gap #16 第 3、4 步）：`render.outputs[]` 要在**写任何东西之前**把每张的
@@ -4373,6 +4390,12 @@ fn multiple_render_outputs_resolve_before_writing_and_honour_no_clobber() {
     assert_eq!(outs[1]["name"], "b");
     assert_eq!(outs[1]["width"], 640, "每张自己的尺寸");
     assert_eq!(outs[1]["height"], 400);
+    assert_eq!(outs[1]["camera_name"], "俯视", "要报告这一张实际用的相机");
+    assert!(
+        outs[0].get("camera_name").is_none(),
+        "用缺省 camera 段的那张不该多出 camera_name：{}",
+        outs[0]
+    );
     assert!(
         outs[1]["output"].as_str().unwrap().ends_with("shot-b.png"),
         "带扩展名的 output 当前缀：{}",
@@ -4436,6 +4459,11 @@ fn multiple_render_outputs_resolve_before_writing_and_honour_no_clobber() {
     assert!(
         v["data"].get("outputs").is_none(),
         "老场景不该多出 outputs 字段：{}",
+        v["data"]
+    );
+    assert!(
+        v["data"].get("camera_name").is_none(),
+        "没传 --camera 的老场景不该多出 camera_name：{}",
         v["data"]
     );
     assert_eq!(v["data"]["would_write"].as_array().unwrap().len(), 1);

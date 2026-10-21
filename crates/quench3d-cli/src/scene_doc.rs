@@ -472,6 +472,12 @@ pub struct SceneDoc {
     /// `a.json → b.json → a.json` 这种环会退化成"把 a 再并一遍"。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+    /// `--camera <名字>` 实际选中的命名相机（**不参与序列化**，只用于报告）。
+    ///
+    /// `None` = 没传旗标，使用 `camera` 段；`Some("default")` = 显式选了别名。
+    /// 不写进场景文件，避免一次命令行选择污染用户的相机段。
+    #[serde(skip)]
+    pub selected_camera: Option<String>,
     /// CLI 用 `--asset-path` 给的额外搜索路径（**不参与序列化**，也不会写回场景文件）。
     ///
     /// 与 `assets.search_paths` 同样处理，只是排在它们**之后**：命令行是"这一次运行"的
@@ -945,6 +951,7 @@ impl Default for SceneDoc {
             render: RenderDoc::default(),
             base_dir: None,
             source_path: None,
+            selected_camera: None,
         }
     }
 }
@@ -3336,11 +3343,13 @@ impl SceneDoc {
     /// 可用名字——CLI 把它包成 `unknown_camera`（退出码 2，属于"输入有问题，改参数再跑"）。
     pub fn select_camera(&mut self, name: &str) -> Result<(), String> {
         if name == "default" {
+            self.selected_camera = Some("default".to_string());
             return Ok(());
         }
         match self.cameras.get(name) {
             Some(c) => {
                 self.camera = c.clone();
+                self.selected_camera = Some(name.to_string());
                 Ok(())
             }
             None => {

@@ -2457,3 +2457,31 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 * Python：`python -m unittest discover -s tools/camera_mocap -p 'test_*.py'`——
   深度归一化、NaN、轮廓提取、关键点连接表。
 * 没有摄像头时用 `--source synthetic` 生成 2D 骨架/轮廓/假深度，验证端到端协议。
+
+
+---
+
+## 25. 第 68 轮：输入/网格/阴影小修 + 正向验证入口
+
+**做了什么**：
+
+* 网格管线真正写深度（`grid_wgsl` 的 `frag_depth` 不再被管线丢弃）；地面下方的调试
+  线段会被遮住。
+* 编辑器快捷键只在**按下事件**（非 auto-repeat）里处理一次，`Game::update` 不再重复；
+  F3/F4 不再"开→关"抵消。
+* 单级阴影纹素吸附改用 `RendererOptions.shadow_map_size`（实际纹理尺寸），与 PCF 一致。
+* `render` 报告新增 `camera_name`（含 `--camera`、`default` 别名、每张 `render.outputs[].camera`）。
+* 新增 `ui_smoke`（整块 `ui::panels` 真跑一帧）与 `tools/probe_web_ui.sh`（CDP 按键 +
+  截图 + `<body data-quench3d-ui>` 状态双判据），以及 `tools/verify_all.sh` /
+  `docs/feature_verification.md`。
+
+**验证**：
+
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**663** 个测试，0 失败；clippy 原生/wasm、doc、
+  wasm 构建、`check_web.mjs` 全绿。
+* `tools/probe_web_ui.sh`：暂停态按 F3/F4/R，UI 状态与截图都必须变化（F3=`grid`、
+  F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale）。
+* `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
+
+**仍未做**：GPU 蒙皮/骨骼动画、IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、
+单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。

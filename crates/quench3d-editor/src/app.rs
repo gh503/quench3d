@@ -125,9 +125,6 @@ impl Game for EditorGame {
             CameraMode::Orbit => engine.orbit.update(&camera_input),
             CameraMode::Fly => engine.fly.update(&camera_input),
         }
-        if self.keys_enabled {
-            engine.handle_engine_keys(None);
-        }
     }
 
     fn fixed_update(&mut self, engine: &mut Engine, dt: f32) {
@@ -292,6 +289,24 @@ impl Inner {
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
         // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
         self.camera.add_lines(&mut self.engine.renderer.lines);
+        #[cfg(target_arch = "wasm32")]
+        publish_ui_debug_state(UiDebugState {
+            keys_enabled: self.game.keys_enabled,
+            paused: self.engine.paused,
+            grid: self.engine.renderer.options.grid,
+            shadows: self.engine.renderer.options.shadows,
+            shadow_instances: self.engine.renderer.stats().shadow_instances,
+            shadow_strength: self.engine.scene.lighting.shadow_strength,
+            sun_cast: self
+                .engine
+                .scene
+                .lighting
+                .sun
+                .map(|s| s.cast_shadows)
+                .unwrap_or(false),
+            camera_mode: self.engine.camera_mode,
+            gizmo_mode: self.gizmo.mode,
+        });
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
         let frame = self.engine.gpu.acquire_frame()?;
@@ -531,6 +546,74 @@ pub struct EditorApp {
     pending: crate::PendingSlot,
 }
 
+/// 仅当 URL 带 `ui_debug=1` 时，把编辑器关键状态挂到 `<body data-quench3d-ui>` 上。
+///
+/// 这不是产品功能，而是**自动化探针的观测孔**：Web 端控件全画在 canvas 里，
+/// 没有 DOM 可查；没有这个属性，测试只能靠截图猜"按键到底有没有生效"。
+/// 默认不开（不污染页面），只有测试 URL 显式要求时才写。
+#[cfg(target_arch = "wasm32")]
+struct UiDebugState {
+    keys_enabled: bool,
+    paused: bool,
+    grid: bool,
+    shadows: bool,
+    shadow_instances: u32,
+    shadow_strength: f32,
+    sun_cast: bool,
+    camera_mode: quench3d::prelude::CameraMode,
+    gizmo_mode: GizmoMode,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn publish_ui_debug_state(state: UiDebugState) {
+    let UiDebugState {
+        keys_enabled,
+        paused,
+        grid,
+        shadows,
+        shadow_instances,
+        shadow_strength,
+        sun_cast,
+        camera_mode,
+        gizmo_mode,
+    } = state;
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let search = window.location().search().unwrap_or_default();
+    if !search.contains("ui_debug=1") {
+        return;
+    }
+    let Some(body) = window.document().and_then(|d| d.body()) else {
+        return;
+    };
+    let state = format!(
+        "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?}"
+    );
+    let _ = body.set_attribute("data-quench3d-ui", &state);
+}
+
+/// 调试探针：记录最近一条 winit 键盘事件（仅 `?ui_debug=1`）。
+#[cfg(target_arch = "wasm32")]
+fn publish_last_key(event: &winit::event::KeyEvent) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let search = window.location().search().unwrap_or_default();
+    if !search.contains("ui_debug=1") {
+        return;
+    }
+    let Some(body) = window.document().and_then(|d| d.body()) else {
+        return;
+    };
+    let state = format!(
+        "physical={:?};logical={:?};state={:?};repeat={}",
+        event.physical_key, event.logical_key, event.state, event.repeat
+    );
+    let _ = body.set_attribute("data-quench3d-last-key", &state);
+}
+
 impl EditorApp {
     /// 新建（此时还没窗口，等 `resumed`）。
     pub fn new(config: EditorConfig) -> Self {
@@ -625,6 +708,8 @@ impl EditorApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                #[cfg(target_arch = "wasm32")]
+                publish_last_key(event);
                 if let PhysicalKey::Code(code) = event.physical_key {
                     // 编辑器快捷键先于引擎：Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y 是编辑器的，
                     // F 聚焦选中。引擎拿到的仍然是它认识的那些键（不会重复处理）。
@@ -688,8 +773,11 @@ impl EditorApp {
                         ElementState::Released => engine.input.on_key_up(code),
                     }
                 }
-                // 引擎内置快捷键（Tab/R/F3–F6/P/Esc）只在不打字时生效。
-                if keys_enabled {
+                // 引擎内置快捷键在**按下事件**里处理：`tick` 开头会 `begin_frame()`
+                // 清掉 `keys_pressed`，等 `Game::update` 再读就已经晚了。只处理
+                // Pressed（且忽略 auto-repeat）保证一次按下只切换一次；抬起不再
+                // 调 `handle_engine_keys`，否则同帧内的 down/up 会互相抵消。
+                if event.state == ElementState::Pressed && !event.repeat && keys_enabled {
                     engine.handle_engine_keys(Some(event_loop));
                 }
             }

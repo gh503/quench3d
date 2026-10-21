@@ -1498,7 +1498,10 @@ impl Renderer {
                 targets: color_targets(HDR_FORMAT, alpha_blend),
                 depth: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(false),
+                    // `grid.wgsl` 写了 `frag_depth`；这里必须真的允许写，否则调试线段
+                    // 会穿过地面画出来（网格看起来"不挡东西"）。网格在透明物体之后、
+                    // 线段之前绘制，写深度后它只遮挡**它后面**的调试几何。
+                    depth_write_enabled: Some(true),
                     depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
@@ -2414,8 +2417,12 @@ impl Renderer {
             .clamp(1, MAX_SHADOW_CASCADES as u32);
         if n <= 1 {
             let focus = camera.position + camera.forward() * (radius * 0.45);
+            // 纹素吸附必须用**实际纹理尺寸**，不是 `DirectionalLight.shadow_map_size`：
+            // 两者不一致时（应用层可以分别设置）阴影会随相机轻微抖动，PCF 也会按错
+            // 的纹素尺寸偏移。`self.options.shadow_map_size` 才是真正建出来的那张图。
+            let map_size = self.options.shadow_map_size.clamp(512, 4096) as f32;
             return (
-                vec![s.shadow_matrix(focus, radius, radius * 2.0)],
+                vec![s.shadow_matrix_with_map_size(focus, radius, radius * 2.0, map_size)],
                 vec![camera.far.max(camera.near + 1.0)],
             );
         }

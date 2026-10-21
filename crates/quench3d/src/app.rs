@@ -831,7 +831,9 @@ impl<G: Game> ForgeApp<G> {
                         ElementState::Released => engine.input.on_key_up(code),
                     }
                 }
-                engine.handle_engine_keys(Some(event_loop));
+                if event.state == ElementState::Pressed && !event.repeat {
+                    engine.handle_engine_keys(Some(event_loop));
+                }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let state = modifiers.state();
