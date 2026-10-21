@@ -123,6 +123,9 @@ pub struct FluidReport {
     pub min_y: f32,
     /// 最高粒子 y。
     pub max_y: f32,
+    /// 本步与刚体的接触数（0 时不出现，保持旧报告字节不变）。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub contacts: usize,
 }
 
 /// 物理仿真报告。
@@ -1637,6 +1640,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             radius: f.radius(),
             rest_density: f.rest_density,
             viscosity: f.viscosity,
+            drag: f.drag,
             iterations: f.iterations,
             max_particles: f.max_particles,
         };
@@ -2080,6 +2084,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
                     avg_density_ratio: s.avg_density_ratio,
                     min_y: s.min_y,
                     max_y: s.max_y,
+                    contacts: s.contacts,
                 }
             })
             .collect(),

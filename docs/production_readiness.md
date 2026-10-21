@@ -2228,7 +2228,7 @@ if let Some(v) = doc.physics.static_friction_speed {
   `lambda` **每次迭代重算**（只算一次再反复加同一个 delta 会过冲，无重力也会炸）。
 * 边界投影放在**迭代内部**：粒子不会先陷进地面再被一次性弹出来；`Plane` 的 AABB
   无效，不能拿它做拒绝测试。
-* **单向**：刚体 → 流体。粒子不会反推刚体，也不会把刚体叫醒。M3 才做两-way。
+* **单向（M2）**：刚体 → 流体。M3 已补上冲量反推 + 自由表面浮力；这一节保留 M2 当时的边界。
 * **没有表面张力 / 涡量 / 粒子间碰撞**。敞开的平地上水会摊成薄层（密度约束允许二维
   密排），这是"液体在无限平面上的解"，不是穿地；围池（`examples/fluid_pool.json`）
   才能堆出三维水堆。测试 `pool_holds_a_three_dimensional_pile` 覆盖这一点。
@@ -2248,3 +2248,37 @@ if let Some(v) = doc.physics.static_friction_speed {
 * 编辑器：`fluids_survive_editor_roundtrip`。
 * 示例：`examples/fluid_pool.json` 240 步 → 4000 粒子、密度比 1.01、最高速度 0.33 m/s、
   y 0.05..1.25。
+
+## 22. 第 65 轮：流体 ↔ 刚体双向耦合（M3）
+
+### 22.1 这轮交付了什么
+
+* **冲量反推**：`Fluid::step` 记录粒子与刚体的接触（法线/接触点/刚体下标/边界速度）；
+  速度求解后，对**动态**刚体按 `J = m_p·v_n·n` 反推法向冲量并 `wake_up`。只反推 20%：
+  粒子的"压力"由浮力项承担，全额反推会让成千上万颗粒子把刚体当鼓面敲（实测浮球被砸进池底）。
+* **粒子自由表面浮力**：`Fluid::surface_near(aabb, margin)` 取刚体 XZ 附近粒子的最高 y
+  作为近似水面；用现成的 `water::submerged_in` 算浸没体积/形心，施加 `-g·ρ·V` 与
+  `drag` 阻尼。`fluids[].drag` 缺省 6，0 = 无阻尼。
+* **格式/报告**：`fluids[].drag` 进 grammar、JSON Schema、system prompt、`FluidDoc`；
+  `simulate` 的 `fluids[].contacts`（0 时省略）；`states[].submerged` 取 `waters` 与
+  `fluids` 的较大值。
+* **示例**：`examples/fluid_pool.json` 加 300 kg/m³ 浮球；480 步后 y≈0.96（水面 1.25，
+  浸没 26%），流体最高速度 0.38 m/s。
+
+### 22.2 边界与不变量
+
+* 浮力水面是**瞬时最高粒子**，飞溅会抬高读数；不是平滑水平集，也没有表面张力。
+* 多流体/水域只取**最大**浸没占比，浮力不叠加（与 M1 `waters` 的"浸没体积求和"不同，
+  这是有意的：两套水体描述同一个池子时不该双倍托举）。
+* 反推只作用于动态刚体；静态刚体只挡粒子。睡眠体被粒子撞到会醒；只有浮力（没有新接触）
+  不会叫醒它，和 M1 的取舍一致。
+* 粒子之间仍无碰撞，敞开平地上会摊成薄层；`TriMesh` 仍不挡粒子。`render` 仍看不到粒子（M4）。
+
+### 22.3 测试与证据
+
+* `quench3d-physics`：`fluid_pushes_a_heavy_dynamic_body_downward`、
+  `fluid_buoyancy_keeps_a_light_body_afloat`、`fluid_wakes_a_sleeping_body_on_impact`，
+  加上 M2 的 6 条流体测试。
+* CLI e2e：`fluid_buoyancy_floats_a_light_body`（300 kg/m³ 球 > 0.5 m、报告 `contacts` > 0）、
+  `fluid_particles_settle_and_are_reported`（围池接触数）。
+* 示例：`examples/fluid_pool.json` 240 步浮球已在水面，480 步收敛到 26% 浸没。

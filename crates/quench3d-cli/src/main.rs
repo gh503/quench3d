@@ -646,12 +646,13 @@ fn dispatch(args: &Args) -> i32 {
                     }
                     for (i, f) in report.fluids.iter().enumerate() {
                         human.push_str(&format!(
-                            "流体[{i}]   : {} 粒子，密度比 {:.2}，最高速度 {:.2} m/s，y {:.2}..{:.2}\n",
+                            "流体[{i}]   : {} 粒子，密度比 {:.2}，最高速度 {:.2} m/s，y {:.2}..{:.2}，接触 {}\n",
                             f.particles,
                             f.avg_density_ratio,
                             f.max_speed,
                             f.min_y,
-                            f.max_y
+                            f.max_y,
+                            f.contacts
                         ));
                     }
                     for s in &report.states {

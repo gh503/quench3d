@@ -978,7 +978,8 @@ fn fluids_survive_editor_roundtrip() {
       "ground": { "size": 20, "y": 0 },
       "fluids": [{ "center": [0, 1.2, 0], "size": [1.2, 1.2, 1.2],
                    "spacing": 0.1, "radius": 0.05, "rest_density": 900,
-                   "viscosity": 0.08, "iterations": 5, "max_particles": 1200 }]
+                   "viscosity": 0.08, "drag": 4, "iterations": 5,
+                   "max_particles": 1200 }]
     }"#;
     let mut doc = Doc::new();
     scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
@@ -994,6 +995,7 @@ fn fluids_survive_editor_roundtrip() {
     assert_eq!(f.radius, Some(0.05));
     assert_eq!(f.rest_density, 900.0);
     assert_eq!(f.viscosity, 0.08);
+    assert_eq!(f.drag, 4.0);
     assert_eq!(f.iterations, 5);
     assert_eq!(f.max_particles, 1200);
 }

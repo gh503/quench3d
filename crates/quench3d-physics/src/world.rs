@@ -1128,7 +1128,67 @@ impl PhysicsWorld {
             return;
         }
         let mut fluids = std::mem::take(&mut self.fluids);
-        fluid::step_all(&mut fluids, &self.bodies, self.gravity, dt);
+        fluid::step_all(&mut fluids, &mut self.bodies, self.gravity, dt);
+        // 两-way 的另一半：粒子的自由表面给刚体浮力/阻尼。
+        // 碰撞冲量管"撞"，这里管"泡在水里被托住"——两者缺一个都不像水。
+        let gravity = self.gravity;
+        let has_waters = !self.waters.is_empty();
+        for slot in &mut self.bodies {
+            let Some(b) = slot.body.as_mut() else {
+                continue;
+            };
+            if b.body_type != BodyType::Dynamic {
+                continue;
+            }
+            if !has_waters {
+                b.submerged = 0.0;
+            }
+            if b.sleeping {
+                continue;
+            }
+            let aabb = b.world_aabb();
+            if !aabb.is_valid() {
+                continue;
+            }
+            let total = water::body_volume(b);
+            if total <= 0.0 {
+                continue;
+            }
+            for fluid in &fluids {
+                let desc = fluid.desc();
+                let level = match fluid.surface_near(aabb, desc.spacing * 2.0) {
+                    Some(y) => y,
+                    None => continue,
+                };
+                let center = Vec2::new(
+                    (aabb.min.x + aabb.max.x) * 0.5,
+                    (aabb.min.z + aabb.max.z) * 0.5,
+                );
+                let half_size = Vec2::new(
+                    ((aabb.max.x - aabb.min.x) * 0.5).max(0.05),
+                    ((aabb.max.z - aabb.min.z) * 0.5).max(0.05),
+                );
+                let w = WaterVolume {
+                    center,
+                    half_size,
+                    level,
+                    density: desc.rest_density,
+                    drag: desc.drag,
+                };
+                let s = water::submerged_in(b, &w);
+                if !s.is_submerged() {
+                    continue;
+                }
+                let ratio = (s.volume / total).clamp(0.0, 1.0);
+                b.submerged = b.submerged.max(ratio);
+                b.add_force_at_point(-gravity * (desc.rest_density * s.volume), s.centroid);
+                if desc.drag > 0.0 {
+                    let f = 1.0 / (1.0 + desc.drag * ratio * dt);
+                    b.linear_velocity *= f;
+                    b.angular_velocity *= f;
+                }
+            }
+        }
         self.fluids = fluids;
     }
 

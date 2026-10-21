@@ -347,9 +347,10 @@ pub fn scene_grammar() -> Value {
                 "radius": "粒子碰撞半径（米），缺省 spacing*0.5；必须不大于 spacing",
                 "rest_density": "静止密度 kg/m³，缺省 1000（水）",
                 "viscosity": "XSPH 粘性 0~1，缺省 0.05",
+                "drag": "浸没刚体线性阻尼 1/s，缺省 6；0 = 无阻尼",
                 "iterations": "密度约束迭代次数 1~8，缺省 4",
                 "max_particles": "粒子上限 1~20000，缺省 4000；超出按晶格顺序截断",
-                "note": "CPU PBF 粒子流体（M2）：粒子被刚体推开（单向），还不会反推刚体；粒子渲染在 M4。不写 = 没有粒子，物理结果与以前逐位相同",
+                "note": "CPU PBF 粒子流体（M3 双向）：粒子被刚体推开并反推冲量；粒子自由表面给刚体浮力/阻尼。粒子渲染在 M4。不写 = 没有粒子，物理结果与以前逐位相同",
             }],
             "materials": "名字 → 材质对象",
             "include": [
@@ -714,11 +715,12 @@ pub fn json_schema() -> Value {
             "radius",
             "rest_density",
             "viscosity",
+            "drag",
             "iterations",
             "max_particles",
         ]);
         d["description"] = json!(
-            "一个 CPU PBF 粒子流体：长方体发射器 + 粒子参数；粒子被刚体推开（M2 单向），不反推刚体"
+            "一个 CPU PBF 粒子流体：长方体发射器 + 粒子参数；粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）"
         );
         d["required"] = json!(["size"]);
         d
@@ -908,7 +910,7 @@ pub fn json_schema() -> Value {
                 "waters": { "type": "array", "items": { "$ref": "#/$defs/water" },
                             "description": "水域（浮力环境）：只影响动态刚体的浮力/阻尼，不参与碰撞；不写 = 没有水" },
                 "fluids": { "type": "array", "items": { "$ref": "#/$defs/fluid" },
-                            "description": "CPU PBF 粒子流体：粒子被刚体推开（单向），不反推刚体；不写 = 没有粒子" },
+                            "description": "CPU PBF 粒子流体：粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；不写 = 没有粒子" },
                 "materials": { "type": "object",
                                "additionalProperties": { "$ref": "#/$defs/material" } },
                 "include": { "type": "array", "items": { "type": "string" },
@@ -963,8 +965,9 @@ pub fn system_prompt() -> String {
   // 水域（浮力环境，M1）：y <= level 且在 XZ 范围内算浸没；动态刚体按排开体积受浮力，
   // 睡眠体不受力。没有粒子/流动/波浪；不写 = 没有水。
 - fluids: [{ center: [0, 2, 0], size: [2, 2, 2], spacing: 0.1, radius: 0.05,
-            rest_density: 1000, viscosity: 0.05, iterations: 4, max_particles: 4000 }]
-  // CPU PBF 粒子流体（M2）：长方体发射器 + 粒子参数。粒子被刚体推开，但还不会反推刚体；
+            rest_density: 1000, viscosity: 0.05, drag: 6, iterations: 4,
+            max_particles: 4000 }]
+  // CPU PBF 粒子流体（M3 双向）：长方体发射器 + 粒子参数。粒子被刚体推开并反推冲量；
   // 没有表面张力/涡量；粒子渲染在 M4。不写 = 没有粒子。
 - materials: { 名字: { color: [r,g,b]（sRGB）, metallic: 0~1, roughness: 0.05~1, emissive: 0,
              alpha: 0~1, emissive_color: [r,g,b], uv_scale: 1, normal_scale: 1,

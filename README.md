@@ -846,17 +846,18 @@ NaN 刚体  : 0
   （否则浮力会把它一直唤醒——这是性能取舍，水面变了要显式唤醒）。`validate` 只查参数；
   浮力结果看 `simulate` 的 `states[].submerged`（0~1）与顶层 `waters` 计数，人读输出有
   "浸没 %"。水面物体只是半透明平面，**没有波浪 / 折射 / 流动**。
-* `fluids` 是 **CPU PBF 粒子流体**（M2）：`{ "center": [x, y, z], "size": [x, y, z],
-  "spacing": 0.1, "radius": 0.05, "rest_density": 1000, "viscosity": 0.05,
-  "iterations": 4, "max_particles": 4000 }`。粒子从长方体里按晶格发射，被静态/动态刚体
-  推开（**单向**：刚体 → 流体，还不会反推刚体），自身用密度约束 + XSPH 粘性求解。
+* `fluids` 是 **CPU PBF 粒子流体**（M2 求解器 + M3 双向耦合）：`{ "center": [x, y, z],
+  "size": [x, y, z], "spacing": 0.1, "radius": 0.05, "rest_density": 1000,
+  "viscosity": 0.05, "drag": 6, "iterations": 4, "max_particles": 4000 }`。粒子从长方体里
+  按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
+  反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
   粒子质量按晶格静止密度校准（不是随便取 1），所以静止时密度比≈1；`simulate` 报告
   `fluids[]` 的 `particles` / `avg_density_ratio` / `max_speed` / `y` 范围。
   **边界**：没有表面张力/涡量/粒子间碰撞，敞开的平地上水会摊成薄层（这是"液体在无限
   平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   `TriMesh` 碰撞体目前不挡粒子（`closest_surface` 返回 `None`），凸包/圆锥用 AABB 近似。
   粒子**渲染**在 M4；现在 `render` 只画水域平面与刚体。`waters` 与 `fluids` 可以同时写，
-  互不替换。
+  互不替换；两者都给刚体浮力时取较大的浸没占比，不会叠加浮力（M3 口径）。
 * `friction_combine` / `restitution_combine` 可写在世界级 `physics` 段（缺省）或单个物体上
   （覆盖缺省）。缺省规则是**几何平均**（摩擦）与**取大**（恢复）——正是老行为；
   改成 `average`/`min`/`max`/`multiply` 会改变已有场景的观感，属于**有意**调整。
@@ -1153,7 +1154,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 635 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 639 个测试（物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1628,7 +1629,7 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 * CLI / 大模型：`ask` 需要有一个正在运行的 OpenAI 兼容服务（本地 Ollama / llama.cpp /
   LM Studio / vLLM，或云端）；`https://` 端点依赖系统 `curl`。模型输出质量取决于所选模型，
   本仓库的测试用假服务覆盖协议与校验，不评价模型本身。
-  场景语法有 `waters` 的解析浮力/半透明水面与 `fluids` 的 CPU PBF 粒子（M2；粒子渲染在 M4），
+  场景语法有 `waters` 的解析浮力/半透明水面与 `fluids` 的 CPU PBF 粒子（M3 双向耦合；粒子渲染在 M4），
   也没有程序化材质。
 * 编辑器：**已有拖拽式变换 gizmo、撤销/重做与父子层级**（见 §1.1），但
   **手柄不支持拖拽中键入数值、不支持轴心切换、不支持多选成组变换**（多选还没做；

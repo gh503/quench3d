@@ -3,8 +3,8 @@
 //! 设计边界（与 M1 的解析水域是两套东西，互不替换）：
 //! * **CPU + 确定性**：所有容器按粒子下标顺序遍历，邻域用固定顺序的 27 个格子查找；
 //!   同一输入在原生与 wasm 上都走同一段代码（浮点结果与平台有关，这是整个引擎的既有口径）。
-//! * **单向耦合（M2）**：刚体是流体的边界，流体会被刚体推开；流体**还不会**反推刚体。
-//!   双向耦合是 M3。
+//! * **双向耦合（M3）**：刚体是流体的边界，流体会被刚体推开；粒子撞到**动态**刚体时
+//!   把法向冲量按动量守恒反推给刚体（静态刚体只挡粒子，不会动）。
 //! * **边界**：对所有非传感器刚体做最近表面投影（球/盒/胶囊/圆柱/圆锥/圆角盒/半空间），
 //!   `TriMesh` 与凸包按 AABB 近似（见 [`crate::Shape::closest_surface`]）。
 //! * 没有表面张力、涡量约束、粘性应力张量；粘性用 XSPH 近似。
@@ -20,6 +20,8 @@ use crate::world::BodySlot;
 const EPS: f32 = 1e-6;
 /// 单个粒子的速度上限（m/s）：防止参数失控时飞出宇宙。
 const MAX_SPEED: f32 = 40.0;
+/// 估算自由表面至少需要的粒子数（少于此数就当作"这里没有水"）。
+const MIN_SURFACE_PARTICLES: usize = 8;
 
 /// 流体参数（场景格式的 `fluids[]` 一项）。
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +38,8 @@ pub struct FluidDesc {
     pub rest_density: f32,
     /// XSPH 粘性系数（0~1）。
     pub viscosity: f32,
+    /// 浸没刚体的线性阻尼（1/s），只对浮力部分生效；0 = 无阻尼。
+    pub drag: f32,
     /// 密度约束迭代次数（1~8）。
     pub iterations: u32,
     /// 粒子上限（超过就按晶格顺序截断）。
@@ -51,6 +55,7 @@ impl Default for FluidDesc {
             radius: 0.05,
             rest_density: 1000.0,
             viscosity: 0.05,
+            drag: 6.0,
             iterations: 4,
             max_particles: 4000,
         }
@@ -76,6 +81,8 @@ impl FluidDesc {
             && self.rest_density > 0.0
             && self.viscosity.is_finite()
             && (0.0..=1.0).contains(&self.viscosity)
+            && self.drag.is_finite()
+            && self.drag >= 0.0
             && (1..=8).contains(&self.iterations)
             && (1..=20_000).contains(&self.max_particles)
     }
@@ -108,6 +115,21 @@ pub struct FluidStats {
     pub min_y: f32,
     /// 最高粒子 y。
     pub max_y: f32,
+    /// 本步与刚体的接触数（报告用，0 时序列化会省略）。
+    pub contacts: usize,
+}
+
+/// 粒子与刚体的一个接触（求解最后一步记录，用于两-way 反冲）。
+#[derive(Clone, Copy, Debug)]
+struct Contact {
+    /// 从刚体指向粒子的单位法线。
+    normal: Vec3,
+    /// 接触点的刚体速度（本步碰撞时采样）。
+    velocity: Vec3,
+    /// 世界坐标接触点。
+    point: Vec3,
+    /// 刚体在 `bodies` 里的下标。
+    body: u32,
 }
 
 /// 一个粒子流体。
@@ -121,12 +143,11 @@ pub struct Fluid {
     lambdas: Vec<f32>,
     /// 每个粒子的邻居下标（按粒子顺序；跨步复用，避免每步分配）。
     neighbors: Vec<Vec<u32>>,
-    /// 每个粒子在本步撞到的最后一个边界的速度（用于相对速度摩擦）。
-    contact_velocity: Vec<Vec3>,
-    /// 每个粒子在本步撞到的最后一个边界的法线。
-    contact_normal: Vec<Vec3>,
+    /// 每个粒子在本步撞到的最后一个边界（用于摩擦与两-way 反冲）。
+    contacts: Vec<Option<Contact>>,
     /// 粒子质量：按**晶格静止密度**校准（`rho0 / ΣW`），不是随便取 1。
     mass: f32,
+    stats_contacts: usize,
     stats: FluidStats,
     spawned: bool,
 }
@@ -145,9 +166,9 @@ impl Fluid {
             densities: Vec::new(),
             lambdas: Vec::new(),
             neighbors: Vec::new(),
-            contact_velocity: Vec::new(),
-            contact_normal: Vec::new(),
+            contacts: Vec::new(),
             mass: 1.0,
+            stats_contacts: 0,
             stats: FluidStats::default(),
             spawned: false,
         };
@@ -173,6 +194,31 @@ impl Fluid {
     /// 当前统计。
     pub fn stats(&self) -> FluidStats {
         self.stats
+    }
+
+    /// 刚体 XZ 范围附近的粒子表面高度（取最高粒子 y）。
+    ///
+    /// 这是 M3 给刚体算浮力用的**近似自由表面**：不是水平集，也不平滑，
+    /// 飞溅的单个粒子会把高度抬高（所以要求至少 `MIN_SURFACE_PARTICLES` 颗）。
+    pub fn surface_near(&self, aabb: Aabb, margin: f32) -> Option<f32> {
+        if !aabb.is_valid() {
+            return None;
+        }
+        let (min_x, max_x) = (aabb.min.x - margin, aabb.max.x + margin);
+        let (min_z, max_z) = (aabb.min.z - margin, aabb.max.z + margin);
+        let mut max_y = f32::NEG_INFINITY;
+        let mut count = 0usize;
+        for p in &self.positions {
+            if p.x >= min_x && p.x <= max_x && p.z >= min_z && p.z <= max_z {
+                max_y = max_y.max(p.y);
+                count += 1;
+            }
+        }
+        if count >= MIN_SURFACE_PARTICLES && max_y.is_finite() {
+            Some(max_y)
+        } else {
+            None
+        }
     }
 
     /// 按参数里的长方体晶格发射粒子（确定性：固定下标顺序 + 固定方向）。
@@ -209,7 +255,7 @@ impl Fluid {
     }
 
     /// 推进一步（PBF：预测 → 密度约束 → 边界投影 → 速度更新 → XSPH 粘性）。
-    fn step(&mut self, bodies: &[BodySlot], gravity: Vec3, dt: f32) {
+    fn step(&mut self, bodies: &mut [BodySlot], gravity: Vec3, dt: f32) {
         if !self.spawned {
             self.spawn();
         }
@@ -280,10 +326,8 @@ impl Fluid {
         // 4. 位置修正（迭代；每次用当前 predicted 重算邻域？邻域固定在预测位置，
         //    这是 PBF 的标准做法：迭代内只更新位置/密度，不重建邻居表）。
         let radius = self.desc.radius;
-        self.contact_velocity.resize(n, Vec3::ZERO);
-        self.contact_normal.resize(n, Vec3::ZERO);
-        self.contact_velocity.fill(Vec3::ZERO);
-        self.contact_normal.fill(Vec3::ZERO);
+        self.contacts.resize(n, None);
+        self.contacts.fill(None);
         // 每次迭代后都做边界投影：只压不拉 + 碰撞放在迭代里面，
         // 粒子不会先陷进地面再被一次性弹出来（那是"炸开"的主要来源）。
         let iters = self.desc.iterations.max(1);
@@ -306,11 +350,10 @@ impl Fluid {
                 *d = (dp / rho0).clamp_length(0.1 * h);
             }
             for (i, d) in delta.iter().enumerate() {
-                let (p, contact) = collide_position(self.predicted[i] + *d, bodies, radius);
+                let (p, contact) = collide_position(self.predicted[i] + *d, &*bodies, radius);
                 self.predicted[i] = p;
-                if let Some((n, cv)) = contact {
-                    self.contact_normal[i] = n;
-                    self.contact_velocity[i] = cv;
+                if contact.is_some() {
+                    self.contacts[i] = contact;
                 }
             }
         }
@@ -322,15 +365,14 @@ impl Fluid {
         let mut new_vel = vec![Vec3::ZERO; n];
         for (i, out) in new_vel.iter_mut().enumerate() {
             let mut v = (self.predicted[i] - self.positions[i]) * inv_dt;
-            let n = self.contact_normal[i];
-            if n.length_squared() > 0.5 {
+            if let Some(c) = self.contacts[i] {
                 // 简单摩擦：法向速度清零，切向留 80%。
-                let rel = v - self.contact_velocity[i];
-                let vn = rel.dot(n);
+                let rel = v - c.velocity;
+                let vn = rel.dot(c.normal);
                 if vn < 0.0 {
-                    v -= n * vn;
+                    v -= c.normal * vn;
                 }
-                let tangent = rel - n * rel.dot(n);
+                let tangent = rel - c.normal * rel.dot(c.normal);
                 v -= tangent * 0.2;
             }
             *out = v.clamp_length(MAX_SPEED);
@@ -361,6 +403,37 @@ impl Fluid {
                 new_vel[i] = (new_vel[i] + delta[i]).clamp_length(MAX_SPEED);
             }
         }
+
+        // 8. 两-way：把粒子撞到**动态**刚体上的法向冲量反推给刚体。
+        //    冲量按动量守恒：粒子减 `J`、刚体加 `J`；`J = m_p · vn · n`
+        //    （vn < 0 表示还在靠近，n 从刚体指向粒子，所以刚体被推向 -n）。
+        let mut contact_count = 0usize;
+        for (i, v) in new_vel.iter_mut().enumerate() {
+            let Some(c) = self.contacts[i] else {
+                continue;
+            };
+            contact_count += 1;
+            let Some(slot) = bodies.get_mut(c.body as usize) else {
+                continue;
+            };
+            let Some(body) = slot.body.as_mut() else {
+                continue;
+            };
+            if !body.is_dynamic() {
+                continue;
+            }
+            let vb = body.velocity_at_point(c.point);
+            let vn = (*v - vb).dot(c.normal);
+            if vn < 0.0 {
+                // 只反推 20% 的法向动量：粒子的"压力"已由浮力项承担，
+                // 全额反推会让成千上万颗粒子把刚体当鼓面敲（实测会把浮球砸进池底）。
+                let impulse = c.normal * (self.mass * vn * 0.2);
+                body.apply_impulse_at_point(impulse, c.point);
+                // 粒子也拿到反冲；否则水会"穿过"轻的刚体。
+                *v -= impulse / self.mass;
+            }
+        }
+        self.stats_contacts = contact_count;
 
         std::mem::swap(&mut self.positions, &mut self.predicted);
         self.velocities = new_vel;
@@ -440,6 +513,7 @@ impl Fluid {
             avg_density_ratio: density_sum / n as f32,
             min_y,
             max_y,
+            contacts: self.stats_contacts,
         };
     }
 }
@@ -476,10 +550,10 @@ fn calibrated_mass(desc: &FluidDesc) -> f32 {
     }
 }
 
-/// 把粒子投影到所有刚体边界之外；返回修正后的位置与最后一个接触（法线, 边界速度）。
-fn collide_position(mut p: Vec3, bodies: &[BodySlot], radius: f32) -> (Vec3, Option<(Vec3, Vec3)>) {
+/// 把粒子投影到所有刚体边界之外；返回修正后的位置与最后一个接触。
+fn collide_position(mut p: Vec3, bodies: &[BodySlot], radius: f32) -> (Vec3, Option<Contact>) {
     let mut contact = None;
-    for slot in bodies {
+    for (body_index, slot) in bodies.iter().enumerate() {
         let Some(body) = &slot.body else {
             continue;
         };
@@ -505,15 +579,20 @@ fn collide_position(mut p: Vec3, bodies: &[BodySlot], radius: f32) -> (Vec3, Opt
             let signed = (p - surf_world).dot(n);
             if signed < radius {
                 p = surf_world + n * radius;
-                contact = Some((n, body.velocity_at_point(surf_world)));
+                contact = Some(Contact {
+                    normal: n,
+                    velocity: body.velocity_at_point(surf_world),
+                    point: surf_world,
+                    body: body_index as u32,
+                });
             }
         }
     }
     (p, contact)
 }
 
-/// 推进所有流体。`bodies` 是当前子步的刚体（流体单向受它们约束）。
-pub(crate) fn step_all(fluids: &mut [Fluid], bodies: &[BodySlot], gravity: Vec3, dt: f32) {
+/// 推进所有流体。`bodies` 是当前子步的刚体（流体与动态刚体双向耦合）。
+pub(crate) fn step_all(fluids: &mut [Fluid], bodies: &mut [BodySlot], gravity: Vec3, dt: f32) {
     if dt <= 0.0 || !dt.is_finite() {
         return;
     }
@@ -630,6 +709,104 @@ mod tests {
             s.max_y
         );
         assert!(s.max_speed < 3.0, "max_speed = {}", s.max_speed);
+    }
+
+    #[test]
+    fn fluid_pushes_a_heavy_dynamic_body_downward() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        let handle = world.add_builder(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.25),
+            })
+            .position(vec3(0.0, 1.0, 0.0))
+            .density(3000.0),
+        );
+        world.add_fluid(FluidDesc {
+            center: vec3(0.0, 2.2, 0.0),
+            half_extents: Vec3::splat(0.35),
+            spacing: 0.1,
+            radius: 0.05,
+            ..FluidDesc::default()
+        });
+        let start = world.body(handle).unwrap().transform.position;
+        for _ in 0..120 {
+            world.step(1.0 / 60.0);
+        }
+        let end = world.body(handle).unwrap().transform.position;
+        assert!(
+            end.y < start.y - 0.02,
+            "水应该把刚体往下压：{start:?} -> {end:?}"
+        );
+        assert!(!world.body(handle).unwrap().is_sleeping());
+    }
+
+    #[test]
+    fn fluid_wakes_a_sleeping_body_on_impact() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        let handle = world.add_builder(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.25),
+            })
+            .position(vec3(0.0, 1.0, 0.0))
+            .density(200.0)
+            .gravity_scale(0.0),
+        );
+        world.body_mut(handle).unwrap().sleep();
+        assert!(world.body(handle).unwrap().is_sleeping());
+        world.add_fluid(FluidDesc {
+            center: vec3(0.0, 2.0, 0.0),
+            half_extents: Vec3::splat(0.3),
+            spacing: 0.1,
+            radius: 0.05,
+            ..FluidDesc::default()
+        });
+        for _ in 0..90 {
+            world.step(1.0 / 60.0);
+        }
+        assert!(
+            !world.body(handle).unwrap().is_sleeping(),
+            "粒子撞上来必须把睡眠体叫醒，否则水会穿过它"
+        );
+    }
+
+    #[test]
+    fn fluid_buoyancy_keeps_a_light_body_afloat() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        let handle = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.25 })
+                .position(vec3(0.0, 1.2, 0.0))
+                .density(300.0),
+        );
+        world.add_fluid(FluidDesc {
+            center: vec3(0.0, 1.2, 0.0),
+            half_extents: Vec3::splat(0.6),
+            spacing: 0.1,
+            radius: 0.05,
+            max_particles: 2000,
+            ..FluidDesc::default()
+        });
+        for _ in 0..240 {
+            world.step(1.0 / 60.0);
+        }
+        let b = world.body(handle).unwrap();
+        assert!(
+            b.transform.position.y > 0.5,
+            "300 kg/m³ 的球应该浮着，实际 {:?}",
+            b.transform.position
+        );
+        assert!(!b.is_sleeping());
     }
 
     #[test]

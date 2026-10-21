@@ -10,7 +10,7 @@
   },
   "fluids": [
     { "center": [0, 1.3, 0], "size": [1.6, 1.6, 1.6], "spacing": 0.1,
-      "radius": 0.05, "rest_density": 1000, "viscosity": 0.05,
+      "radius": 0.05, "rest_density": 1000, "viscosity": 0.05, "drag": 6,
       "iterations": 4, "max_particles": 5000 }
   ],
   "objects": [
@@ -21,7 +21,10 @@
     { "name": "前壁", "shape": { "type": "box", "size": [2.4, 1.2, 0.2] },
       "position": [0, 0.6, 1.2], "material": "wall", "body": "static" },
     { "name": "后壁", "shape": { "type": "box", "size": [2.4, 1.2, 0.2] },
-      "position": [0, 0.6, -1.2], "material": "wall", "body": "static" }
+      "position": [0, 0.6, -1.2], "material": "wall", "body": "static" },
+    { "name": "浮球", "shape": { "type": "sphere", "radius": 0.25 },
+      "position": [0, 1.2, 0], "material": "water", "body": "dynamic",
+      "density": 300 }
   ],
   "camera": { "position": [4.2, 3.4, 4.6], "look_at": [0, 0.7, 0], "fov_deg": 50 },
   "lighting": { "preset": "studio", "shadows": true },

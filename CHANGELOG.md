@@ -10,6 +10,17 @@
 
 ### 新增
 
+- **流体 ↔ 刚体双向耦合（M3）**：粒子撞到动态刚体时按动量守恒反推法向冲量（只反推 20%，
+  避免成千上万颗粒子把刚体当鼓面敲），并把睡眠体叫醒；反过来，粒子的**近似自由表面**
+  （刚体 XZ 附近粒子的最高 y）与 `water::submerged_in` 给刚体**浮力 + 浸没阻尼**
+  （同一套采样，不重复实现体积/形心）。`fluids[].drag` 新增（缺省 6，0 = 无阻尼），
+  `simulate` 的 `fluids[].contacts` 报告本步粒子-刚体接触数（0 时不出现）。
+  `examples/fluid_pool.json` 里 300 kg/m³ 的浮球 480 步后停在水面下 26%（密度比 0.3，
+  符合阿基米德），流体最高速度 0.38 m/s。**不写 `fluids` = 行为与以前逐位相同**。
+  边界：浮力用瞬时最高粒子当水面（飞溅会抬高读数），多流体只取最大浸没占比、不叠加浮力；
+  还没有表面张力/涡量/粒子间碰撞。验证：`cargo test -p quench3d-physics fluid`
+  （重物被压下去、轻物浮住、睡眠体被叫醒、确定性）、`cargo test -p quench3d-cli --test
+  cli_e2e fluid`（报告 `contacts` 与浮球位置）。
 - **`waters`：解析水域 + 浮力（M1，不是流体求解器）**：场景新增 `waters: [{ center, size,
   level, density, drag }]`，动态刚体按**排开体积**受浮力（作用在排开体积形心上，因此有扶正
   力矩）、按浸没比例受线性阻尼；`simulate` 报告新增 `waters` 计数与 `states[].submerged`

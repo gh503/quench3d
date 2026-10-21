@@ -302,6 +302,8 @@ fn fluid_particles_settle_and_are_reported() {
     assert!(min_y > 0.0, "粒子不应穿地，实际 min_y = {min_y}");
     let ratio = f["avg_density_ratio"].as_f64().unwrap();
     assert!((0.5..=2.0).contains(&ratio), "密度比异常: {ratio}");
+    let contacts = f["contacts"].as_u64().unwrap_or(0);
+    assert!(contacts > 0, "围池的粒子应该与墙/地面有接触: {f}");
 
     // spacing 非法：当场报 fluids[0].spacing，而不是静默没有粒子。
     let bad = dir.join("bad_fluid.json");
@@ -319,6 +321,42 @@ fn fluid_particles_settle_and_are_reported() {
             .iter()
             .any(|d| d["path"].as_str() == Some("fluids[0].spacing")),
         "要报 fluids[0].spacing: {diags:?}"
+    );
+}
+
+#[test]
+fn fluid_buoyancy_floats_a_light_body() {
+    let dir = temp_dir("fluid_buoyancy");
+    let scene = dir.join("float.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "ground": { "size": 20, "y": 0 },
+          "fluids": [
+            { "center": [0, 1.2, 0], "size": [1.2, 1.2, 1.2],
+              "spacing": 0.1, "radius": 0.05, "max_particles": 2000,
+              "drag": 6 }
+          ],
+          "objects": [
+            { "name": "浮球", "shape": { "type": "sphere", "radius": 0.25 },
+              "position": [0, 1.2, 0], "body": "dynamic", "density": 300 }
+          ],
+          "simulate": { "steps": 240, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let env = r.json();
+    let data = &env["data"];
+    let states = data["states"].as_array().unwrap();
+    let ball = states.iter().find(|s| s["name"] == "浮球").unwrap();
+    let y = ball["position"][1].as_f64().unwrap();
+    assert!(y > 0.5, "300 kg/m³ 的球应该被流体托住，实际 y = {y}");
+    let f = &data["fluids"].as_array().unwrap()[0];
+    assert!(
+        f["contacts"].as_u64().unwrap_or(0) > 0,
+        "应有粒子-刚体接触: {f}"
     );
 }
 

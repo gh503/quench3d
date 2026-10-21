@@ -364,7 +364,7 @@ pub struct SceneDoc {
     /// 粒子流体（CPU PBF）：长方体发射器 + 粒子参数。
     ///
     /// 不写 = 没有粒子流体（物理结果与以前逐位相同）。流体按**排开体积**被刚体
-    /// 推开（M2 单向：刚体 → 流体），还不会反推刚体。
+    /// 推开，并把法向冲量反推给动态刚体；粒子的自由表面还给刚体浮力/阻尼（M3 双向）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fluids: Vec<FluidDoc>,
     /// 具名材质。
@@ -1025,6 +1025,9 @@ pub struct FluidDoc {
     /// XSPH 粘性系数 0~1，缺省 0.05。
     #[serde(default = "default_fluid_viscosity")]
     pub viscosity: f32,
+    /// 浸没刚体的线性阻尼（1/s），缺省 6；0 = 无阻尼。
+    #[serde(default = "default_fluid_drag")]
+    pub drag: f32,
     /// 密度约束迭代次数 1~8，缺省 4。
     #[serde(default = "default_fluid_iterations")]
     pub iterations: u32,
@@ -1068,6 +1071,10 @@ fn default_fluid_density() -> f32 {
 
 fn default_fluid_viscosity() -> f32 {
     0.05
+}
+
+fn default_fluid_drag() -> f32 {
+    6.0
 }
 
 fn default_fluid_iterations() -> u32 {
@@ -3504,6 +3511,13 @@ impl SceneDoc {
                     ErrorCode::OutOfRange,
                     format!("{p}.viscosity"),
                     "粘性系数必须在 0~1 之间",
+                ));
+            }
+            if !(f.drag.is_finite() && f.drag >= 0.0) {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.drag"),
+                    "浸没阻尼必须是有限的非负数",
                 ));
             }
             if !(1..=8).contains(&f.iterations) {
@@ -6620,6 +6634,7 @@ mod tests {
         assert_eq!(doc.fluids[0].radius(), 0.05, "缺省半径 = spacing/2");
         assert_eq!(doc.fluids[0].rest_density, 1000.0);
         assert_eq!(doc.fluids[0].iterations, 4);
+        assert_eq!(doc.fluids[0].drag, 6.0, "缺省浸没阻尼");
         let text = serde_json::to_string(&doc).expect("序列化");
         let again = SceneDoc::from_json(&text).expect("往返");
         assert_eq!(again.fluids.len(), 2);
@@ -6649,6 +6664,7 @@ mod tests {
                 json!({"size": [1, 1, 1], "viscosity": 2}),
                 "fluids[0].viscosity",
             ),
+            (json!({"size": [1, 1, 1], "drag": -1}), "fluids[0].drag"),
             (
                 json!({"size": [1, 1, 1], "iterations": 0}),
                 "fluids[0].iterations",
