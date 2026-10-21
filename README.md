@@ -133,10 +133,11 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   边界：双 clip 混合会按 `blend_weight` 逐 target 插值两条 clip 的 morph 权重；
   没有编辑器滑杆；`models[].collide` 的碰撞体仍是绑定姿态。`info` 会报 `morph_targets`，动画报告
   会报 `animation.morph_tracks`。
-* **时间驱动动画状态机**：场景里用 `models[].animator` 声明 `states` 与
-  `transitions`；当前状态停留 `after` 秒后切到目标状态，`fade` 秒内从旧 clip
-  淡入新 clip（0 = 立即切），淡入完成后新 clip 提为主 clip。它只按**时间**过渡，
-  没有输入参数/事件；和 `models[].animation` 互斥。报告
+* **时间/结束驱动动画状态机**：场景里用 `models[].animator` 声明 `states` 与
+  `transitions`；当前状态停留 `after` 秒后切到目标状态，或写
+  `on_finished: true` 让非循环 clip **播完**时切，`fade` 秒内从旧 clip 淡入新 clip
+  （0 = 立即切），淡入完成后新 clip 提为主 clip。它仍没有输入参数/事件；
+  和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
 * **动画面板**：右侧「动画」列出场景里每个播放实例的 clip、时长、倍速、循环/播完
   状态和状态机当前状态；拖动「时间」滑杆时**暂停也立刻**重算位姿与蒙皮/morph 顶点
@@ -214,7 +215,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12318413 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12319238 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -898,7 +899,8 @@ NaN 刚体  : 0
   `blend` 是**第二条 clip 的交叉淡化**：两条 clip 各自推进自己的时间，再对局部 TRS
   插值（旋转 slerp），最后统一累乘父子链；`weight` 缺省 0.5，0 = 只用第一条，1 = 只用第二条。
   `fade` 缺省 0 = 立即到 `weight`；写成正数时从第一帧的 0 **smoothstep** 升到 `weight`，
-  用于"走路→跑步"这类一次性过渡。没有任意权重曲线/状态机；第二条名字写错时
+  用于"走路→跑步"这类一次性过渡。没有任意权重曲线；状态机见 §1.1 的
+  `models[].animator`（按停留时间或 clip 播完过渡）。第二条名字写错时
   **两条都不登记**（保持绑定姿态），不会偷偷只播第一条。`collide: true` 的静态碰撞体**不跟着动**。可用名字用
   `quench3d info 模型.glb` 看。
 * `waters` 是**解析浮力环境**，不是流体求解器：`{ "center": [x, z], "size": [x, z], "level": y,
@@ -1230,7 +1232,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 688 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 691 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

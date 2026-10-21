@@ -1576,7 +1576,12 @@ pub struct ModelAnimatorStateDoc {
     pub start: Option<f32>,
 }
 
-/// 状态机的一条过渡：当前状态停留 `after` 秒后切到 `to`。
+/// serde 的 `skip_serializing_if`：`false` 不写进 JSON（老场景不增加噪声）。
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// 状态机的一条过渡：当前状态停留 `after` 秒、或当前 clip 播完后切到 `to`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelAnimatorTransitionDoc {
@@ -1584,8 +1589,12 @@ pub struct ModelAnimatorTransitionDoc {
     pub from: String,
     /// 目标状态名。
     pub to: String,
-    /// 在当前状态停留多少秒后开始过渡（必须 >= 0）。
+    /// 在当前状态停留多少秒后开始过渡（必须 >= 0；`on_finished` 时忽略）。
+    #[serde(default)]
     pub after: f32,
+    /// `true` = 当前 clip 播完时过渡，不按 `after` 计时。缺省 `false`。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub on_finished: bool,
     /// 淡入秒数，缺省 0 = 立即切换。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade: Option<f32>,

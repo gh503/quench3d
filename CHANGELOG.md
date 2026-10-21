@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **状态机 clip 结束触发（第 80 轮）**：`models[].animator.transitions[]` 新增
+  `on_finished: true`，当前状态的非循环 clip 播完后的**下一帧首**切到目标状态，
+  不再需要猜 `after` 秒数；此模式可省略 `after`（缺省 0），`fade` 语义不变。
+  回归：`scene_animator_transitions_when_clip_finishes`（帧首语义 + 目标重新计时）+
+  CLI `scene_animator_accepts_finished_trigger_without_after`（校验通过、报告不变）。
+  边界：仍没有输入参数/事件条件；当前状态若循环则永远不会 finished。
 - **动画时间检查器（第 79 轮）**：编辑器右侧新增「动画」面板，列出每个播放实例的
   clip 名、时长、倍速、循环/播完状态与状态机当前状态；拖动 `Slider` 改
   `player.time` 后调用新 API `Scene::refresh_animations_with_renderer`，**暂停时也**

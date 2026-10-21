@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **688** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **691** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -62,6 +62,9 @@ tools/verify_all.sh
 | CUBICSPLINE 解析链路 | `cargo test -p quench3d --test model_loading cubic_spline_tangents_survive_parsing_and_sampling` | 解析后 in/out 切线保留，`sample_animation(t=.5)` 的 x=.75 |
 | 双 clip morph 混合 | `cargo test -p quench3d --test model_loading blended_morph_weights_interpolate_both_clips` | 主 clip .5、第二 clip 1、blend=.5 → 权重 .75；形变位移 .375 |
 | 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
+| 状态机 clip 结束触发 | `cargo test -p quench3d --test model_loading scene_animator_transitions_when_clip_finishes` | 非循环 clip 播完的**下一帧首**才切到目标状态；目标 clip 重新计时 |
+| `on_finished` 省略 after | `cargo test -p quench3d-cli --test cli_e2e scene_animator_accepts_finished_trigger_without_after` | `validate` 退出 0；`simulate` 报告 animator.found/states/transitions |
+| `on_finished` 首帧画面 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-cli --test cli_e2e scene_animator_finished_trigger_changes_first_frame` | 初始状态已播完（start=2）时首帧切到 after(start=.5)，与基线逐像素 0 差异；不切则停在旧 clip 末帧 |
 | 动画时间检查器（CPU） | `cargo test -p quench3d --test model_loading refresh_animations` | 手动把 `player.time` 拖回 0.25，调用 `refresh_animations` 后位移精确为 10.75，重复刷新不漂移、不推进时间 |
 | 动画时间检查器（GPU 蒙皮） | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --test model_loading skinned_mesh_changes_rendered_pixels` | 用 `refresh_animations_with_renderer` 在 t=0/0.25 渲染，两张 PNG 像素有差 |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |

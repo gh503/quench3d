@@ -171,8 +171,13 @@ pub struct ModelAnimatorTransition {
     pub from: String,
     /// 到哪个状态名。
     pub to: String,
-    /// 在当前状态停留多少秒后开始过渡。
+    /// 在当前状态停留多少秒后开始过渡（`on_finished = true` 时忽略）。
     pub after: f32,
+    /// `true` = 当前 clip **播完**（非循环播放器 `finished`）时立即过渡，而不是等 `after`。
+    ///
+    /// 这让"跑步→停下"这类一次性动作不需要猜 clip 时长；若当前状态仍循环，
+    /// 它永远不会结束，这条过渡也就不会触发。
+    pub on_finished: bool,
     /// 淡入秒数；0 = 立即切换。
     pub fade: f32,
 }
@@ -249,6 +254,8 @@ fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
         return;
     }
     let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+    // 在借 `animator` 之前取，避免同时借 `a.player` 的字段。
+    let player_finished = a.player.finished;
     let Some(anim) = &mut a.animator else {
         return;
     };
@@ -259,7 +266,15 @@ fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
     // 过渡在**帧首**判定：本帧开始时已经停留够 after 才切。这样目标 clip
     // 不会被多推进一整帧——它本帧只从 0 开始走这一帧的时间。
     let transition = anim.transitions.iter().find(|t| {
-        t.from == current_name && t.after.is_finite() && t.after >= 0.0 && anim.elapsed >= t.after
+        if t.from != current_name {
+            return false;
+        }
+        if t.on_finished {
+            // 帧首判定：上一帧 `player.advance` 已经把它置为 finished。
+            player_finished
+        } else {
+            t.after.is_finite() && t.after >= 0.0 && anim.elapsed >= t.after
+        }
     });
     let Some(transition) = transition else {
         anim.elapsed += step;

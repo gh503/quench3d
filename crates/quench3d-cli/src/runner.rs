@@ -3303,6 +3303,7 @@ pub fn setup_visuals(
                     from: t.from.clone(),
                     to: t.to.clone(),
                     after: t.after,
+                    on_finished: t.on_finished,
                     fade: t.fade.unwrap_or(0.0),
                 })
                 .collect();

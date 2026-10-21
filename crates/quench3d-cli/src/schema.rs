@@ -453,7 +453,7 @@ pub fn scene_grammar() -> Value {
             "collide": "true 时把模型合并成静态三角网格碰撞体，缺省 false",
             "friction": "参与碰撞时的摩擦，缺省 0.8",
             "morph_weights": "手工覆盖 glTF morph target 的权重数组（0~1，按 target 顺序；缺省用资产默认值，缺项按 0）；写了它就优先于 clip 自带的 morph 权重动画",
-            "animator": "时间驱动状态机 { initial, states, transitions? }；与 animation 互斥。状态按停留时间 after 秒过渡到目标状态，fade 秒淡入（0 = 立即切换）；没有输入参数/事件",
+            "animator": "时间/结束驱动状态机 { initial, states, transitions? }；与 animation 互斥。过渡按停留时间 after 秒，或 on_finished 时当前 clip 播完，fade 秒淡入（0 = 立即切换）；没有输入参数/事件",
             "animation": "播放模型里的一条 glTF 动画：{ name, start?, speed?, loop?, blend? }。不写 = 静止（老行为）；loop 缺省 true（写 false = 播完停在最后一帧）；带 morph weights 轨道的 clip 会同时驱动形变（手工 morph_weights 优先；双 clip 只取主 clip 的 morph 轨道）；blend: { name, start?, speed?, loop?, weight?, fade? } 是第二条 clip 的交叉淡化（weight 缺省 0.5，fade 缺省 0 = 立即生效）；名字不存在**不是**校验错误（validate 不读资产），会在 simulate/render 报告的 models[].animation.found / models[].blend.found 里报 false"
         },
         "joint": {
@@ -791,8 +791,10 @@ pub fn json_schema() -> Value {
         d
     });
     defs.insert("modelAnimatorTransition".into(), {
-        let mut d = def(&["from", "to", "after", "fade"]);
-        d["required"] = json!(["from", "to", "after"]);
+        let mut d = def(&["from", "to", "after", "on_finished", "fade"]);
+        d["properties"]["after"] = json!({ "type": "number", "minimum": 0.0 });
+        d["properties"]["on_finished"] = json!({ "type": "boolean", "default": false });
+        d["required"] = json!(["from", "to"]);
         d
     });
     defs.insert("assets".into(), def(&["search_paths"]));

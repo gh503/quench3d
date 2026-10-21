@@ -1042,6 +1042,7 @@ fn scene_animator_transitions_and_promotes() {
         from: "idle".into(),
         to: "run".into(),
         after: 0.5,
+        on_finished: false,
         fade: 0.5,
     }];
     let mut scene = Scene::new();
@@ -1092,6 +1093,65 @@ fn scene_animator_transitions_and_promotes() {
     let animator = a.animator.as_ref().expect("状态机还在");
     assert_eq!(animator.current, 1);
     assert_eq!(animator.pending, None);
+    assert!(animator.elapsed < 1e-6, "新状态应重新计时");
+}
+
+/// `on_finished`：非循环 clip 播完后的**下一帧首**才切换，避免同一帧既结束又切换。
+#[test]
+fn scene_animator_transitions_when_clip_finishes() {
+    use quench3d::scene::{ModelAnimatorState, ModelAnimatorTransition, Scene};
+
+    let mut model =
+        load_model_from_bytes("nodes.glb", &nodes_with_animation_glb()).expect("该能解析");
+    let mut second = model.animations[0].clone();
+    second.name = "移动2".into();
+    model.animations.push(second);
+    let model = std::sync::Arc::new(model);
+    let states = vec![
+        ModelAnimatorState {
+            name: "once".into(),
+            animation: "移动".into(),
+            speed: 1.0,
+            looping: false,
+            start: 0.0,
+        },
+        ModelAnimatorState {
+            name: "after".into(),
+            animation: "移动2".into(),
+            speed: 1.0,
+            looping: true,
+            start: 0.0,
+        },
+    ];
+    let transitions = vec![ModelAnimatorTransition {
+        from: "once".into(),
+        to: "after".into(),
+        after: 0.0,
+        on_finished: true,
+        fade: 0.0,
+    }];
+    let mut scene = Scene::new();
+    let idx = scene
+        .play_model_animator(model, Vec::new(), Vec::new(), states, transitions, 0)
+        .expect("两个 clip 都存在");
+
+    scene.advance_animations(0.6);
+    assert_eq!(scene.animations[idx].player.animation, "移动");
+    assert!(!scene.animations[idx].player.finished);
+
+    // 这一帧把时间推到 clips 末尾并置 finished；帧首判定时还没 finished，所以不切。
+    scene.advance_animations(0.6);
+    assert_eq!(scene.animations[idx].player.animation, "移动");
+    assert!(scene.animations[idx].player.finished);
+
+    // 下一帧首看到 finished，立即切到循环的「移动2」。
+    scene.advance_animations(0.1);
+    let a = &scene.animations[idx];
+    assert_eq!(a.player.animation, "移动2");
+    assert!(!a.player.finished);
+    assert!(a.secondary.is_none());
+    let animator = a.animator.as_ref().expect("状态机还在");
+    assert_eq!(animator.current, 1);
     assert!(animator.elapsed < 1e-6, "新状态应重新计时");
 }
 

@@ -6551,6 +6551,126 @@ fn scene_animator_is_reported_and_changes_cli_render() {
     );
 }
 
+/// `on_finished` 的**视觉**证据：初始状态已经播完时，首帧必须切到目标 clip，
+/// 与直接播放目标 `start` 的基线逐像素一致（不切就会停在旧 clip 末帧）。
+#[test]
+fn scene_animator_finished_trigger_changes_first_frame() {
+    let dir = temp_dir("animator_finished_pixels");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    let camera = serde_json::json!({
+        "position": [0.5, 0.75, 4.0], "look_at": [0.5, 0.75, 0.0], "fov_deg": 45.0
+    });
+    let render_block = serde_json::json!({
+        "output": "ignored.png", "width": 160, "height": 120, "msaa": 1
+    });
+    let triggered = write_scene(
+        &dir,
+        "finished-pixels.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{
+                "path": "morph.glb",
+                "animator": {
+                    "initial": "once",
+                    "states": [
+                        // start 超过 clip 时长 → play_model_animator 的 advance(0)
+                        // 已经把它夹到末尾并置 finished。
+                        { "name": "once", "animation": "pulse", "start": 2.0, "loop": false },
+                        { "name": "after", "animation": "pulse", "start": 0.5, "loop": false }
+                    ],
+                    "transitions": [
+                        { "from": "once", "to": "after", "on_finished": true, "fade": 0.0 }
+                    ]
+                }
+            }],
+            "camera": camera,
+            "render": render_block
+        }),
+    );
+    let baseline = write_scene(
+        &dir,
+        "finished-baseline.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{ "path": "morph.glb", "animation": { "name": "pulse", "start": 0.5 } }],
+            "camera": camera,
+            "render": render_block
+        }),
+    );
+    let triggered_png = dir.join("finished-trigger.png");
+    let r = run(&[
+        "render",
+        triggered.to_str().unwrap(),
+        "--out",
+        triggered_png.to_str().unwrap(),
+    ]);
+    if r.code == 3 {
+        return;
+    }
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let baseline_png = dir.join("finished-baseline.png");
+    let r = run(&[
+        "render",
+        baseline.to_str().unwrap(),
+        "--out",
+        baseline_png.to_str().unwrap(),
+    ]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let (w, h, a) = decode_rgba(&triggered_png);
+    let (w2, h2, b) = decode_rgba(&baseline_png);
+    assert_eq!((w, h), (w2, h2));
+    let changed = a
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
+        .filter(|(x, y)| x != y)
+        .count();
+    assert_eq!(
+        changed, 0,
+        "首帧应切到 after(start=.5)，与基线逐像素一致；实际 {changed} 像素不同"
+    );
+}
+
+/// `on_finished` 可以省略 `after`：校验通过，报告仍是同一个状态机。
+#[test]
+fn scene_animator_accepts_finished_trigger_without_after() {
+    let dir = temp_dir("animator_finished");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    let scene = write_scene(
+        &dir,
+        "finished.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{
+                "path": "morph.glb",
+                "animator": {
+                    "initial": "once",
+                    "states": [
+                        { "name": "once", "animation": "pulse", "loop": false },
+                        { "name": "after", "animation": "pulse", "start": 0.5, "loop": false }
+                    ],
+                    "transitions": [
+                        { "from": "once", "to": "after", "on_finished": true, "fade": 0.0 }
+                    ]
+                }
+            }]
+        }),
+    );
+    let r = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    assert_eq!(d["data"]["valid"], true, "{d}");
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    let a = &d["data"]["models"][0]["animator"];
+    assert_eq!(a["found"], true, "{d}");
+    assert_eq!(a["states"], 2, "{d}");
+    assert_eq!(a["transitions"], 1, "{d}");
+}
+
 #[test]
 fn scene_animator_is_validated() {
     let dir = temp_dir("animator_validate");
