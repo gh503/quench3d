@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **编辑器 morph 覆盖（第 85 轮）**：带 morph target 的动画实例新增「手动 morph
+  覆盖」开关与按 target 的 `目标 #N` 滑杆；勾选后把覆盖权重写进运行时
+  `ModelAnimationInstance.morph_weights`（立即重传网格）和底稿
+  `models[i].morph_weights`（可撤销、存盘生效），取消勾选则删除覆盖。未启用时
+  滑杆以禁用状态占位，明确告诉用户模型有 morph target。回归：
+  `set_morph_weights_writes_and_removes_override` + `ui_smoke` 的开关/目标滑杆文本断言。
 - **状态机过渡编辑（第 84 轮）**：状态机实例的「动画」面板现在列出每条
   `from → to` 过渡，可直接改等待秒数、淡入秒数和「播完触发」勾选；改动同步运行时
   `animator.transitions[i]` 并通过 `Doc::set_animator_transition` 写回

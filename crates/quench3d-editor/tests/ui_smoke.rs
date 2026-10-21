@@ -7,7 +7,9 @@
 //! **显式 opt-in**：要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1` 才执行。
 #![cfg(not(target_arch = "wasm32"))]
 
-use quench3d::assets::{LoadedAnimation, LoadedModel, ModelAnimationPlayer};
+use quench3d::assets::{
+    LoadedAnimation, LoadedMesh, LoadedModel, LoadedMorphTarget, ModelAnimationPlayer,
+};
 use quench3d::prelude::*;
 use quench3d::render::context::with_gpu_tests;
 use quench3d::scene::{ModelAnimationInstance, ModelAnimatorRuntime, ModelAnimatorState};
@@ -116,7 +118,10 @@ fn fake_animation_instance() -> ModelAnimationInstance {
 fn fake_plain_animation_instance() -> ModelAnimationInstance {
     let mut model = LoadedModel {
         name: "ui-smoke-plain".into(),
-        meshes: Vec::new(),
+        meshes: vec![LoadedMesh {
+            morph_targets: vec![LoadedMorphTarget::default()],
+            ..Default::default()
+        }],
         materials: Vec::new(),
         images: Vec::new(),
         nodes: Vec::new(),
@@ -227,6 +232,14 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "循环"),
         "动画循环控件没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "手动 morph 覆盖"),
+        "morph 覆盖开关没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "目标 #0"),
+        "morph 目标滑杆没有出现在面板内容里"
     );
     assert!(
         shapes_contain_text(&output.shapes, "待机 → 走"),

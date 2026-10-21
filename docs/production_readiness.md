@@ -2170,13 +2170,13 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 渲染循环里的调用点 | ✅ 第 62 轮 | `Scene::advance_animations(dt)`；`Engine::tick`（窗口）与 `render_sequence_with_game`（无头 `movie`）每帧在 `sync_from_physics` 之后调一次，暂停不推进；单帧 `render` 用 `dt = 0` 摆起始姿态 |
 | 与场景格式的接口 | ✅ 第 62 / 71 / 72 轮 | `models[].animation = { name, start?, speed?, loop?, blend? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`blend = { name, start?, speed?, loop?, weight?, fade? }`，`weight` 缺省 0.5、`fade` 缺省 0；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
-| 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`。**仍不是**完整时间轴（不能加事件/增删状态或过渡） |
+| 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）。**仍不是**完整时间轴（不能加事件/增删状态或过渡） |
 | 时间/结束驱动状态机 | ✅ 第 75 / 80 轮 | `models[].animator`：`states` + `transitions`，按状态停留时间 `after` 过渡，或 `on_finished: true` 在当前非循环 clip 播完时过渡（`after` 可省略）；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；报告 `models[].animator`。**仍缺**：输入参数/事件条件、编辑器状态机编辑面板 |
 | 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
 | `skins` + GPU 蒙皮 | ❌ | 顶点着色器还没有关节矩阵；CPU 路径在角色面数高时是瓶颈。要做顶点属性 + 关节矩阵上传 + WGSL 分支 |
 | glTF `targets` / 静态 morph | ✅ 第 73 轮 | `LoadedMorphTarget` 解析 position/normal/tangent 位移（按节点世界方向烘过）；`LoadedModel::morphed_mesh` 按权重叠加，`deformed_mesh` 保证**先 morph 再蒙皮**；`models[].morph_weights` 覆盖 + GPU 静态回写；`info` 报 `morph_targets` |
-| morph 权重动画 | ✅ 第 74 轮（双 clip 第 77 轮，CUBICSPLINE 第 81 轮） | `ReadOutputs::MorphTargetWeights` 解析为 `MorphTrack`（按 target 数切帧；CUBICSPLINE 保留 `[入切线, 值, 出切线]` 三块），`LoadedModel::morph_weights_at` 采样；场景每帧按节点应用到网格；双 clip 用 `blended_morph_weights_at` 按 `blend_weight` 逐 target 插值。**仍缺**：编辑器 morph 滑杆、morph 事件 |
+| morph 权重动画 | ✅ 第 74 轮（双 clip 第 77 轮，CUBICSPLINE 第 81 轮） | `ReadOutputs::MorphTargetWeights` 解析为 `MorphTrack`（按 target 数切帧；CUBICSPLINE 保留 `[入切线, 值, 出切线]` 三块），`LoadedModel::morph_weights_at` 采样；场景每帧按节点应用到网格；双 clip 用 `blended_morph_weights_at` 按 `blend_weight` 逐 target 插值。**仍缺**：morph 事件；编辑器滑杆见第 85 轮（手动覆盖，多网格共用一组权重） |
 | `CUBICSPLINE` 真值 | ✅ 第 76 轮（TRS）/ 第 81 轮（morph） | TRS 与 morph 权重轨道都按 Hermite 基函数求值，切线来自 glTF 的 `[入切线, 值, 出切线]`；旋转分量求值后归一化；切线不齐时退化为线性 |
 | 动画 vs 物理 | ⚠️ 有意 | 模型动画是**视觉**的：`models[].collide` 的静态三角网碰撞体保持绑定姿态，不会跟着动 |
 | `LoadedModel` 的节点树 | ✅ 第 61 轮 | `nodes` + `bind_pose()` + `bind_inverse`（每网格）——静态烘焙与动画并存：`world(t) × bind_inverse` 在绑定姿态下是单位矩阵 |
@@ -2490,7 +2490,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**696** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**697** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

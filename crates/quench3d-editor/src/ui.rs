@@ -1271,6 +1271,20 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         .iter()
         .map(|a| a.model.animations.iter().map(|c| c.name.clone()).collect())
         .collect();
+    // 每个模型最多有多少个 morph target；多网格共用一组覆盖权重（与场景格式一致）。
+    let morph_counts: Vec<usize> = engine
+        .scene
+        .animations
+        .iter()
+        .map(|a| {
+            a.model
+                .meshes
+                .iter()
+                .map(|m| m.morph_targets.len())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
     let mut refresh = false;
     let mut changed_model: Option<String> = None;
     let mut begin_edit = false;
@@ -1331,6 +1345,70 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                     changed_model = Some(path);
                                 }
                             }
+                        }
+                    }
+                }
+                if morph_counts[index] > 0 {
+                    let mut manual = animation.morph_weights.is_some();
+                    if ui.checkbox(&mut manual, "手动 morph 覆盖").changed() {
+                        animation.morph_weights = if manual {
+                            Some(vec![0.0; morph_counts[index]])
+                        } else {
+                            None
+                        };
+                        if models[index].is_some() {
+                            if let Some(path) =
+                                doc.set_morph_weights(&objects, animation.morph_weights.clone())
+                            {
+                                changed_model = Some(path);
+                            }
+                        }
+                        refresh = true;
+                        record_edit = true;
+                    }
+                    if let Some(weights) = &mut animation.morph_weights {
+                        weights.resize(morph_counts[index], 0.0);
+                        let mut changed = false;
+                        for (target, weight) in weights.iter_mut().enumerate() {
+                            let response = ui.add(
+                                egui::Slider::new(weight, 0.0..=1.0)
+                                    .text(format!("目标 #{target}"))
+                                    .fixed_decimals(3),
+                            );
+                            if response.drag_started() {
+                                begin_edit = true;
+                            }
+                            if response.changed() {
+                                changed = true;
+                                if !response.dragged() {
+                                    record_edit = true;
+                                }
+                            }
+                            if response.drag_stopped() {
+                                end_edit = true;
+                            }
+                        }
+                        if changed {
+                            refresh = true;
+                            if models[index].is_some() {
+                                if let Some(path) =
+                                    doc.set_morph_weights(&objects, Some(weights.clone()))
+                                {
+                                    changed_model = Some(path);
+                                }
+                            }
+                        }
+                    } else {
+                        // 未启用覆盖时仍把目标画出来（禁用），让用户知道这个模型有
+                        // morph target、勾选后会多出哪些滑杆。
+                        for target in 0..morph_counts[index] {
+                            let mut zero = 0.0;
+                            ui.add_enabled(
+                                false,
+                                egui::Slider::new(&mut zero, 0.0..=1.0)
+                                    .text(format!("目标 #{target}"))
+                                    .fixed_decimals(3),
+                            );
                         }
                     }
                 }

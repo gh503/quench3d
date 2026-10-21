@@ -243,6 +243,24 @@ impl Doc {
             .map(|i| i.model)
     }
 
+    /// 把模型的手动 morph 权重写回 `models[i].morph_weights`。
+    ///
+    /// `Some(vec![])` 与 `None` 不同：前者是显式全 0 覆盖，后者删除覆盖。返回模型路径；
+    /// 没有映射或模型下标不存在时返回 `None`。
+    pub fn set_morph_weights(
+        &mut self,
+        objects: &[usize],
+        weights: Option<Vec<f32>>,
+    ) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        doc.morph_weights = weights;
+        Some(doc.path.display().to_string())
+    }
+
     /// 把状态机第 `index` 条过渡的时间/淡入/结束触发写回底稿。
     ///
     /// 返回模型路径；没有映射、模型没有 animator 或下标越界时返回 `None`。
@@ -1113,5 +1131,35 @@ mod tests {
         assert!(doc
             .set_animator_transition(&[99], 0, 0.0, 0.0, false)
             .is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_morph_weights_writes_and_removes_override() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{"path": "morph.glb"}]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![quench3d_cli::runner::ModelInstance {
+            model: 0,
+            path: "morph.glb".into(),
+            objects: vec![4],
+        }]);
+        assert_eq!(
+            doc.set_morph_weights(&[4], Some(vec![0.25, 0.75]))
+                .as_deref(),
+            Some("morph.glb")
+        );
+        assert_eq!(
+            doc.base_doc.as_ref().unwrap().models[0].morph_weights,
+            Some(vec![0.25, 0.75])
+        );
+        assert!(doc.set_morph_weights(&[4], None).is_some());
+        assert_eq!(doc.base_doc.as_ref().unwrap().models[0].morph_weights, None);
+        assert!(doc.set_morph_weights(&[99], Some(vec![0.0])).is_none());
     }
 }
