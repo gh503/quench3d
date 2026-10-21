@@ -2160,7 +2160,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 环节 | 状态 | 说明 |
 | --- | --- | --- |
 | glTF 节点层级 / 节点变换 | ✅ 本轮 | 静态几何正确了 |
-| glTF `animations` 解析 | ✅ 第 61 / 76 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 用 Hermite 入/出切线）；**morph 动画轨道仍跳过** |
+| glTF `animations` 解析 | ✅ 第 61 / 76 / 81 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 用 Hermite 入/出切线）；morph 权重轨道也解析并保留入/出切线 |
 | glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ✅ 第 70 轮（CPU） | `LoadedSkin` + `LoadedMesh.skin/joints/weights`；缺任何顶点数据时整体退回刚性路径（不撕裂网格） |
 | CPU 蒙皮变形 + 顶点回写 | ✅ 第 70 轮 | `LoadedModel::skinned_mesh` 算 `Σ w·world(joint)·IBM·bindInverse`；`Scene::advance_animations_with_renderer` 调 `Renderer::update_mesh_vertices` 原地更新同一个 `MeshId`。GPU 像素回归 t=0/t=0.25 |
 | GPU 蒙皮（顶点着色器关节矩阵） | ❌ | 现在是 CPU 变形；大角色每帧在 CPU 上重算并上传全部顶点。要做 GPU：`JOINTS_0/WEIGHTS_0` 顶点属性 + 关节矩阵 storage/uniform + WGSL 分支 |
@@ -2176,8 +2176,8 @@ if let Some(v) = doc.physics.static_friction_speed {
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
 | `skins` + GPU 蒙皮 | ❌ | 顶点着色器还没有关节矩阵；CPU 路径在角色面数高时是瓶颈。要做顶点属性 + 关节矩阵上传 + WGSL 分支 |
 | glTF `targets` / 静态 morph | ✅ 第 73 轮 | `LoadedMorphTarget` 解析 position/normal/tangent 位移（按节点世界方向烘过）；`LoadedModel::morphed_mesh` 按权重叠加，`deformed_mesh` 保证**先 morph 再蒙皮**；`models[].morph_weights` 覆盖 + GPU 静态回写；`info` 报 `morph_targets` |
-| morph 权重动画 | ✅ 第 74 轮（双 clip 第 77 轮） | `ReadOutputs::MorphTargetWeights` 解析为 `MorphTrack`（按 target 数切帧；CUBICSPLINE 只取值块并按线性采样），`LoadedModel::morph_weights_at` 采样；场景每帧按节点应用到网格；双 clip 用 `blended_morph_weights_at` 按 `blend_weight` 逐 target 插值。**仍缺**：morph 的 CUBICSPLINE 切线、编辑器滑杆、morph 事件 |
-| `CUBICSPLINE` 真值 | ✅ 第 76 轮（TRS） | TRS 轨道按 Hermite 基函数求值，切线来自 glTF 的 `[入切线, 值, 出切线]`；旋转分量求值后归一化。**morph 权重轨道仍只取关键帧值**（线性） |
+| morph 权重动画 | ✅ 第 74 轮（双 clip 第 77 轮，CUBICSPLINE 第 81 轮） | `ReadOutputs::MorphTargetWeights` 解析为 `MorphTrack`（按 target 数切帧；CUBICSPLINE 保留 `[入切线, 值, 出切线]` 三块），`LoadedModel::morph_weights_at` 采样；场景每帧按节点应用到网格；双 clip 用 `blended_morph_weights_at` 按 `blend_weight` 逐 target 插值。**仍缺**：编辑器 morph 滑杆、morph 事件 |
+| `CUBICSPLINE` 真值 | ✅ 第 76 轮（TRS）/ 第 81 轮（morph） | TRS 与 morph 权重轨道都按 Hermite 基函数求值，切线来自 glTF 的 `[入切线, 值, 出切线]`；旋转分量求值后归一化；切线不齐时退化为线性 |
 | 动画 vs 物理 | ⚠️ 有意 | 模型动画是**视觉**的：`models[].collide` 的静态三角网碰撞体保持绑定姿态，不会跟着动 |
 | `LoadedModel` 的节点树 | ✅ 第 61 轮 | `nodes` + `bind_pose()` + `bind_inverse`（每网格）——静态烘焙与动画并存：`world(t) × bind_inverse` 在绑定姿态下是单位矩阵 |
 
@@ -2201,7 +2201,7 @@ if let Some(v) = doc.physics.static_friction_speed {
    （第 74 轮）：`weights` 轨道 + 场景逐帧采样；双 clip 的 morph 权重按 `blend_weight`
    逐 target 插值。✅ **时间驱动状态机**（第 75 轮）：
    `animator.states/transitions` + 淡入。**仍缺 GPU 蒙皮**（顶点属性 + 关节矩阵 +
-   WGSL）、任意权重曲线、输入参数/事件状态机、morph 的 CUBICSPLINE 切线。
+   WGSL）、任意权重曲线、输入参数/事件状态机。
 5. ❌ **`skins` + GPU 蒙皮**（下一个大块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
    绑定姿态对账。CPU 路径已经证明"数据链/场景/报告"是对的，GPU 只是把变形搬到显卡；
    不要在还没有动画混合/蒙皮测试的情况下先重写着色器。
@@ -2490,7 +2490,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**691** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**693** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

@@ -226,12 +226,16 @@ pub struct AnimationTrack {
 pub struct MorphTrack {
     /// 节点下标（[`LoadedModel::nodes`] 的 `mesh` 节点）。
     pub node: usize,
-    /// 插值方式；morph 的 `CubicSpline` 当前仍按线性取关键帧值。
+    /// 插值方式；`CubicSpline` 会用切线做 Hermite 插值。
     pub interpolation: Interpolation,
     /// 关键帧时间（秒，升序）。
     pub times: Vec<f32>,
     /// 每个关键帧的完整权重数组。
     pub values: Vec<Vec<f32>>,
+    /// CUBICSPLINE 的**入切线**（按 target 展平）；非三次样条为空。
+    pub in_tangents: Vec<Vec<f32>>,
+    /// CUBICSPLINE 的**出切线**（按 target 展平）；非三次样条为空。
+    pub out_tangents: Vec<Vec<f32>>,
 }
 
 /// 一条动画的**播放状态**（时间推进、速度、循环）。
@@ -1042,6 +1046,28 @@ fn sample_morph_track(track: &MorphTrack, t: f32) -> Option<Vec<f32>> {
     }
     let u = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
     let len = a.len().min(b.len());
+    if track.interpolation == Interpolation::CubicSpline
+        && track.in_tangents.len() >= n
+        && track.out_tangents.len() >= n
+    {
+        // 与 TRS 的 CUBICSPLINE 完全相同的 Hermite 公式：glTF 切线是"每秒"导数。
+        let td = t1 - t0;
+        let a_out = &track.out_tangents[lo];
+        let b_in = &track.in_tangents[hi];
+        let u2 = u * u;
+        let u3 = u2 * u;
+        let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+        let h10 = u3 - 2.0 * u2 + u;
+        let h01 = -2.0 * u3 + 3.0 * u2;
+        let h11 = u3 - u2;
+        let mut out = Vec::with_capacity(len);
+        for k in 0..len {
+            let m0 = a_out.get(k).copied().unwrap_or(0.0);
+            let m1 = b_in.get(k).copied().unwrap_or(0.0);
+            out.push(h00 * a[k] + h10 * td * m0 + h01 * b[k] + h11 * td * m1);
+        }
+        return Some(out);
+    }
     let mut out = Vec::with_capacity(len);
     for k in 0..len {
         out.push(a[k] + (b[k] - a[k]) * u);
@@ -1344,21 +1370,36 @@ fn model_from_gltf(
                     }
                     let flat: Vec<f32> = it.into_f32().collect();
                     let stride = morph_target_count;
-                    let values: Vec<Vec<f32>> = if cubic {
+                    let (values, in_tangents, out_tangents) = if cubic {
                         // CUBICSPLINE：每个关键帧是 [入切线 | 值 | 出切线]，
-                        // 每个块 target_count 个权重；只取中间的值块。
-                        flat.chunks(stride * 3)
-                            .filter_map(|chunk| {
-                                let value = chunk.get(stride..stride * 2)?;
-                                Some(value.to_vec())
-                            })
-                            .collect()
+                        // 每个块 target_count 个权重；三组分别收，供 Hermite 用。
+                        let mut values = Vec::new();
+                        let mut ins = Vec::new();
+                        let mut outs = Vec::new();
+                        for chunk in flat.chunks(stride * 3) {
+                            let (Some(input), Some(value), Some(output)) = (
+                                chunk.get(0..stride),
+                                chunk.get(stride..stride * 2),
+                                chunk.get(stride * 2..stride * 3),
+                            ) else {
+                                continue;
+                            };
+                            ins.push(input.to_vec());
+                            values.push(value.to_vec());
+                            outs.push(output.to_vec());
+                        }
+                        (values, ins, outs)
                     } else {
-                        flat.chunks(stride).map(|chunk| chunk.to_vec()).collect()
+                        (
+                            flat.chunks(stride).map(|chunk| chunk.to_vec()).collect(),
+                            Vec::new(),
+                            Vec::new(),
+                        )
                     };
                     if times.is_empty() || values.is_empty() {
                         continue;
                     }
+                    // 切线数组必须和值一一对应；不齐时采样端会退化为线性。
                     let duration = times.last().copied().unwrap_or(0.0);
                     clip.duration = clip.duration.max(duration);
                     clip.morph_tracks.push(MorphTrack {
@@ -1366,6 +1407,8 @@ fn model_from_gltf(
                         interpolation,
                         times,
                         values,
+                        in_tangents,
+                        out_tangents,
                     });
                     continue;
                 }
@@ -2355,5 +2398,29 @@ mod cache_tests {
         cache.clear();
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().bytes, 0);
+    }
+
+    #[test]
+    fn cubic_morph_track_uses_tangents_instead_of_linear() {
+        let track = MorphTrack {
+            node: 0,
+            interpolation: Interpolation::CubicSpline,
+            times: vec![0.0, 1.0],
+            values: vec![vec![0.0], vec![1.0]],
+            in_tangents: vec![vec![0.0], vec![0.0]],
+            out_tangents: vec![vec![2.0], vec![0.0]],
+        };
+        let mid = sample_morph_track(&track, 0.5).expect("采样");
+        assert!(
+            (mid[0] - 0.75).abs() < 1e-6,
+            "Hermite 中点应为 .75（线性会是 .5），实际 {}",
+            mid[0]
+        );
+        // 切线缺失时明确退化为线性，不能悄悄用 0 切线造成另一种错误形状。
+        let mut linear = track.clone();
+        linear.in_tangents.clear();
+        linear.out_tangents.clear();
+        let mid = sample_morph_track(&linear, 0.5).expect("采样");
+        assert!((mid[0] - 0.5).abs() < 1e-6, "缺切线应退化线性：{mid:?}");
     }
 }

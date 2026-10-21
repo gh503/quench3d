@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **morph CUBICSPLINE 切线（第 81 轮）**：`MorphTrack` 现在同时保留
+  `[入切线, 值, 出切线]` 三块，`sample_morph_track` 用与 TRS 相同的 Hermite 基函数
+  求值；切线数组缺失/不齐时显式退化线性。回归：
+  `cubic_morph_track_uses_tangents_instead_of_linear`（采样 .75 vs .5）+
+  `cubic_morph_animation_uses_tangents`（手搓 CUBICSPLINE GLB 解析 → 权重 .75 →
+  顶点位移 .375）。边界：仍没有任意权重曲线、morph 事件、编辑器 morph 滑杆。
 - **状态机 clip 结束触发（第 80 轮）**：`models[].animator.transitions[]` 新增
   `on_finished: true`，当前状态的非循环 clip 播完后的**下一帧首**切到目标状态，
   不再需要猜 `after` 秒数；此模式可省略 `after`（缺省 0），`fade` 语义不变。

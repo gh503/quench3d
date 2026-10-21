@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **691** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **693** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -60,6 +60,8 @@ tools/verify_all.sh
 | 状态机校验 | `cargo test -p quench3d-cli --test cli_e2e scene_animator_is_validated` | 初始状态不存在、to 不存在、after 负数、fade 负数各有诊断 |
 | CUBICSPLINE 采样 | `cargo test -p quench3d --lib cubic_spline_uses_tangents` | 出切线 2/s、入切线 0 时 u=.5 为 .75（线性只会 .5）；切线缺失退回线性 |
 | CUBICSPLINE 解析链路 | `cargo test -p quench3d --test model_loading cubic_spline_tangents_survive_parsing_and_sampling` | 解析后 in/out 切线保留，`sample_animation(t=.5)` 的 x=.75 |
+| morph CUBICSPLINE 采样 | `cargo test -p quench3d --lib cubic_morph_track_uses_tangents_instead_of_linear` | 出切线 2/s、入切线 0 时权重 u=.5 为 .75（线性 .5）；切线缺失退化线性 |
+| morph CUBICSPLINE 解析链路 | `cargo test -p quench3d --test model_loading cubic_morph_animation_uses_tangents` | 解析出 in/out 切线；`morph_weights_at(.5)`=.75，网格位移 .375 |
 | 双 clip morph 混合 | `cargo test -p quench3d --test model_loading blended_morph_weights_interpolate_both_clips` | 主 clip .5、第二 clip 1、blend=.5 → 权重 .75；形变位移 .375 |
 | 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
 | 状态机 clip 结束触发 | `cargo test -p quench3d --test model_loading scene_animator_transitions_when_clip_finishes` | 非循环 clip 播完的**下一帧首**才切到目标状态；目标 clip 重新计时 |

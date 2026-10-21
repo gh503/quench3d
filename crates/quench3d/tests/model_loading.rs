@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use quench3d::assets::{load_model, load_model_from_bytes, AssetError};
+use quench3d::assets::{load_model, load_model_from_bytes, AssetError, Interpolation};
 use quench3d::math::{Mat4, Transform, Vec3};
 use quench3d::render::context::with_gpu_tests;
 use quench3d::EngineConfig;
@@ -224,6 +224,81 @@ fn morph_glb() -> Vec<u8> {
 "animations":[{"name":"pulse","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
  "channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]}"#;
     glb_from_parts(json, bin)
+}
+
+/// 与 `morph_glb` 相同的三角形，但权重轨道是 CUBICSPLINE：
+/// 关键帧 0 = (入 0, 值 0, 出 2)，关键帧 1 = (入 0, 值 1, 出 0)。
+fn morph_cubic_glb() -> Vec<u8> {
+    let mut bin = Vec::new();
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    for _ in 0..3 {
+        for f in [0.0f32, 0.0, 1.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    for i in [0u16, 1, 2] {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    bin.extend_from_slice(&[0, 0]);
+    for _ in 0..3 {
+        for f in [0.0f32, 0.5, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // [入切线, 值, 出切线] × 2 个关键帧（每个 target 1 个权重）
+    for f in [0.0f32, 0.0, 2.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"tri","mesh":0}],
+"meshes":[{"name":"morph","weights":[0.0],"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"targets":[{"POSITION":3}]}]}],
+"accessors":[
+ {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+ {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+ {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
+ {"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"},
+ {"bufferView":4,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+ {"bufferView":5,"componentType":5126,"count":6,"type":"SCALAR"}],
+"bufferViews":[
+ {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":36,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":72,"byteLength":6,"target":34963},
+ {"buffer":0,"byteOffset":80,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":116,"byteLength":8},
+ {"buffer":0,"byteOffset":124,"byteLength":24}],
+"buffers":[{"byteLength":148}],
+"animations":[{"name":"pulse","samplers":[{"input":4,"output":5,"interpolation":"CUBICSPLINE"}],
+ "channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]}"#;
+    glb_from_parts(json, bin)
+}
+
+#[test]
+fn cubic_morph_animation_uses_tangents() {
+    let model = load_model_from_bytes("cubic-morph.glb", &morph_cubic_glb()).expect("CUBICSPLINE");
+    let clip = model.animation("pulse").expect("pulse");
+    let track = &clip.morph_tracks[0];
+    assert_eq!(track.interpolation, Interpolation::CubicSpline);
+    assert_eq!(track.values, vec![vec![0.0], vec![1.0]]);
+    assert_eq!(track.in_tangents, vec![vec![0.0], vec![0.0]]);
+    assert_eq!(track.out_tangents, vec![vec![2.0], vec![0.0]]);
+    let mid = model.morph_weights_at("pulse", 0.5).expect("t=.5");
+    assert!(
+        (mid[0].1[0] - 0.75).abs() < 1e-6,
+        "Hermite 中点应为 .75，实际 {:?}",
+        mid[0].1
+    );
+    let base = model.morphed_mesh(0, None).expect("base");
+    let deformed = model.morphed_mesh(0, Some(&mid[0].1)).expect("mesh");
+    assert!(
+        (deformed.vertices[0].position[1] - base.vertices[0].position[1] - 0.375).abs() < 1e-6,
+        "权重 .75 × 位移 .5 = .375"
+    );
 }
 
 #[test]
