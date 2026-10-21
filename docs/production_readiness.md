@@ -47,7 +47,8 @@
 | LOD | 引擎级 | 无 | ❌ |
 | 相机 | 全部 | 透视 + 正交（`camera.rs:7`）；**一次 render 只吃一个相机**，无多视口 | 🟡 |
 | 天空 / 环境反射 | 全部 | 程序化天空 + 常量环境项（`light.rs:107`）+ **解析式环境高光**（反射方向取同一套天空，`RendererOptions.environment`）；**仍无 HDRI/IBL/cubemap 预滤波、无 SSR** | 🟠 |
-| 调试叠加层 | 全部 | 网格 / 坐标轴 / 接触点 / 包围盒线框 | 🟡 |
+| 调试叠加层 | 全部 | 网格 / 坐标轴 / 接触点 / 包围盒线框；**动捕 3D 骨骼**也走调试线段 | 🟡 |
+| 摄像头/动捕 | Unity + MediaPipe/SMPL-X | **实验**：普通 RGB → MediaPipe Pose 33 点（2D/3D）+ 分割轮廓 + 可选 MiDaS 相对深度；编辑器显示画面/轮廓/骨架并叠 3D 骨骼。单帧、单人、无体型拟合、无米制深度、无点云/TSDF、Web 未接 | 🟡 |
 
 ### 1.2 光照
 
@@ -2388,3 +2389,40 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 * 不是 IBL：没有 HDRI/cubemap，没有按粗糙度预滤波，没有 BRDF LUT，没有屏幕空间反射。
 * 反射只包含天空/地面/太阳光晕；场景里的物体不会出现在金属反射里。
 * 环境色只由天空颜色与太阳驱动；换 HDRI 仍要另做一轮资源/绑定/预滤波。
+
+
+---
+
+## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
+
+**做了什么**：
+
+* `tools/camera_mocap/camera_mocap.py`：OpenCV 采集（Linux V4L2）、MediaPipe Pose
+  33 点（2D 归一化 + 以髋部为原点的 3D 世界点）、Pose 分割 mask 的最大外轮廓、
+  可选 MiDaS small ONNX 单目相对逆深度；OpenCV 预览与深度叠加。
+* 输出 `latest.json` + `latest.rgb` + `latest.depth`，原子写、rgb 先 json 后。
+* `quench3d-editor/src/camera.rs`：后台线程轮询最新帧；egui 浮动窗口显示画面、
+  2D 骨架、轮廓、可选深度；`add_lines` 把 33 个 world 点画成 35 根骨 + 关节小球，
+  叠加到 3D 视口。停更 2 秒自动消失。
+* 协议版本 `quench3d.mocap/1`；桌面端读文件，Web 端空实现（浏览器不走这条路）。
+
+**为什么用文件而不是 socket/stdout**：Python 进程可以独立起停/崩溃，不影响编辑器；
+一帧目录可以直接拷走做回归；代价是最多约一帧的轮询延迟。编辑器只读，不修改任何
+摄像头数据。
+
+**边界（诚实）**：
+
+* 单帧、单人；MediaPipe Pose 不是多人体跟踪。
+* 3D 世界点是 MediaPipe 的近似，不是精确骨骼角；没有 SMPL/SMPL-X 体型/蒙皮。
+* 单目深度是**相对逆深度**，每帧归一化，不是米制；不能直接用于物理/碰撞。
+* 固定放在 `(2.2, 1.0, 0.0)`，没有放置/缩放 UI；没有时间同步/IMU/多相机。
+* 没有点云/TSDF/网格重建；下一步才是深度抬升与融合。
+* 只能桌面 Linux 采集；Web 端是空实现，浏览器摄像头需要另做 getUserMedia 管线。
+
+**验证**：
+
+* Rust：`cargo test -p quench3d-editor --lib camera`——协议解析、rgb 长度校验、
+  完整帧读入、坐标翻转、35 根骨 + 33 个关节的线段数量、低可见度不画。
+* Python：`python -m unittest discover -s tools/camera_mocap -p 'test_*.py'`——
+  深度归一化、NaN、轮廓提取、关键点连接表。
+* 没有摄像头时用 `--source synthetic` 生成 2D 骨架/轮廓/假深度，验证端到端协议。

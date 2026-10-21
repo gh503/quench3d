@@ -2916,3 +2916,22 @@ transparent_`。场景故意先提交近红、再提交远蓝；正确结果与"
 验证：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline
 analytic_environment`——同一金属球只切开关，像素必须变化；`cargo test -p quench3d-render
 --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
+
+---
+
+## 71. 摄像头动捕第一阶段（2026-10-21）
+
+需求是"普通摄像头实时采集 + 轮廓/形态/姿态/深度 + 人体骨骼"。这轮先做**能闭环的
+最小一条**，不碰 SMPL、不做点云/TSDF：
+
+* 采集端 `tools/camera_mocap/camera_mocap.py`：OpenCV V4L2、MediaPipe Pose
+  （33 个 2D + 33 个 3D 世界点）、分割 mask 最大轮廓、可选 MiDaS small 深度；
+  深度推理放后台线程，慢也不卡预览。
+* 输出协议 `quench3d.mocap/1`：`latest.json/rgb/depth` 原子写；编辑器只读。
+* 编辑器 `camera.rs`：文件轮询 + egui 画面/2D 骨架/轮廓 + 3D 骨骼调试线段；
+  停更 2 秒自动消失。Web 端空实现。
+* 隐私：所有推理本地完成；模型只在显式 `--download-depth-model` 时联网。
+
+边界：单帧单人、无 SMPL 体型、无米制深度、无点云/TSDF、固定位置；这是采集/叠加
+原型，不是产品级动捕。下一步优先级：深度尺度/点云、骨骼重定向到角色、多人、
+Web getUserMedia。

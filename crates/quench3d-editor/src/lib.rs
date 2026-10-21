@@ -23,6 +23,7 @@
 #![warn(missing_docs)]
 
 pub mod app;
+pub mod camera;
 pub mod doc;
 pub mod gizmo;
 pub mod history;
@@ -30,6 +31,7 @@ pub mod scene_io;
 pub mod ui;
 
 pub use app::{run, EditorApp, EditorConfig};
+pub use camera::CameraFeed;
 
 /// Web 端：页面探好的后端结论（见 `web/index.html` 的 `pickBackend`）。
 ///

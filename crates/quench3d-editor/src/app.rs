@@ -9,6 +9,7 @@
 //! 第 3 步是这个 crate 存在的理由：引擎自带的 `ForgeApp` 只能「3D 渲染 + 呈现」，
 //! 中间插不进一层 UI。这里自己拿 `acquire_frame`，所以 UI 能浮在 3D 上面。
 
+use crate::camera::CameraFeed;
 use crate::doc::Doc;
 use crate::gizmo::{Gizmo, Mode as GizmoMode, Space as GizmoSpace};
 use crate::ui::{self, Viewport};
@@ -146,6 +147,8 @@ struct Inner {
     viewport: Viewport,
     /// 视口里的变换手柄（模式 / 坐标系 / 正在拖拽的状态）。
     gizmo: Gizmo,
+    /// 摄像头动捕读端（桌面端轮询 latest.*；Web 端空实现）。
+    camera: CameraFeed,
     last_time: f64,
     first_frame_done: bool,
 }
@@ -225,6 +228,7 @@ impl Inner {
             egui_renderer,
             viewport: Viewport::default(),
             gizmo: Gizmo::default(),
+            camera: CameraFeed::new(),
             last_time: quench3d::clock::now_seconds(),
             first_frame_done: false,
         }
@@ -251,6 +255,7 @@ impl Inner {
                 &mut self.doc,
                 &mut self.viewport,
                 &mut self.gizmo,
+                &mut self.camera,
             );
             if requests.screenshot {
                 self.screenshot();
@@ -284,6 +289,9 @@ impl Inner {
         game.keys_enabled = keys_enabled;
         self.engine.tick(&mut game, dt);
         self.game = game;
+        // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
+        // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
+        self.camera.add_lines(&mut self.engine.renderer.lines);
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
         let frame = self.engine.gpu.acquire_frame()?;

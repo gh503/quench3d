@@ -2205,6 +2205,8 @@ dependencies = [
  "quench3d-math",
  "quench3d-physics",
  "quench3d-render",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

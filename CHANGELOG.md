@@ -10,6 +10,12 @@
 
 ### 新增
 
+- **摄像头动捕（实验，桌面 Linux）**：新增 `tools/camera_mocap/` 采集端——普通 RGB
+  摄像头 + MediaPipe Pose 33 点（2D + 3D 世界点）+ 人体分割轮廓 + 可选 MiDaS 单目
+  **相对**深度。采集端只写 `latest.json` / `latest.rgb` / `latest.depth`，编辑器
+  （`quench3d-editor/src/camera.rs`）轮询后显示画面/轮廓/骨架，并把 3D 世界点作为
+  调试线段叠进视口。单帧、单人、无 SMPL 体型拟合、无米制深度、无点云/TSDF；
+  所有推理本地运行。回归：编辑器协议/坐标/线段数量测试 + Python 纯函数测试。
 - **解析式环境高光（无 HDRI）**：金属/光滑材质现在按反射方向取程序化天空（天顶/地平线/地面
   + 太阳光晕），并用 Karis split-sum 近似算环境 BRDF；`RendererOptions.environment`
   缺省开，关掉恢复旧的半球环境光路径。对金属是主要能量来源，对电介质只补一点反射。

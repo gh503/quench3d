@@ -1,0 +1,5 @@
+# 采集/显示
+opencv-python==4.11.0.86
+# MediaPipe Pose（33 点 + 分割；0.10.21 与 numpy<2 兼容）
+mediapipe==0.10.21
+numpy>=1.26,<2

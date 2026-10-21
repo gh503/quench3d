@@ -3,6 +3,7 @@
 //! 界面只表达意图：真正改场景/物理的代码在 [`crate::doc`] 里，
 //! 需要平台能力（存盘、截图）的请求回传给 [`crate::app`]。
 
+use crate::camera::CameraFeed;
 use crate::doc::{BodyKind, Doc, Primitive};
 use crate::gizmo::{Gizmo, Mode as GizmoMode, Space as GizmoSpace};
 use egui::{RichText, Ui};
@@ -60,6 +61,7 @@ pub fn panels(
     doc: &mut Doc,
     view: &mut Viewport,
     gizmo: &mut Gizmo,
+    camera: &mut CameraFeed,
 ) -> Requests {
     let mut req = Requests::default();
     view.click = None;
@@ -70,6 +72,7 @@ pub fn panels(
     viewport(ui, engine, doc, view, gizmo);
     let ctx = ui.ctx().clone();
     help_window(&ctx, doc);
+    camera.window(&ctx);
     req
 }
 

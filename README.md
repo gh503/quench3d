@@ -602,6 +602,32 @@ quench3d::write_png(&image, "out.png")?;
 > `(162, 180, 202)`）。回归防线是 `frame_uniform_layout_matches_wgsl`（把偏移量钉死）
 > 与 `crates/quench3d-render/tests/point_lights.rs`（单盏红灯必须照亮且变红）。
 
+### 4.1 摄像头动捕（实验）
+
+一条**本地、单帧、单人**的摄像头参考管线，入口在
+[`tools/camera_mocap/`](tools/camera_mocap/)：
+
+* 采集：OpenCV `VideoCapture`（Linux V4L2），普通 RGB 摄像头；
+* 姿态：MediaPipe Pose，33 个 2D 关键点 + 33 个以髋部为原点的 3D 世界点；
+* 轮廓：Pose 自带人体分割 mask → 最大外轮廓多边形；
+* 深度：可选 MiDaS small ONNX，**单目相对逆深度**（0..255，不是米）；
+* 编辑器：`quench3d-editor` 的「摄像头动捕（实验）」浮动窗口显示画面/轮廓/骨架，
+  3D 世界点作为调试线段叠加到视口（青绿骨骼、黄色关节点）。
+
+```bash
+python3 -m venv target/tmp/camvenv
+target/tmp/camvenv/bin/python -m pip install -r tools/camera_mocap/requirements.txt
+target/tmp/camvenv/bin/python tools/camera_mocap/camera_mocap.py --source 0
+cargo run -p quench3d-editor
+```
+
+没有摄像头时用 `--source synthetic` 验证协议；深度模型需要显式下载一次，详见
+[`tools/camera_mocap/README.md`](tools/camera_mocap/README.md)。
+
+**边界（诚实）**：没有 SMPL/SMPL-X 体型拟合、没有多人体、没有米制深度、没有
+点云/TSDF 网格重建、没有时间同步/IMU 融合；3D 骨骼是 MediaPipe 的 33 点近似，
+不是精确关节角。所有推理在本地完成，不把画面发到网络。
+
 ## 5. 示例清单
 
 共 **10 个**示例（`quench3d` 6 个、`quench3d-render` 2 个、`quench3d-physics` 1 个、
@@ -1171,7 +1197,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 652 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 659 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

@@ -32,6 +32,9 @@ winit = "0.30"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1.0"
 env_logger = "0.11"
+# 摄像头动捕的 latest.json 协议；只在桌面端读文件。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
