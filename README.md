@@ -123,7 +123,7 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   （场景格式里 `models[i].scale` 是一个数）。
 * **骨骼蒙皮（CPU）**：带 glTF `skins` / `JOINTS_0` / `WEIGHTS_0` 的角色会按关节矩阵
   逐帧变形，再写回同一个 GPU 顶点缓冲；场景里用 `models[].animation` 选一条 clip。
-  边界：每顶点最多 4 关节，没有 GPU 蒙皮、状态机、IK；`info` 会列出
+  边界：每顶点最多 4 关节，没有 GPU 蒙皮、IK（状态机见下）；`info` 会列出
   `skins` / `skinned_meshes`，方便先确认资产真的带蒙皮。
 * **morph target（静态权重 + 权重动画）**：带 glTF `targets` 的网格解析逐顶点
   `POSITION/NORMAL/TANGENT` 位移；场景里用 `models[].morph_weights` 覆盖权重
@@ -138,6 +138,10 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   淡入新 clip（0 = 立即切），淡入完成后新 clip 提为主 clip。它只按**时间**过渡，
   没有输入参数/事件；和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
+* **动画面板**：右侧「动画」列出场景里每个播放实例的 clip、时长、倍速、循环/播完
+  状态和状态机当前状态；拖动「时间」滑杆时**暂停也立刻**重算位姿与蒙皮/morph 顶点
+  （`Scene::refresh_animations_with_renderer`），不推进播放器、不写回场景文件。
+  边界：这里不是完整时间轴编辑器（不能选片段/改速度/加事件），只用于检查当前姿态。
 * **CUBICSPLINE 真值**：glTF 动画的 TRS 轨道按 Hermite 基函数使用入/出切线
   （旋转在分量求值后归一化）；解析器保留三段 `[入切线, 值, 出切线]`，不再退化线性。
   morph 权重轨道的 CUBICSPLINE 仍只取关键帧值（按线性采样）。
@@ -210,7 +214,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12313269 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12318413 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -1226,7 +1230,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 687 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 688 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1722,8 +1726,9 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   导入的模型（glTF/OBJ）已经接进场景树：可整组选中、可聚焦、可在视口里实时拖动并写回
   `models[i]`（见 §1.1），但**一个模型只有一个变换** —— 不能单独挪模型里的某个子网格，
   也不能把非均匀缩放写回格式（`models[i].scale` 是单个浮点数）。
-  模型的 `animation` 字段能原样保留并播放（帧循环推进），但编辑器**还没有动画面板**：
-  不能在视口里选片段、调时间轴或换起始帧，只能改场景文件。
+  模型的 `animation` 字段能原样保留并播放（帧循环推进）；右侧「动画」面板可以
+  拖时间轴检查当前姿态（暂停也立刻重算蒙皮/morph），但还不能选片段/改速度/换起始帧，
+  这些仍要改场景文件。
 * 编辑器能改**光照**（场景级）与**材质**（基础色/金属度/粗糙度/自发光 + 四个贴图槽 +
   UV 平铺/法线强度/alpha 裁剪与混合/无光照/双面），改不了的是材质节点图 / 自定义着色器，
   也没有贴图 UV 的可视化编辑（贴图按**路径**指定：原生端可从磁盘应用，Web 端写进场景文件）。

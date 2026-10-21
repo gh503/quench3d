@@ -1246,6 +1246,102 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     }
 }
 
+/// 动画面板：拖动当前 clip 的时间，暂停时也能看到蒙皮/morph 当场变化。
+///
+/// 这里**不**改场景文件里的速度/循环/状态机；那些由 `models[].animation` /
+/// `animator` 决定。拖动是"检查器"语义：只改当前会话的 `player.time`，然后
+/// 调 [`quench3d::scene::Scene::refresh_animations_with_renderer`] 重算位姿与
+/// 蒙皮顶点，不推进播放器。
+fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    let count = engine.scene.animations.len();
+    if count == 0 {
+        return;
+    }
+    let mut refresh = false;
+    egui::CollapsingHeader::new(format!("动画（{count} 个实例）"))
+        .default_open(true)
+        .show(ui, |ui| {
+            for (index, animation) in engine.scene.animations.iter_mut().enumerate() {
+                let name = animation.player.animation.clone();
+                let duration = animation.player.duration.max(0.0);
+                ui.label(RichText::new(format!("#{index} · {name}")).small().strong());
+                let state = if animation.player.finished {
+                    "已播完"
+                } else if animation.player.looping {
+                    "循环"
+                } else {
+                    "播放中"
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "时长 {duration:.2}s · 倍速 {:.2} · {state}",
+                        animation.player.speed
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if duration > 0.0 {
+                    let mut time = animation.player.time.clamp(0.0, duration);
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut time, 0.0..=duration)
+                                .text("时间")
+                                .fixed_decimals(3),
+                        )
+                        .changed()
+                    {
+                        animation.player.time = time;
+                        animation.player.finished = false;
+                        refresh = true;
+                    }
+                }
+                if let Some(secondary) = &animation.secondary {
+                    ui.label(
+                        RichText::new(format!(
+                            "过渡到「{}」 · 权重 {:.2}",
+                            secondary.animation, animation.blend_weight
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+                if let Some(animator) = &animation.animator {
+                    let current = animator
+                        .states
+                        .get(animator.current)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("?");
+                    let pending = animator
+                        .pending
+                        .and_then(|i| animator.states.get(i))
+                        .map(|s| s.name.as_str());
+                    ui.label(
+                        RichText::new(match pending {
+                            Some(to) => {
+                                format!("状态机：{current} → {to}（停留 {:.2}s）", animator.elapsed)
+                            }
+                            None => format!("状态机：{current}（停留 {:.2}s）", animator.elapsed),
+                        })
+                        .small()
+                        .weak(),
+                    );
+                }
+                ui.add_space(4.0);
+            }
+            ui.label(
+                RichText::new("拖动只改当前会话的时间，不写回场景文件。")
+                    .small()
+                    .weak(),
+            );
+        });
+    if !refresh {
+        return;
+    }
+    let (scene, renderer, gpu) = (&mut engine.scene, &mut engine.renderer, &engine.gpu);
+    let updated = scene.refresh_animations_with_renderer(renderer, gpu);
+    doc.status = format!("动画时间已刷新（{updated} 个片段）");
+}
+
 /// 模型（glTF/OBJ 引用）的变换面板。
 ///
 /// 改这里会**同时**做两件事：把新变换写进底稿的 `models[i]`（存盘生效），
@@ -1376,6 +1472,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
             ui.separator();
             light_section(ui, engine, doc);
             models_section(ui, engine, doc);
+            animations_section(ui, engine, doc);
             ui.separator();
             let Some(index) = doc.selected else {
                 ui.label("在场景树或视口里点一个物体。");

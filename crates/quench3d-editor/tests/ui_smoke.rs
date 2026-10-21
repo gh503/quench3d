@@ -7,8 +7,10 @@
 //! **显式 opt-in**：要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1` 才执行。
 #![cfg(not(target_arch = "wasm32"))]
 
+use quench3d::assets::{LoadedModel, ModelAnimationPlayer};
 use quench3d::prelude::*;
 use quench3d::render::context::with_gpu_tests;
+use quench3d::scene::{ModelAnimationInstance, ModelAnimatorRuntime, ModelAnimatorState};
 use quench3d_editor::camera::CameraFeed;
 use quench3d_editor::doc::Doc;
 use quench3d_editor::gizmo::Gizmo;
@@ -42,6 +44,72 @@ fn headless_engine() -> Option<Engine> {
     ))
 }
 
+/// 一个不依赖磁盘/GPU 的播放实例：只给动画面板读播放器与状态机字段。
+/// 片段列表为空，所以 `refresh_animations` 不会碰任何物体。
+fn fake_animation_instance() -> ModelAnimationInstance {
+    let model = std::sync::Arc::new(LoadedModel {
+        name: "ui-smoke".into(),
+        meshes: Vec::new(),
+        materials: Vec::new(),
+        images: Vec::new(),
+        nodes: Vec::new(),
+        animations: Vec::new(),
+        skins: Vec::new(),
+    });
+    ModelAnimationInstance {
+        model,
+        objects: Vec::new(),
+        base: Vec::new(),
+        player: ModelAnimationPlayer {
+            animation: "idle".into(),
+            duration: 1.0,
+            time: 0.25,
+            speed: 1.0,
+            looping: true,
+            finished: false,
+        },
+        secondary: Some(ModelAnimationPlayer {
+            animation: "walk".into(),
+            duration: 1.0,
+            time: 0.5,
+            speed: 1.0,
+            looping: true,
+            finished: false,
+        }),
+        blend_weight: 0.5,
+        blend_target: 0.5,
+        blend_fade: 0.0,
+        blend_elapsed: 0.0,
+        morph_weights: None,
+        animator: Some(ModelAnimatorRuntime {
+            states: vec![ModelAnimatorState {
+                name: "待机".into(),
+                animation: "idle".into(),
+                speed: 1.0,
+                looping: true,
+                start: 0.0,
+            }],
+            transitions: Vec::new(),
+            current: 0,
+            elapsed: 0.25,
+            pending: None,
+        }),
+    }
+}
+
+/// 在 egui 的绘制图元里递归找一段文字，证明面板的**内容**真的被排版了，
+/// 而不只是"没 panic"。
+fn shapes_contain_text(shapes: &[egui::epaint::ClippedShape], needle: &str) -> bool {
+    fn walk(shape: &egui::Shape, needle: &str) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.text().contains(needle),
+            egui::Shape::Vec(shapes) => shapes.iter().any(|s| walk(s, needle)),
+            _ => false,
+        }
+    }
+    shapes.iter().any(|clipped| walk(&clipped.shape, needle))
+}
+
 #[test]
 fn all_editor_panels_draw_in_one_frame() {
     let Some(mut engine) = headless_engine() else {
@@ -49,6 +117,7 @@ fn all_editor_panels_draw_in_one_frame() {
     };
     let mut doc = Doc::new();
     doc.build_default_scene(&mut engine);
+    engine.scene.animations.push(fake_animation_instance());
     doc.selected = Some(1);
     doc.show_help = true;
 
@@ -77,6 +146,18 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         !output.shapes.is_empty(),
         "整块 UI 一帧没产出任何绘制图元：面板没画出来"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "动画（1 个实例）"),
+        "动画面板标题没有出现在绘制图元里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "idle"),
+        "动画 clip 名没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "状态机：待机"),
+        "状态机当前状态没有出现在面板内容里"
     );
     assert!(
         output.textures_delta.set.len() + output.textures_delta.free.len() > 0,

@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **动画时间检查器（第 79 轮）**：编辑器右侧新增「动画」面板，列出每个播放实例的
+  clip 名、时长、倍速、循环/播完状态与状态机当前状态；拖动 `Slider` 改
+  `player.time` 后调用新 API `Scene::refresh_animations_with_renderer`，**暂停时也**
+  立刻重算刚体位姿和蒙皮/morph 顶点，且不推进播放器、不写回场景文件。新增纯 CPU
+  `Scene::refresh_animations`；GPU 蒙皮像素测试改用刷新入口（t=0 vs 0.25 仍有差）。
+  边界：不是完整时间轴编辑器，不能选片段/改速度/加事件；状态机仍是时间驱动。
 - **摄像头深度点云（第 78 轮）**：采集端把 MiDaS 相对逆深度按相机内参反投影成
   `latest.points`（`N*3` little-endian f32，缺省每 6 像素一点，约 8.5k 点），
   z 映射到 0.3~3.0 的任意尺度并在 `latest.json` 里写 `points.{count,layout,space,step,bounds}`；

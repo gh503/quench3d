@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **687** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **688** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -62,6 +62,9 @@ tools/verify_all.sh
 | CUBICSPLINE 解析链路 | `cargo test -p quench3d --test model_loading cubic_spline_tangents_survive_parsing_and_sampling` | 解析后 in/out 切线保留，`sample_animation(t=.5)` 的 x=.75 |
 | 双 clip morph 混合 | `cargo test -p quench3d --test model_loading blended_morph_weights_interpolate_both_clips` | 主 clip .5、第二 clip 1、blend=.5 → 权重 .75；形变位移 .375 |
 | 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
+| 动画时间检查器（CPU） | `cargo test -p quench3d --test model_loading refresh_animations` | 手动把 `player.time` 拖回 0.25，调用 `refresh_animations` 后位移精确为 10.75，重复刷新不漂移、不推进时间 |
+| 动画时间检查器（GPU 蒙皮） | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --test model_loading skinned_mesh_changes_rendered_pixels` | 用 `refresh_animations_with_renderer` 在 t=0/0.25 渲染，两张 PNG 像素有差 |
+| 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
 | 场景双时间线 | `cargo test -p quench3d --test model_loading scene_blended_animation_advances_both_clips` | `Scene::advance_animations` 同时推进两条 clip，t=.5 落在 base+2.5 |
 | 一次性淡入 | `cargo test -p quench3d --test model_loading scene_blend_fades_in_over_time` | `fade=0.5`：t=.25 权重 0.5（smoothstep）位移 1.75，t=.5 权重 1 位移 3.5 |

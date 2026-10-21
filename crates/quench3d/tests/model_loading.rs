@@ -441,11 +441,9 @@ fn skinned_mesh_changes_rendered_pixels() {
                     engine.orbit.distance = 3.0;
                     engine.orbit.yaw = 0.0;
                     engine.orbit.pitch = 0.0;
-                    engine.scene.advance_animations_with_renderer(
-                        0.0,
-                        &mut engine.renderer,
-                        &engine.gpu,
-                    );
+                    engine
+                        .scene
+                        .refresh_animations_with_renderer(&mut engine.renderer, &engine.gpu);
                 })
             };
             let a = render_at(0.0);
@@ -853,6 +851,49 @@ fn scene_animation_moves_the_spawned_meshes() {
         (x - 10.0).abs() < 1e-4,
         "循环走满 1 秒该绕回基础位置，实际 {x}"
     );
+}
+
+/// 编辑器拖动时间轴：直接改 `player.time` 再 `refresh_animations`，位姿必须
+/// 精确落在该时间点，且**不会**再推进时间（拖动不是播放）。
+#[test]
+fn refresh_animations_applies_current_time_without_advancing() {
+    use quench3d::math::{Quat, Transform};
+    use quench3d::scene::Scene;
+
+    let model = std::sync::Arc::new(
+        load_model_from_bytes("nodes.glb", &nodes_with_animation_glb()).expect("该能解析"),
+    );
+    let mut scene = Scene::new();
+    let base = Transform::new(Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+    let objects: Vec<usize> = (0..model.meshes.len())
+        .map(|i| scene.add_named(i as u32, 0, base, &format!("片段{i}")))
+        .collect();
+    let right = model
+        .meshes
+        .iter()
+        .position(|m| m.name.starts_with("右/"))
+        .expect("「右」片段该在");
+    scene.play_model_animation(
+        model.clone(),
+        objects.clone(),
+        vec![base; model.meshes.len()],
+        model.player("移动").expect("该有播放器"),
+    );
+
+    scene.advance_animations(0.5);
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!((x - 11.5).abs() < 1e-4, "t=.5 该在 11.5，实际 {x}");
+
+    // 拖回 t=.25：线性插值 2→3.5 的中点是 2.75，所以世界 x = 10.75。
+    scene.animations[0].player.time = 0.25;
+    assert_eq!(scene.refresh_animations(), objects.len());
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!((x - 10.75).abs() < 1e-4, "t=.25 该在 10.75，实际 {x}");
+    // 再刷一次不推进时间，也不累积位移。
+    scene.refresh_animations();
+    assert!((scene.animations[0].player.time - 0.25).abs() < 1e-6);
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!((x - 10.75).abs() < 1e-4, "重复刷新不该漂移，实际 {x}");
 }
 
 /// 场景层也真的推进**两条**时间线：primary 在 t=.5 位移 1.5，secondary 位移 3.5，

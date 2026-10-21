@@ -699,6 +699,41 @@ impl Scene {
         updated
     }
 
+    /// **按当前播放时间**重新摆位姿，不推进时间。
+    ///
+    /// 编辑器的拖动条会直接改 `player.time`，然后调用它让视口当场更新；
+    /// 状态机的 `elapsed` / 过渡都不动（拖动不改状态机语义）。
+    pub fn refresh_animations(&mut self) -> usize {
+        if self.animations.is_empty() {
+            return 0;
+        }
+        let Scene {
+            objects,
+            animations,
+            ..
+        } = self;
+        let mut updated = 0;
+        for a in animations.iter() {
+            let mats = animation_matrices(a);
+            updated += apply_matrices(objects, &a.objects, &a.base, &mats);
+        }
+        updated
+    }
+
+    /// 按当前时间刷新位姿并**把蒙皮/morph 顶点写回 GPU**。
+    ///
+    /// 供编辑器在暂停时拖动时间轴；正常帧循环仍应使用
+    /// [`Scene::advance_animations_with_renderer`]。
+    pub fn refresh_animations_with_renderer(
+        &mut self,
+        renderer: &mut Renderer,
+        ctx: &quench3d_render::GpuContext,
+    ) -> usize {
+        let updated = self.refresh_animations();
+        self.upload_animated_vertices(renderer, ctx);
+        updated
+    }
+
     /// 推进动画并**把蒙皮顶点写回 GPU**；窗口/无头渲染都应该用这个入口。
     ///
     /// 变换与顶点更新分开：`advance_animations` 只摆物体的刚性位姿（绑定姿态时是
@@ -712,12 +747,22 @@ impl Scene {
         ctx: &quench3d_render::GpuContext,
     ) -> usize {
         let updated = self.advance_animations(dt);
+        self.upload_animated_vertices(renderer, ctx);
+        updated
+    }
+
+    /// 把当前 `player.time` / morph 权重算出的变形顶点写回 GPU。
+    fn upload_animated_vertices(
+        &mut self,
+        renderer: &mut Renderer,
+        ctx: &quench3d_render::GpuContext,
+    ) {
         if !self
             .animations
             .iter()
             .any(|a| a.model.has_skinning() || a.model.has_morph_targets())
         {
-            return updated;
+            return;
         }
         let Scene {
             objects,
@@ -770,7 +815,6 @@ impl Scene {
                 renderer.update_mesh_vertices(ctx, object.mesh, &data.vertices);
             }
         }
-        updated
     }
 
     /// 物体数量。

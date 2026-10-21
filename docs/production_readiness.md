@@ -83,7 +83,7 @@
 | 拖拽改父级 | 全部 | 属性面板里用"父物体"下拉改（**保世界位姿**）；场景树内拖放还没有 | 🟡 |
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
-| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **时间驱动状态机**；**无编辑器时间轴/混合 UI、无输入参数/事件** | 🟡 |
+| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **时间驱动状态机**；编辑器有**暂停可拖的时间检查器**（只读状态机，不写回）；无完整时间轴/混合 UI、无输入参数/事件 | 🟡 |
 | 骨骼 / 蒙皮 | 全部 | **CPU 蒙皮可用**（`skins` + 逆绑定矩阵 + 每帧顶点变形 + 写回 GPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**GPU 蒙皮、IK 仍无** | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
@@ -2170,7 +2170,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 渲染循环里的调用点 | ✅ 第 62 轮 | `Scene::advance_animations(dt)`；`Engine::tick`（窗口）与 `render_sequence_with_game`（无头 `movie`）每帧在 `sync_from_physics` 之后调一次，暂停不推进；单帧 `render` 用 `dt = 0` 摆起始姿态 |
 | 与场景格式的接口 | ✅ 第 62 / 71 / 72 轮 | `models[].animation = { name, start?, speed?, loop?, blend? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`blend = { name, start?, speed?, loop?, weight?, fade? }`，`weight` 缺省 0.5、`fade` 缺省 0；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
-| 编辑器可达 | ✅ 第 62 轮（只保字段） | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；**没有动画面板**（不能选片段 / 调时间轴） |
+| 编辑器可达 | ✅ 第 62 / 79 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph。**仍不是**完整时间轴（不能选片段/改速度/加事件） |
 | 时间驱动状态机 | ✅ 第 75 轮 | `models[].animator`：`states` + `transitions`，按状态停留时间 `after` 过渡，`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；报告 `models[].animator`。**仍缺**：输入参数/事件条件、编辑器状态机面板 |
 | 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
@@ -2490,7 +2490,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**687** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**688** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
