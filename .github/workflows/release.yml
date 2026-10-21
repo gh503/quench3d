@@ -1,0 +1,157 @@
+# 发布流水线：打 tag（`v*`）时自动构建三平台二进制 + Web 客户端，并挂到 GitHub Release。
+#
+# 设计要点（都是有意为之，不要"顺手简化"）：
+# 1. **只用第一方 action + `gh` CLI**：不引入 softprops/action-gh-release 之类的第三方
+#    发布 action（供应链面大、行为不透明）。runner 自带 `gh`，够用。
+# 2. **工具链钉 `1.99.0`**：与 ci.yml 一致。不钉版会让"今天能编、明天编不过"变成发布事故。
+# 3. **`--locked`**：发布必须用仓库里那份 Cargo.lock，否则产出的二进制与 CI 验证过的依赖树不一致。
+# 4. **tag 是唯一版本来源**：release 名与产物名都从 `GITHUB_REF_NAME` 派生（去掉前缀 `v`），
+#    不在 workflow 里另写一份版本号（两份版本号迟早不一致）。
+# 5. `workflow_dispatch` 只做"构建 + 传 artifact"，**不创建 release**（除非你手动在 tag 上跑）：
+#    避免手动点一下就在仓库里留下一个奇怪版本的 release。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # 手动跑：验证"发布能不能编出来"而不在仓库里留 release（见文件头第 5 条）。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # 发布产物要能复现：不做增量缓存，减少"上次的中间产物混进来"的可能。
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # 三平台二进制：CLI（quench3d）+ 桌面编辑器（quench3d-editor）
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - label: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          # Intel Mac：在 arm64 runner 上交叉编译。Rust 目标支持这个组合，
+          # 且依赖树里没有需要 arm64 专属 C 库的东西（wgpu/winit 都是纯 Rust 绑定）。
+          # 万一哪天它红了：先看是不是交叉链接问题，不要直接删掉这一行。
+          - label: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 构建 CLI 与桌面编辑器（release）
+        run: cargo build --release --locked --target ${{ matrix.target }} -p quench3d-cli -p quench3d-editor
+
+      - name: 打包
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARGET="${{ matrix.target }}"
+          EXT=""
+          case "$TARGET" in
+            *windows*) EXT=".exe" ;;
+          esac
+          DIR="quench3d-${VERSION}-${TARGET}"
+          mkdir -p "dist/${DIR}"
+          cp "target/${TARGET}/release/quench3d${EXT}" "dist/${DIR}/"
+          cp "target/${TARGET}/release/quench3d-editor${EXT}" "dist/${DIR}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/${DIR}/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            # windows runner 自带 7z
+            7z a "${DIR}.zip" "${DIR}" > /dev/null
+          else
+            tar -czf "${DIR}.tar.gz" "${DIR}"
+          fi
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Web 客户端（wasm）：复用仓库里唯一的打包脚本，保证与 Pages 上那份同源同法
+  web:
+    name: web (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: 构建 Web 客户端
+        run: tools/build_web.sh web_client
+
+      - name: 打包
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIR="quench3d-web-client-${VERSION}"
+          mkdir -p dist
+          cp -r web "dist/${DIR}"
+          cd dist
+          zip -qr "${DIR}.zip" "${DIR}"
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: dist/*
+          if-no-files-found: error
+
+  # 只有打 tag 才创建 Release；手动 dispatch 不会留下 release
+  release:
+    name: publish release
+    needs: [build, web]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 创建或补传 Release 资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          ls -l dist
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # 重跑/补传：clobber 覆盖同名资产
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "quench3d ${TAG#v}" \
+              --generate-notes \
+              --verify-tag
+          fi
