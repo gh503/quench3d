@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **697** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **698** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -76,6 +76,8 @@ tools/verify_all.sh
 | 状态机过渡控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「待机 → 走」「播完触发」；过渡行真的排版出来 |
 | morph 覆盖写回 | `cargo test -p quench3d-editor --lib set_morph_weights_writes_and_removes_override` | `Some([.25,.75])` 写入 `morph_weights`；`None` 删除覆盖；未知物体返回 `None` |
 | morph 覆盖控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「手动 morph 覆盖」「目标 #0」；未启用时滑杆禁用仍占位 |
+| 状态 clip/起始写回 | `cargo test -p quench3d-editor --lib set_animator_state_writes_clip_and_start` | 状态 `run` + `start=.75` 写回底稿；越界下标/未知物体返回 `None` |
+| 状态编辑控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「#0 待机」「起始」；状态行的 clip 下拉与起始时间真的排版出来 |
 | 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |

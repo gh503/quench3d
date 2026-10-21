@@ -55,7 +55,18 @@ fn fake_animation_instance() -> ModelAnimationInstance {
         materials: Vec::new(),
         images: Vec::new(),
         nodes: Vec::new(),
-        animations: Vec::new(),
+        animations: vec![
+            LoadedAnimation {
+                name: "idle".into(),
+                duration: 1.0,
+                ..Default::default()
+            },
+            LoadedAnimation {
+                name: "walk".into(),
+                duration: 1.0,
+                ..Default::default()
+            },
+        ],
         skins: Vec::new(),
     });
     ModelAnimationInstance {
@@ -232,6 +243,14 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "循环"),
         "动画循环控件没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "#0 待机"),
+        "状态机状态行没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "起始"),
+        "状态起始时间控件没有出现在面板内容里"
     );
     assert!(
         shapes_contain_text(&output.shapes, "手动 morph 覆盖"),

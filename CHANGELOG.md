@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **状态 clip/起始编辑（第 86 轮）**：状态机实例的「状态」列表现在逐行显示
+  `#i 状态名`、clip 下拉和「起始」时间；改当前状态会重建播放器（保留 speed/loop/
+  start，重置 finished）并刷新蒙皮/morph，改非当前状态只影响之后进入该状态时。
+  通过 `Doc::set_animator_state` 写回 `models[i].animator.states[i]`（可撤销、
+  存盘生效）。回归：`set_animator_state_writes_clip_and_start` + `ui_smoke` 的
+  「#0 待机」「起始」控件文本断言。
 - **编辑器 morph 覆盖（第 85 轮）**：带 morph target 的动画实例新增「手动 morph
   覆盖」开关与按 target 的 `目标 #N` 滑杆；勾选后把覆盖权重写进运行时
   `ModelAnimationInstance.morph_weights`（立即重传网格）和底稿

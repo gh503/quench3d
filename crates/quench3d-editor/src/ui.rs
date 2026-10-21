@@ -1516,6 +1516,84 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .small()
                         .weak(),
                     );
+                    ui.label(RichText::new("状态").small().strong());
+                    for si in 0..animator.states.len() {
+                        let name = animator.states[si].name.clone();
+                        let old_clip = animator.states[si].animation.clone();
+                        let mut selected = old_clip.clone();
+                        let mut start = animator.states[si].start;
+                        let mut changed = false;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("#{si} {name}")).small());
+                            egui::ComboBox::from_id_salt(format!(
+                                "animator-state-clip-{index}-{si}"
+                            ))
+                            .selected_text(selected.clone())
+                            .show_ui(ui, |ui| {
+                                for clip in &clips[index] {
+                                    if ui
+                                        .selectable_value(&mut selected, clip.clone(), clip)
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                            let response = ui.add(
+                                egui::DragValue::new(&mut start)
+                                    .range(0.0..=60.0)
+                                    .speed(0.02)
+                                    .prefix("起始 ")
+                                    .suffix("s"),
+                            );
+                            if response.drag_started() {
+                                begin_edit = true;
+                            }
+                            if response.changed() {
+                                changed = true;
+                                if !response.dragged() {
+                                    record_edit = true;
+                                }
+                            }
+                            if response.drag_stopped() {
+                                end_edit = true;
+                            }
+                        });
+                        if changed {
+                            let clip_changed = selected != old_clip;
+                            animator.states[si].animation = selected.clone();
+                            animator.states[si].start = start;
+                            if si == animator.current {
+                                if clip_changed {
+                                    if let Some(mut player) = animation.model.player(&selected) {
+                                        player.speed = animator.states[si].speed;
+                                        player.looping = animator.states[si].looping;
+                                        player.time = start;
+                                        player.finished = false;
+                                        player.advance(0.0);
+                                        animation.player = player;
+                                        animation.secondary = None;
+                                        animation.blend_weight = 0.0;
+                                        animation.blend_target = 0.0;
+                                        animation.blend_fade = 0.0;
+                                        animation.blend_elapsed = 0.0;
+                                    }
+                                } else {
+                                    animation.player.time = start;
+                                    animation.player.finished = false;
+                                }
+                                refresh = true;
+                            }
+                            if models[index].is_some() {
+                                if let Some(path) =
+                                    doc.set_animator_state(&objects, si, &selected, start)
+                                {
+                                    changed_model = Some(path);
+                                }
+                            }
+                            record_edit = true;
+                        }
+                    }
                     if !animator.transitions.is_empty() {
                         ui.label(RichText::new("过渡").small().strong());
                     }
