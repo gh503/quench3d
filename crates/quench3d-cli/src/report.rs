@@ -82,6 +82,11 @@ impl ErrorInfo {
             info = info
                 .hint("换一个 --out / --frames-dir，或去掉 --no-clobber；也可以先自己把旧产物移走");
         }
+        if e.kind == "golden_mismatch" {
+            info = info.hint(
+                "确认这是有意的画面变化后，把本次输出复制成新的参考图；只是抗锯齿/驱动差异可用 --golden-tolerance 放宽",
+            );
+        }
         info
     }
 
@@ -92,7 +97,7 @@ impl ErrorInfo {
             "invalid" | "scene" | "output_exists" | "unknown_camera" => EXIT_INVALID,
             "environment" => EXIT_ENVIRONMENT,
             "network" | "config" | "http" | "parse" => EXIT_NETWORK,
-            "io" | "runtime" => EXIT_RUNTIME,
+            "io" | "runtime" | "golden_mismatch" => EXIT_RUNTIME,
             _ => EXIT_RUNTIME,
         }
     }

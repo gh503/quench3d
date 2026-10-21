@@ -1928,6 +1928,148 @@ fn movie_builtin_encoders_produce_playable_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 单帧黄金图：同场景重渲必须逐像素一致；换颜色必须报 `golden_mismatch`；
+/// 用法错误（缺参考图 / 配 dry-run / 多输出）必须**不碰 GPU**就拒绝。
+#[test]
+fn golden_png_comparison_is_wired_and_fails_loudly() {
+    let doctor = run(&["doctor", "--json"]).json();
+    if !doctor["data"]["gpu_available"].as_bool().unwrap_or(false) {
+        eprintln!("跳过：没有 GPU");
+        return;
+    }
+    let dir = temp_dir("golden");
+    let scene = |name: &str, color: &str| {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "lighting": {{ "preset": "none", "ambient": 0.0, "sky": false, "grid": false }},
+                    "materials": {{ "m": {{ "color": {color}, "roughness": 0.8 }} }},
+                    "objects": [{{ "name": "球", "shape": {{ "type": "sphere", "radius": 1 }},
+                                   "position": [0, 1, 0], "material": "m" }}],
+                    "camera": {{ "position": [0, 1.5, 4], "look_at": [0, 1, 0] }},
+                    "render": {{ "output": "ignored.png", "width": 64, "height": 48, "msaa": 1 }}
+                }}"#
+            ),
+        )
+        .unwrap();
+        path
+    };
+    let red = scene("red.json", "[1.0, 0.1, 0.1]");
+    let blue = scene("blue.json", "[0.1, 0.1, 1.0]");
+    let golden = dir.join("golden.png");
+    let out = dir.join("out.png");
+    let red_render = run(&[
+        "render",
+        red.to_str().unwrap(),
+        "--out",
+        golden.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(red_render.code, 0, "{}", red_render.stderr);
+    assert!(
+        red_render.json()["data"]["golden"].is_null(),
+        "不传 --golden 时报告里不该多出字段"
+    );
+
+    let same = run(&[
+        "render",
+        red.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--golden",
+        golden.to_str().unwrap(),
+        "--golden-tolerance",
+        "0",
+        "--json",
+    ]);
+    assert_eq!(same.code, 0, "同场景重渲必须匹配：{}", same.stdout);
+    let g = &same.json()["data"]["golden"];
+    assert_eq!(g["matched"], true);
+    assert_eq!(g["changed_pixels"], 0);
+    assert_eq!(g["total_pixels"], 64 * 48);
+    assert_eq!(g["tolerance"], 0);
+
+    let different = run(&[
+        "render",
+        blue.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--golden",
+        golden.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        different.code, 1,
+        "黄金图不一致应当是运行错误（退出码 1）：{}",
+        different.stdout
+    );
+    let env = different.json();
+    assert_eq!(env["ok"], false);
+    assert_eq!(env["error"]["kind"], "golden_mismatch");
+    let msg = env["error"]["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("超出容差"), "消息要给出差异规模：{msg}");
+
+    let missing = run(&[
+        "render",
+        red.to_str().unwrap(),
+        "--golden",
+        dir.join("nope.png").to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        missing.code, 1,
+        "参考图不存在应当是运行错误（退出码 1）：{}",
+        missing.stdout
+    );
+    assert_eq!(missing.json()["error"]["kind"], "io");
+
+    // 以下三条都是**参数错误**，必须在创建 GPU 之前返回 2。
+    let no_ref = run(&[
+        "render",
+        red.to_str().unwrap(),
+        "--golden-tolerance",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(no_ref.code, 2, "{}", no_ref.stdout);
+    assert_eq!(no_ref.json()["error"]["kind"], "invalid");
+
+    let dry = run(&[
+        "render",
+        red.to_str().unwrap(),
+        "--dry-run",
+        "--golden",
+        golden.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(dry.code, 2, "{}", dry.stdout);
+    assert_eq!(dry.json()["error"]["kind"], "scene");
+
+    let multi = dir.join("multi.json");
+    std::fs::write(
+        &multi,
+        r#"{
+            "objects": [{ "name": "箱", "shape": { "type": "box", "size": [1,1,1] }, "position": [0,1,0] }],
+            "render": { "output": "ignored.png", "width": 32, "height": 32, "msaa": 1,
+                        "outputs": [{ "name": "a" }, { "name": "b" }] }
+        }"#,
+    )
+    .unwrap();
+    let multi_run = run(&[
+        "render",
+        multi.to_str().unwrap(),
+        "--golden",
+        golden.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(multi_run.code, 2, "{}", multi_run.stdout);
+    assert_eq!(multi_run.json()["error"]["kind"], "scene");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn render_refuses_scene_that_disables_rendering() {
     // render.enabled 以前是死字段（写 false 也照渲染）；现在与命令意图冲突时明确报错，

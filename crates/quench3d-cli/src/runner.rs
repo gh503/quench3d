@@ -459,6 +459,32 @@ fn model_cache_snapshot() -> Option<ModelCacheReport> {
     })
 }
 
+/// 单帧 PNG 的黄金图比对参数（`--golden`）。
+#[derive(Debug, Clone)]
+pub struct GoldenSpec {
+    /// 参考 PNG 路径。
+    pub path: PathBuf,
+    /// 允许的单通道最大差值（0 = 逐字节相同）。
+    pub tolerance: u8,
+}
+
+/// 黄金图比对结果（写进 `render` 报告；只在传了 `--golden` 时出现）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoldenReport {
+    /// 参考图路径。
+    pub path: String,
+    /// 是否在容差内。
+    pub matched: bool,
+    /// 超出容差的像素数。
+    pub changed_pixels: u64,
+    /// 总像素数。
+    pub total_pixels: u64,
+    /// 最大单通道差值。
+    pub max_channel_diff: u8,
+    /// 使用的容差。
+    pub tolerance: u8,
+}
+
 /// 渲染报告。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderReport {
@@ -512,6 +538,9 @@ pub struct RenderReport {
     /// 这一张实际使用的相机名（`--camera` / `render.outputs[].camera`；缺省不写）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_name: Option<String>,
+    /// 黄金图比对结果（只在传了 `--golden` 时出现）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub golden: Option<GoldenReport>,
     /// 模型动画的装载后对账（没写 `models[].animation` 时不出现）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelReport>,
@@ -3633,15 +3662,32 @@ fn apply_camera(engine: &mut Engine, doc: &SceneDoc) {
     }
 }
 
-/// 渲染场景并写 PNG。
-/// 渲染入口：写了 `render.outputs` 就一次渲多张，否则与老行为**逐位一致**。
+/// 渲染场景并写 PNG（不带黄金图）。
 pub fn run_render(
     doc: &SceneDoc,
     output_override: Option<&std::path::Path>,
     policy: OutputPolicy,
 ) -> Result<RenderReport, RunError> {
+    run_render_with_golden(doc, output_override, policy, None)
+}
+
+/// 渲染入口：写了 `render.outputs` 就一次渲多张，否则与老行为**逐位一致**。
+///
+/// `golden` 只允许单张输出：多张各自比一张参考图没有意义；调用方要在进 GPU 之前
+/// 就把它当作参数错误拦下（这里也再做一次守卫）。
+pub fn run_render_with_golden(
+    doc: &SceneDoc,
+    output_override: Option<&std::path::Path>,
+    policy: OutputPolicy,
+    golden: Option<&GoldenSpec>,
+) -> Result<RenderReport, RunError> {
+    if golden.is_some() && !doc.render.outputs.is_empty() {
+        return Err(RunError::scene(
+            "--golden 只支持单张输出：请去掉 render.outputs，或去掉 --golden".to_string(),
+        ));
+    }
     if doc.render.outputs.is_empty() {
-        return run_render_single(doc, output_override, policy);
+        return run_render_single(doc, output_override, policy, golden);
     }
     // 多输出：先把全部目标算清楚，再**统一**做 no-clobber 检查——
     // 否则可能出现"渲了三张、第四张已存在"，留下半套文件。
@@ -3694,7 +3740,7 @@ pub fn run_render(
         if let Some(cam) = camera {
             one.select_camera(&cam).map_err(RunError::scene)?;
         }
-        let r = run_render_single(&one, None, policy)?;
+        let r = run_render_single(&one, None, policy, None)?;
         reports.push(OutputReport {
             name,
             output: r.output.clone(),
@@ -3720,6 +3766,7 @@ fn run_render_single(
     doc: &SceneDoc,
     output_override: Option<&std::path::Path>,
     policy: OutputPolicy,
+    golden: Option<&GoldenSpec>,
 ) -> Result<RenderReport, RunError> {
     let started = Instant::now();
     // 场景说"不要渲染"，就别渲染：宁可报错，也不要无视这个字段（以前它是死字段）
@@ -3764,6 +3811,11 @@ fn run_render_single(
         s.models.clone_from(&models);
     }
     if policy.dry_run {
+        if golden.is_some() {
+            return Err(RunError::scene(
+                "--golden 需要真正渲染出图，不能和 --dry-run 一起用".to_string(),
+            ));
+        }
         // 只跑物理：不建 GPU 上下文、不写盘。渲染相关的统计保持 0，
         // 由 `dry_run: true` 与 `would_write` 说明"这些数不是真的没有，而是没测"。
         return Ok(RenderReport {
@@ -3787,6 +3839,7 @@ fn run_render_single(
             would_write: vec![output.display().to_string()],
             outputs: Vec::new(),
             camera_name: doc.selected_camera.clone(),
+            golden: None,
             models,
             warnings,
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -3847,6 +3900,10 @@ fn run_render_single(
     quench3d::write_png(&image, &output)
         .map_err(|e| RunError::io(format!("写入 PNG 失败: {e}")))?;
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
+    let golden_report = match golden {
+        Some(spec) => Some(compare_golden(&image, spec)?),
+        None => None,
+    };
 
     let RenderStats {
         draw_calls,
@@ -3879,10 +3936,104 @@ fn run_render_single(
         would_write: Vec::new(),
         outputs: Vec::new(),
         camera_name: doc.selected_camera.clone(),
+        golden: golden_report,
         models,
         warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// 读取一张 RGBA8 / RGB8 PNG 并比对。
+///
+/// 渲染器自己写的是 RGBA8；参考图允许 RGB8（很多截图工具默认去掉 alpha）。
+/// 其它色型/位深直接报错，而不是猜一种转换——黄金图必须可比。
+fn compare_golden(image: &ImageData, spec: &GoldenSpec) -> Result<GoldenReport, RunError> {
+    let file = std::fs::File::open(&spec.path)
+        .map_err(|e| RunError::io(format!("打开黄金图失败：{}（{e}）", spec.path.display())))?;
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| RunError::io(format!("解析黄金图失败：{}（{e}）", spec.path.display())))?;
+    let buffer_size = reader
+        .output_buffer_size()
+        .ok_or_else(|| RunError::io(format!("黄金图尺寸溢出：{}", spec.path.display())))?;
+    let mut buf = vec![0u8; buffer_size];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| RunError::io(format!("解码黄金图失败：{}（{e}）", spec.path.display())))?;
+    if info.bit_depth != png::BitDepth::Eight {
+        return Err(RunError::io(format!(
+            "黄金图必须是 8 位 PNG：{} 是 {:?}",
+            spec.path.display(),
+            info.bit_depth
+        )));
+    }
+    let pixels: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
+            for px in buf[..info.buffer_size()].as_chunks::<3>().0 {
+                out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+            out
+        }
+        other => {
+            return Err(RunError::io(format!(
+                "黄金图必须是 RGB 或 RGBA PNG：{} 是 {other:?}",
+                spec.path.display()
+            )))
+        }
+    };
+    if info.width != image.width || info.height != image.height {
+        return Err(RunError::io(format!(
+            "黄金图尺寸不一致：{} 是 {}×{}，本次渲染是 {}×{}",
+            spec.path.display(),
+            info.width,
+            info.height,
+            image.width,
+            image.height
+        )));
+    }
+    let total = u64::from(image.width) * u64::from(image.height);
+    let mut changed = 0u64;
+    let mut max_diff = 0u8;
+    for (a, b) in image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        let diff = (0..4).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
+        max_diff = max_diff.max(diff);
+        if diff > spec.tolerance {
+            changed += 1;
+        }
+    }
+    let matched = changed == 0;
+    let report = GoldenReport {
+        path: spec.path.display().to_string(),
+        matched,
+        changed_pixels: changed,
+        total_pixels: total,
+        max_channel_diff: max_diff,
+        tolerance: spec.tolerance,
+    };
+    if !matched {
+        return Err(RunError {
+            kind: "golden_mismatch",
+            message: format!(
+                "和黄金图不一致：{} 个像素超出容差 {}（最大差值 {}，共 {} 像素；参考图 {}）",
+                changed,
+                spec.tolerance,
+                max_diff,
+                total,
+                spec.path.display()
+            ),
+            path: Some(spec.path.display().to_string()),
+        });
+    }
+    Ok(report)
 }
 
 /// FNV-1a 64 位的初始值（帧序列可复现性摘要用）。

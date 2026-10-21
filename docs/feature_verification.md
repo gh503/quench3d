@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **663** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **664** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -40,6 +40,7 @@ tools/verify_all.sh
 | --- | --- | --- |
 | `validate` / 诊断码 / 退出码 | `cargo test -p quench3d-cli` | 每条诊断路径 + 退出码 0/2/3 |
 | 单帧 `render` PNG | `cargo test -p quench3d-cli --test cli_e2e render_produces` | 合法 PNG、尺寸/统计 |
+| 单帧黄金图 | `cargo test -p quench3d-cli --test cli_e2e golden_png_comparison` | 同场景 0 差异；换颜色 `golden_mismatch`；缺图/多输出/dry-run 的退出码 |
 | 多输出 + no-clobber | `... multiple_render_outputs` | 两张路径/尺寸先解析、整体不写半套 |
 | 命名相机 + `camera_name` | `... camera_flag` / `multiple_render_outputs` | 已知名/`default`/未知名；报告字段 |
 | 雾 / 阴影质量 / 天空 | `... fog_and_shadow_quality` | 字段真的从 JSON 传到像素 |
@@ -92,5 +93,6 @@ python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 * **音频、脚本层、粒子、贴花、地形、多视口**：没有。
 * **Web 摄像头**：只有桌面文件协议；浏览器 `getUserMedia` 未接。
 * **真机 GPU/浏览器矩阵**：只有 headless Chrome + SwiftShader（软件光栅）；真机 WebGPU 未验证。
-* **单帧 `render` 的 golden 像素基线**：仍只断言 PNG 合法与场景内像素差，没有跨运行黄金图。
+* **跨机器的 golden 基线**：`--golden` 已能逐像素比对，但仓库**没有**提交一份
+  "官方参考图"给所有平台；不同 GPU/驱动/抗锯齿下的基线仍要各自生成。
 * **UI 每一个按钮的点击**：`ui_smoke` 只证明全面板能画，`probe_web_ui` 覆盖 F3/F4/R 三个真实按键（R 切缩放/平移手柄）；其余按钮仍靠人工/单元路径，未逐一点击。

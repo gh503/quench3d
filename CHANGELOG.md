@@ -28,6 +28,13 @@
 
 ### 新增
 
+- **单帧黄金图回归（`render --golden`）**：渲染后把 PNG 与参考图逐像素比对，
+  报告 `golden: { matched, changed_pixels, total_pixels, max_channel_diff, tolerance }`；
+  超出 `--golden-tolerance`（0..255，缺省 0）退出码 1，并提示"确认是有意变化后更新
+  参考图 / 用容差放宽"。仍会先写出本次 PNG，方便直接看差异；`--dry-run` 与多输出
+  会在碰 GPU 之前拒绝（多张各比一张参考图没有意义）。回归：
+  `golden_png_comparison_is_wired_and_fails_loudly`（同场景 0 差异、换颜色报
+  `golden_mismatch`、缺文件/缺参考图参数/多输出各自的退出码）。
 - **`render` / `render.outputs[]` 报告 `camera_name`**：`--camera`、`default` 别名或
   每张输出自己的 `camera` 都会如实写进报告；不传旗标的老场景不多出字段。
   回归：`camera_flag_reports_unknown_names_without_touching_the_gpu` 与

@@ -2968,3 +2968,10 @@ Web getUserMedia。
 
 验证入口：`tools/verify_all.sh`（门禁 + WebGL2 + Web UI 按键/截图 + 摄像头纯函数）。
 功能矩阵与**明确未覆盖**清单见 `docs/feature_verification.md`。
+
+## 74. 第 69 轮：单帧黄金图回归
+
+`render --golden` 把"这台机器上这张图有没有变"变成可重跑的门槛：同场景 0 差异，
+换颜色报 `golden_mismatch`，缺参考图/多输出/dry-run 在碰 GPU 前拒绝。参考图仍由
+各平台自己生成（不提交跨平台基线），默认容差 0，不做模糊匹配。回归：
+`golden_png_comparison_is_wired_and_fails_loudly`（退出码 1/2 都钉住）。

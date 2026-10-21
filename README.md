@@ -1197,7 +1197,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 663 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 664 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1350,6 +1350,7 @@ quench3d example --out scene.json
 quench3d simulate scene.json --steps 300 --json   # 不需要 GPU，断言无 NaN、不穿地
 quench3d validate bad.json --json                 # 断言退出码 2 且诊断带路径
 quench3d render scene.json --out out.png --json   # 有 GPU 出图，无 GPU 必须是退出码 3
+quench3d render scene.json --out out.png --golden 参考.png   # 单帧像素回归；不匹配退出码 1
 ```
 
 ## 8. 性能与资源

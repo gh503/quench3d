@@ -2485,3 +2485,22 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **仍未做**：GPU 蒙皮/骨骼动画、IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、
 单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
+
+---
+
+## 26. 第 69 轮：单帧黄金图回归（`render --golden`）
+
+**做了什么**：
+
+* `render --golden <参考.png> [--golden-tolerance 0..255]`：单张渲染后逐像素比对
+  RGBA8（参考图允许 RGB8），报告 `golden.matched / changed_pixels / total_pixels /
+  max_channel_diff / tolerance`；超容差退出码 1，并保留本次 PNG 供直接看差异。
+* 拒绝在碰 GPU 前：`--golden-tolerance` 单独出现、`--dry-run` + `--golden`、
+  `render.outputs` 多输出 + `--golden`。
+* 参考图缺失/尺寸不一致/色型不支持/位深不是 8 位都给出具体原因，不猜转换。
+
+**验证**：`cargo test -p quench3d-cli --test cli_e2e golden_png_comparison`——
+同场景重渲 0 差异、换材质颜色报 `golden_mismatch`、缺图退出 1、三种参数错误退出 2。
+
+**边界**：仓库不提交跨平台"官方参考图"；不同 GPU/驱动/抗锯齿下的基线要各自生成。
+逐像素比对是**严格**的（默认容差 0），对有意改画面需要更新参考图或显式放宽容差。

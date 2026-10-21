@@ -32,6 +32,8 @@ const MAX_FIXED_DT: f32 = 1.0;
 
 const VALUE_FLAGS: &[&str] = &[
     "--camera",
+    "--golden",
+    "--golden-tolerance",
     "--asset-path",
     "--out",
     "--width",
@@ -132,6 +134,26 @@ impl Args {
 
     fn has(&self, key: &str) -> bool {
         self.flags.contains_key(key)
+    }
+}
+
+/// 解析 `--golden` / `--golden-tolerance`。
+///
+/// 容差单独给但没给参考图是用法错误：不要悄悄忽略，否则"我明明设了容差"会变成
+/// 一次逐字节比较。
+fn golden_spec(args: &Args) -> Result<Option<runner::GoldenSpec>, String> {
+    match args.flag_str("--golden") {
+        Some(path) => {
+            let tolerance = args.flag_parse::<u8>("--golden-tolerance")?.unwrap_or(0);
+            Ok(Some(runner::GoldenSpec {
+                path: PathBuf::from(path),
+                tolerance,
+            }))
+        }
+        None if args.has("--golden-tolerance") => {
+            Err("--golden-tolerance 必须和 --golden <参考图> 一起用".to_string())
+        }
+        None => Ok(None),
     }
 }
 
@@ -414,7 +436,24 @@ fn dispatch(args: &Args) -> i32 {
                 doc.simulate.steps = 0;
             }
             let out = args.flag_str("--out").map(PathBuf::from);
-            match runner::run_render(&doc, out.as_deref(), output_policy(args)) {
+            let golden = match golden_spec(args) {
+                Ok(g) => g,
+                Err(e) => {
+                    return fail(
+                        args,
+                        "render",
+                        ErrorInfo::new("invalid", e)
+                            .hint("用法：--golden 参考.png [--golden-tolerance 0..255]"),
+                        started,
+                    )
+                }
+            };
+            match runner::run_render_with_golden(
+                &doc,
+                out.as_deref(),
+                output_policy(args),
+                golden.as_ref(),
+            ) {
                 Ok(report) if report.dry_run => {
                     let value = serde_json::to_value(&report).unwrap_or(Value::Null);
                     let mut warnings = String::new();
@@ -446,8 +485,23 @@ fn dispatch(args: &Args) -> i32 {
                     for w in &report.warnings {
                         warnings.push_str(&format!("\n注意      : {w}"));
                     }
+                    let camera = report
+                        .camera_name
+                        .as_ref()
+                        .map(|n| format!("\n相机名    : {n}"))
+                        .unwrap_or_default();
+                    let golden = report
+                        .golden
+                        .as_ref()
+                        .map(|g| {
+                            format!(
+                                "\n黄金图    : 通过（{} 像素，最大差值 {}，容差 {}）",
+                                g.total_pixels, g.max_channel_diff, g.tolerance
+                            )
+                        })
+                        .unwrap_or_default();
                     let human = format!(
-                        "已渲染    : {}（{}×{}，{} KB）\n绘制/实例 : {} / {}\n三角形    : {}\n阴影实例  : {}\n场景物体  : {}\n相机位置  : {:?}\n耗时      : {} ms{}{}",
+                        "已渲染    : {}（{}×{}，{} KB）\n绘制/实例 : {} / {}\n三角形    : {}\n阴影实例  : {}\n场景物体  : {}\n相机位置  : {:?}{}{}\n耗时      : {} ms{}{}",
                         report.output,
                         report.width,
                         report.height,
@@ -458,6 +512,8 @@ fn dispatch(args: &Args) -> i32 {
                         report.shadow_instances,
                         report.objects,
                         report.camera_position,
+                        camera,
+                        golden,
                         report.elapsed_ms,
                         report
                             .simulate
@@ -1791,6 +1847,8 @@ fn help_text() -> String {
 常用参数
   --out <路径>           覆盖 render.output
   --camera <名字>        渲染 `cameras` 段里的命名相机（缺省用 `camera` 段那台）
+  --golden <参考.png>    单张渲染后和黄金图逐像素比对；超出容差退出码 1
+  --golden-tolerance <n> 允许的单通道最大差值（0..255，缺省 0）
   --asset-path <目录>    额外资源搜索路径：多个用 `:` 分隔（Windows `;`），只影响这次运行
   --width/--height <n>   覆盖渲染尺寸
   --steps <n>            覆盖 simulate.steps
