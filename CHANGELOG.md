@@ -32,6 +32,13 @@
 
 ### 新增
 
+- **状态机过渡编辑（第 84 轮）**：状态机实例的「动画」面板现在列出每条
+  `from → to` 过渡，可直接改等待秒数、淡入秒数和「播完触发」勾选；改动同步运行时
+  `animator.transitions[i]` 并通过 `Doc::set_animator_transition` 写回
+  `models[i].animator.transitions[i]`（可撤销、存盘生效）。`on_finished` 打开时等待
+  时间控件禁用，避免误以为两个触发条件会叠加。回归：
+  `set_animator_transition_writes_trigger_fields` + `ui_smoke` 的「待机 → 走」「播完触发」
+  控件文本断言。
 - **动画片段选择（第 83 轮）**：普通模型动画（非状态机）的「动画」面板新增
   「片段」下拉框，列出资产里的 clip；切换时重建 `ModelAnimationPlayer`（保留倍速/
   循环，时间归零），刷新蒙皮/morph，并通过 `Doc::set_animation_clip` 写回

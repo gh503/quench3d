@@ -144,7 +144,9 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   state）**，可撤销，存盘生效。拖动「时间」滑杆时**暂停也立刻**重算位姿与蒙皮/morph
   顶点（`Scene::refresh_animations_with_renderer`），但时间本身只改当前会话。
   普通动画还可从资产里选择 clip（写回 `models[i].animation.name`）；状态机的片段由
-  `states` 管，不能在这里单换。边界：仍不是完整时间轴（不能加事件/改过渡曲线）。
+  `states` 管，不能在这里单换。状态机的每条过渡可直接改等待秒数、淡入秒数和
+  「播完触发」（写回 `transitions[i]`）。边界：仍不是完整时间轴（不能加事件/
+  增删状态或过渡）。
 * **CUBICSPLINE 真值**：glTF 动画的 TRS 轨道按 Hermite 基函数使用入/出切线
   （旋转在分量求值后归一化）；解析器保留三段 `[入切线, 值, 出切线]`，不再退化线性。
   morph 权重轨道的 CUBICSPLINE 仍只取关键帧值（按线性采样）。
@@ -217,7 +219,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12330616 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12335870 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -1234,7 +1236,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 695 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 696 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

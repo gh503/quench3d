@@ -1418,7 +1418,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .weak(),
                     );
                 }
-                if let Some(animator) = &animation.animator {
+                if let Some(animator) = &mut animation.animator {
                     let current = animator
                         .states
                         .get(animator.current)
@@ -1438,6 +1438,75 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .small()
                         .weak(),
                     );
+                    if !animator.transitions.is_empty() {
+                        ui.label(RichText::new("过渡").small().strong());
+                    }
+                    for ti in 0..animator.transitions.len() {
+                        let from = animator.transitions[ti].from.clone();
+                        let to = animator.transitions[ti].to.clone();
+                        let transition = &mut animator.transitions[ti];
+                        let mut changed = false;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{from} → {to}")).small());
+                            let response = ui.add_enabled(
+                                !transition.on_finished,
+                                egui::DragValue::new(&mut transition.after)
+                                    .range(0.0..=60.0)
+                                    .speed(0.05)
+                                    .prefix("等待 ")
+                                    .suffix("s"),
+                            );
+                            if response.drag_started() {
+                                begin_edit = true;
+                            }
+                            if response.changed() {
+                                changed = true;
+                                if !response.dragged() {
+                                    record_edit = true;
+                                }
+                            }
+                            if response.drag_stopped() {
+                                end_edit = true;
+                            }
+                            let response = ui.add(
+                                egui::DragValue::new(&mut transition.fade)
+                                    .range(0.0..=5.0)
+                                    .speed(0.02)
+                                    .prefix("淡入 ")
+                                    .suffix("s"),
+                            );
+                            if response.drag_started() {
+                                begin_edit = true;
+                            }
+                            if response.changed() {
+                                changed = true;
+                                if !response.dragged() {
+                                    record_edit = true;
+                                }
+                            }
+                            if response.drag_stopped() {
+                                end_edit = true;
+                            }
+                            if ui
+                                .checkbox(&mut transition.on_finished, "播完触发")
+                                .changed()
+                            {
+                                changed = true;
+                                record_edit = true;
+                            }
+                        });
+                        if changed && models[index].is_some() {
+                            if let Some(path) = doc.set_animator_transition(
+                                &objects,
+                                ti,
+                                transition.after,
+                                transition.fade,
+                                transition.on_finished,
+                            ) {
+                                changed_model = Some(path);
+                            }
+                        }
+                    }
                 }
                 ui.add_space(4.0);
             }
@@ -1461,7 +1530,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         doc.record_edit(engine);
     }
     if let Some(path) = changed_model {
-        doc.status = format!("动画倍速/循环已写回 {path}（存盘生效，可撤销）");
+        doc.status = format!("动画参数已写回 {path}（存盘生效，可撤销）");
     }
 }
 

@@ -82,14 +82,29 @@ fn fake_animation_instance() -> ModelAnimationInstance {
         blend_elapsed: 0.0,
         morph_weights: None,
         animator: Some(ModelAnimatorRuntime {
-            states: vec![ModelAnimatorState {
-                name: "待机".into(),
-                animation: "idle".into(),
-                speed: 1.0,
-                looping: true,
-                start: 0.0,
+            states: vec![
+                ModelAnimatorState {
+                    name: "待机".into(),
+                    animation: "idle".into(),
+                    speed: 1.0,
+                    looping: true,
+                    start: 0.0,
+                },
+                ModelAnimatorState {
+                    name: "走".into(),
+                    animation: "idle".into(),
+                    speed: 1.0,
+                    looping: true,
+                    start: 0.0,
+                },
+            ],
+            transitions: vec![quench3d::scene::ModelAnimatorTransition {
+                from: "待机".into(),
+                to: "走".into(),
+                after: 0.5,
+                on_finished: false,
+                fade: 0.0,
             }],
-            transitions: Vec::new(),
             current: 0,
             elapsed: 0.25,
             pending: None,
@@ -212,6 +227,14 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "循环"),
         "动画循环控件没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "待机 → 走"),
+        "状态机过渡行没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "播完触发"),
+        "状态机过渡的结束触发控件没有出现在面板内容里"
     );
     assert!(
         output.textures_delta.set.len() + output.textures_delta.free.len() > 0,

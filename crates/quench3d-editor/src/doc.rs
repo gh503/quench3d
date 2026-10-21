@@ -243,6 +243,30 @@ impl Doc {
             .map(|i| i.model)
     }
 
+    /// 把状态机第 `index` 条过渡的时间/淡入/结束触发写回底稿。
+    ///
+    /// 返回模型路径；没有映射、模型没有 animator 或下标越界时返回 `None`。
+    pub fn set_animator_transition(
+        &mut self,
+        objects: &[usize],
+        index: usize,
+        after: f32,
+        fade: f32,
+        on_finished: bool,
+    ) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let transition = doc.animator.as_mut()?.transitions.get_mut(index)?;
+        transition.after = after;
+        transition.fade = Some(fade);
+        transition.on_finished = on_finished;
+        Some(path)
+    }
+
     /// 把普通模型动画（不是状态机）的 clip 名写回 `models[i].animation.name`。
     ///
     /// 返回模型路径；没有映射、模型只有 `animator` 或没有 `animation` 段时返回 `None`。
@@ -1042,5 +1066,52 @@ mod tests {
         // 状态机没有可单独换的 animation.name；不能把 states 结构改坏。
         assert!(doc.set_animation_clip(&[2], "run").is_none());
         assert!(doc.set_animation_clip(&[99], "run").is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_animator_transition_writes_trigger_fields() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{"path": "a.glb", "animator": {
+                    "initial": "idle",
+                    "states": [
+                        {"name": "idle", "animation": "idle"},
+                        {"name": "run", "animation": "run"}
+                    ],
+                    "transitions": [
+                        {"from": "idle", "to": "run", "after": 0.0, "fade": 0.0}
+                    ]
+                }}]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![quench3d_cli::runner::ModelInstance {
+            model: 0,
+            path: "a.glb".into(),
+            objects: vec![7],
+        }]);
+        assert_eq!(
+            doc.set_animator_transition(&[7], 0, 1.5, 0.25, true)
+                .as_deref(),
+            Some("a.glb")
+        );
+        let transition = &doc.base_doc.as_ref().unwrap().models[0]
+            .animator
+            .as_ref()
+            .unwrap()
+            .transitions[0];
+        assert!((transition.after - 1.5).abs() < 1e-6);
+        assert_eq!(transition.fade, Some(0.25));
+        assert!(transition.on_finished);
+        // 越界/未知物体不能误写。
+        assert!(doc
+            .set_animator_transition(&[7], 9, 0.0, 0.0, false)
+            .is_none());
+        assert!(doc
+            .set_animator_transition(&[99], 0, 0.0, 0.0, false)
+            .is_none());
     }
 }
