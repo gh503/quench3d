@@ -333,6 +333,32 @@ fn sample_spot_shadow(world: vec3<f32>, n: vec3<f32>, n_dot_l: f32) -> f32 {
     return pcf_3x3(spot_shadow_map, uv, ndc.z - depth_bias, texel);
 }
 
+// 解析式环境：与 `sky.wgsl` 同一条渐变 + 太阳光晕，用作金属/光滑材质的反射。
+//
+// 这不是 HDRI/IBL：没有 cubemap、没有按粗糙度预滤波，只按反射方向直接取天空色。
+// 好处是零额外纹理/绑定，GL/WebGL2 与原生走同一条路径；边界写在 README/§23.5。
+fn environment_radiance(dir: vec3<f32>) -> vec3<f32> {
+    let t = clamp(dir.y, -1.0, 1.0);
+    var color = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, smoothstep(0.0, 0.7, t));
+    color = mix(color, frame.sky_ground.rgb, smoothstep(0.0, -0.35, t));
+    let l = normalize(frame.light_dir.xyz);
+    let cos_angle = max(dot(dir, l), 0.0);
+    let glow = pow(cos_angle, 12.0) * 0.25 + pow(cos_angle, 3.0) * 0.05;
+    let disc = smoothstep(0.9993, 0.9998, cos_angle) * 6.0;
+    color = color + frame.light_color.rgb * frame.light_dir.w * (glow + disc);
+    return color;
+}
+
+// Karis 的 split-sum 环境 BRDF 近似（不用 LUT）。
+fn environment_brdf(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + vec3<f32>(ab.y);
+}
+
 struct FragOut {
     @location(0) color: vec4<f32>,
     // 水面 mask（主 pass 第二颜色附件）：r = 1 表示水面，g = 水面世界高度；
@@ -485,8 +511,23 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
         let ambient_irradiance = mix(frame.ambient.rgb * frame.ambient.w, sky, 0.65);
         let f_env = fresnel_schlick_roughness(n_dot_v, f0, roughness);
         let kd_env = (vec3<f32>(1.0) - f_env) * (1.0 - metallic);
-        lo = lo + kd_env * albedo.rgb * ambient_irradiance;
-        lo = lo + f_env * ambient_irradiance * (1.0 - roughness) * (0.35 + 0.65 * metallic);
+        if (frame.cascade_info.w > 0.5) {
+            // 反射方向取环境色；粗糙度用"反射色 → 环境光"的混合代替预滤波。
+            // 对金属这是主要能量来源，对电介质只补一点高光。
+            let reflected = reflect(-view_dir, n);
+            let env_diffuse = mix(ambient_irradiance, environment_radiance(n), 0.65);
+            let env_reflection = mix(
+                environment_radiance(reflected),
+                ambient_irradiance,
+                roughness * roughness,
+            );
+            let env_spec = env_reflection * environment_brdf(f0, roughness, n_dot_v);
+            lo = lo + kd_env * albedo.rgb * env_diffuse;
+            lo = lo + env_spec;
+        } else {
+            lo = lo + kd_env * albedo.rgb * ambient_irradiance;
+            lo = lo + f_env * ambient_irradiance * (1.0 - roughness) * (0.35 + 0.65 * metallic);
+        }
     } else {
         lo = albedo.rgb;
     }

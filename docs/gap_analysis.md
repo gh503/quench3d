@@ -84,7 +84,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 | P0 | **GPU 蒙皮 + 骨骼动画（仍无）** | 顶点只有 pos/normal/uv/tangent（`mesh.rs:13-22`），没有 JOINTS_0/WEIGHTS_0；第 61~62 轮补的是**节点级 TRS 动画**（`animations` 解析 + CPU 采样 + `models[].animation` 播放），不是蒙皮 | 带骨骼的角色 GLB 仍只能**静止**；机械/节点动画已可播（见 #23）；人物/怪物动画还做不了 |
 | P0 | ~~**无 CSM 级联阴影**~~ ✅ 已补 | `cascade.rs` + `lighting.shadow_quality.cascades`（1~4，2×2 图集，按视空间深度选级）；`tests/shadow_cascades.rs` 有 GPU 回归 | 大场景阴影不再只靠一张固定半径的正交图 |
 | P1 | ~~无后处理链、无 HDR 中间目标~~ ✅ 2026-10-16 | `rgba16float` 中间目标 + `post.wgsl`（ACES 只此一份）+ 半分辨率 bloom；tonemap 从三个物体着色器里删掉 | **已修**：混合/Alpha/网格线现在发生在 tonemap **之前**（此前是"先 tonemap 再混合"，能量错）。仍缺景深 / TAA / 可插拔 pass 图、AO 去噪（FXAA ✅ + SSAO ✅ 2026-10-16） |
-| P1 | **无 IBL / 环境贴图** | 只有解析式半球环境光（`pbr.wgsl:245-252`）；材质绑定组仅 4 张 2D 贴图（`renderer.rs:413-433`） | 金属/光滑材质没有反射，观感对不上 Blender 预览 |
+| P1 | **无真正的 IBL / 环境贴图**（已有解析式环境高光） | `pbr.wgsl` 的 `environment_radiance` 按反射方向取程序化天空 + `environment_brdf`；没有 cubemap/HDRI、没有按粗糙度预滤波、没有 SSR | 金属有天空/地面反射了，但没有环境贴图里的具体物体反射，观感仍对不上 Blender 预览 |
 | P1 | ~~**无聚光灯、点光无阴影**~~ ✅ 已补 | `SpotLight` + `PointLight.cast_shadows`（各自整帧一盏，缺省关闭；`spot_shadow.rs` / `point_shadow.rs`） | 室内、手电、舞台灯可用；多盏同时投影仍是后续 |
 | P1 | ~~透明物体之间不排序~~ ✅ 2026-10-21 | 半透明按实例 AABB 中心到相机的距离全局由远到近逐实例绘制（`renderer.rs` 的 `alpha_draws`）；像素测试 `transparent_objects_are_drawn_back_to_front` | 玻璃叠玻璃不再按材质 id 闪错；代价是透明物体不合批 |
 | P2 | 无 AO 贴图、无 HDR/浮点纹理、无 KTX2/BC/ASTC | `params2.z` 硬编码 1.0（`material.rs:217`）；只支持 `Rgba8Unorm(Srgb)`（`texture.rs:284-288`） | 大贴图包体积、缺少接触阴影细节 |
@@ -319,7 +319,7 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 | --- | --- | --- | --- |
 | 内容层 | GPU 蒙皮/骨骼动画（`skin\|skinning\|joint_palette` = **0**，loader 不调 glTF `animations()` = **0**）、morph（0）、粒子（0）、贴花（0） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 导入任何角色 GLB **只能静止**；HUD/菜单/伤害数字要宿主自绘 |
 | 手工界面 | ✅ **已有**（2026-10-16）：`quench3d-editor` 用 egui 做了工具栏/场景树/属性面板/视口拾取，桌面与 Web 共用（§2.5）。**引擎本体仍不带** UI/文字系统（`font\|glyph\|sdf` 在 `quench3d-render` 里仍是 0）——GUI 由宿主（编辑器就是这样一个宿主）自己选库 | Unity/Godot 的 UI 是引擎内建；Bevy 走 `bevy_ui` + 第三方编辑器 | 想在自己游戏里画 HUD，得自己接一个 UI 库（本仓库演示了怎么和 wgpu 渲染器共存） |
-| 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM ✅（1~4）、聚光灯/点光阴影 ✅（各一盏）、透明距离排序 ✅、IBL/环境贴图（0）、景深/TAA（0）、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属没反射；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
+| 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM ✅（1~4）、聚光灯/点光阴影 ✅（各一盏）、透明距离排序 ✅、解析式环境高光 ✅、IBL/环境贴图（0）、景深/TAA（0）、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属只有天空/地面反射，没有环境贴图里的具体物体；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
 | 玩法层（物理） | 碰撞过滤 layer/mask ✅、传感器/触发事件 ✅（轮询式，无回调总线）、CCD 🟡（中心射线式）、复合形状（1 刚体 1 形状）、关节限位/马达补全、持久流形/特征 ID、物理材质与 combine（0）、快照回放、渲染插值（`interpolat` = 0）、地形高度场（0） | PhysX 5 / Jolt / Rapier / Box2D 的标配 | 队友互不碰撞、拾取/伤害区、子弹穿墙、载具悬挂、存档与回滚、高刷平滑 |
 | 工程/平台层 | 存档、音频（0）、输入抽象（手柄/触屏/重绑定 = 0，只有键鼠 + `movement_axes`）、脚本层（0）、渲染资源释放（渲染器 `remove_*` = **0**，资源表 append-only）、**Web 端 glTF/OBJ 加载（`assets.rs` 用 `Path::exists()`，wasm 下必 NotFound）**、发布工程 | Unity/Godot 的 Asset/Input/Audio/Save 子系统；Bevy 的 asset server | 项目做完变不成产品；Web 端连模型都加载不了 |
 
@@ -645,7 +645,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 24b | ✅ 编辑器与 CLI 的后处理一致性（第 51–52 轮）：级联 UI + `bloom/fxaa/ssao` 载入应用与写回，共用同一份映射函数 | — | 编辑器预览与 `quench3d render` 在后处理上不再分叉 |
 | 24 |（部分 ✅）第 51 轮：编辑器有了级联 UI，且载入/存盘与 CLI 共用同一份映射（预览==渲染）| 24 |（部分 ✅）第 49 轮加了**聚光灯**：`lighting.spot_lights`（引擎 `SpotLight` + 与点光源共享 8 盏名额 + WGSL 圆锥平滑过渡 + 校验 + 测试 + 本机 GPU 量化）。**仍缺**：~~点光源不投影（要立方体阴影图）~~ 第 55 轮补上了（见 24d）；聚光灯的阴影见 24d| 局部光只能照明、不能互相遮挡 | 🟡 部分（第 42~43 轮）：**CSM 已落地并已量化**——`lighting.shadow_quality.cascades`（1~4，缺省 1 = 老行为逐像素不变）+ `split_lambda`（0~1）；CPU 侧 `cascade.rs`（PSSM 切分 / 视锥角点 / 切段角点 / 每级矩阵 + 分块纹素对齐）有几何断言与"每级 bias 都等于同一纹素数"的不变式（无显卡可跑）；渲染侧画进 2×2 图集、着色器按视空间深度选级；e2e 覆盖校验（0/5/1.5 报错）；`examples/shadow_probe` 级联 sweep 给出**实测数字**（`docs/production_readiness.md` §12.2）：级联换到的是**覆盖**（60 米外投射体单级 0 个影子像素，2/3/4 级 5/3/3 个，落点误差 ≤0.6px），而"小场景 + far=500"下单级反而清晰约 33 倍（纹素足迹 0.0273 vs 0.893）。**没做**：点光源阴影（立方体阴影图）；聚光灯阴影见 24d | 渲染 |
 | 25 | 后处理链骨架（HDR 中间目标 + tonemap 移出物体着色器）✅ 2026-10-16 + Bloom ✅（`lighting.bloom`）+ FXAA ✅（`lighting.fxaa`）+ SSAO ✅（`lighting.ssao`，深度-only、无去噪）+ TAA/景深 ❌ | 引擎（大） |
-| 26 | IBL / 环境贴图 | 引擎 |
+| 26 | IBL / 环境贴图（解析式环境高光已补，真实 cubemap/HDRI 仍未） | 引擎 |
 | 27 | 资源管线：Web 端模型加载（bytes/fetch）✅ 2026-10-15（`load_model_from_bytes` + wasm 探针验证）+ **CPU 侧模型缓存 ✅ 第 41 轮**（`assets::ModelCache`：进程内、规范化路径为 key、按 `(文件长度, mtime)` 失效、256 MiB 估算预算 + LRU 淘汰、`stats()`；`simulate` 报告的 `model_cache{...}` 是可达观测口径，e2e 钉住"同文件两条引用 = 1 次解析 + 1 次命中"、"不同文件 2 次解析"、"没模型的场景报告里不出现这个字段"）+ **显存释放仍 ❌**（GPU 缓冲还是只增不减，反复 `load_model` 必涨显存——这条本轮没动，见 readiness §11） | 引擎 |
 | 28 | agent 幂等与安全：`--out` 冲突保护 ✅、`--dry-run` ✅、**API key 不再走 argv** ✅、MCP annotations/outputSchema ✅（全部 2026-10-15） | 交付 |
 | 29 | 事件总线 ✅ 2026-10-18（`PhysicsWorld::events()/drain_events()/take_events()`，7 种事件：接触开始/结束、传感器进入/离开、睡眠/唤醒、关节断裂；队列有上限 4096 + `events_dropped()` 记账；`simulate` 报告里输出 `events[]`（物体名 + 步号）+ `events_dropped`；**仍缺**生命周期钩子与用户回调——没有脚本层，`on_scene_loaded`/`on_destroy` 只能由宿主轮询，编辑器只有状态栏只读显示） | 引擎 |

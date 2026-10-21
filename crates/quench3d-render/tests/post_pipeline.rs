@@ -223,6 +223,79 @@ fn alpha_blending_happens_before_tonemap() {
     );
 }
 
+/// 解析式环境高光必须真的改变金属球：同一盏太阳、同一台相机，只切
+/// `RendererOptions.environment`，金属球上的反射/环境项必须不同。
+///
+/// 这不是"检查着色器里有没有那行代码"：像素差异证明它进了最终画面。
+#[test]
+fn analytic_environment_reflection_changes_metal() {
+    let Some(mut ctx) = context(1, "环境高光的像素级验证（真的创建 wgpu 上下文）")
+    else {
+        return;
+    };
+    let image = |ctx: &mut GpuContext, environment: bool| {
+        let mut renderer = Renderer::new(
+            ctx,
+            RendererOptions {
+                grid: false,
+                shadows: false,
+                sky: false,
+                environment,
+                ..Default::default()
+            },
+        );
+        let material = renderer.add_material(
+            ctx,
+            MaterialDesc {
+                base_color: Vec4::new(0.15, 0.18, 0.22, 1.0),
+                metallic: 1.0,
+                roughness: 0.08,
+                ..Default::default()
+            },
+        );
+        let sphere = renderer.add_mesh(ctx, &MeshData::sphere(0.5, 24, 16));
+        renderer.draw(
+            sphere,
+            material,
+            InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 1.0),
+        );
+        let mut camera = Camera::perspective(W as f32 / H as f32);
+        camera.position = vec3(0.0, 0.0, 2.0);
+        camera.look_at(vec3(0.0, 0.0, 0.0));
+        renderer
+            .capture(
+                ctx,
+                W,
+                H,
+                &camera,
+                &Lighting {
+                    exposure: 1.0,
+                    ..Default::default()
+                },
+            )
+            .expect("离屏渲染")
+    };
+    let on = image(&mut ctx, true);
+    let off = image(&mut ctx, false);
+    let mut changed = 0usize;
+    let mut max_diff = 0i32;
+    for y in 0..H {
+        for x in 0..W {
+            let a = pixel(&on, x, y);
+            let b = pixel(&off, x, y);
+            let d = (0..3).map(|i| (a[i] - b[i]).abs()).max().unwrap_or(0);
+            if d > 3 {
+                changed += 1;
+            }
+            max_diff = max_diff.max(d);
+        }
+    }
+    assert!(
+        max_diff > 12 && changed > (W * H) as usize / 20,
+        "环境高光没有改变金属球：changed={changed}, max_diff={max_diff}"
+    );
+}
+
 /// 两个半透明面重叠时，必须**全局由远到近**画，而不是按材质 id/提交顺序。
 ///
 /// 这条测试故意先提交近的红色面、再提交远的蓝色面：旧实现按批次的材质 id

@@ -30,7 +30,8 @@ struct Frame {
     shadow_matrices: array<mat4x4<f32>, 4>,
     // 每一级的远平面距离（视空间米数，严格递增）
     cascade_splits: vec4<f32>,
-    // x = 级联数量（0 = 不投影阴影）, y = 图集分块缩放（单级 1，多级 0.5）, z/w 备用
+    // x = 级联数量（0 = 不投影阴影）, y = 图集分块缩放（单级 1，多级 0.5）,
+    // z 备用, w = 是否启用解析环境高光（0/1）
     cascade_info: vec4<f32>,
     sky_zenith: vec4<f32>,
     sky_horizon: vec4<f32>,

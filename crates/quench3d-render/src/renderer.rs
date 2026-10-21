@@ -580,6 +580,9 @@ pub struct RendererOptions {
     pub ssao: SsaoOptions,
     /// 屏幕空间水面（缺省关闭；水面 mask 仍会写，只是后处理不读）。
     pub water: WaterOptions,
+    /// 解析式环境高光（缺省开启）：金属/光滑材质按反射方向取程序化天空，
+    /// 而不是只用半球环境光。没有 HDRI/cubemap，属于便宜近似。
+    pub environment: bool,
 }
 
 impl Default for RendererOptions {
@@ -596,6 +599,7 @@ impl Default for RendererOptions {
             fxaa: FxaaOptions::default(),
             ssao: SsaoOptions::default(),
             water: WaterOptions::default(),
+            environment: true,
         }
     }
 }
@@ -2500,7 +2504,12 @@ impl Renderer {
             view: camera.view().to_cols_arrays(),
             shadow_matrices,
             cascade_splits,
-            cascade_info: [cascade_count as f32, tile_scale, 0.0, 0.0],
+            cascade_info: [
+                cascade_count as f32,
+                tile_scale,
+                0.0,
+                if self.options.environment { 1.0 } else { 0.0 },
+            ],
             sky_zenith: [
                 lighting.sky.zenith.x,
                 lighting.sky.zenith.y,

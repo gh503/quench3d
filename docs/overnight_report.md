@@ -2895,3 +2895,24 @@ transparent_`。场景故意先提交近红、再提交远蓝；正确结果与"
 是旧审计结论，实际代码早已有（`cascade.rs`、`spot_shadow.rs`、`point_shadow.rs`）；
 本轮把它们改成当前状态，避免下一轮重复做。仍没有的是：IBL/环境贴图、GPU 蒙皮/骨骼动画、
 景深/TAA、透明 OIT、多盏局部光同时投影。
+
+---
+
+## 70. 解析式环境高光（2026-10-21）
+
+金属材质此前只有"半球环境光 + 菲涅耳"这一项，没有反射方向；光滑金属看起来像塑料。
+真正的 IBL 需要 HDRI/cubemap、按粗糙度预滤波、BRDF LUT，还要加纹理绑定并处理 GL/WebGL2
+的浮点过滤；这是一整轮的工作量。这一轮先补**零资源**的近似：
+
+* `environment_radiance(dir)`：与 `sky.wgsl` 同一条天顶/地平线/地面渐变 + 太阳光晕；
+* `environment_brdf`：Karis split-sum 近似（不用 LUT）；
+* 金属/电介质在环境项里按 `reflect(-view_dir, n)` 取环境色，粗糙度用反射色到环境光的
+  混合代替预滤波；
+* `RendererOptions.environment`（缺省开）经 `cascade_info.w` 传给着色器；关掉恢复旧路径。
+
+边界：没有 cubemap/HDRI，没有环境贴图里的具体物体反射，没有按粗糙度预滤波，没有 SSR。
+它解决的是"金属完全不像金属"，不是"能当 Blender 的 HDRI 预览"。
+
+验证：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline
+analytic_environment`——同一金属球只切开关，像素必须变化；`cargo test -p quench3d-render
+--lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
