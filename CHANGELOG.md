@@ -10,6 +10,10 @@
 
 ### 修复
 
+- **CI 的 ubuntu runner 没有 GPU 适配器时，蒙皮像素回归直接 panic**。新加的
+  `skinned_mesh_changes_rendered_pixels` 在 `QUENCH3D_GPU_TESTS=1` 下创建上下文失败
+  就 `.expect("t=0 渲染")`，把"找不到 GPU"报成像素回归失败。现在只有适配器缺失
+  才打印可读跳过；着色器/渲染错误仍然 panic，不掩盖真故障。
 - **网格不写深度，调试线段会从地面下穿出来**。`grid.wgsl` 写了 `frag_depth`，但
   `quench3d-grid` 管线是 `depth_write_enabled: false`——网格只按深度测试、不写回，
   地面下方的坐标轴/包围盒/骨架线全部可见。现在网格真正写深度；地面**下方**的线段

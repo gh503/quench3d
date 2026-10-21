@@ -273,13 +273,25 @@ fn skinned_mesh_changes_rendered_pixels() {
                     );
                 })
             };
-            let a = render_at(0.0).expect("t=0 渲染");
-            let b = render_at(0.25).expect("t=0.25 渲染");
+            let a = render_at(0.0);
+            let b = render_at(0.25);
             (a, b)
         },
     );
     let Some((a, b)) = rendered else {
         return;
+    };
+    // CI 的 ubuntu runner 可能没有 Vulkan/GL 适配器；这时显式跳过，而不是把
+    // "找不到 GPU" 当像素回归失败。其它错误仍然 panic（那才是真的渲染坏了）。
+    let (a, b) = match (a, b) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => {
+            if e.contains("GPU 适配器") || e.contains("GPU adapter") {
+                eprintln!("跳过：没有可用的 GPU（{e}）");
+                return;
+            }
+            panic!("蒙皮渲染失败：{e}");
+        }
     };
     let changed = a
         .rgba
