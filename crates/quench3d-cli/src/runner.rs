@@ -350,6 +350,7 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
                 found: second.is_some(),
                 duration: second.map(|c| c.duration),
                 tracks: second.map(|c| c.tracks.len()),
+                morph_tracks: second.map(|c| c.morph_tracks.len()).filter(|n| *n > 0),
                 weight: b.weight.unwrap_or(0.5),
                 fade: b.fade.unwrap_or(0.0),
                 speed: b.speed.unwrap_or(1.0),
@@ -370,6 +371,7 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
                 found: clip.is_some(),
                 duration: clip.map(|c| c.duration),
                 tracks: clip.map(|c| c.tracks.len()),
+                morph_tracks: clip.map(|c| c.morph_tracks.len()).filter(|n| *n > 0),
                 speed: requested.speed.unwrap_or(1.0),
                 looping: requested.looping.unwrap_or(true),
                 start: requested.start.unwrap_or(0.0),
@@ -458,6 +460,9 @@ pub struct ModelAnimationStatus {
     /// 轨道数；`found = false` 时不出现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracks: Option<usize>,
+    /// morph target 权重轨道数；没有时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morph_tracks: Option<usize>,
     /// 播放倍速（场景里的值，缺省 1）。
     pub speed: f32,
     /// 是否循环（场景里的值，缺省 true）。
@@ -479,6 +484,9 @@ pub struct ModelBlendStatus {
     /// 轨道数；`found = false` 时不出现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracks: Option<usize>,
+    /// morph target 权重轨道数；没有时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morph_tracks: Option<usize>,
     /// 第二条 clip 的权重（0 = 只用第一条，1 = 只用第二条）。
     pub weight: f32,
     /// 淡入时长（秒，缺省 0）。

@@ -538,6 +538,10 @@ impl Scene {
             let Some(worlds) = animation_worlds(a) else {
                 continue;
             };
+            // morph 动画按节点给权重；场景里手工写的 `morph_weights` 优先级更高，
+            // 用于覆盖资产动画（此时动画的 morph 轨道被忽略）。双 clip 混合时只取
+            // 主 clip 的 morph 轨道，不对两条 clip 的权重插值。
+            let sampled = a.model.morph_weights_at(&a.player.animation, a.player.time);
             for (mesh_index, &object_index) in a.objects.iter().enumerate() {
                 let Some(mesh) = a.model.meshes.get(mesh_index) else {
                     continue;
@@ -546,10 +550,18 @@ impl Scene {
                 if mesh.skin.is_none() && mesh.morph_targets.is_empty() {
                     continue;
                 }
-                let Some(data) =
-                    a.model
-                        .deformed_mesh(mesh_index, &worlds, a.morph_weights.as_deref())
-                else {
+                let weights: Option<&[f32]> = if let Some(manual) = &a.morph_weights {
+                    Some(manual.as_slice())
+                } else {
+                    mesh.node.and_then(|node| {
+                        sampled
+                            .as_ref()?
+                            .iter()
+                            .find(|(n, _)| *n == node)
+                            .map(|(_, w)| w.as_slice())
+                    })
+                };
+                let Some(data) = a.model.deformed_mesh(mesh_index, &worlds, weights) else {
                     continue;
                 };
                 let Some(object) = objects.get_mut(object_index) else {
@@ -1271,6 +1283,7 @@ mod anim_tests {
                     times: vec![0.0, 1.0],
                     values: vec![[2.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0]],
                 }],
+                morph_tracks: Vec::new(),
             }],
             ..Default::default()
         }

@@ -6307,6 +6307,12 @@ fn morph_glb_bytes() -> Vec<u8> {
             bin.extend_from_slice(&f.to_le_bytes()); // 80..116 MORPH POSITION
         }
     }
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 116..124 动画时间
+    }
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes()); // 124..132 morph 权重
+    }
     let json = r#"{"asset":{"version":"2.0"},"scene":0,
 "scenes":[{"nodes":[0]}],
 "nodes":[{"name":"tri","mesh":0}],
@@ -6315,13 +6321,19 @@ fn morph_glb_bytes() -> Vec<u8> {
  {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
  {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
  {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
- {"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"}],
+ {"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"},
+ {"bufferView":4,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+ {"bufferView":5,"componentType":5126,"count":2,"type":"SCALAR"}],
 "bufferViews":[
  {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
  {"buffer":0,"byteOffset":36,"byteLength":36,"target":34962},
  {"buffer":0,"byteOffset":72,"byteLength":6,"target":34963},
- {"buffer":0,"byteOffset":80,"byteLength":36,"target":34962}],
-"buffers":[{"byteLength":116}]}"#;
+ {"buffer":0,"byteOffset":80,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":116,"byteLength":8},
+ {"buffer":0,"byteOffset":124,"byteLength":8}],
+"buffers":[{"byteLength":132}],
+"animations":[{"name":"pulse","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
+ "channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]}"#;
     glb_from_parts(json, bin)
 }
 
@@ -6388,6 +6400,73 @@ fn scene_morph_weights_change_cli_render() {
     assert!(
         changed > 10,
         "morph 权重 0 与 1 应当改变画面，实际 {changed} 像素"
+    );
+}
+
+/// morph 权重动画必须真的改变画面：同一条 `pulse`，start=0 与 start=0.5 的 PNG 不同。
+#[test]
+fn scene_morph_animation_changes_cli_render() {
+    let dir = temp_dir("morph_anim_render");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    // 报告：morph 轨道被发现
+    let scene = write_scene(
+        &dir,
+        "pulse-report.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{ "path": "morph.glb", "animation": { "name": "pulse", "start": 0.5 } }],
+            "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+        }),
+    );
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    assert_eq!(d["data"]["models"][0]["animation"]["found"], true, "{d}");
+    assert_eq!(
+        d["data"]["models"][0]["animation"]["morph_tracks"], 1,
+        "{d}"
+    );
+
+    let render_at = |start: f32| {
+        let scene = write_scene(
+            &dir,
+            &format!("pulse-{start}.json"),
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{ "path": "morph.glb", "animation": { "name": "pulse", "start": start } }],
+                "camera": { "position": [0.5, 0.75, 4.0], "look_at": [0.5, 0.75, 0.0], "fov_deg": 45.0 },
+                "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+            }),
+        );
+        let png = dir.join(format!("pulse-{start}.png"));
+        let r = run(&[
+            "render",
+            scene.to_str().unwrap(),
+            "--out",
+            png.to_str().unwrap(),
+        ]);
+        (r, png)
+    };
+    let (r0, png0) = render_at(0.0);
+    if r0.code == 3 {
+        return; // 无 GPU
+    }
+    assert_eq!(r0.code, 0, "stderr={} stdout={}", r0.stderr, r0.stdout);
+    let (r1, png1) = render_at(0.5);
+    assert_eq!(r1.code, 0, "stderr={} stdout={}", r1.stderr, r1.stdout);
+    let (w, h, a) = decode_rgba(&png0);
+    let (w2, h2, b) = decode_rgba(&png1);
+    assert_eq!((w, h), (w2, h2));
+    let changed = a
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
+        .filter(|(x, y)| x != y)
+        .count();
+    assert!(
+        changed > 10,
+        "morph 动画 start=0 与 0.5 应当改变画面，实际 {changed} 像素"
     );
 }
 

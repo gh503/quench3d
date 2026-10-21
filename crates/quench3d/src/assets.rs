@@ -215,6 +215,22 @@ pub struct AnimationTrack {
     pub values: Vec<[f32; 4]>,
 }
 
+/// 一条 morph target 权重轨道：某个节点上所有 target 的权重随时间怎么变。
+///
+/// glTF 的 morph 输出按关键帧展平：每个关键帧有 `target_count` 个权重。
+/// 本结构已经按关键帧切成 `values[k]`（长度通常等于 target 数）。
+#[derive(Clone, Debug)]
+pub struct MorphTrack {
+    /// 节点下标（[`LoadedModel::nodes`] 的 `mesh` 节点）。
+    pub node: usize,
+    /// 插值方式（`CubicSpline` 已在解析时退化为线性）。
+    pub interpolation: Interpolation,
+    /// 关键帧时间（秒，升序）。
+    pub times: Vec<f32>,
+    /// 每个关键帧的完整权重数组。
+    pub values: Vec<Vec<f32>>,
+}
+
 /// 一条动画的**播放状态**（时间推进、速度、循环）。
 ///
 /// 这是纯 CPU 的：`advance(dt)` 推时间，`mesh_matrices(&model)` 给出"每个网格片段
@@ -304,8 +320,10 @@ pub struct LoadedAnimation {
     pub name: String,
     /// 时长（秒，= 所有轨道最后一个关键帧时间的最大值）。
     pub duration: f32,
-    /// 轨道。
+    /// 节点 TRS 轨道。
     pub tracks: Vec<AnimationTrack>,
+    /// morph target 权重轨道（没有时为空）。
+    pub morph_tracks: Vec<MorphTrack>,
 }
 
 /// CPU 端的一个材质。
@@ -397,6 +415,31 @@ impl LoadedModel {
     pub fn sample_animation(&self, name: &str, time: f32) -> Option<Vec<Mat4>> {
         let locals = self.sample_animation_locals(name, time)?;
         Some(self.worlds_from_locals(&locals))
+    }
+
+    /// 采样某条动画在 `time` 秒时的 **morph 权重**（每个节点一项）。
+    ///
+    /// 返回 `(node, weights)` 列表；`None` = 这条动画没有 morph 轨道。权重数组
+    /// 长度按资产里的 target 数，缺项由调用方按 0 处理。**只采样主 clip**；
+    /// 双 clip 混合时的 morph 权重目前不做插值（见场景层的边界说明）。
+    pub fn morph_weights_at(&self, name: &str, time: f32) -> Option<Vec<(usize, Vec<f32>)>> {
+        let clip = self.animation(name)?;
+        if clip.morph_tracks.is_empty() {
+            return None;
+        }
+        let t = if self.nodes.is_empty() {
+            0.0
+        } else {
+            time.clamp(0.0, clip.duration.max(0.0))
+        };
+        Some(
+            clip.morph_tracks
+                .iter()
+                .filter_map(|track| {
+                    sample_morph_track(track, t).map(|weights| (track.node, weights))
+                })
+                .collect(),
+        )
     }
 
     /// 采样某条动画在 `time` 秒时的**局部**变换（每个节点一项）。
@@ -911,6 +954,43 @@ fn resolve(
 }
 
 /// 采样一条轨道在 `t` 时刻的值（4 分量；平移/缩放只用前 3 个）。
+fn sample_morph_track(track: &MorphTrack, t: f32) -> Option<Vec<f32>> {
+    let n = track.times.len().min(track.values.len());
+    if n == 0 {
+        return None;
+    }
+    if n == 1 || t <= track.times[0] {
+        return Some(track.values[0].clone());
+    }
+    if t >= track.times[n - 1] {
+        return Some(track.values[n - 1].clone());
+    }
+    let mut lo = 0usize;
+    let mut hi = n - 1;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if track.times[mid] <= t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let t0 = track.times[lo];
+    let t1 = track.times[hi];
+    let a = &track.values[lo];
+    let b = &track.values[hi];
+    if track.interpolation == Interpolation::Step || (t1 - t0).abs() < 1e-9 {
+        return Some(a.clone());
+    }
+    let u = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+    let len = a.len().min(b.len());
+    let mut out = Vec::with_capacity(len);
+    for k in 0..len {
+        out.push(a[k] + (b[k] - a[k]) * u);
+    }
+    Some(out)
+}
+
 fn sample_track(track: &AnimationTrack, t: f32) -> [f32; 4] {
     let n = track.times.len().min(track.values.len());
     if n == 0 {
@@ -1132,6 +1212,7 @@ fn model_from_gltf(
                 .unwrap_or_else(|| format!("animation_{ai}")),
             duration: 0.0,
             tracks: Vec::new(),
+            morph_tracks: Vec::new(),
         };
         for channel in anim.channels() {
             // 在这一版 gltf crate 里 `target().node()` 直接返回节点（恒有）
@@ -1154,6 +1235,12 @@ fn model_from_gltf(
             };
             // CUBICSPLINE 的每个关键帧有 3 个值（入切线、值、出切线）：只取"值"。
             let cubic = interpolation == Interpolation::CubicSplineDegradedToLinear;
+            // morph 输出是展平的标量数组，必须先知道这个节点的 target 数才能切帧。
+            let morph_target_count = target_node
+                .mesh()
+                .and_then(|m| m.primitives().next())
+                .map(|p| p.morph_targets().count())
+                .unwrap_or(0);
             let (property, values): (AnimatedProperty, Vec<[f32; 4]>) = match outputs {
                 gltf::animation::util::ReadOutputs::Translations(it) => (
                     AnimatedProperty::Translation,
@@ -1167,8 +1254,37 @@ fn model_from_gltf(
                     AnimatedProperty::Rotation,
                     it.into_f32().map(|v| [v[0], v[1], v[2], v[3]]).collect(),
                 ),
-                // 形变动画（morph target）不在这一轮的范围里：跳过而不是猜
-                gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => continue,
+                gltf::animation::util::ReadOutputs::MorphTargetWeights(it) => {
+                    if morph_target_count == 0 {
+                        continue;
+                    }
+                    let flat: Vec<f32> = it.into_f32().collect();
+                    let stride = morph_target_count;
+                    let values: Vec<Vec<f32>> = if cubic {
+                        // CUBICSPLINE：每个关键帧是 [入切线 | 值 | 出切线]，
+                        // 每个块 target_count 个权重；只取中间的值块。
+                        flat.chunks(stride * 3)
+                            .filter_map(|chunk| {
+                                let value = chunk.get(stride..stride * 2)?;
+                                Some(value.to_vec())
+                            })
+                            .collect()
+                    } else {
+                        flat.chunks(stride).map(|chunk| chunk.to_vec()).collect()
+                    };
+                    if times.is_empty() || values.is_empty() {
+                        continue;
+                    }
+                    let duration = times.last().copied().unwrap_or(0.0);
+                    clip.duration = clip.duration.max(duration);
+                    clip.morph_tracks.push(MorphTrack {
+                        node: target_node_index,
+                        interpolation,
+                        times,
+                        values,
+                    });
+                    continue;
+                }
             };
             let values: Vec<[f32; 4]> = if cubic {
                 values.into_iter().skip(1).step_by(3).collect()

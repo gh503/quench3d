@@ -154,6 +154,14 @@ fn morph_glb() -> Vec<u8> {
             bin.extend_from_slice(&f.to_le_bytes());
         }
     }
+    // 动画时间 0,1
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // morph 权重 0 → 1
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
     let json = r#"{"asset":{"version":"2.0"},"scene":0,
 "scenes":[{"nodes":[0]}],
 "nodes":[{"name":"tri","mesh":0}],
@@ -162,13 +170,19 @@ fn morph_glb() -> Vec<u8> {
  {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
  {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
  {"bufferView":2,"componentType":5123,"count":3,"type":"SCALAR"},
- {"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"}],
+ {"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"},
+ {"bufferView":4,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+ {"bufferView":5,"componentType":5126,"count":2,"type":"SCALAR"}],
 "bufferViews":[
  {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
  {"buffer":0,"byteOffset":36,"byteLength":36,"target":34962},
  {"buffer":0,"byteOffset":72,"byteLength":6,"target":34963},
- {"buffer":0,"byteOffset":80,"byteLength":36,"target":34962}],
-"buffers":[{"byteLength":116}]}"#;
+ {"buffer":0,"byteOffset":80,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":116,"byteLength":8},
+ {"buffer":0,"byteOffset":124,"byteLength":8}],
+"buffers":[{"byteLength":132}],
+"animations":[{"name":"pulse","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
+ "channels":[{"sampler":0,"target":{"node":0,"path":"weights"}}]}]}"#;
     glb_from_parts(json, bin)
 }
 
@@ -191,6 +205,26 @@ fn morph_targets_displace_vertices_by_weight() {
     }
     let half = model.morphed_mesh(0, Some(&[0.5])).expect("权重 0.5");
     assert!((half.vertices[0].position[1] - 0.25).abs() < 1e-6);
+}
+
+#[test]
+fn morph_animation_interpolates_weights() {
+    let model = load_model_from_bytes("morph.glb", &morph_glb()).expect("morph GLB 应当能解析");
+    let clip = model.animation("pulse").expect("应当有 pulse 动画");
+    assert_eq!(clip.morph_tracks.len(), 1, "应当解析出 1 条 morph 权重轨道");
+    assert!(clip.tracks.is_empty(), "只有 morph 轨道，没有 TRS 轨道");
+    let start = model.morph_weights_at("pulse", 0.0).expect("t=0");
+    assert_eq!(start.len(), 1);
+    assert_eq!(start[0].0, 0, "权重轨道在节点 0 上");
+    assert!((start[0].1[0] - 0.0).abs() < 1e-6);
+    let mid = model.morph_weights_at("pulse", 0.5).expect("t=0.5");
+    assert!((mid[0].1[0] - 0.5).abs() < 1e-6, "{mid:?}");
+    let end = model.morph_weights_at("pulse", 1.0).expect("t=1");
+    assert!((end[0].1[0] - 1.0).abs() < 1e-6);
+    // 采样出的权重直接喂给 morph 网格：顶点相对基础上移 0.25。
+    let base = model.morphed_mesh(0, None).expect("基础网格");
+    let deformed = model.morphed_mesh(0, Some(&mid[0].1)).expect("t=0.5 网格");
+    assert!((deformed.vertices[0].position[1] - base.vertices[0].position[1] - 0.25).abs() < 1e-6);
 }
 
 #[test]

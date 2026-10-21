@@ -32,6 +32,15 @@
 
 ### 新增
 
+- **morph 权重动画（第 74 轮）**：解析 glTF 动画的 `weights` 输出为 `MorphTrack`
+  （按节点的 target 数切帧；CUBICSPLINE 只取值块），新增
+  `LoadedModel::morph_weights_at`；场景的 `models[].animation` 每帧按节点采样，
+  与静态 morph 共用 `deformed_mesh`（先 morph 后蒙皮）。报告新增
+  `models[].animation.morph_tracks` / `blend.morph_tracks`。手工
+  `models[].morph_weights` 优先于动画轨道；双 clip 混合只取主 clip 的 morph 轨道。
+  回归：`morph_animation_interpolates_weights`（t=0/0.5/1 权重与顶点位移对账）+
+  `scene_morph_animation_changes_cli_render`（start=0 与 0.5 的 PNG 必须不同，
+  报告 `morph_tracks=1`）。边界：不做双 clip morph 权重插值，没有编辑器滑杆。
 - **静态 morph target（第 73 轮）**：解析 glTF primitive 的 `targets`
   （POSITION/NORMAL/TANGENT 位移，按节点世界方向变换），新增
   `LoadedModel::morphed_mesh` 与 `deformed_mesh`；场景格式新增
