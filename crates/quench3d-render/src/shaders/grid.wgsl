@@ -21,6 +21,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> GridOut {
 struct GridFrag {
     @builtin(frag_depth) depth: f32,
     @location(0) color: vec4<f32>,
+    @location(1) mask: vec4<f32>,
 };
 
 fn grid_line_coord(p: vec2<f32>, scale: f32, width: vec2<f32>) -> f32 {
@@ -80,5 +81,6 @@ fn fs_main(in: GridOut) -> GridFrag {
     out.depth = clamp(clip.z / max(clip.w, 1e-6), 0.0, 1.0);
     // 线性 HDR + alpha：网格线的混合因此发生在线性空间（见 post.wgsl）。
     out.color = vec4<f32>(color * frame.params2.z, alpha);
+    out.mask = vec4<f32>(0.0);
     return out;
 }

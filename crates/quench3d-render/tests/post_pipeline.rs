@@ -1002,3 +1002,79 @@ fn every_real_gpu_context_creation_in_tests_goes_through_the_gate() {
         gated
     );
 }
+
+/// 屏幕空间水：水面材质只写 mask（颜色 alpha = 0），后处理必须自己把水画出来。
+///
+/// 这是"mask 附件 + 第二颜色目标 + 后处理读取"三件事的端到端守卫：
+/// 任何一环接错，`on` 与 `off` 的中心像素都不会有差别。
+#[test]
+fn water_post_uses_the_mask_and_changes_pixels() {
+    let Some(mut ctx) = context(1, "屏幕空间水的 mask/后处理（真的创建 wgpu 上下文）")
+    else {
+        return;
+    };
+
+    let image = |ctx: &mut GpuContext, enabled: bool| {
+        let mut renderer = Renderer::new(
+            ctx,
+            RendererOptions {
+                grid: false,
+                shadows: false,
+                sky: false,
+                water: WaterOptions {
+                    enabled,
+                    color: [1.0, 0.0, 0.0],
+                    strength: 0.0,
+                },
+                ..Default::default()
+            },
+        );
+        let bg = renderer.add_material(ctx, MaterialDesc::from_srgb(0.2, 0.2, 0.2, 1.0).unlit());
+        let mut water_desc = MaterialDesc::from_srgb(1.0, 0.0, 0.0, 0.0).unlit();
+        water_desc.alpha_blend = true;
+        water_desc.water_mask = true;
+        let water = renderer.add_material(ctx, water_desc);
+        let cube = renderer.add_mesh(ctx, &MeshData::cube(1.0));
+        renderer.draw(
+            cube,
+            bg,
+            InstanceDesc::from_position(vec3(0.0, 0.0, -20.0), 80.0),
+        );
+        renderer.draw(
+            cube,
+            water,
+            InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 100.0),
+        );
+        let mut camera = Camera::perspective(W as f32 / H as f32);
+        camera.position = vec3(0.0, 0.0, 60.0);
+        camera.look_at(vec3(0.0, 0.0, 0.0));
+        renderer
+            .capture(
+                ctx,
+                W,
+                H,
+                &camera,
+                &Lighting {
+                    exposure: 1.0,
+                    ..Default::default()
+                },
+            )
+            .expect("离屏渲染")
+    };
+
+    let off = image(&mut ctx, false);
+    let on = image(&mut ctx, true);
+    let a = pixel(&off, W / 2, H / 2);
+    let b = pixel(&on, W / 2, H / 2);
+    assert!(
+        b[0] > a[0] + 10,
+        "水面后处理没有生效：on={b:?} off={a:?}（红通道应当明显升高）"
+    );
+    // 水面 mask 覆盖全屏（alpha=0 的水面立方体），不应只改中心一个像素。
+    let corner_off = pixel(&off, 4, 4);
+    let corner_on = pixel(&on, 4, 4);
+    assert!(
+        corner_on[0] > corner_off[0] + 5,
+        "角落也没有水面效果：on={corner_on:?} off={corner_off:?}"
+    );
+}

@@ -21,7 +21,15 @@ fn vs_main(in: LineIn) -> LineOut {
     return out;
 }
 
+struct LineFrag {
+    @location(0) color: vec4<f32>,
+    @location(1) mask: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: LineOut) -> @location(0) vec4<f32> {
-    return in.color;
+fn fs_main(in: LineOut) -> LineFrag {
+    var out: LineFrag;
+    out.color = in.color;
+    out.mask = vec4<f32>(0.0);
+    return out;
 }

@@ -10,11 +10,24 @@
 
 ### 新增
 
+- **屏幕空间水面（M4.1）**：主 pass 增加第二颜色附件（`WATER_MASK_FORMAT`，Rgba8Unorm），
+  水面材质（`MaterialDesc.water_mask`）写 1、其余材质写 0；后处理 `post.wgsl` 读取 mask，
+  做屏幕空间折射（UV 波纹）、吸收、菲涅耳与边缘泡沫。mask 已经过主 pass 深度测试，
+  所以不需要读深度纹理，GL/WebGL2 也能用；`waters` 与 `fluids` 两条路径共用。
+  `render` 报告新增 `water_post`（有水域时为 true），`RendererOptions.water` 默认关闭，
+  所以 API 用户不启用时像素与以前一致。`examples/fluid_pool.json` 960×600：仍为
+  4909 实例、47.2 万三角形、约 10 s，相对无流体基线 7.4% 像素变化（平均绝对差 3.84；
+  相对 M4 的 alpha 水面 2.6% 像素、平均 0.35 变化）；640×420 48 帧 GIF 帧间平均 8.1%。
+  验证：`cargo test -p quench3d-render --lib water_mask`、
+  `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline water_post`
+  （水面 mask + 后处理改变像素）。
+  边界：吸收厚度固定、折射是屏幕空间 UV 波纹（不是光线追踪）、法线按水平面、
+  泡沫只在 mask 边缘；没有焦散/水下体积光/真实波浪；mask 附件始终分配（约 4 字节/像素 + MSAA）。
 - **粒子/水面渲染（M4）**：`SceneObject` 新增 `fluid_particle` / `fluid_surface`，
   `sync_from_physics` 每帧从 `world.fluids()` 读粒子位置与速度：每颗粒子画成 8×6 低模球
   （可视半径 `radius * 1.4`，速度越快越偏青白），水面是一张跟着最高粒子走的 alpha 平面。
-  `render`/`movie`/编辑器共用同一条同步路径。**不是屏幕空间水**：没有读深度做吸收/折射，
-  没有泡沫/焦散/波面法线。`examples/fluid_pool.json` 960×600：4909 实例、47.2 万三角形、
+  `render`/`movie`/编辑器共用同一条同步路径。M4 先落地的是 alpha 平面；屏幕空间折射/
+  吸收/泡沫由 M4.1 补上（见上一条），但仍是水平面近似，没有真实波面法线。`examples/fluid_pool.json` 960×600：4909 实例、47.2 万三角形、
   约 10 s，相对无流体基线 7.4% 像素变化；640×420 48 帧 GIF 帧间平均 7.6% 变化。
   验证：`cargo test -p quench3d --lib fluid_visuals_follow`（粒子/水面同步，不需要 GPU）。
 - **流体 ↔ 刚体双向耦合（M3）**：粒子撞到动态刚体时按动量守恒反推法向冲量（只反推 20%，

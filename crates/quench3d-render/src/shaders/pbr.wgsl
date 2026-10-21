@@ -333,8 +333,14 @@ fn sample_spot_shadow(world: vec3<f32>, n: vec3<f32>, n_dot_l: f32) -> f32 {
     return pcf_3x3(spot_shadow_map, uv, ndc.z - depth_bias, texel);
 }
 
+struct FragOut {
+    @location(0) color: vec4<f32>,
+    // 水面 mask（主 pass 第二颜色附件）：只有水面平面写 1，其余材质写 0。
+    @location(1) mask: vec4<f32>,
+}
+
 @fragment
-fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut {
     let flags = u32(material.params.w + 0.5);
     let scale = max(material.params.z, 1e-4);
     let uv = in.uv * scale;
@@ -504,5 +510,8 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> @locatio
     lo = lo * frame.params2.z; // 曝光
     // 输出**线性 HDR**：tonemap 由后处理统一做（见 post.wgsl）。
     // 这样半透明/网格线的混合发生在线性空间，而不是"tonemap 之后再混"。
-    return vec4<f32>(lo, alpha);
+    var out: FragOut;
+    out.color = vec4<f32>(lo, alpha);
+    out.mask = vec4<f32>(material.params2.w, 0.0, 0.0, 0.0);
+    return out;
 }

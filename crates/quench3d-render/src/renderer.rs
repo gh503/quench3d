@@ -99,6 +99,11 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// 而半透明与网格线都要混合。f16 的精度对"tonemap 之前"的值完全够用
 /// （相对误差 ~1e-3，落在 8 位输出的 1 个色阶以内，见 `post_pass` 的像素测试）。
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// 水面 mask（主 pass 第二颜色附件）：r = 1 表示水面平面覆盖。
+///
+/// 用 `Rgba8Unorm` 而不是 `R8Unorm`：部分后端对单通道 MSAA resolve 支持不一致，
+/// 四通道最稳，代价只有每像素 4 字节。
+pub const WATER_MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// 阴影级联的最大级数（图集是 2x2 分块，所以最多 4 级）。
 pub const MAX_SHADOW_CASCADES: usize = 4;
 
@@ -421,6 +426,33 @@ pub struct PostUniforms {
     pub proj: [[f32; 4]; 4],
     /// 逆投影矩阵（裁剪空间 → 视空间）：从深度反投影出视空间位置要用。
     pub inv_proj: [[f32; 4]; 4],
+    /// 屏幕空间水：x = 开关（0/1），y = 时间，z = 强度，w = 预留。
+    pub water: [f32; 4],
+    /// 水色（线性 RGB），a = 预留。
+    pub water_color: [f32; 4],
+    /// 视空间 → 世界：由屏幕坐标算视线方向（菲涅耳）。
+    pub inv_view: [[f32; 4]; 4],
+}
+
+/// 屏幕空间水面选项。
+#[derive(Clone, Copy, Debug)]
+pub struct WaterOptions {
+    /// 是否启用（缺省关闭：关闭时后处理完全不走水面分支，像素与以前一致）。
+    pub enabled: bool,
+    /// 水色（线性 RGB）。
+    pub color: [f32; 3],
+    /// 波纹/泡沫强度（0 = 平静水面）。
+    pub strength: f32,
+}
+
+impl Default for WaterOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: [0.06, 0.28, 0.48],
+            strength: 1.0,
+        }
+    }
 }
 
 /// Bloom 配置。
@@ -533,6 +565,8 @@ pub struct RendererOptions {
     pub fxaa: FxaaOptions,
     /// SSAO（缺省关闭）。
     pub ssao: SsaoOptions,
+    /// 屏幕空间水面（缺省关闭；水面 mask 仍会写，只是后处理不读）。
+    pub water: WaterOptions,
 }
 
 impl Default for RendererOptions {
@@ -548,6 +582,7 @@ impl Default for RendererOptions {
             bloom: BloomOptions::default(),
             fxaa: FxaaOptions::default(),
             ssao: SsaoOptions::default(),
+            water: WaterOptions::default(),
         }
     }
 }
@@ -682,6 +717,10 @@ pub struct Renderer {
     msaa_view: Option<wgpu::TextureView>,
     /// HDR 中间目标（场景渲染到这里，再由后处理读）。
     hdr_view: Option<wgpu::TextureView>,
+    /// 水面 mask（单采样）：主 pass 第二颜色附件解析后的结果，后处理按像素读。
+    water_mask_view: Option<wgpu::TextureView>,
+    /// 水面 mask 的 MSAA 附件（`sample_count == 1` 时为 `None`，直接画到 `water_mask_view`）。
+    water_mask_msaa_view: Option<wgpu::TextureView>,
     /// FXAA 的输入：tonemap 之后的画面（线性显示值，格式与 HDR 目标相同）。
     ///
     /// 只在开了 FXAA 时才会被写/读；关着的时候它只是占内存，不影响任何像素。
@@ -967,6 +1006,8 @@ impl Renderer {
                     },
                     count: None,
                 },
+                // 水面 mask（r = 1）：屏幕空间水的可见性；与深度无关，GL/WebGL2 也能用。
+                texture_binding(5),
             ],
         });
         let bloom_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1259,11 +1300,21 @@ impl Renderer {
         let instance_buffer_layout = Self::instance_layout();
 
         let color_targets = |format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
-            vec![Some(wgpu::ColorTargetState {
-                format,
-                blend,
-                write_mask: wgpu::ColorWrites::ALL,
-            })]
+            vec![
+                Some(wgpu::ColorTargetState {
+                    format,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // 第二颜色附件：水面 mask。主 pass 的所有管线都必须有同一个
+                // attachment 数量（WebGPU 校验），所以 sky/grid/line/pbr 都写这一路，
+                // 非水面材质写 0。mask 不做混合：水面写 1，后处理按像素读。
+                Some(wgpu::ColorTargetState {
+                    format: WATER_MASK_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ]
         };
         let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
         let depth_state = |write: bool, compare: wgpu::CompareFunction, bias: i32| {
@@ -1666,6 +1717,8 @@ impl Renderer {
             depth_view: None,
             msaa_view: None,
             hdr_view: None,
+            water_mask_view: None,
+            water_mask_msaa_view: None,
             ldr_view: None,
             resolved_depth_view: None,
             dummy_depth_view,
@@ -2072,6 +2125,42 @@ impl Renderer {
         let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
         self.hdr_view = Some(hdr_view.clone());
 
+        // 水面 mask：单采样目标（后处理读）+（MSAA 时）多采样附件。
+        let mask = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-water-mask"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WATER_MASK_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let mask_view = mask.create_view(&wgpu::TextureViewDescriptor::default());
+        self.water_mask_view = Some(mask_view);
+        self.water_mask_msaa_view = (self.sample_count > 1).then(|| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("quench3d-water-mask-msaa"),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: self.sample_count,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: WATER_MASK_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+
         // LDR 中间目标：FXAA 的输入（tonemap 之后的画面）。格式与 HDR 目标相同
         // （`rgba16float`）：着色器给线性显示值，最后写 sRGB 目标时由硬件编码一次；
         // 若改用 8 位 sRGB 贴图，"先编码再解码"会在混合处多一次量化。
@@ -2208,6 +2297,12 @@ impl Renderer {
                             self.resolved_depth_view
                                 .as_ref()
                                 .unwrap_or(&self.dummy_depth_view),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.water_mask_view.as_ref().expect("水面 mask 目标缺失"),
                         ),
                     },
                 ],
@@ -2575,6 +2670,27 @@ impl Renderer {
                 inv_proj.cols[2].to_array(),
                 inv_proj.cols[3].to_array(),
             ],
+            water: [
+                if self.options.water.enabled { 1.0 } else { 0.0 },
+                self.time,
+                self.options.water.strength.max(0.0),
+                0.0,
+            ],
+            water_color: [
+                self.options.water.color[0],
+                self.options.water.color[1],
+                self.options.water.color[2],
+                1.0,
+            ],
+            inv_view: {
+                let v = camera.view().inverse();
+                [
+                    v.cols[0].to_array(),
+                    v.cols[1].to_array(),
+                    v.cols[2].to_array(),
+                    v.cols[3].to_array(),
+                ]
+            },
         };
         ctx.queue
             .write_buffer(&self.post_uniform, 0, bytemuck::bytes_of(&post));
@@ -2811,28 +2927,44 @@ impl Renderer {
 
         // ---------- 主 pass（渲染到线性 HDR 中间目标） ----------
         let hdr_view = self.hdr_view.clone().expect("HDR 目标缺失");
+        let mask_view = self.water_mask_view.clone().expect("水面 mask 目标缺失");
         {
             let (color_view, resolve_target) = match &self.msaa_view {
                 // MSAA 解析到 HDR 目标（不是最终目标：tonemap 还没做）
                 Some(msaa) => (msaa, Some(&hdr_view)),
                 None => (&hdr_view, None),
             };
+            let (mask_color, mask_resolve) = match &self.water_mask_msaa_view {
+                Some(msaa) => (msaa, Some(&mask_view)),
+                None => (&mask_view, None),
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("quench3d-main-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: color_view,
-                    depth_slice: None,
-                    resolve_target,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.03,
-                            b: 0.05,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: color_view,
+                        depth_slice: None,
+                        resolve_target,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.02,
+                                g: 0.03,
+                                b: 0.05,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: mask_color,
+                        depth_slice: None,
+                        resolve_target: mask_resolve,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: self.depth_view.as_ref().expect("深度视图缺失"),
                     depth_ops: Some(wgpu::Operations {
@@ -3392,6 +3524,14 @@ mod tests {
         assert_eq!(std::mem::size_of::<crate::mesh::Vertex>() % 4, 0);
     }
 
+    /// `PostParams` 的 Rust/WGSL 布局必须一致：6 个 vec4 + 2 个 mat4 +
+    /// water/water_color 2 个 vec4 + inv_view 1 个 mat4 = 320 字节。
+    #[test]
+    fn post_uniforms_size_matches_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<PostUniforms>(), 320);
+        assert_eq!(std::mem::size_of::<PostUniforms>() % 16, 0);
+    }
+
     /// WGSL 源码级守卫：阴影 PCF 里不许用**带隐式梯度**的比较采样。
     ///
     /// 为什么是"扫文本"而不是编译一遍：D3D 的 FXC 只在 Windows 上跑，本地（Linux/Vulkan）
@@ -3618,6 +3758,29 @@ mod tests {
         );
     }
 
+    /// 水面 mask 不依赖深度，GL 变体里也必须保留（否则 WebGL2 上水会消失）。
+    #[test]
+    fn post_keeps_water_mask_in_both_variants() {
+        for src in [post_wgsl_for(false), post_wgsl_for(true)] {
+            assert!(
+                src.contains("@binding(5) var water_mask_texture"),
+                "post 变体里水面 mask 绑定不见了"
+            );
+            assert!(
+                src.contains("textureLoad(water_mask_texture"),
+                "post 变体里水面 mask 没有被读取"
+            );
+        }
+    }
+
+    #[test]
+    fn water_options_are_disabled_by_default() {
+        let w = WaterOptions::default();
+        assert!(!w.enabled);
+        assert_eq!(w.color, [0.06, 0.28, 0.48]);
+        assert_eq!(w.strength, 1.0);
+    }
+
     /// GL 变体里不许再出现任何深度纹理（正向 + 反向都断言）。
     #[test]
     fn post_gl_variant_drops_every_depth_texture() {
@@ -3636,6 +3799,7 @@ mod tests {
             "aces_tonemap(",
             "hdr_texture",
             "textureSampleLevel(bloom_texture",
+            "water_mask_texture",
         ] {
             assert!(
                 gl.contains(keep),

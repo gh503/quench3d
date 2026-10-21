@@ -2185,7 +2185,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 阻尼 | 🟡 简化 | 浸没部分按 `drag × submerged` 的比例缩速度（1/s），不是粘性应力；缺省 6 是"辐射阻尼"的替身 |
 | 睡眠 | ✅ 可睡 | 浮力直接累加 `force/torque`、**不调 `wake_up`**，睡眠体连采样都跳过（`submerged` 停在最后醒着的值）；水面变化后要显式唤醒 |
 | 多重水域 | ⚠️ 叠加 | 重叠水域会叠加浮力（不做优先级/去重）；文档建议不要重叠 |
-| 粒子/流动/波浪/折射 | ❌ | 这是 M1；PBF 粒子流体、屏幕空间水渲染是 M2/M4 |
+| 粒子/流动/波浪/折射 | 🟡 | PBF 粒子流体（M2/M3）与屏幕空间水面后处理（M4.1）已做；真实波浪/流动/光线折射/焦散仍无 |
 | 格式校验 | ✅ | 尺寸/密度/阻尼非法在 `validate` 报 `waters[i].*`；`build_world` 再挡一次（不静默忽略） |
 
 ### 20.3 测试与证据
@@ -2302,8 +2302,9 @@ if let Some(v) = doc.physics.static_friction_speed {
 
 ### 23.2 边界（诚实清单）
 
-* **不是屏幕空间水**：没有读深度做吸收/折射、没有泡沫/焦散、没有法线扰动的波面；
-  水面就是一个跟着最高粒子走的 alpha 平面。
+* **M4 当时不是屏幕空间水**：M4 先落地 alpha 平面；M4.1 补了基于 mask 的屏幕空间
+  折射/吸收/菲涅耳/边缘泡沫（见 §23.4）。仍**没有**真实波面法线/焦散/水下体积光，
+  吸收厚度固定，折射是屏幕空间 UV 波纹而不是光线追踪。
 * 粒子球是**视觉代理**：可视半径 `radius * 1.4`，比物理半径大，为了少留缝；它不改变
   碰撞/浮力。
 * 4000 个场景物体对编辑器 UI/拾取不是免费午餐：这是"先能看见"的实现，不是最终
@@ -2315,5 +2316,38 @@ if let Some(v) = doc.physics.static_friction_speed {
 * `quench3d`：`scene::tests::fluid_visuals_follow_the_particle_cloud`（不建 GPU，
   直接验证粒子位置/缩放与水面高度同步）。
 * 像素：`render examples/fluid_pool.json` 对照无流体场景，7.4% 像素变化、平均绝对差
-  3.66；GIF 48 帧（640×420，4 s）帧间平均 7.6% 变化、蓝像素占比 62%~73%。
-* 报告：`render` 的 `instances` 4909、`triangles` 472434，证明粒子确实进了提交列表。
+  3.84；相对 M4 alpha 水面 2.6% 像素、平均 0.35 变化；GIF 48 帧（640×420，4 s）
+  帧间平均 8.1% 变化、蓝像素占比 59%~66%。
+* 报告：`render` 的 `instances` 4909、`triangles` 472434，证明粒子确实进了提交列表；
+  有水域时 `water_post: true`。
+
+### 23.4 M4.1：屏幕空间水面
+
+**为什么不是读深度**：第一版想用后处理读主 pass 深度，从世界坐标判"这是不是水面"。
+问题是水面走 alpha 混合、`depth_write=false`，深度纹理里根本没有水面；改用 SSAO 的
+单采样深度解析又受绑定/重建路径影响（实测读回常量远平面）。这条路不可靠，回滚。
+
+**最终方案：主 pass 第二颜色附件（MRT）**：
+
+* 所有主 pass 管线（pbr/sky/grid/line）都输出 `@location(1)`；非水面写 0，水面材质
+  （`MaterialDesc.water_mask = true`）写 1。mask 格式 `Rgba8Unorm`，MSAA 时同样解析。
+* mask 经过主 pass 深度测试：墙/粒子挡住水面的像素不会写 1，所以后处理不会"透过墙"上色。
+* `post.wgsl` 读 `@binding(5)` 的 mask，做 UV 波纹折射、固定厚度吸收、水平面 Schlick
+  菲涅耳、mask 边缘泡沫；不依赖深度纹理，GL/WebGL2 也能建管线。
+* `RendererOptions.water` 默认关闭；`runner::apply_water_options` 在 `waters`/`fluids`
+  非空时打开。关闭时水面仍是 M4 的 alpha 平面，像素与旧版一致。
+
+**验证**：
+
+* CPU：material `params2.w`、`PostUniforms` 320 字节布局、GL 变体保留 mask 绑定。
+* GPU（`QUENCH3D_GPU_TESTS=1`）：`water_post_uses_the_mask_and_changes_pixels`——
+  全屏 alpha=0 水面写 mask，开后处理中心/角落红通道必须升高；不开时不变。
+* 静态图 / GIF 指标见 §23.3；`water_post` 字段证明 CLI 真的接上了。
+
+**边界**：
+
+* 吸收用固定厚度，没有按水深/视线长度积分；折射是 2D UV 波纹，不是真实光线偏折。
+* 法线按水平面 `(0,1,0)` 近似，斜坡/瀑布不适用；泡沫只在 mask 边缘，不是白水模拟。
+* 没有焦散、水下体积光、真实波浪；粒子本身不写 mask（只有水面平面写）。
+* mask 附件始终分配（即使 `water.enabled=false`），约 4 B/像素，MSAA 4× 时约 4 倍；
+  这是为了不改主 pass 管线布局（所有管线必须同一 attachment 数量）。

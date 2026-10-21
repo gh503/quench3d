@@ -74,6 +74,10 @@ pub struct MaterialDesc {
     pub unlit: bool,
     /// 双面渲染。
     pub double_sided: bool,
+    /// 写入水面 mask（主 pass 的第二颜色附件，供屏幕空间水后处理使用）。
+    ///
+    /// 只有水面平面该置位；它不影响颜色，只在 mask 附件里写 1。
+    pub water_mask: bool,
 }
 
 impl Default for MaterialDesc {
@@ -94,6 +98,7 @@ impl Default for MaterialDesc {
             alpha_blend: false,
             unlit: false,
             double_sided: false,
+            water_mask: false,
         }
     }
 }
@@ -226,7 +231,12 @@ impl MaterialDesc {
                 self.uv_scale.max(1e-4),
                 self.flag_bits() as f32,
             ],
-            params2: [self.alpha_cutoff, self.normal_scale, 1.0, 0.0],
+            params2: [
+                self.alpha_cutoff,
+                self.normal_scale,
+                1.0,
+                if self.water_mask { 1.0 } else { 0.0 },
+            ],
         }
     }
 
@@ -264,6 +274,16 @@ mod tests {
     fn uniform_layout_is_16_byte_aligned() {
         assert_eq!(std::mem::size_of::<MaterialUniform>() % 16, 0);
         assert_eq!(std::mem::size_of::<MaterialUniform>(), 64);
+    }
+
+    #[test]
+    fn water_mask_is_carried_in_params2_w() {
+        assert_eq!(MaterialDesc::default().to_uniform().params2[3], 0.0);
+        let m = MaterialDesc {
+            water_mask: true,
+            ..MaterialDesc::default()
+        };
+        assert_eq!(m.to_uniform().params2[3], 1.0);
     }
 
     #[test]

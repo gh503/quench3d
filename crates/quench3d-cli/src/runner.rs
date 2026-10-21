@@ -492,6 +492,9 @@ pub struct RenderReport {
     /// 仿真报告（配置了步进时才有）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulate: Option<SimReport>,
+    /// 是否启用了屏幕空间水面后处理（场景有 `waters` / `fluids` 时为真）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub water_post: bool,
     /// 是否为 `--dry-run`（真：没有渲染、没有写盘，渲染相关统计全为 0）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub dry_run: bool,
@@ -3085,6 +3088,7 @@ pub fn setup_visuals(
 
     add_water_visuals(engine, doc);
     add_fluid_visuals(engine, doc);
+    apply_water_options(engine, doc);
     apply_camera(engine, doc);
     Ok(instances)
 }
@@ -3149,6 +3153,7 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
                 roughness: 0.08,
                 alpha_blend: true,
                 double_sided: true,
+                water_mask: true,
                 ..MaterialDesc::default()
             };
             let surface_material = engine.assets.material(
@@ -3194,6 +3199,7 @@ fn add_water_visuals(engine: &mut Engine, doc: &SceneDoc) {
         roughness: 0.08,
         alpha_blend: true,
         double_sided: true,
+        water_mask: true,
         ..MaterialDesc::default()
     };
     let material = engine
@@ -3210,6 +3216,20 @@ fn add_water_visuals(engine: &mut Engine, doc: &SceneDoc) {
             .scene
             .add_named(mesh, material, transform, &format!("水域{i}"));
     }
+}
+
+/// 打开屏幕空间水面后处理。
+///
+/// 只负责"有没有水"：水面 mask 由 `waters` / `fluids` 的平面写进主 pass 的
+/// 第二颜色附件，后处理据此做折射/吸收/菲涅耳/边缘泡沫。没有水域时关闭，
+/// 后处理完全不走水面分支（像素与旧版一致）。
+fn apply_water_options(engine: &mut Engine, doc: &SceneDoc) {
+    let has_water = !doc.waters.is_empty() || !doc.fluids.is_empty();
+    engine.renderer.options.water = WaterOptions {
+        enabled: has_water,
+        color: [0.06, 0.28, 0.48],
+        strength: 1.0,
+    };
 }
 
 /// 单位水面网格：XZ 平面上 `N×N` 个格子（y = 0，法线朝上）。
@@ -3738,6 +3758,7 @@ fn run_render_single(
             probes,
             sensors,
             simulate: sim,
+            water_post: false,
             dry_run: true,
             would_write: vec![output.display().to_string()],
             outputs: Vec::new(),
@@ -3771,6 +3792,7 @@ fn run_render_single(
 
     let mut scene_objects = 0usize;
     let mut camera_position = [0.0f32; 3];
+    let mut water_post = false;
     // 闭包签名是 `FnMut(&mut Engine) -> ()`，所以先把错误兜住，渲染结束后再冒泡。
     let mut setup_error: Option<RunError> = None;
     let (image, stats) = quench3d::render_offscreen_stats(width, height, &config, |engine| {
@@ -3784,6 +3806,7 @@ fn run_render_single(
         engine.scene.advance_animations(0.0);
         scene_objects = engine.scene.len();
         camera_position = arr(engine.camera().position);
+        water_post = engine.renderer.options.water.enabled;
     })
     .map_err(RunError::env)?;
     if let Some(e) = setup_error {
@@ -3826,6 +3849,7 @@ fn run_render_single(
         probes,
         sensors,
         simulate: sim,
+        water_post,
         dry_run: false,
         would_write: Vec::new(),
         outputs: Vec::new(),

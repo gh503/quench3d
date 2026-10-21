@@ -22,6 +22,8 @@
 // 只用 `textureLoad` 按像素读，所以不需要采样器——深度也不该被双线性插值。
 @group(0) @binding(4) var depth_texture: texture_depth_2d;
 //@gl-depth-end
+// 水面 mask（r = 1）：主 pass 第二颜色附件解析后的结果；不依赖深度，GL 也能用。
+@group(0) @binding(5) var water_mask_texture: texture_2d<f32>;
 
 struct PostParams {
     // x = bloom 开关（0/1），y = bloom 强度，z = bloom 阈值，w = 预留
@@ -41,6 +43,12 @@ struct PostParams {
     // 投影（视空间 → 裁剪空间）与逆投影：反投影位置、再把半球采样点投回屏幕
     proj: mat4x4<f32>,
     inv_proj: mat4x4<f32>,
+    // x = 开关（0/1），y = 时间（秒），z = 强度，w = 预留
+    water: vec4<f32>,
+    // rgb = 水色（线性），a = 预留
+    water_color: vec4<f32>,
+    // 视空间 → 世界：用于由屏幕坐标算视线方向（菲涅耳）
+    inv_view: mat4x4<f32>,
 };
 
 /// Narkowicz 2015 的 ACES 近似（全项目唯一一份）。
@@ -171,6 +179,51 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
     if (post.params.x > 0.5) {
         let bloom = textureSampleLevel(bloom_texture, hdr_sampler, uv, 0.0).rgb;
         hdr = hdr + bloom * post.params.y;
+    }
+
+    // ---------- 屏幕空间水面 ----------
+    // mask 由水面平面写进主 pass 的第二颜色附件；它已经过了深度测试，所以这里
+    // 只负责"水面像素长什么样"：折射、吸收、菲涅耳、边缘泡沫。
+    // 不依赖深度纹理，GL/WebGL2 也能跑。
+    if (post.water.x > 0.5) {
+        let m = textureLoad(water_mask_texture, coord, 0).r;
+        let visible = smoothstep(0.15, 0.85, m);
+        if (visible > 0.001) {
+            let strength = max(post.water.z, 0.0);
+            let t = post.water.y;
+            let ripple_px = vec2<f32>(
+                sin(uv.y * 37.0 + t * 2.0),
+                cos(uv.x * 29.0 + t * 1.7),
+            ) * (5.0 * strength);
+            let refracted = textureSampleLevel(
+                hdr_texture, hdr_sampler, uv + ripple_px * texel, 0.0,
+            ).rgb;
+
+            // 视线方向（世界空间）：相机看向 -Z，屏幕 NDC 的 z = -1 取近平面方向。
+            let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+            let ray = normalize((post.inv_view * vec4<f32>(ndc, -1.0, 0.0)).xyz);
+            let up = vec3<f32>(0.0, 1.0, 0.0);
+            let cos_v = clamp(abs(dot(up, ray)), 0.0, 1.0);
+            // 水平水面的 Schlick 近似：正视更透，掠射更亮。
+            let fresnel = pow(1.0 - cos_v, 5.0);
+
+            // 吸收：水体越厚（这里用固定厚度近似）越偏水色；再按菲涅耳提亮反射。
+            let body = mix(refracted, refracted * post.water_color.rgb, 0.55);
+            let water_col = mix(body, post.water_color.rgb * 0.72, 0.22 + 0.42 * fresnel);
+
+            // 边缘泡沫：mask 的 2px 邻域里只要有一个不是水，就认为是水面边缘。
+            let size = vec2<i32>(post.target_texel.zw) - vec2<i32>(1);
+            let ml = textureLoad(water_mask_texture, clamp(coord - vec2<i32>(2, 0), vec2<i32>(0), size), 0).r;
+            let mr = textureLoad(water_mask_texture, clamp(coord + vec2<i32>(2, 0), vec2<i32>(0), size), 0).r;
+            let mu = textureLoad(water_mask_texture, clamp(coord + vec2<i32>(0, 2), vec2<i32>(0), size), 0).r;
+            let md = textureLoad(water_mask_texture, clamp(coord - vec2<i32>(0, 2), vec2<i32>(0), size), 0).r;
+            let edge = 1.0 - min(min(ml, mr), min(mu, md));
+            let foam = smoothstep(0.45, 0.95, edge)
+                * (0.55 + 0.45 * sin(uv.x * 90.0 + uv.y * 70.0 + t * 3.0));
+            let foam_col = vec3<f32>(0.82, 0.90, 0.92);
+
+            hdr = mix(hdr, water_col + foam_col * foam * 0.35, visible * (0.52 + 0.32 * fresnel));
+        }
     }
 
     return vec4<f32>(aces_tonemap(hdr), 1.0);

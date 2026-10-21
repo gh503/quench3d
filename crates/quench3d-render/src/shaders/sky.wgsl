@@ -19,8 +19,13 @@ fn vs_main(@builtin(vertex_index) index: u32) -> SkyOut {
     return out;
 }
 
+struct SkyFrag {
+    @location(0) color: vec4<f32>,
+    @location(1) mask: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: SkyOut) -> @location(0) vec4<f32> {
+fn fs_main(in: SkyOut) -> SkyFrag {
     let far_point = frame.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let world = far_point.xyz / max(far_point.w, 1e-6);
     let dir = normalize(world - frame.camera_pos.xyz);
@@ -39,5 +44,8 @@ fn fs_main(in: SkyOut) -> @location(0) vec4<f32> {
 
     color = color * frame.params2.z;
     // 线性 HDR：太阳圆盘可以远大于 1，tonemap 由后处理统一做（也才能被 bloom 拾取）。
-    return vec4<f32>(color, 1.0);
+    var out: SkyFrag;
+    out.color = vec4<f32>(color, 1.0);
+    out.mask = vec4<f32>(0.0);
+    return out;
 }
