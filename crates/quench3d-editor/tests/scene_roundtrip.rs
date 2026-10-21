@@ -974,6 +974,60 @@ fn waters_survive_editor_roundtrip_and_render_a_surface() {
     assert_eq!(style.wave_strength, Some(1.5));
 }
 
+/// 打开一个没有水的白模再存盘，不能凭空多出 `water` 段（数据繁殖）。
+#[test]
+fn editor_does_not_add_water_style_to_a_plain_scene() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let source = r#"{
+      "format": "quench3d.scene", "version": 2, "name": "plain",
+      "ground": { "size": 20, "y": 0 },
+      "objects": [{ "name": "box", "shape": { "type": "box" }, "position": [0, 1, 0] }]
+    }"#;
+    let mut doc = Doc::new();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+    let out = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    let parsed = SceneDoc::from_json(&out.json).expect("导出的必须是合法场景 JSON");
+    assert!(
+        parsed.water.is_none(),
+        "没有水也没改风格时不该写 water 段：{:?}",
+        parsed.water
+    );
+}
+
+/// 编辑器里改屏幕空间水（UI 直接改 `renderer.options.water`）后存盘，
+/// 场景文件必须带上新值；否则"预览里调了、`quench3d render` 渲出来还是旧的"。
+#[test]
+fn water_style_edited_in_editor_is_exported() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let source = r#"{
+      "format": "quench3d.scene", "version": 2, "name": "water-edit",
+      "ground": { "size": 20, "y": 0 },
+      "waters": [{ "size": [6, 6], "level": 0.0 }]
+    }"#;
+    let mut doc = Doc::new();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+    assert!(engine.renderer.options.water.enabled);
+
+    engine.renderer.options.water.color = [0.2, 0.4, 0.6];
+    engine.renderer.options.water.clarity = 0.7;
+    engine.renderer.options.water.strength = 2.0;
+    engine.renderer.options.water.foam = 1.4;
+    engine.renderer.options.water.refraction = 0.3;
+
+    let out = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    let parsed = SceneDoc::from_json(&out.json).expect("导出的必须是合法场景 JSON");
+    let style = parsed.water.as_ref().expect("水风格必须写回");
+    assert_eq!(style.color, Some([0.2, 0.4, 0.6]));
+    assert_eq!(style.clarity, Some(0.7));
+    assert_eq!(style.wave_strength, Some(2.0));
+    assert_eq!(style.foam, Some(1.4));
+    assert_eq!(style.refraction, Some(0.3));
+}
+
 #[test]
 fn fluids_survive_editor_roundtrip() {
     let Some(mut engine) = headless_engine() else {

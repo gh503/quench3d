@@ -710,11 +710,10 @@ pub struct Renderer {
     visible_ranges: Vec<(u32, u32)>,
     batches: Vec<Batch>,
     batch_index: HashMap<u64, usize>,
-    /// 排序后的绘制顺序：`(是否透明, 材质, 网格, 批次下标)`。
-    /// 绘制顺序：`(alpha, double_sided, material, mesh, batch)`。
+    /// 不透明物体的绘制顺序：`(0, double_sided, 材质, 网格, 批次下标)`。
     ///
-    /// 前两项是**管线选择**（不透明在前、半透明在后；双面与单面分开批），
-    /// 所以它们必须参与排序键，否则同一材质会被两套管线交叉绘制。
+    /// 半透明**不进这里**：透明物体按相机距离全局由远到近逐实例画，
+    /// 顺序在 `render` 内用局部 `alpha_draws` 排；合批会丢掉批次之间的前后关系。
     draw_order: Vec<(u8, u8, MaterialId, MeshId, usize)>,
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
@@ -2748,20 +2747,35 @@ impl Renderer {
 
         let mut write = 0u32;
         let mut shadow_batches: Vec<(MeshId, u32, u32)> = Vec::new();
+        // 透明物体不能按 (材质, 网格) 合批后随便画：混合结果依赖**全局**远→近顺序。
+        // 这里为每个可见透明实例记一条 draw（引用打包后的 instance_index），
+        // 排序后逐实例画；不透明仍走原来的合批路径。
+        let mut alpha_draws: Vec<(f32, MaterialId, MeshId, u32)> = Vec::new();
+        let view = camera.view();
         for (i, batch) in self.batches.iter().enumerate() {
             let start = batch.first as usize;
             let end = start + batch.count as usize;
             let batch_first = write;
             let mut batch_count = 0u32;
             let mut shadow_any = false;
+            let desc = self.materials.get(batch.material as usize).map(|m| &m.desc);
+            let alpha = desc.map(|d| d.needs_alpha_blend()).unwrap_or(false);
+            let double = desc.map(|d| d.double_sided).unwrap_or(false);
+            let unlit = desc.map(|d| d.unlit).unwrap_or(false);
             for (raw, bounds) in &self.staging[start..end] {
                 if !frustum.intersects_aabb(bounds) {
                     stats.culled += 1;
                     continue;
                 }
+                let instance_index = write;
                 self.visible.push(*raw);
                 write += 1;
                 batch_count += 1;
+                if alpha {
+                    // 视空间 z 取负 = 到相机的正距离；由远到近排序。
+                    let eye = view.transform_point3(bounds.center());
+                    alpha_draws.push((-eye.z, batch.material, batch.mesh, instance_index));
+                }
                 if shadow_frustums.iter().any(|f| f.intersects_aabb(bounds))
                     || point_shadow_sphere.is_some_and(|(c, r)| {
                         crate::point_shadow::aabb_intersects_sphere(bounds, c, r)
@@ -2774,17 +2788,10 @@ impl Renderer {
                 continue;
             }
             self.visible_ranges[i] = (batch_first, batch_count);
-            let desc = self.materials.get(batch.material as usize).map(|m| &m.desc);
-            let alpha = desc.map(|d| d.needs_alpha_blend()).unwrap_or(false);
-            let double = desc.map(|d| d.double_sided).unwrap_or(false);
-            let unlit = desc.map(|d| d.unlit).unwrap_or(false);
-            self.draw_order.push((
-                u8::from(alpha),
-                u8::from(double),
-                batch.material,
-                batch.mesh,
-                i,
-            ));
+            if !alpha {
+                self.draw_order
+                    .push((0, u8::from(double), batch.material, batch.mesh, i));
+            }
             if shadow_any && !alpha && !unlit {
                 shadow_batches.push((batch.mesh, batch_first, batch_count));
                 stats.shadow_instances += batch_count;
@@ -2792,6 +2799,13 @@ impl Renderer {
         }
         stats.instances = write;
         self.draw_order.sort_unstable();
+        // 距离相等时按材质/网格/实例下标稳定收尾，避免同一帧两次运行顺序漂移。
+        alpha_draws.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
 
         if !self.visible.is_empty() {
             ctx.queue.write_buffer(
@@ -3023,11 +3037,11 @@ impl Renderer {
                 ) else {
                     continue;
                 };
+                // 半透明不在这里画：它们按全局远→近顺序逐实例画在下面。
+                debug_assert_eq!(alpha_flag, 0, "draw_order 里不应再有透明批次");
                 // 双面材质不能剔除背面；着色器已按 front_facing 翻转法线，
                 // 所以这里只需要换一条不剔除的管线。
-                let pipeline = if alpha_flag == 1 {
-                    &self.alpha_pipeline
-                } else if double_flag == 1 {
+                let pipeline = if double_flag == 1 {
                     &self.opaque_double_pipeline
                 } else {
                     &self.opaque_pipeline
@@ -3042,6 +3056,27 @@ impl Renderer {
                 pass.draw_indexed(0..gm.index_count, 0, first..(first + count));
                 stats.draw_calls += 1;
                 stats.triangles += (gm.index_count as u64 / 3) * count as u64;
+            }
+
+            // 透明物体：全局由远到近，逐实例画。不能合批——一旦把两个透明批次
+            // 分别 instancing，批次之间的前后关系就丢了（玻璃叠玻璃会闪）。
+            for &(_, material, mesh, instance_index) in &alpha_draws {
+                let (Some(gm), Some(gmat)) = (
+                    self.meshes.get(mesh as usize),
+                    self.materials.get(material as usize),
+                ) else {
+                    continue;
+                };
+                pass.set_pipeline(&self.alpha_pipeline);
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                pass.set_bind_group(1, &self.shadow_bind_group, &[]);
+                pass.set_bind_group(2, &gmat.bind_group, &[]);
+                pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..gm.index_count, 0, instance_index..(instance_index + 1));
+                stats.draw_calls += 1;
+                stats.triangles += gm.index_count as u64 / 3;
             }
 
             // 无限网格

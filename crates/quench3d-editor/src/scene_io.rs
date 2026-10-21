@@ -10,7 +10,7 @@ use quench3d::prelude::*;
 use quench3d_cli::runner;
 use quench3d_cli::scene_doc::{
     BodyKind as DocBodyKind, CameraDoc, MaterialDoc, ObjectDoc, SceneDoc, ShapeDoc, ShapeKind,
-    FORMAT, VERSION,
+    WaterStyleDoc, FORMAT, VERSION,
 };
 
 /// 导出结果。
@@ -177,6 +177,29 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         ground: Some([light.sky.ground.x, light.sky.ground.y, light.sky.ground.z]),
     });
     out.lighting = lighting;
+
+    // 屏幕空间水：编辑器没有独立的水域数据，但**风格**是引擎渲染选项的一部分，
+    // 所以从 `renderer.options.water` 写回。这样在编辑器里拖过颜色/波浪后存盘，
+    // `quench3d render` 拿到的就是同一份参数（否则改了只在当前预览有效）。
+    //
+    // 没有水、也没改过风格时不写这一节：否则"打开一个白模 → 存盘"会凭空多出
+    // 五项默认值（虽然不改变画面，但属于无意义的数据繁殖）。
+    let water = &engine.renderer.options.water;
+    let defaults = WaterOptions::default();
+    let style_changed = water.color != defaults.color
+        || water.clarity != defaults.clarity
+        || water.strength != defaults.strength
+        || water.foam != defaults.foam
+        || water.refraction != defaults.refraction;
+    if out.water.is_some() || !out.waters.is_empty() || !out.fluids.is_empty() || style_changed {
+        out.water = Some(WaterStyleDoc {
+            color: Some(water.color),
+            clarity: Some(water.clarity),
+            wave_strength: Some(water.strength),
+            foam: Some(water.foam),
+            refraction: Some(water.refraction),
+        });
+    }
 
     // 场景物体下标 → 导出后 `objects` 里的下标（父子关系要靠它对上）。
     let mut exported: Vec<(usize, usize)> = Vec::new();

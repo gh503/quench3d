@@ -37,12 +37,13 @@
 | 前向 PBR | 全部 | 金属度/粗糙度工作流，IBL 之外的直接光照手感正确 | ✅ |
 | HDR 管线 | three.js / Unity | `rgba16float` 中间目标（`renderer.rs:41`）+ ACES 色调映射（`shaders/post.wgsl:26`，Narkowicz 近似）+ 可选半分辨率 bloom（`renderer.rs:253`、`shaders/bloom.wgsl`）+ 标量曝光（`light.rs:177`） | ✅ |
 | 色调映射可选性 | 全部 | 算子**不可选不可关**，只有一条 ACES 路径（→ H1） | 🟠 |
-| 阴影 | 全部 | 1 张方向光阴影贴图（`renderer.rs:339`，Depth32Float），3×3 PCF（`pbr.wgsl:105`），分辨率 512–4096（缺省 2048）；**无 CSM** | 🟡 |
+| 阴影 | 全部 | 方向光 1~4 级 CSM（2×2 图集，视空间深度选级，`lighting.shadow_quality.cascades`）+ 3×3 PCF；聚光灯一张透视 2D 阴影图、点光源立方体阴影（各自整帧一盏，缺省关闭）。分辨率 512–4096（缺省 2048） | ✅ |
 | 阴影可调参数 | Blender / Unity | bias 是编译期常量（`renderer.rs:795`），**没有公开字段**；只有 `DirectionalLight.cast_shadows` + 全局开关 | 🟠 |
 | 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO 与深度解析两趟按能力整体关闭**（§12.7） | 🟡 |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4；**GL/WebGL2 上按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧，§12.7） | 🟡 |
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent（`mesh.rs:14`）；**无顶点色、无骨骼蒙皮、无 morph** | 🟡 |
-| 实例化 | 全部 | 有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
+| 实例化 | 全部 | 不透明有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
+| 透明排序 | 全部 | 半透明按实例 AABB 中心到相机的距离**全局由远到近**逐实例绘制，不同材质/网格之间也正确；代价是透明物体不合批 | ✅ |
 | LOD | 引擎级 | 无 | ❌ |
 | 相机 | 全部 | 透视 + 正交（`camera.rs:7`）；**一次 render 只吃一个相机**，无多视口 | 🟡 |
 | 天空 | 全部 | 程序化天空 + 常量环境项（`light.rs:107`）；**无 HDRI/IBL/cubemap 反射** | 🟠 |
@@ -54,9 +55,9 @@
 |---|---|---|---|
 | 方向光 | 全部 | 有（含阴影开关，`light.rs:165`） | ✅ |
 | 点光 | 全部 | **有，最多 8 个**（`light.rs:103`、`common.wgsl:30`），半径为平滑衰减（`pbr.wgsl:214`） | ✅ |
-| 聚光 / 面光 | 全部 | **没有**（`spot` / `cone` / 面光 0 命中） | ❌ |
+| 聚光 / 面光 | 全部 | **聚光有**（内外锥角平滑过渡 + 可选聚光阴影）；面光没有 | 🟡 |
 | 环境光 / 曝光 | 全部 | 常量环境项 + 标量曝光（`light.rs:167/177`） | 🟡 |
-| 每灯光参数可调 | 全部 | 引擎侧有颜色/强度/半径；**编辑器还没有灯光面板**（本轮未做） | 🟠 |
+| 每灯光参数可调 | 全部 | 引擎侧有颜色/强度/半径/锥角/投影；编辑器「光照」面板可增删点光与聚光并调参 | ✅ |
 | 灯光 gizmo | Unity / Blender | 无（不能画半径/锥角并拖拽） | ❌ |
 | 逐物体 投/受影 | Unity | 无 | ❌ |
 
@@ -2364,8 +2365,8 @@ if let Some(v) = doc.physics.static_friction_speed {
   泡沫是 mask 边缘 + 波峰近似，不是白水模拟。
 * 没有焦散、水下体积光、真实波浪；粒子本身不写 mask（只有水面平面写）。
 * 射线-平面求交假设相机在水面上方；相机潜入水下时水面重建不成立。
-* 编辑器没有 `water` 专用面板：改场景 JSON 后加载即可，存盘会保留；`water` 是全局风格，
-  不支持逐水域颜色。
+* 编辑器「屏幕空间水」面板只调**全局**风格，不能逐水域上色；颜色/波浪/泡沫/折射
+  存盘会写回顶层 `water` 段。
 * mask 附件始终分配（即使 `water.enabled=false`），约 8 B/像素（`Rgba16Float`），
   MSAA 4× 时更高；
   这是为了不改主 pass 管线布局（所有管线必须同一 attachment 数量）。

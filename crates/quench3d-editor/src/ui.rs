@@ -266,6 +266,7 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                 .on_hover_text(
                     "屏幕空间环境光遮蔽：让物体与地面接触的缝隙、墙角变暗。\n                     深度-only 实现，只影响间接光的近似；半径/强度在场景文件的 lighting.ssao 里调。",
                 );
+            water_section(ui, engine);
             ui.checkbox(&mut engine.debug.axes, "坐标轴");
 
             let mode_label = match engine.camera_mode {
@@ -860,6 +861,60 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
             *changed = true;
         }
     });
+}
+
+/// 屏幕空间水的全局外观（与场景文件顶层 `water` 同一份字段）。
+///
+/// 这里直接改 `engine.renderer.options.water`：下一帧生效。存盘时
+/// `scene_io::scene_to_json` 再从渲染选项写回 `out.water`，所以编辑器里调过的
+/// 颜色/波浪在 `quench3d render` 里仍然是同一份——不会只活在预览里。
+///
+/// `enabled` 不在这里开关：它由场景里有没有 `waters`/`fluids` 决定；
+/// 没有水时参数照样能编辑和保存，只是画面不会出现水面。
+fn water_section(ui: &mut Ui, engine: &mut Engine) {
+    egui::CollapsingHeader::new("屏幕空间水")
+        .default_open(false)
+        .show(ui, |ui| {
+            let water = &mut engine.renderer.options.water;
+            if water.enabled {
+                ui.label("当前场景的水面后处理：开（由 waters / fluids 自动启用）");
+            } else {
+                ui.label("当前场景没有 waters / fluids：参数会保存，但不会出现水面");
+            }
+            ui.horizontal(|ui| {
+                ui.label("颜色");
+                ui.color_edit_button_rgb(&mut water.color)
+                    .on_hover_text("线性 RGB；缺省 [0.06, 0.28, 0.48]");
+            });
+            ui.add(
+                egui::DragValue::new(&mut water.clarity)
+                    .speed(0.01)
+                    .range(0.0..=1.0)
+                    .prefix("清澈度 "),
+            )
+            .on_hover_text("0 = 浑浊/强吸收，1 = 清澈；只影响画面");
+            ui.add(
+                egui::DragValue::new(&mut water.strength)
+                    .speed(0.02)
+                    .range(0.0..=4.0)
+                    .prefix("波浪 "),
+            )
+            .on_hover_text("波面法线扰动幅度；0 = 平静水面");
+            ui.add(
+                egui::DragValue::new(&mut water.foam)
+                    .speed(0.02)
+                    .range(0.0..=2.0)
+                    .prefix("泡沫 "),
+            )
+            .on_hover_text("水面边缘/浪尖的泡沫；0 = 无泡沫");
+            ui.add(
+                egui::DragValue::new(&mut water.refraction)
+                    .speed(0.02)
+                    .range(0.0..=2.0)
+                    .prefix("折射 "),
+            )
+            .on_hover_text("屏幕空间折射偏移；0 = 不扰动背景");
+        });
 }
 
 fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {

@@ -2857,3 +2857,41 @@ mask 从 `Rgba8Unorm` 换成 `Rgba16Float`：`r` 仍然是覆盖，`g` 存水面
 吸收厚度固定；折射是屏幕空间偏移；水面几何仍是平面，法线只是程序化扰动；
 没有焦散、水下体积光、真实波浪；粒子本身不写 mask。风格是**全局一份**，不是逐水域。
 这些写进 README/CHANGELOG/§23.4，下一轮不要误以为已经做了物理折射。
+
+---
+
+## 69. 透明排序 + 编辑器水面板（2026-10-21）
+
+M4.2 收尾后还剩两件"用户马上会撞到"的事：透明物体按批次顺序画，编辑器里调不了水。
+
+### 69.1 透明物体全局远→近
+
+旧路径把可见实例按 `(alpha, double_sided, 材质, 网格, 批次)` 排序后合批实例化；
+透明批次之间的先后由材质 id 决定，和真实深度无关。两个不同材质的玻璃叠在一起时，
+谁先画取决于"谁先被创建"，换一个加载顺序结果就变。
+
+现在半透明实例在可见性循环里同时记 `(距离, 材质, 网格, 实例下标)`：
+距离取实例 AABB 中心到相机的视空间 z，排序后**逐实例** `draw_indexed`。
+不透明路径完全不变（仍合批）；粒子球是 opaque，不受影响。代价写清楚：
+透明物体失去合批，透明实例很多时 draw call 会涨。
+
+验证：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline
+transparent_`。场景故意先提交近红、再提交远蓝；正确结果与"先近后远"相差 20+ 色阶。
+临时删掉排序后这条测试会红（实测过），不是"改了就绿"。
+
+### 69.2 编辑器水面板
+
+左侧渲染面板新增「屏幕空间水」：颜色、清澈度、波浪、泡沫、折射。UI 直接改
+`engine.renderer.options.water`，下一帧生效；存盘由 `scene_io::scene_to_json` 从渲染选项
+写回顶层 `water`。没有 `waters`/`fluids` 时参数照样存，但 `enabled` 仍为 false，
+不会凭空出现水。
+
+验证：`cargo test -p quench3d-editor --test scene_roundtrip water_style_edited`——
+载入水域后改五项，导出再解析，五项必须原样回来。
+
+### 69.3 顺手修正的文档过时项
+
+`docs/gap_analysis.md` 与 `docs/production_readiness.md` 里"无 CSM""无聚光灯/点光阴影"
+是旧审计结论，实际代码早已有（`cascade.rs`、`spot_shadow.rs`、`point_shadow.rs`）；
+本轮把它们改成当前状态，避免下一轮重复做。仍没有的是：IBL/环境贴图、GPU 蒙皮/骨骼动画、
+景深/TAA、透明 OIT、多盏局部光同时投影。

@@ -223,6 +223,90 @@ fn alpha_blending_happens_before_tonemap() {
     );
 }
 
+/// 两个半透明面重叠时，必须**全局由远到近**画，而不是按材质 id/提交顺序。
+///
+/// 这条测试故意先提交近的红色面、再提交远的蓝色面：旧实现按批次的材质 id
+/// 排序，会把红色先画、蓝色后画，中心像素偏蓝；正确结果是近处红色占 50%，
+/// 叠加在远处蓝色之上。只改一个像素就能区分两种顺序。
+#[test]
+fn transparent_objects_are_drawn_back_to_front() {
+    let Some((mut ctx, mut renderer)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    let bg = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.2, 0.2, 0.2, 1.0).unlit());
+    let near_mat = renderer.add_material(
+        &ctx,
+        MaterialDesc::from_srgb(1.0, 0.0, 0.0, 0.5)
+            .unlit()
+            .alpha_blend(),
+    );
+    let far_mat = renderer.add_material(
+        &ctx,
+        MaterialDesc::from_srgb(0.0, 0.0, 1.0, 0.5)
+            .unlit()
+            .alpha_blend(),
+    );
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    // 背景 z=-40（正面 z=0）；远处蓝面 z=-20（正面 z=20）；近处红面 z=0（正面 z=50）。
+    renderer.draw(
+        cube,
+        bg,
+        InstanceDesc::from_position(vec3(0.0, 0.0, -40.0), 80.0),
+    );
+    // 故意先提交近的：旧代码会先画它。
+    renderer.draw(
+        cube,
+        near_mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 100.0),
+    );
+    renderer.draw(
+        cube,
+        far_mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, -20.0), 80.0),
+    );
+
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let image = renderer
+        .capture(
+            &mut ctx,
+            W,
+            H,
+            &camera,
+            &Lighting {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        )
+        .expect("离屏渲染");
+
+    // 线性空间：bg → 50% 蓝 → 50% 红（从后往前）。
+    let bg_lin = lin([0.2, 0.2, 0.2]);
+    let blue_lin = lin([0.0, 0.0, 1.0]);
+    let red_lin = lin([1.0, 0.0, 0.0]);
+    let mut correct_lin = [0.0; 3];
+    let mut wrong_lin = [0.0; 3];
+    for i in 0..3 {
+        let after_blue = 0.5 * blue_lin[i] + 0.5 * bg_lin[i];
+        correct_lin[i] = 0.5 * red_lin[i] + 0.5 * after_blue;
+        // 旧顺序：先红后蓝。
+        let after_red = 0.5 * red_lin[i] + 0.5 * bg_lin[i];
+        wrong_lin[i] = 0.5 * blue_lin[i] + 0.5 * after_red;
+    }
+    let correct = srgb8(aces(correct_lin));
+    let wrong = srgb8(aces(wrong_lin));
+    let got = pixel(&image, W / 2, H / 2);
+    assert!(
+        (correct[0] - wrong[0]).abs() > 20 || (correct[2] - wrong[2]).abs() > 20,
+        "测试没有区分度：正确 {correct:?} 与错误顺序 {wrong:?} 太接近"
+    );
+    assert!(
+        near(got, correct, 2),
+        "透明物体没有由远到近画：期望 {correct:?}（先画近处会给 {wrong:?}），实际 {got:?}"
+    );
+}
+
 /// 缺省（bloom 关闭）时，后处理链的输出与"只有 tonemap"完全一致——
 /// 也就是说 bloom 的三趟 pass 一行都没执行。
 #[test]

@@ -10,6 +10,19 @@
 
 ### 新增
 
+- **透明物体全局由远到近排序**：半透明实例不再按 `(材质, 网格)` 批次顺序画，而是按
+  相机距离（实例 AABB 中心）**全局**排序后逐实例绘制。此前两个不同材质/网格的透明物体
+  谁先画取决于材质 id，玻璃叠玻璃会因为提交顺序不同而闪错。代价是透明物体失去合批
+  （不透明路径不变）；粒子球是不透明的，所以 M4 的 4000 颗球不受影响。
+  验证：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline
+  transparent_`——故意先提交近红后提交远蓝，期望颜色由远到近混合；把排序去掉这条测试
+  会失败（已实测）。
+- **编辑器屏幕空间水面板**：左侧渲染面板新增「屏幕空间水」折叠区，可直接调颜色、清澈度、
+  波浪、泡沫、折射；改的是 `engine.renderer.options.water`，下一帧生效，存盘时
+  `scene_io::scene_to_json` 写回顶层 `water` 段。没有 `waters`/`fluids` 时参数仍可保存，
+  但后处理保持关闭（不会凭空出现水）。
+  没有水、也没改过风格时**不写** `water` 段，避免"打开白模存盘就多出五项默认值"。
+  验证：`cargo test -p quench3d-editor --test scene_roundtrip water`（编辑后写回、白模不繁殖）。
 - **屏幕空间水面（M4.1/M4.2）**：主 pass 增加第二颜色附件（`WATER_MASK_FORMAT`，
   `Rgba16Float`：r = 覆盖，g = 水面世界高度），水面材质（`MaterialDesc.water_mask`）
   写自身高度、其余材质写 0；后处理 `post.wgsl` 用屏幕射线与 mask.g 求交重建水面世界
@@ -30,7 +43,7 @@
   （mask + 后处理改变像素；调大风格后中心像素继续变化）。
   边界：吸收厚度固定、折射是屏幕空间偏移（不是光线追踪）、水面几何仍是平面、
   风格是全局一份；相机在水下时射线-平面重建不成立；没有焦散/水下体积光/真实波浪；
-  编辑器没有 `water` 面板（改 JSON 后加载，存盘保留）；mask 附件始终分配
+  编辑器面板只调全局风格、不能逐水域上色；mask 附件始终分配
   （约 8 字节/像素 + MSAA）。
 - **粒子/水面渲染（M4）**：`SceneObject` 新增 `fluid_particle` / `fluid_surface`，
   `sync_from_physics` 每帧从 `world.fluids()` 读粒子位置与速度：每颗粒子画成 8×6 低模球

@@ -82,11 +82,11 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 | 优先级 | 缺什么 | 证据 | 现实后果 |
 | --- | --- | --- | --- |
 | P0 | **GPU 蒙皮 + 骨骼动画（仍无）** | 顶点只有 pos/normal/uv/tangent（`mesh.rs:13-22`），没有 JOINTS_0/WEIGHTS_0；第 61~62 轮补的是**节点级 TRS 动画**（`animations` 解析 + CPU 采样 + `models[].animation` 播放），不是蒙皮 | 带骨骼的角色 GLB 仍只能**静止**；机械/节点动画已可播（见 #23）；人物/怪物动画还做不了 |
-| P0 | **无 CSM 级联阴影** | `cascade`/`csm` 全仓 **0 命中**；单张 2048 正交深度图（`renderer.rs:474`） | 大场景（>100m）阴影直接糊掉；小了又浪费精度 |
+| P0 | ~~**无 CSM 级联阴影**~~ ✅ 已补 | `cascade.rs` + `lighting.shadow_quality.cascades`（1~4，2×2 图集，按视空间深度选级）；`tests/shadow_cascades.rs` 有 GPU 回归 | 大场景阴影不再只靠一张固定半径的正交图 |
 | P1 | ~~无后处理链、无 HDR 中间目标~~ ✅ 2026-10-16 | `rgba16float` 中间目标 + `post.wgsl`（ACES 只此一份）+ 半分辨率 bloom；tonemap 从三个物体着色器里删掉 | **已修**：混合/Alpha/网格线现在发生在 tonemap **之前**（此前是"先 tonemap 再混合"，能量错）。仍缺景深 / TAA / 可插拔 pass 图、AO 去噪（FXAA ✅ + SSAO ✅ 2026-10-16） |
 | P1 | **无 IBL / 环境贴图** | 只有解析式半球环境光（`pbr.wgsl:245-252`）；材质绑定组仅 4 张 2D 贴图（`renderer.rs:413-433`） | 金属/光滑材质没有反射，观感对不上 Blender 预览 |
-| P1 | **无聚光灯、点光无阴影** | `spot` 全仓 **0 命中** | 室内、手电、舞台灯做不了 |
-| P1 | 透明物体之间不排序 | 排序键 `(alpha_flag, material, mesh, idx)`（`renderer.rs:1240-1248`） | 玻璃叠玻璃、树叶穿插会出现错误遮挡 |
+| P1 | ~~**无聚光灯、点光无阴影**~~ ✅ 已补 | `SpotLight` + `PointLight.cast_shadows`（各自整帧一盏，缺省关闭；`spot_shadow.rs` / `point_shadow.rs`） | 室内、手电、舞台灯可用；多盏同时投影仍是后续 |
+| P1 | ~~透明物体之间不排序~~ ✅ 2026-10-21 | 半透明按实例 AABB 中心到相机的距离全局由远到近逐实例绘制（`renderer.rs` 的 `alpha_draws`）；像素测试 `transparent_objects_are_drawn_back_to_front` | 玻璃叠玻璃不再按材质 id 闪错；代价是透明物体不合批 |
 | P2 | 无 AO 贴图、无 HDR/浮点纹理、无 KTX2/BC/ASTC | `params2.z` 硬编码 1.0（`material.rs:217`）；只支持 `Rgba8Unorm(Srgb)`（`texture.rs:284-288`） | 大贴图包体积、缺少接触阴影细节 |
 | P2 | 无粒子 / billboard / 贴花 | `particle`/`decal` 全仓 0 命中 | 火、烟、雨、命中特效、弹孔都没有 |
 | P2 | 流体有"可配置屏幕空间水"但仍不是物理折射 | 第 63 轮 `waters`（排开体积浮力 + 半透明平面）+ 第 64 轮 `fluids`（CPU PBF：密度约束/迭代/XSPH + 冲量反推 + 自由表面浮力，`fluid.rs`）+ 第 66 轮粒子/水面渲染（低模球 + alpha 平面）+ 第 67 轮 MRT mask 屏幕空间水 + 第 68 轮 M4.2（mask.g 水面高度、射线-平面、程序化波面法线、太阳高光、顶层 `water` 风格）。仍没有表面张力、涡量、真实波浪模拟、焦散、水下体积光；折射仍是屏幕空间偏移 | 水花/波浪/烟的**物理**仍做不了；物理折射/焦散/白水是后续 |
@@ -319,7 +319,7 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 | --- | --- | --- | --- |
 | 内容层 | GPU 蒙皮/骨骼动画（`skin\|skinning\|joint_palette` = **0**，loader 不调 glTF `animations()` = **0**）、morph（0）、粒子（0）、贴花（0） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 导入任何角色 GLB **只能静止**；HUD/菜单/伤害数字要宿主自绘 |
 | 手工界面 | ✅ **已有**（2026-10-16）：`quench3d-editor` 用 egui 做了工具栏/场景树/属性面板/视口拾取，桌面与 Web 共用（§2.5）。**引擎本体仍不带** UI/文字系统（`font\|glyph\|sdf` 在 `quench3d-render` 里仍是 0）——GUI 由宿主（编辑器就是这样一个宿主）自己选库 | Unity/Godot 的 UI 是引擎内建；Bevy 走 `bevy_ui` + 第三方编辑器 | 想在自己游戏里画 HUD，得自己接一个 UI 库（本仓库演示了怎么和 wgpu 渲染器共存） |
-| 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM（0）、聚光灯（0）、IBL/环境贴图（0）、景深/TAA（0）、透明物体距离排序、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属没反射；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
+| 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM ✅（1~4）、聚光灯/点光阴影 ✅（各一盏）、透明距离排序 ✅、IBL/环境贴图（0）、景深/TAA（0）、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属没反射；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
 | 玩法层（物理） | 碰撞过滤 layer/mask ✅、传感器/触发事件 ✅（轮询式，无回调总线）、CCD 🟡（中心射线式）、复合形状（1 刚体 1 形状）、关节限位/马达补全、持久流形/特征 ID、物理材质与 combine（0）、快照回放、渲染插值（`interpolat` = 0）、地形高度场（0） | PhysX 5 / Jolt / Rapier / Box2D 的标配 | 队友互不碰撞、拾取/伤害区、子弹穿墙、载具悬挂、存档与回滚、高刷平滑 |
 | 工程/平台层 | 存档、音频（0）、输入抽象（手柄/触屏/重绑定 = 0，只有键鼠 + `movement_axes`）、脚本层（0）、渲染资源释放（渲染器 `remove_*` = **0**，资源表 append-only）、**Web 端 glTF/OBJ 加载（`assets.rs` 用 `Path::exists()`，wasm 下必 NotFound）**、发布工程 | Unity/Godot 的 Asset/Input/Audio/Save 子系统；Bevy 的 asset server | 项目做完变不成产品；Web 端连模型都加载不了 |
 

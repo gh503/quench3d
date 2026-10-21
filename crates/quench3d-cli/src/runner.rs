@@ -3230,7 +3230,7 @@ fn apply_water_options(engine: &mut Engine, doc: &SceneDoc) {
 /// 把场景里的 `water` 风格映射成渲染器选项（纯函数，方便不建 GPU 的单元测试）。
 ///
 /// 没有 `waters` / `fluids` 时一律关闭：`water` 段只改外观，不能凭空造出水。
-fn water_options_for(doc: &SceneDoc) -> WaterOptions {
+pub fn water_options_for(doc: &SceneDoc) -> WaterOptions {
     let has_water = !doc.waters.is_empty() || !doc.fluids.is_empty();
     let defaults = WaterOptions::default();
     let style = doc.water.as_ref();
