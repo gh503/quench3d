@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **693** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **694** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -69,6 +69,8 @@ tools/verify_all.sh
 | `on_finished` 首帧画面 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-cli --test cli_e2e scene_animator_finished_trigger_changes_first_frame` | 初始状态已播完（start=2）时首帧切到 after(start=.5)，与基线逐像素 0 差异；不切则停在旧 clip 末帧 |
 | 动画时间检查器（CPU） | `cargo test -p quench3d --test model_loading refresh_animations` | 手动把 `player.time` 拖回 0.25，调用 `refresh_animations` 后位移精确为 10.75，重复刷新不漂移、不推进时间 |
 | 动画时间检查器（GPU 蒙皮） | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --test model_loading skinned_mesh_changes_rendered_pixels` | 用 `refresh_animations_with_renderer` 在 t=0/0.25 渲染，两张 PNG 像素有差 |
+| 动画倍速/循环写回 | `cargo test -p quench3d-editor --lib set_animation_params_writes_animation_and_current_animator_state` | 普通 `animation` 与状态机当前 state 都写回底稿；未知物体/状态返回 `None` 不误写 |
+| 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
 | 场景双时间线 | `cargo test -p quench3d --test model_loading scene_blended_animation_advances_both_clips` | `Scene::advance_animations` 同时推进两条 clip，t=.5 落在 base+2.5 |

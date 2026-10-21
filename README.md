@@ -140,9 +140,10 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
 * **动画面板**：右侧「动画」列出场景里每个播放实例的 clip、时长、倍速、循环/播完
-  状态和状态机当前状态；拖动「时间」滑杆时**暂停也立刻**重算位姿与蒙皮/morph 顶点
-  （`Scene::refresh_animations_with_renderer`），不推进播放器、不写回场景文件。
-  边界：这里不是完整时间轴编辑器（不能选片段/改速度/加事件），只用于检查当前姿态。
+  状态和状态机当前状态；**倍速/循环可改并写回 `models[i].animation`（或状态机当前
+  state）**，可撤销，存盘生效。拖动「时间」滑杆时**暂停也立刻**重算位姿与蒙皮/morph
+  顶点（`Scene::refresh_animations_with_renderer`），但时间本身只改当前会话。
+  边界：仍不是完整时间轴（不能选片段/加事件/改过渡曲线）。
 * **CUBICSPLINE 真值**：glTF 动画的 TRS 轨道按 Hermite 基函数使用入/出切线
   （旋转在分量求值后归一化）；解析器保留三段 `[入切线, 值, 出切线]`，不再退化线性。
   morph 权重轨道的 CUBICSPLINE 仍只取关键帧值（按线性采样）。
@@ -215,7 +216,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12320401 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12325286 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -1232,7 +1233,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 693 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 694 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

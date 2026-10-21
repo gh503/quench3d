@@ -160,6 +160,14 @@ fn all_editor_panels_draw_in_one_frame() {
         "状态机当前状态没有出现在面板内容里"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "倍速"),
+        "动画倍速控件没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "循环"),
+        "动画循环控件没有出现在面板内容里"
+    );
+    assert!(
         output.textures_delta.set.len() + output.textures_delta.free.len() > 0,
         "字体/图标纹理没有更新，egui 可能根本没跑"
     );

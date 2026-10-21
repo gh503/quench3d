@@ -243,6 +243,37 @@ impl Doc {
             .map(|i| i.model)
     }
 
+    /// 把动画倍速/循环写回底稿里对应模型的 `animation` 或当前 `animator` 状态。
+    ///
+    /// `objects` 是这个动画实例驱动的物体（用来反查 `models[i]`）；`state` 是状态机
+    /// 当前状态名（非状态机传 `None`）。返回模型路径，没映射/没字段时返回 `None`。
+    /// 只改**底稿**，不改运行时播放器 —— 运行时由调用方同步，避免这里依赖 `Engine`。
+    pub fn set_animation_params(
+        &mut self,
+        objects: &[usize],
+        state: Option<&str>,
+        speed: f32,
+        looping: bool,
+    ) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        if let Some(animator) = &mut doc.animator {
+            let state = state?;
+            let state = animator.states.iter_mut().find(|s| s.name == state)?;
+            state.speed = Some(speed);
+            state.looping = Some(looping);
+            return Some(path);
+        }
+        let animation = doc.animation.as_mut()?;
+        animation.speed = Some(speed);
+        animation.looping = Some(looping);
+        Some(path)
+    }
+
     /// 文档里记录的模型变换（位置 / 姿态 / 均匀缩放，缺省 = 原点 / 无旋转 / 1 倍）。
     pub fn model_transform(&self, model: usize) -> Option<Transform> {
         let m = self.base_doc.as_ref()?.models.get(model)?;
@@ -891,5 +922,63 @@ mod tests {
         let aabb = Primitive::Cone.shape().local_aabb();
         assert!((aabb.max.x - 0.5).abs() < 1e-6 && (aabb.max.y - 0.5).abs() < 1e-6);
         assert!((aabb.min.y + 0.5).abs() < 1e-6);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_animation_params_writes_animation_and_current_animator_state() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [
+                    {"path": "a.glb", "animation": {"name": "idle", "speed": 1.0, "loop": true}},
+                    {"path": "b.glb", "animator": {
+                        "initial": "idle",
+                        "states": [
+                            {"name": "idle", "animation": "idle"},
+                            {"name": "run", "animation": "run", "speed": 1.0, "loop": true}
+                        ]
+                    }}
+                ]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![
+            quench3d_cli::runner::ModelInstance {
+                model: 0,
+                path: "a.glb".into(),
+                objects: vec![1],
+            },
+            quench3d_cli::runner::ModelInstance {
+                model: 1,
+                path: "b.glb".into(),
+                objects: vec![2],
+            },
+        ]);
+
+        let path = doc
+            .set_animation_params(&[1], None, 2.5, false)
+            .expect("普通 animation 应当写回");
+        assert_eq!(path, "a.glb");
+        let base = doc.base_doc.as_ref().expect("底稿");
+        let animation = base.models[0].animation.as_ref().expect("animation");
+        assert_eq!(animation.speed, Some(2.5));
+        assert_eq!(animation.looping, Some(false));
+
+        let path = doc
+            .set_animation_params(&[2], Some("run"), 0.5, true)
+            .expect("状态机当前状态应当写回");
+        assert_eq!(path, "b.glb");
+        let base = doc.base_doc.as_ref().expect("底稿");
+        let animator = base.models[1].animator.as_ref().expect("animator");
+        let run = animator.states.iter().find(|s| s.name == "run").unwrap();
+        assert_eq!(run.speed, Some(0.5));
+        assert_eq!(run.looping, Some(true));
+        // 未知状态 / 未知物体都不能误写。
+        assert!(doc
+            .set_animation_params(&[2], Some("nope"), 3.0, false)
+            .is_none());
+        assert!(doc.set_animation_params(&[99], None, 3.0, false).is_none());
     }
 }

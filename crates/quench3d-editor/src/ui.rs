@@ -1257,13 +1257,30 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     if count == 0 {
         return;
     }
+    // 动画实例驱动的物体 → 底稿里的 models 下标；先算好，避免在可变借用时再查 doc。
+    let models: Vec<Option<usize>> = engine
+        .scene
+        .animations
+        .iter()
+        .map(|a| a.objects.iter().find_map(|&o| doc.model_of_object(o)))
+        .collect();
     let mut refresh = false;
+    let mut changed_model: Option<String> = None;
+    let mut begin_edit = false;
+    let mut end_edit = false;
+    let mut record_edit = false;
     egui::CollapsingHeader::new(format!("动画（{count} 个实例）"))
         .default_open(true)
         .show(ui, |ui| {
             for (index, animation) in engine.scene.animations.iter_mut().enumerate() {
                 let name = animation.player.animation.clone();
                 let duration = animation.player.duration.max(0.0);
+                let objects = animation.objects.clone();
+                let state_name = animation
+                    .animator
+                    .as_ref()
+                    .and_then(|a| a.states.get(a.current))
+                    .map(|s| s.name.clone());
                 ui.label(RichText::new(format!("#{index} · {name}")).small().strong());
                 let state = if animation.player.finished {
                     "已播完"
@@ -1280,6 +1297,65 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .small()
                     .weak(),
                 );
+                ui.horizontal(|ui| {
+                    let mut speed = animation.player.speed;
+                    let response = ui.add(
+                        egui::DragValue::new(&mut speed)
+                            .range(0.05..=8.0)
+                            .speed(0.01)
+                            .prefix("倍速 "),
+                    );
+                    if response.drag_started() {
+                        begin_edit = true;
+                    }
+                    if response.changed() {
+                        animation.player.speed = speed;
+                        if let Some(animator) = &mut animation.animator {
+                            if let Some(state) = animator.states.get_mut(animator.current) {
+                                state.speed = speed;
+                            }
+                        }
+                        if models[index].is_some() {
+                            if let Some(path) = doc.set_animation_params(
+                                &objects,
+                                state_name.as_deref(),
+                                speed,
+                                animation.player.looping,
+                            ) {
+                                changed_model = Some(path);
+                            }
+                        }
+                        if !response.dragged() {
+                            record_edit = true;
+                        }
+                    }
+                    if response.drag_stopped() {
+                        end_edit = true;
+                    }
+                    let mut looping = animation.player.looping;
+                    if ui.checkbox(&mut looping, "循环").changed() {
+                        animation.player.looping = looping;
+                        if looping {
+                            animation.player.finished = false;
+                        }
+                        if let Some(animator) = &mut animation.animator {
+                            if let Some(state) = animator.states.get_mut(animator.current) {
+                                state.looping = looping;
+                            }
+                        }
+                        if models[index].is_some() {
+                            if let Some(path) = doc.set_animation_params(
+                                &objects,
+                                state_name.as_deref(),
+                                animation.player.speed,
+                                looping,
+                            ) {
+                                changed_model = Some(path);
+                            }
+                        }
+                        record_edit = true;
+                    }
+                });
                 if duration > 0.0 {
                     let mut time = animation.player.time.clamp(0.0, duration);
                     if ui
@@ -1329,17 +1405,27 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 ui.add_space(4.0);
             }
             ui.label(
-                RichText::new("拖动只改当前会话的时间，不写回场景文件。")
+                RichText::new("倍速/循环写回场景文件（可撤销）；时间滑杆只改当前会话。")
                     .small()
                     .weak(),
             );
         });
-    if !refresh {
-        return;
+    if refresh {
+        let (scene, renderer, gpu) = (&mut engine.scene, &mut engine.renderer, &engine.gpu);
+        let updated = scene.refresh_animations_with_renderer(renderer, gpu);
+        doc.status = format!("动画时间已刷新（{updated} 个片段）");
     }
-    let (scene, renderer, gpu) = (&mut engine.scene, &mut engine.renderer, &engine.gpu);
-    let updated = scene.refresh_animations_with_renderer(renderer, gpu);
-    doc.status = format!("动画时间已刷新（{updated} 个片段）");
+    if begin_edit {
+        doc.begin_history_transaction();
+    }
+    if end_edit {
+        doc.end_history_transaction(engine);
+    } else if record_edit {
+        doc.record_edit(engine);
+    }
+    if let Some(path) = changed_model {
+        doc.status = format!("动画倍速/循环已写回 {path}（存盘生效，可撤销）");
+    }
 }
 
 /// 模型（glTF/OBJ 引用）的变换面板。

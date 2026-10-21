@@ -32,6 +32,13 @@
 
 ### 新增
 
+- **动画面板倍速/循环编辑（第 82 轮）**：右侧「动画」面板的倍速 `DragValue` 与
+  循环勾选框不再只读。改运行时 `player.speed/looping` 的同时同步状态机当前 state，
+  并通过 `Doc::set_animation_params` 写回 `models[i].animation`（或
+  `models[i].animator.states[current]`），可撤销、存盘生效；时间滑杆仍只改当前会话。
+  回归：`set_animation_params_writes_animation_and_current_animator_state`（普通片段 +
+  状态机当前 state + 未知物体/状态不误写）+ `ui_smoke` 断言「倍速」「循环」控件文本
+  真的出现在绘制图元里。
 - **morph CUBICSPLINE 切线（第 81 轮）**：`MorphTrack` 现在同时保留
   `[入切线, 值, 出切线]` 三块，`sample_morph_track` 用与 TRS 相同的 Hermite 基函数
   求值；切线数组缺失/不齐时显式退化线性。回归：
