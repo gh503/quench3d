@@ -125,8 +125,11 @@ fn skinned_glb() -> Vec<u8> {
  {"buffer":0,"byteOffset":160,"byteLength":8},
  {"buffer":0,"byteOffset":168,"byteLength":24}],
 "buffers":[{"byteLength":192}],
-"animations":[{"name":"lift","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
- "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#;
+"animations":[
+ {"name":"lift","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
+  "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]},
+ {"name":"lift2","samplers":[{"input":4,"output":5,"interpolation":"LINEAR"}],
+  "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#;
     glb_from_parts(json, bin)
 }
 
@@ -883,4 +886,95 @@ fn scene_blend_fades_in_over_time() {
         (x - 13.5).abs() < 1e-4,
         "淡入结束权重 1，t=.5 应完全取第二条（位移 3.5），实际 {x}"
     );
+}
+
+/// 状态机：按停留时间从 `移动` 淡入 `移动2`，淡入结束后把新 clip 提为主 clip。
+#[test]
+fn scene_animator_transitions_and_promotes() {
+    use quench3d::scene::{ModelAnimatorState, ModelAnimatorTransition, Scene};
+
+    let mut model =
+        load_model_from_bytes("nodes.glb", &nodes_with_animation_glb()).expect("该能解析");
+    let mut second = model.animations[0].clone();
+    second.name = "移动2".into();
+    for track in &mut second.tracks {
+        if track.property == quench3d::assets::AnimatedProperty::Translation {
+            for value in &mut track.values {
+                value[0] += 2.0;
+            }
+        }
+    }
+    model.animations.push(second);
+    let model = std::sync::Arc::new(model);
+    let states = vec![
+        ModelAnimatorState {
+            name: "idle".into(),
+            animation: "移动".into(),
+            speed: 1.0,
+            looping: true,
+            start: 0.0,
+        },
+        ModelAnimatorState {
+            name: "run".into(),
+            animation: "移动2".into(),
+            speed: 1.0,
+            looping: true,
+            start: 0.0,
+        },
+    ];
+    let transitions = vec![ModelAnimatorTransition {
+        from: "idle".into(),
+        to: "run".into(),
+        after: 0.5,
+        fade: 0.5,
+    }];
+    let mut scene = Scene::new();
+    let idx = scene
+        .play_model_animator(
+            model.clone(),
+            Vec::new(),
+            Vec::new(),
+            states,
+            transitions,
+            0,
+        )
+        .expect("两个 clip 都存在");
+    assert_eq!(scene.animations[idx].player.animation, "移动");
+    assert!(scene.animations[idx].secondary.is_none());
+
+    scene.advance_animations(0.25);
+    let a = &scene.animations[idx];
+    assert_eq!(a.player.animation, "移动", "0.25 秒还没到过渡时间");
+    assert!(a.secondary.is_none());
+
+    scene.advance_animations(0.25);
+    let a = &scene.animations[idx];
+    assert_eq!(
+        a.player.animation, "移动",
+        "停留时间到 0.5 秒的这一帧还没开始过渡"
+    );
+    assert!(a.secondary.is_none());
+
+    scene.advance_animations(0.25);
+    let a = &scene.animations[idx];
+    assert_eq!(a.player.animation, "移动", "过渡期间旧 clip 仍是主 clip");
+    assert_eq!(
+        a.secondary.as_ref().map(|p| p.animation.as_str()),
+        Some("移动2"),
+        "第二条 clip 应当开始淡入"
+    );
+    assert!(
+        a.blend_weight > 0.4 && a.blend_weight < 0.6,
+        "过渡开始后的这一帧应走到半程：{}",
+        a.blend_weight
+    );
+
+    scene.advance_animations(0.25);
+    let a = &scene.animations[idx];
+    assert_eq!(a.player.animation, "移动2", "淡入结束应提为主 clip");
+    assert!(a.secondary.is_none());
+    let animator = a.animator.as_ref().expect("状态机还在");
+    assert_eq!(animator.current, 1);
+    assert_eq!(animator.pending, None);
+    assert!(animator.elapsed < 1e-6, "新状态应重新计时");
 }

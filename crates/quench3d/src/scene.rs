@@ -149,6 +149,49 @@ impl BlendOptions {
     }
 }
 
+/// 状态机里的一个状态：一个可循环/单次的 clip。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelAnimatorState {
+    /// 状态名（场景文件里的 `name`，只用于过渡匹配）。
+    pub name: String,
+    /// 资产里的动画名。
+    pub animation: String,
+    /// 播放倍速（必须 > 0）。
+    pub speed: f32,
+    /// 是否循环。
+    pub looping: bool,
+    /// 进入状态时的起始时间（秒）。
+    pub start: f32,
+}
+
+/// 状态机的一条过渡。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelAnimatorTransition {
+    /// 从哪个状态名出发。
+    pub from: String,
+    /// 到哪个状态名。
+    pub to: String,
+    /// 在当前状态停留多少秒后开始过渡。
+    pub after: f32,
+    /// 淡入秒数；0 = 立即切换。
+    pub fade: f32,
+}
+
+/// 运行中的状态机：当前状态、已停留时间、正在淡入的目标状态。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelAnimatorRuntime {
+    /// 所有状态（顺序与场景一致）。
+    pub states: Vec<ModelAnimatorState>,
+    /// 所有过渡（按场景顺序匹配，先命中先用）。
+    pub transitions: Vec<ModelAnimatorTransition>,
+    /// 当前状态下标。
+    pub current: usize,
+    /// 当前状态已停留的时间（秒）。
+    pub elapsed: f32,
+    /// 正在淡入的目标状态下标；`None` = 不在过渡中。
+    pub pending: Option<usize>,
+}
+
 /// 场景里一个"正在播放 glTF 动画"的模型实例。
 ///
 /// 一个模型会展开成多个场景物体（每个网格片段一个），动画要把每个片段自己的矩阵
@@ -175,6 +218,8 @@ pub struct ModelAnimationInstance {
     pub blend_elapsed: f32,
     /// 场景覆盖的 morph 权重；`None` = 用资产的默认值。
     pub morph_weights: Option<Vec<f32>>,
+    /// 可选的状态机；`None` = 单/双 clip 播放。
+    pub animator: Option<ModelAnimatorRuntime>,
 }
 
 /// 取一个动画实例当前该用的节点世界矩阵（单 clip 或双 clip 混合）。
@@ -192,6 +237,96 @@ fn animation_matrices(a: &ModelAnimationInstance) -> Vec<Mat4> {
     match animation_worlds(a) {
         Some(worlds) => a.model.mesh_matrices_from_worlds(&worlds),
         None => vec![Mat4::IDENTITY; a.model.meshes.len()],
+    }
+}
+
+/// 状态机的一步：推进当前状态计时，命中过渡就建立淡入（或立即切换）。
+///
+/// `dt` 非法时按 0 处理；`fade` 非法时按 0；过渡按场景中的顺序取第一条命中的。
+fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
+    // 过渡中不再启动下一条过渡；等 promotion 把新 clip 提为主 clip。
+    if a.secondary.is_some() {
+        return;
+    }
+    let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+    let Some(anim) = &mut a.animator else {
+        return;
+    };
+    let current_name = anim.states.get(anim.current).map(|s| s.name.clone());
+    let Some(current_name) = current_name else {
+        return;
+    };
+    // 过渡在**帧首**判定：本帧开始时已经停留够 after 才切。这样目标 clip
+    // 不会被多推进一整帧——它本帧只从 0 开始走这一帧的时间。
+    let transition = anim.transitions.iter().find(|t| {
+        t.from == current_name && t.after.is_finite() && t.after >= 0.0 && anim.elapsed >= t.after
+    });
+    let Some(transition) = transition else {
+        anim.elapsed += step;
+        return;
+    };
+    let target = anim.states.iter().position(|s| s.name == transition.to);
+    let Some(target) = target else {
+        return;
+    };
+    let fade = if transition.fade.is_finite() {
+        transition.fade.max(0.0)
+    } else {
+        0.0
+    };
+    let state = anim.states[target].clone();
+    let Some(mut player) = a.model.player(&state.animation) else {
+        return;
+    };
+    player.speed = state.speed;
+    player.looping = state.looping;
+    player.time = state.start;
+    player.advance(0.0);
+    if fade <= 0.0 {
+        a.player = player;
+        if let Some(anim) = &mut a.animator {
+            anim.current = target;
+            anim.elapsed = 0.0;
+            anim.pending = None;
+        }
+        a.blend_weight = 0.0;
+        a.blend_target = 0.0;
+        a.blend_fade = 0.0;
+        a.blend_elapsed = 0.0;
+    } else {
+        a.secondary = Some(player);
+        a.blend_weight = 0.0;
+        a.blend_target = 1.0;
+        a.blend_fade = fade;
+        a.blend_elapsed = 0.0;
+        if let Some(anim) = &mut a.animator {
+            anim.pending = Some(target);
+        }
+    }
+}
+
+/// 淡入结束后把 `secondary` 提为主 clip，并让状态机重新计时。
+fn promote_animator(a: &mut ModelAnimationInstance) {
+    let Some(target) = a.animator.as_ref().and_then(|x| x.pending) else {
+        return;
+    };
+    if a.secondary.is_none() {
+        return;
+    }
+    if a.blend_fade > 0.0 && a.blend_elapsed + 1e-6 < a.blend_fade {
+        return;
+    }
+    if let Some(player) = a.secondary.take() {
+        a.player = player;
+    }
+    a.blend_weight = 0.0;
+    a.blend_target = 0.0;
+    a.blend_fade = 0.0;
+    a.blend_elapsed = 0.0;
+    if let Some(anim) = &mut a.animator {
+        anim.current = target;
+        anim.elapsed = 0.0;
+        anim.pending = None;
     }
 }
 
@@ -383,6 +518,7 @@ impl Scene {
             blend_fade: 0.0,
             blend_elapsed: 0.0,
             morph_weights: None,
+            animator: None,
         });
         index
     }
@@ -451,8 +587,60 @@ impl Scene {
             blend_fade: fade,
             blend_elapsed: 0.0,
             morph_weights: None,
+            animator: None,
         });
         index
+    }
+
+    /// 用状态机播放模型动画；返回动画实例下标，任何状态引用的 clip 不存在时返回 `None`。
+    ///
+    /// 状态机只按**停留时间**过渡：当前状态停留 `transition.after` 秒后开始淡入目标状态，
+    /// `fade = 0` 立即切换；命中多条时按 `transitions` 顺序取第一条。过渡期间旧的
+    /// `player` 仍是主 clip，新的在 `secondary` 里 0→1 淡入；淡入完成后把新 clip
+    /// 提为主 clip，状态机重新计时。这是纯 CPU 的时间逻辑，不依赖渲染器。
+    pub fn play_model_animator(
+        &mut self,
+        model: Arc<crate::assets::LoadedModel>,
+        objects: Vec<usize>,
+        base: Vec<Transform>,
+        states: Vec<ModelAnimatorState>,
+        transitions: Vec<ModelAnimatorTransition>,
+        initial: usize,
+    ) -> Option<usize> {
+        if states.is_empty() || initial >= states.len() {
+            return None;
+        }
+        // 先确认每个状态的 clip 都存在：状态机不能等切过去才发现名字写错。
+        for state in &states {
+            model.player(&state.animation)?;
+        }
+        let first = &states[initial];
+        let mut player = model.player(&first.animation)?;
+        player.speed = first.speed;
+        player.looping = first.looping;
+        player.time = first.start;
+        player.advance(0.0);
+        let index = self.animations.len();
+        self.animations.push(ModelAnimationInstance {
+            model,
+            objects,
+            base,
+            player,
+            secondary: None,
+            blend_weight: 0.0,
+            blend_target: 0.0,
+            blend_fade: 0.0,
+            blend_elapsed: 0.0,
+            morph_weights: None,
+            animator: Some(ModelAnimatorRuntime {
+                states,
+                transitions,
+                current: initial,
+                elapsed: 0.0,
+                pending: None,
+            }),
+        });
+        Some(index)
     }
 
     /// 覆盖某个动画实例的 morph 权重（下标来自 `play_model_animation*`）。
@@ -490,6 +678,7 @@ impl Scene {
         } = self;
         let mut updated = 0;
         for a in animations.iter_mut() {
+            advance_animator(a, dt);
             a.player.advance(dt);
             if let Some(secondary) = &mut a.secondary {
                 secondary.advance(dt);
@@ -503,6 +692,7 @@ impl Scene {
                     a.blend_weight = a.blend_target;
                 }
             }
+            promote_animator(a);
             let mats = animation_matrices(a);
             updated += apply_matrices(objects, &a.objects, &a.base, &mats);
         }

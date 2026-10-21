@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **678** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **681** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -55,6 +55,9 @@ tools/verify_all.sh
 | morph 权重校验 | `cargo test -p quench3d-cli --test cli_e2e scene_morph_weights_are_validated` | `validate` 报 `models[0].morph_weights[0]` / `[1]` 的 `out_of_range`，退出码 2 |
 | morph 权重动画 | `cargo test -p quench3d --test model_loading morph_animation_interpolates_weights` | 解析 `pulse` 的 `weights` 轨道；t=0/0.5/1 权重 0/0.5/1，喂给网格后位移 0/0.25/0.5 |
 | morph 动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e scene_morph_animation_changes_cli_render` | `animation.start=0` 与 `0.5` 的 PNG 有可见像素差；报告 `animation.morph_tracks=1` |
+| 状态机过渡 | `cargo test -p quench3d --test model_loading scene_animator_transitions_and_promotes` | 停留 0.5 秒后淡入，半程权重约 0.5；淡入结束把新 clip 提为主 clip 并重新计时 |
+| 状态机报告 / 首帧 | `cargo test -p quench3d-cli --test cli_e2e scene_animator_is_reported_and_changes_cli_render` | `animator.found=true`/`states=2`/`transitions=1`；立即过渡（after=0, fade=0）的 PNG 与基线不同 |
+| 状态机校验 | `cargo test -p quench3d-cli --test cli_e2e scene_animator_is_validated` | 初始状态不存在、to 不存在、after 负数、fade 负数各有诊断 |
 | 场景动画 → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e skinned_model_animation_changes_cli_render` | `models[].animation.start=0` 与 `0.5` 两张 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
 | 场景双时间线 | `cargo test -p quench3d --test model_loading scene_blended_animation_advances_both_clips` | `Scene::advance_animations` 同时推进两条 clip，t=.5 落在 base+2.5 |

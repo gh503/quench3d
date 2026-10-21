@@ -6470,6 +6470,127 @@ fn scene_morph_animation_changes_cli_render() {
     );
 }
 
+/// 状态机：报告字段 + 立即过渡（after=0, fade=0）必须改变首帧画面。
+#[test]
+fn scene_animator_is_reported_and_changes_cli_render() {
+    let dir = temp_dir("animator");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    let animator_scene = write_scene(
+        &dir,
+        "animator.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{
+                "path": "morph.glb",
+                "animator": {
+                    "initial": "a",
+                    "states": [
+                        { "name": "a", "animation": "pulse", "start": 0.0 },
+                        { "name": "b", "animation": "pulse", "start": 0.5 }
+                    ],
+                    "transitions": [
+                        { "from": "a", "to": "b", "after": 0.0, "fade": 0.0 }
+                    ]
+                }
+            }],
+            "camera": { "position": [0.5, 0.75, 4.0], "look_at": [0.5, 0.75, 0.0], "fov_deg": 45.0 },
+            "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+        }),
+    );
+    let r = run(&["simulate", animator_scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    let m = &d["data"]["models"][0];
+    assert_eq!(m["animator"]["found"], true, "{d}");
+    assert_eq!(m["animator"]["states"], 2, "{d}");
+    assert_eq!(m["animator"]["transitions"], 1, "{d}");
+    assert_eq!(m["animator"]["initial"], "a", "{d}");
+
+    let baseline = write_scene(
+        &dir,
+        "animator-baseline.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{ "path": "morph.glb", "animation": { "name": "pulse", "start": 0.0 } }],
+            "camera": { "position": [0.5, 0.75, 4.0], "look_at": [0.5, 0.75, 0.0], "fov_deg": 45.0 },
+            "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+        }),
+    );
+    let anim_png = dir.join("animator.png");
+    let r = run(&[
+        "render",
+        animator_scene.to_str().unwrap(),
+        "--out",
+        anim_png.to_str().unwrap(),
+    ]);
+    if r.code == 3 {
+        return; // 无 GPU
+    }
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let base_png = dir.join("animator-baseline.png");
+    let r = run(&[
+        "render",
+        baseline.to_str().unwrap(),
+        "--out",
+        base_png.to_str().unwrap(),
+    ]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let (w, h, a) = decode_rgba(&anim_png);
+    let (w2, h2, b) = decode_rgba(&base_png);
+    assert_eq!((w, h), (w2, h2));
+    let changed = a
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
+        .filter(|(x, y)| x != y)
+        .count();
+    assert!(
+        changed > 10,
+        "状态机立即过渡应改变首帧画面，实际 {changed} 像素"
+    );
+}
+
+#[test]
+fn scene_animator_is_validated() {
+    let dir = temp_dir("animator_validate");
+    std::fs::write(dir.join("morph.glb"), morph_glb_bytes()).expect("写 morph 夹具");
+    let scene = write_scene(
+        &dir,
+        "bad-animator.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{
+                "path": "morph.glb",
+                "animation": { "name": "pulse" },
+                "animator": {
+                    "initial": "missing",
+                    "states": [{ "name": "a", "animation": "pulse" }],
+                    "transitions": [
+                        { "from": "a", "to": "nope", "after": -1.0, "fade": -0.5 }
+                    ]
+                }
+            }]
+        }),
+    );
+    let r = run(&["validate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    let diags = d["data"]["diagnostics"].as_array().unwrap();
+    for path in [
+        "models[0].animator",
+        "models[0].animator.initial",
+        "models[0].animator.transitions[0].to",
+        "models[0].animator.transitions[0].after",
+        "models[0].animator.transitions[0].fade",
+    ] {
+        assert!(
+            diags.iter().any(|x| x["path"] == path),
+            "缺少 {path} 诊断：{d}"
+        );
+    }
+}
+
 #[test]
 fn scene_morph_weights_are_validated() {
     let dir = temp_dir("morph_validate");

@@ -337,46 +337,95 @@ pub fn model_animation_reports(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunEr
 fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunError> {
     let mut out = Vec::new();
     for (i, m) in doc.models.iter().enumerate() {
-        let Some(requested) = &m.animation else {
+        if m.animation.is_none() && m.animator.is_none() {
             continue;
-        };
+        }
         let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
         let model = load_model_cached(&resolved)?;
-        let clip = model.animation(&requested.name);
-        let blend = requested.blend.as_ref().map(|b| {
-            let second = model.animation(&b.name);
-            ModelBlendStatus {
-                name: b.name.clone(),
-                found: second.is_some(),
-                duration: second.map(|c| c.duration),
-                tracks: second.map(|c| c.tracks.len()),
-                morph_tracks: second.map(|c| c.morph_tracks.len()).filter(|n| *n > 0),
-                weight: b.weight.unwrap_or(0.5),
-                fade: b.fade.unwrap_or(0.0),
-                speed: b.speed.unwrap_or(1.0),
-                looping: b.looping.unwrap_or(true),
-                start: b.start.unwrap_or(0.0),
+        let clips: Vec<String> = model
+            .animation_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (status, blend, animator) = if let Some(a) = &m.animation {
+            let clip = model.animation(&a.name);
+            let blend = a.blend.as_ref().map(|b| {
+                let second = model.animation(&b.name);
+                ModelBlendStatus {
+                    name: b.name.clone(),
+                    found: second.is_some(),
+                    duration: second.map(|c| c.duration),
+                    tracks: second.map(|c| c.tracks.len()),
+                    morph_tracks: second.map(|c| c.morph_tracks.len()).filter(|n| *n > 0),
+                    weight: b.weight.unwrap_or(0.5),
+                    fade: b.fade.unwrap_or(0.0),
+                    speed: b.speed.unwrap_or(1.0),
+                    looping: b.looping.unwrap_or(true),
+                    start: b.start.unwrap_or(0.0),
+                }
+            });
+            (
+                ModelAnimationStatus {
+                    name: a.name.clone(),
+                    found: clip.is_some(),
+                    duration: clip.map(|c| c.duration),
+                    tracks: clip.map(|c| c.tracks.len()),
+                    morph_tracks: clip.map(|c| c.morph_tracks.len()).filter(|n| *n > 0),
+                    speed: a.speed.unwrap_or(1.0),
+                    looping: a.looping.unwrap_or(true),
+                    start: a.start.unwrap_or(0.0),
+                },
+                blend,
+                None,
+            )
+        } else {
+            // 状态机：用初始状态对应的 clip 作为 `animation` 状态（报告保持向后兼容），
+            // 另外给出状态机整体是否可用。
+            let anim = m.animator.as_ref().expect("上面已经排除两者都为空");
+            let initial = anim
+                .states
+                .iter()
+                .find(|s| s.name == anim.initial)
+                .or_else(|| anim.states.first());
+            let clip = initial.and_then(|s| model.animation(&s.animation));
+            let mut missing = Vec::new();
+            for state in &anim.states {
+                if model.animation(&state.animation).is_none()
+                    && !missing.contains(&state.animation)
+                {
+                    missing.push(state.animation.clone());
+                }
             }
-        });
+            (
+                ModelAnimationStatus {
+                    name: initial
+                        .map(|s| s.animation.clone())
+                        .unwrap_or_else(|| anim.initial.clone()),
+                    found: clip.is_some(),
+                    duration: clip.map(|c| c.duration),
+                    tracks: clip.map(|c| c.tracks.len()),
+                    morph_tracks: clip.map(|c| c.morph_tracks.len()).filter(|n| *n > 0),
+                    speed: initial.and_then(|s| s.speed).unwrap_or(1.0),
+                    looping: initial.and_then(|s| s.looping).unwrap_or(true),
+                    start: initial.and_then(|s| s.start).unwrap_or(0.0),
+                },
+                None,
+                Some(ModelAnimatorStatus {
+                    initial: anim.initial.clone(),
+                    found: missing.is_empty(),
+                    states: anim.states.len(),
+                    transitions: anim.transitions.len(),
+                    missing,
+                }),
+            )
+        };
         out.push(ModelReport {
             model: i,
             path: m.path.display().to_string(),
-            clips: model
-                .animation_names()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            animation: ModelAnimationStatus {
-                name: requested.name.clone(),
-                found: clip.is_some(),
-                duration: clip.map(|c| c.duration),
-                tracks: clip.map(|c| c.tracks.len()),
-                morph_tracks: clip.map(|c| c.morph_tracks.len()).filter(|n| *n > 0),
-                speed: requested.speed.unwrap_or(1.0),
-                looping: requested.looping.unwrap_or(true),
-                start: requested.start.unwrap_or(0.0),
-            },
+            clips,
+            animation: status,
             blend,
+            animator,
         });
     }
     Ok(out)
@@ -396,6 +445,15 @@ fn animation_warnings(reports: &[ModelReport]) -> Vec<String> {
                 "models[{}].animation：动画 \"{}\" 不存在（{available}），模型保持绑定姿态",
                 r.model, r.animation.name
             ));
+        }
+        if let Some(anim) = &r.animator {
+            if !anim.found {
+                out.push(format!(
+                    "models[{}].animator：状态机引用的动画 {} 不存在（{available}），模型保持绑定姿态",
+                    r.model,
+                    anim.missing.join("、")
+                ));
+            }
         }
         if let Some(b) = &r.blend {
             if !b.found {
@@ -445,6 +503,25 @@ pub struct ModelReport {
     /// 可选的第二条 clip 的装载结果；没写 `animation.blend` 时不出现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<ModelBlendStatus>,
+    /// 状态机装载结果；没写 `animator` 时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animator: Option<ModelAnimatorStatus>,
+}
+
+/// 时间驱动状态机的装载结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelAnimatorStatus {
+    /// 场景里写的初始状态名。
+    pub initial: String,
+    /// 所有状态引用的 clip 是否都存在。
+    pub found: bool,
+    /// 状态数。
+    pub states: usize,
+    /// 过渡数。
+    pub transitions: usize,
+    /// 缺失的动画名（去重；`found = true` 时为空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
 }
 
 /// 请求的那条模型动画的装载结果。
@@ -3205,6 +3282,43 @@ pub fn setup_visuals(
                     ));
                 }
             }
+        } else if let Some(anim) = &m.animator {
+            // 状态机：把场景里的状态/过渡翻译成引擎类型；任何 clip 缺失时
+            // `play_model_animator` 返回 None，报告里会给出 missing 列表。
+            let states: Vec<quench3d::scene::ModelAnimatorState> = anim
+                .states
+                .iter()
+                .map(|s| quench3d::scene::ModelAnimatorState {
+                    name: s.name.clone(),
+                    animation: s.animation.clone(),
+                    speed: s.speed.unwrap_or(1.0),
+                    looping: s.looping.unwrap_or(true),
+                    start: s.start.unwrap_or(0.0),
+                })
+                .collect();
+            let transitions: Vec<quench3d::scene::ModelAnimatorTransition> = anim
+                .transitions
+                .iter()
+                .map(|t| quench3d::scene::ModelAnimatorTransition {
+                    from: t.from.clone(),
+                    to: t.to.clone(),
+                    after: t.after,
+                    fade: t.fade.unwrap_or(0.0),
+                })
+                .collect();
+            let initial = anim
+                .states
+                .iter()
+                .position(|s| s.name == anim.initial)
+                .unwrap_or(0);
+            animation_index = engine.scene.play_model_animator(
+                model.clone(),
+                objects.clone(),
+                vec![transform; objects.len()],
+                states,
+                transitions,
+                initial,
+            );
         }
         if let Some(weights) = &m.morph_weights {
             // 场景覆盖：先把 GPU 上的绑定姿态网格换成 morph 后的几何（静态模型

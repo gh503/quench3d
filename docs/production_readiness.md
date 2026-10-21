@@ -83,8 +83,8 @@
 | 拖拽改父级 | 全部 | 属性面板里用"父物体"下拉改（**保世界位姿**）；场景树内拖放还没有 | 🟡 |
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
-| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ 皮肤蒙皮 + 双 clip 混合（支持一次性淡入）；**无编辑器时间轴/混合 UI** | 🟡 |
-| 骨骼 / 蒙皮 | 全部 | **CPU 蒙皮可用**（`skins` + 逆绑定矩阵 + 每帧顶点变形 + 写回 GPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 不混合 morph）；**GPU 蒙皮、动画状态机、IK 仍无** | 🟡 |
+| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **时间驱动状态机**；**无编辑器时间轴/混合 UI、无输入参数/事件** | 🟡 |
+| 骨骼 / 蒙皮 | 全部 | **CPU 蒙皮可用**（`skins` + 逆绑定矩阵 + 每帧顶点变形 + 写回 GPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 不混合 morph）；**GPU 蒙皮、IK 仍无** | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
 
@@ -2171,6 +2171,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 与场景格式的接口 | ✅ 第 62 / 71 / 72 轮 | `models[].animation = { name, start?, speed?, loop?, blend? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`blend = { name, start?, speed?, loop?, weight?, fade? }`，`weight` 缺省 0.5、`fade` 缺省 0；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
 | 编辑器可达 | ✅ 第 62 轮（只保字段） | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；**没有动画面板**（不能选片段 / 调时间轴） |
+| 时间驱动状态机 | ✅ 第 75 轮 | `models[].animator`：`states` + `transitions`，按状态停留时间 `after` 过渡，`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；报告 `models[].animator`。**仍缺**：输入参数/事件条件、编辑器状态机面板 |
 | 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、状态机、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
 | `skins` + GPU 蒙皮 | ❌ | 顶点着色器还没有关节矩阵；CPU 路径在角色面数高时是瓶颈。要做顶点属性 + 关节矩阵上传 + WGSL 分支 |
@@ -2197,8 +2198,9 @@ if let Some(v) = doc.physics.static_friction_speed {
    **一次性 smoothstep 淡入**（第 72 轮）：`animation.blend` +
    `Scene::play_model_animation_blend_with_fade`。✅ **静态 morph target**（第 73 轮）：
    `targets` 解析 + `morph_weights` 场景覆盖 + 先 morph 后蒙皮。✅ **morph 权重动画**
-   （第 74 轮）：`weights` 轨道 + 场景逐帧采样。**仍缺 GPU 蒙皮**（顶点属性 +
-   关节矩阵 + WGSL）、任意权重曲线/状态机、CUBICSPLINE 真值、双 clip morph 混合。
+   （第 74 轮）：`weights` 轨道 + 场景逐帧采样。✅ **时间驱动状态机**（第 75 轮）：
+   `animator.states/transitions` + 淡入。**仍缺 GPU 蒙皮**（顶点属性 + 关节矩阵 +
+   WGSL）、任意权重曲线、输入参数/事件状态机、CUBICSPLINE 真值、双 clip morph 混合。
 5. ❌ **`skins` + GPU 蒙皮**（下一个大块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
    绑定姿态对账。CPU 路径已经证明"数据链/场景/报告"是对的，GPU 只是把变形搬到显卡；
    不要在还没有动画混合/蒙皮测试的情况下先重写着色器。
@@ -2487,7 +2489,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**678** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**681** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
@@ -2495,8 +2497,8 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
   `camera` Orbit→Fly。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
-**仍未做**：GPU 蒙皮（CPU 蒙皮已做）/动画状态机、morph 双 clip 混合、IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、单帧 golden 基线、
-真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
+**仍未做**：GPU 蒙皮（CPU 蒙皮已做）、输入参数/事件驱动的动画状态机、morph 双 clip 混合、
+IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---
 

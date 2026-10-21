@@ -32,6 +32,17 @@
 
 ### 新增
 
+- **时间驱动动画状态机（第 75 轮）**：场景格式新增 `models[].animator`
+  （`initial` / `states` / `transitions`），与 `models[].animation` 互斥。当前状态
+  停留 `after` 秒后开始过渡，`fade` 秒内从旧 clip smoothstep 淡入新 clip；淡入完成后
+  新 clip 提为主 clip 并重新计时。引擎新增 `Scene::play_model_animator`，报告新增
+  `models[].animator.{initial,found,states,transitions,missing}`。`validate` 检查
+  空状态、重复状态名、未知初始状态、过渡 from/to 不存在、after/fade 越界，以及
+  `animator` 与 `animation` 同时写。回归：`scene_animator_transitions_and_promotes`
+  （0.5 秒后过渡、半程权重、淡入结束提为主 clip）+
+  `scene_animator_is_reported_and_changes_cli_render`（立即过渡改变首帧 PNG）+
+  `scene_animator_is_validated`。边界：只按时间过渡，没有输入参数/事件条件；
+  没有编辑器状态机面板。
 - **morph 权重动画（第 74 轮）**：解析 glTF 动画的 `weights` 输出为 `MorphTrack`
   （按节点的 target 数切帧；CUBICSPLINE 只取值块），新增
   `LoadedModel::morph_weights_at`；场景的 `models[].animation` 每帧按节点采样，

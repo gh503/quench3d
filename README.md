@@ -133,6 +133,11 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   边界：双 clip 混合只取主 clip 的 morph 轨道、不做权重混合；没有编辑器滑杆；
   `models[].collide` 的碰撞体仍是绑定姿态。`info` 会报 `morph_targets`，动画报告
   会报 `animation.morph_tracks`。
+* **时间驱动动画状态机**：场景里用 `models[].animator` 声明 `states` 与
+  `transitions`；当前状态停留 `after` 秒后切到目标状态，`fade` 秒内从旧 clip
+  淡入新 clip（0 = 立即切），淡入完成后新 clip 提为主 clip。它只按**时间**过渡，
+  没有输入参数/事件；和 `models[].animation` 互斥。报告
+  `models[].animator.{found,states,transitions,missing}`。
 * **父子层级**：场景树按缩进显示父子关系，属性面板里用"父物体"下拉改父（也可以提回根物体）。
   改父与**拖动父物体**都会**保持子物体的世界位姿**（改父不跳位、删父不跳位），
   一次改动只留一步历史。边界：子物体继承父物体的**位置与朝向，但不继承缩放** ——
@@ -1215,7 +1220,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 678 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 681 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

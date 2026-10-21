@@ -1557,6 +1557,56 @@ pub struct ModelAnimationBlendDoc {
     pub fade: Option<f32>,
 }
 
+/// 一个模型动画状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAnimatorStateDoc {
+    /// 状态名（场景内唯一，用于过渡的 `from` / `to`）。
+    pub name: String,
+    /// glTF 里的动画名。
+    pub animation: String,
+    /// 播放倍速，缺省 1（必须 > 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    /// 是否循环，缺省 true。
+    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
+    pub looping: Option<bool>,
+    /// 进入状态时的起始时间，缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f32>,
+}
+
+/// 状态机的一条过渡：当前状态停留 `after` 秒后切到 `to`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAnimatorTransitionDoc {
+    /// 出发状态名。
+    pub from: String,
+    /// 目标状态名。
+    pub to: String,
+    /// 在当前状态停留多少秒后开始过渡（必须 >= 0）。
+    pub after: f32,
+    /// 淡入秒数，缺省 0 = 立即切换。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade: Option<f32>,
+}
+
+/// 一个按**停留时间**驱动的模型动画状态机。
+///
+/// 状态机只按时间过渡（没有游戏输入参数/事件）；适合待机→行走→待机这类演示。
+/// 它和 `animation` 互斥：写了 `animator` 就不要再写 `animation`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAnimatorDoc {
+    /// 初始状态名（必须存在于 `states`）。
+    pub initial: String,
+    /// 至少一个状态。
+    pub states: Vec<ModelAnimatorStateDoc>,
+    /// 过渡列表；可以为空（永远停在初始状态）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<ModelAnimatorTransitionDoc>,
+}
+
 /// 一个外部模型文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1584,6 +1634,9 @@ pub struct ModelDoc {
     /// 这是**静态**权重，不是 morph 动画；`models[].collide` 的碰撞体仍是绑定姿态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub morph_weights: Option<Vec<f32>>,
+    /// 可选的时间驱动状态机；与 `animation` 互斥。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animator: Option<ModelAnimatorDoc>,
     /// 播放模型里的一条 glTF 动画；**不写 = 静止**（老行为逐字节不变）。
     ///
     /// 名字不存在不会让场景非法（`validate` 不读资产），但会在 `simulate` / `render`
@@ -5072,6 +5125,105 @@ impl SceneDoc {
                                 ErrorCode::OutOfRange,
                                 format!("{bp}.fade"),
                                 "淡入时长必须是非负有限值（0 = 立即生效）",
+                            ));
+                        }
+                    }
+                }
+            }
+            if m.animator.is_some() && m.animation.is_some() {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
+                    format!("{p}.animator"),
+                    "`animator` 与 `animation` 不能同时写",
+                ));
+            }
+            if let Some(anim) = &m.animator {
+                let ap = format!("{p}.animator");
+                if anim.states.is_empty() {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        format!("{ap}.states"),
+                        "状态机至少需要一个状态",
+                    ));
+                }
+                let mut names = std::collections::BTreeSet::new();
+                for (si, st) in anim.states.iter().enumerate() {
+                    let sp = format!("{ap}.states[{si}]");
+                    if st.name.trim().is_empty() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{sp}.name"),
+                            "状态名不能为空",
+                        ));
+                    } else if !names.insert(st.name.clone()) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{sp}.name"),
+                            format!("状态名 \"{}\" 重复", st.name),
+                        ));
+                    }
+                    if st.animation.trim().is_empty() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{sp}.animation"),
+                            "动画名不能为空",
+                        ));
+                    }
+                    if let Some(speed) = st.speed {
+                        if !(speed.is_finite() && speed > 0.0) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{sp}.speed"),
+                                "播放倍速必须是正的有限值",
+                            ));
+                        }
+                    }
+                    if let Some(start) = st.start {
+                        if !start.is_finite() || start < 0.0 {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{sp}.start"),
+                                "起始时间必须是非负有限值",
+                            ));
+                        }
+                    }
+                }
+                if !names.contains(&anim.initial) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        format!("{ap}.initial"),
+                        format!("初始状态 \"{}\" 不在 states 里", anim.initial),
+                    ));
+                }
+                for (ti, tr) in anim.transitions.iter().enumerate() {
+                    let tp = format!("{ap}.transitions[{ti}]");
+                    if !names.contains(&tr.from) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{tp}.from"),
+                            format!("过渡的 from 状态 \"{}\" 不存在", tr.from),
+                        ));
+                    }
+                    if !names.contains(&tr.to) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{tp}.to"),
+                            format!("过渡的 to 状态 \"{}\" 不存在", tr.to),
+                        ));
+                    }
+                    if !tr.after.is_finite() || tr.after < 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{tp}.after"),
+                            "过渡等待时间必须是非负有限值",
+                        ));
+                    }
+                    if let Some(fade) = tr.fade {
+                        if !fade.is_finite() || fade < 0.0 {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{tp}.fade"),
+                                "过渡淡入必须是非负有限值（0 = 立即切换）",
                             ));
                         }
                     }
