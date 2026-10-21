@@ -1264,6 +1264,13 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         .iter()
         .map(|a| a.objects.iter().find_map(|&o| doc.model_of_object(o)))
         .collect();
+    // 资产里可选的 clip 名字；普通动画可以换，状态机的 clip 由 states 管。
+    let clips: Vec<Vec<String>> = engine
+        .scene
+        .animations
+        .iter()
+        .map(|a| a.model.animations.iter().map(|c| c.name.clone()).collect())
+        .collect();
     let mut refresh = false;
     let mut changed_model: Option<String> = None;
     let mut begin_edit = false;
@@ -1297,6 +1304,36 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .small()
                     .weak(),
                 );
+                if animation.animator.is_none() && !clips[index].is_empty() {
+                    let mut selected = animation.player.animation.clone();
+                    ui.horizontal(|ui| {
+                        ui.label("片段");
+                        egui::ComboBox::from_id_salt(format!("animation-clip-{index}"))
+                            .selected_text(selected.clone())
+                            .show_ui(ui, |ui| {
+                                for clip in &clips[index] {
+                                    ui.selectable_value(&mut selected, clip.clone(), clip);
+                                }
+                            });
+                    });
+                    if selected != animation.player.animation {
+                        if let Some(mut player) = animation.model.player(&selected) {
+                            player.speed = animation.player.speed;
+                            player.looping = animation.player.looping;
+                            player.time = 0.0;
+                            player.finished = false;
+                            player.advance(0.0);
+                            animation.player = player;
+                            refresh = true;
+                            record_edit = true;
+                            if models[index].is_some() {
+                                if let Some(path) = doc.set_animation_clip(&objects, &selected) {
+                                    changed_model = Some(path);
+                                }
+                            }
+                        }
+                    }
+                }
                 ui.horizontal(|ui| {
                     let mut speed = animation.player.speed;
                     let response = ui.add(

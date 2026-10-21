@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **动画片段选择（第 83 轮）**：普通模型动画（非状态机）的「动画」面板新增
+  「片段」下拉框，列出资产里的 clip；切换时重建 `ModelAnimationPlayer`（保留倍速/
+  循环，时间归零），刷新蒙皮/morph，并通过 `Doc::set_animation_clip` 写回
+  `models[i].animation.name`（可撤销、存盘生效）。状态机的 clip 仍由 `states` 管，
+  不显示该下拉框，避免把状态机结构写坏。回归：
+  `set_animation_clip_only_writes_plain_animation_segment` + `ui_smoke` 的「片段」控件断言。
 - **动画面板倍速/循环编辑（第 82 轮）**：右侧「动画」面板的倍速 `DragValue` 与
   循环勾选框不再只读。改运行时 `player.speed/looping` 的同时同步状态机当前 state，
   并通过 `Doc::set_animation_params` 写回 `models[i].animation`（或

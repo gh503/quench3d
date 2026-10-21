@@ -243,6 +243,22 @@ impl Doc {
             .map(|i| i.model)
     }
 
+    /// 把普通模型动画（不是状态机）的 clip 名写回 `models[i].animation.name`。
+    ///
+    /// 返回模型路径；没有映射、模型只有 `animator` 或没有 `animation` 段时返回 `None`。
+    pub fn set_animation_clip(&mut self, objects: &[usize], clip: &str) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        // 状态机的 clip 由 states 管；这里只改普通 animation 段，避免把状态机结构写坏。
+        let animation = doc.animation.as_mut()?;
+        animation.name = clip.to_string();
+        Some(path)
+    }
+
     /// 把动画倍速/循环写回底稿里对应模型的 `animation` 或当前 `animator` 状态。
     ///
     /// `objects` 是这个动画实例驱动的物体（用来反查 `models[i]`）；`state` 是状态机
@@ -980,5 +996,51 @@ mod tests {
             .set_animation_params(&[2], Some("nope"), 3.0, false)
             .is_none());
         assert!(doc.set_animation_params(&[99], None, 3.0, false).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_animation_clip_only_writes_plain_animation_segment() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [
+                    {"path": "a.glb", "animation": {"name": "idle"}},
+                    {"path": "b.glb", "animator": {
+                        "initial": "idle",
+                        "states": [{"name": "idle", "animation": "idle"}]
+                    }}
+                ]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![
+            quench3d_cli::runner::ModelInstance {
+                model: 0,
+                path: "a.glb".into(),
+                objects: vec![1],
+            },
+            quench3d_cli::runner::ModelInstance {
+                model: 1,
+                path: "b.glb".into(),
+                objects: vec![2],
+            },
+        ]);
+        assert_eq!(
+            doc.set_animation_clip(&[1], "run").as_deref(),
+            Some("a.glb")
+        );
+        assert_eq!(
+            doc.base_doc.as_ref().unwrap().models[0]
+                .animation
+                .as_ref()
+                .unwrap()
+                .name,
+            "run"
+        );
+        // 状态机没有可单独换的 animation.name；不能把 states 结构改坏。
+        assert!(doc.set_animation_clip(&[2], "run").is_none());
+        assert!(doc.set_animation_clip(&[99], "run").is_none());
     }
 }

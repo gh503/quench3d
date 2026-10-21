@@ -7,7 +7,7 @@
 //! **显式 opt-in**：要真的创建 wgpu 上下文，所以只有设了 `QUENCH3D_GPU_TESTS=1` 才执行。
 #![cfg(not(target_arch = "wasm32"))]
 
-use quench3d::assets::{LoadedModel, ModelAnimationPlayer};
+use quench3d::assets::{LoadedAnimation, LoadedModel, ModelAnimationPlayer};
 use quench3d::prelude::*;
 use quench3d::render::context::with_gpu_tests;
 use quench3d::scene::{ModelAnimationInstance, ModelAnimatorRuntime, ModelAnimatorState};
@@ -97,6 +97,44 @@ fn fake_animation_instance() -> ModelAnimationInstance {
     }
 }
 
+/// 普通（非状态机）播放实例：资产里真的有一个 `walk` clip，用来显示片段选择器。
+fn fake_plain_animation_instance() -> ModelAnimationInstance {
+    let mut model = LoadedModel {
+        name: "ui-smoke-plain".into(),
+        meshes: Vec::new(),
+        materials: Vec::new(),
+        images: Vec::new(),
+        nodes: Vec::new(),
+        animations: Vec::new(),
+        skins: Vec::new(),
+    };
+    model.animations.push(LoadedAnimation {
+        name: "walk".into(),
+        duration: 1.0,
+        ..Default::default()
+    });
+    ModelAnimationInstance {
+        model: std::sync::Arc::new(model),
+        objects: Vec::new(),
+        base: Vec::new(),
+        player: ModelAnimationPlayer {
+            animation: "walk".into(),
+            duration: 1.0,
+            time: 0.25,
+            speed: 1.0,
+            looping: true,
+            finished: false,
+        },
+        secondary: None,
+        blend_weight: 0.0,
+        blend_target: 0.0,
+        blend_fade: 0.0,
+        blend_elapsed: 0.0,
+        morph_weights: None,
+        animator: None,
+    }
+}
+
 /// 在 egui 的绘制图元里递归找一段文字，证明面板的**内容**真的被排版了，
 /// 而不只是"没 panic"。
 fn shapes_contain_text(shapes: &[egui::epaint::ClippedShape], needle: &str) -> bool {
@@ -118,6 +156,10 @@ fn all_editor_panels_draw_in_one_frame() {
     let mut doc = Doc::new();
     doc.build_default_scene(&mut engine);
     engine.scene.animations.push(fake_animation_instance());
+    engine
+        .scene
+        .animations
+        .push(fake_plain_animation_instance());
     doc.selected = Some(1);
     doc.show_help = true;
 
@@ -148,7 +190,7 @@ fn all_editor_panels_draw_in_one_frame() {
         "整块 UI 一帧没产出任何绘制图元：面板没画出来"
     );
     assert!(
-        shapes_contain_text(&output.shapes, "动画（1 个实例）"),
+        shapes_contain_text(&output.shapes, "动画（2 个实例）"),
         "动画面板标题没有出现在绘制图元里"
     );
     assert!(
@@ -158,6 +200,10 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "状态机：待机"),
         "状态机当前状态没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "片段"),
+        "动画片段选择器没有出现在面板内容里"
     );
     assert!(
         shapes_contain_text(&output.shapes, "倍速"),
