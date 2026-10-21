@@ -133,6 +133,43 @@ fn skinned_glb() -> Vec<u8> {
     glb_from_parts(json, bin)
 }
 
+/// 手搓一个 CUBICSPLINE 平移动画：x 从 0 到 1，出切线 2/s、入切线 0。
+///
+/// 中点 Hermite 值应是 .75（线性只会是 .5），用来钉住解析器真的读了
+/// `[入切线, 值, 出切线]` 三块，而不是只取中间的值。
+fn cubic_glb() -> Vec<u8> {
+    let mut bin = Vec::new();
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // [入切线, 值, 出切线] × 2
+    for f in [
+        0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, // key0
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, // key1
+    ] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[
+ {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+ {"bufferView":1,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+ {"bufferView":2,"componentType":5126,"count":6,"type":"VEC3"}],
+"bufferViews":[
+ {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":36,"byteLength":8},
+ {"buffer":0,"byteOffset":44,"byteLength":72}],
+"buffers":[{"byteLength":116}],
+"animations":[{"name":"cubic","samplers":[
+ {"input":1,"output":2,"interpolation":"CUBICSPLINE"}],
+ "channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]}"#;
+    glb_from_parts(json, bin)
+}
+
 /// 手搓一个带 1 个 morph target 的 GLB：三角形所有顶点 y 方向 +0.5。
 fn morph_glb() -> Vec<u8> {
     let mut bin = Vec::new();
@@ -977,4 +1014,26 @@ fn scene_animator_transitions_and_promotes() {
     assert_eq!(animator.current, 1);
     assert_eq!(animator.pending, None);
     assert!(animator.elapsed < 1e-6, "新状态应重新计时");
+}
+
+/// CUBICSPLINE 的切线必须从解析器一路传到采样：t=.5 是 .75 而不是 .5。
+#[test]
+fn cubic_spline_tangents_survive_parsing_and_sampling() {
+    let model = load_model_from_bytes("cubic.glb", &cubic_glb()).expect("CUBICSPLINE GLB");
+    let clip = model.animation("cubic").expect("cubic clip");
+    let track = &clip.tracks[0];
+    assert_eq!(
+        track.interpolation,
+        quench3d::assets::Interpolation::CubicSpline
+    );
+    assert_eq!(
+        track.values,
+        vec![[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
+    );
+    assert_eq!(track.in_tangents.len(), 2);
+    assert_eq!(track.out_tangents.len(), 2);
+    assert!((track.out_tangents[0][0] - 2.0).abs() < 1e-6);
+    let worlds = model.sample_animation("cubic", 0.5).expect("采样");
+    let x = worlds[0].transform_point3(Vec3::ZERO).x;
+    assert!((x - 0.75).abs() < 1e-5, "Hermite 中点 x 应为 .75，实际 {x}");
 }

@@ -2160,7 +2160,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 环节 | 状态 | 说明 |
 | --- | --- | --- |
 | glTF 节点层级 / 节点变换 | ✅ 本轮 | 静态几何正确了 |
-| glTF `animations` 解析 | ✅ 第 61 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 退化线性）；**morph 动画轨道仍跳过** |
+| glTF `animations` 解析 | ✅ 第 61 / 76 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 用 Hermite 入/出切线）；**morph 动画轨道仍跳过** |
 | glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ✅ 第 70 轮（CPU） | `LoadedSkin` + `LoadedMesh.skin/joints/weights`；缺任何顶点数据时整体退回刚性路径（不撕裂网格） |
 | CPU 蒙皮变形 + 顶点回写 | ✅ 第 70 轮 | `LoadedModel::skinned_mesh` 算 `Σ w·world(joint)·IBM·bindInverse`；`Scene::advance_animations_with_renderer` 调 `Renderer::update_mesh_vertices` 原地更新同一个 `MeshId`。GPU 像素回归 t=0/t=0.25 |
 | GPU 蒙皮（顶点着色器关节矩阵） | ❌ | 现在是 CPU 变形；大角色每帧在 CPU 上重算并上传全部顶点。要做 GPU：`JOINTS_0/WEIGHTS_0` 顶点属性 + 关节矩阵 storage/uniform + WGSL 分支 |
@@ -2172,12 +2172,12 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
 | 编辑器可达 | ✅ 第 62 轮（只保字段） | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；**没有动画面板**（不能选片段 / 调时间轴） |
 | 时间驱动状态机 | ✅ 第 75 轮 | `models[].animator`：`states` + `transitions`，按状态停留时间 `after` 过渡，`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；报告 `models[].animator`。**仍缺**：输入参数/事件条件、编辑器状态机面板 |
-| 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、状态机、事件/根运动 |
+| 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
 | `skins` + GPU 蒙皮 | ❌ | 顶点着色器还没有关节矩阵；CPU 路径在角色面数高时是瓶颈。要做顶点属性 + 关节矩阵上传 + WGSL 分支 |
 | glTF `targets` / 静态 morph | ✅ 第 73 轮 | `LoadedMorphTarget` 解析 position/normal/tangent 位移（按节点世界方向烘过）；`LoadedModel::morphed_mesh` 按权重叠加，`deformed_mesh` 保证**先 morph 再蒙皮**；`models[].morph_weights` 覆盖 + GPU 静态回写；`info` 报 `morph_targets` |
-| morph 权重动画 | ✅ 第 74 轮 | `ReadOutputs::MorphTargetWeights` 解析为 `MorphTrack`（按 target 数切帧，CUBICSPLINE 只取值块），`LoadedModel::morph_weights_at` 采样；场景每帧按节点应用到网格。**仍缺**：双 clip 的 morph 权重插值、编辑器滑杆、morph 事件 |
-| `CUBICSPLINE` 真值 | ❌ | 仍退化线性（只取关键帧值、丢切线） |
+| morph 权重动画 | ✅ 第 74 轮 | `ReadOutputs::MorphTargetWeights` 解析为 `MorphTrack`（按 target 数切帧；CUBICSPLINE 只取值块并按线性采样），`LoadedModel::morph_weights_at` 采样；场景每帧按节点应用到网格。**仍缺**：morph 的 CUBICSPLINE 切线、双 clip 的 morph 权重插值、编辑器滑杆、morph 事件 |
+| `CUBICSPLINE` 真值 | ✅ 第 76 轮（TRS） | TRS 轨道按 Hermite 基函数求值，切线来自 glTF 的 `[入切线, 值, 出切线]`；旋转分量求值后归一化。**morph 权重轨道仍只取关键帧值**（线性） |
 | 动画 vs 物理 | ⚠️ 有意 | 模型动画是**视觉**的：`models[].collide` 的静态三角网碰撞体保持绑定姿态，不会跟着动 |
 | `LoadedModel` 的节点树 | ✅ 第 61 轮 | `nodes` + `bind_pose()` + `bind_inverse`（每网格）——静态烘焙与动画并存：`world(t) × bind_inverse` 在绑定姿态下是单位矩阵 |
 
@@ -2200,7 +2200,7 @@ if let Some(v) = doc.physics.static_friction_speed {
    `targets` 解析 + `morph_weights` 场景覆盖 + 先 morph 后蒙皮。✅ **morph 权重动画**
    （第 74 轮）：`weights` 轨道 + 场景逐帧采样。✅ **时间驱动状态机**（第 75 轮）：
    `animator.states/transitions` + 淡入。**仍缺 GPU 蒙皮**（顶点属性 + 关节矩阵 +
-   WGSL）、任意权重曲线、输入参数/事件状态机、CUBICSPLINE 真值、双 clip morph 混合。
+   WGSL）、任意权重曲线、输入参数/事件状态机、morph 的 CUBICSPLINE 切线、双 clip morph 混合。
 5. ❌ **`skins` + GPU 蒙皮**（下一个大块）：顶点属性扩展 + 关节矩阵上传 + WGSL 改动 +
    绑定姿态对账。CPU 路径已经证明"数据链/场景/报告"是对的，GPU 只是把变形搬到显卡；
    不要在还没有动画混合/蒙皮测试的情况下先重写着色器。
@@ -2489,7 +2489,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**681** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**683** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

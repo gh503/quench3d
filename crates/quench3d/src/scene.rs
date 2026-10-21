@@ -1472,6 +1472,8 @@ mod anim_tests {
                     interpolation: Interpolation::Linear,
                     times: vec![0.0, 1.0],
                     values: vec![[2.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0]],
+                    in_tangents: Vec::new(),
+                    out_tangents: Vec::new(),
                 }],
                 morph_tracks: Vec::new(),
             }],

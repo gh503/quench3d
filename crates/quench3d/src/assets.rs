@@ -192,12 +192,9 @@ pub enum Interpolation {
     Step,
     /// 线性（旋转用球面插值）。
     Linear,
-    /// 三次样条 —— **当前按线性采样**（只取每个关键帧的"值"，丢掉切线）。
-    ///
-    /// 诚实说明：真做 CUBICSPLINE 要按 Hermite 基函数算，且切线是逐分量的；
-    /// 对于"播放看起来对"这件事，退化到线性只表现为动作略"硬"。这条写在
-    /// `docs/production_readiness.md` §19.2。
-    CubicSplineDegradedToLinear,
+    /// 三次样条（Hermite）：TRS 轨道按 glTF 的入/出切线逐分量求值，
+    /// 旋转在分量求值后归一化；morph 权重轨道仍只取关键帧值（按线性采样）。
+    CubicSpline,
 }
 
 /// 一条动画轨道：某个节点的某个属性随时间怎么变。
@@ -213,6 +210,12 @@ pub struct AnimationTrack {
     pub times: Vec<f32>,
     /// 每个关键帧的值：平移/缩放取前 3 个分量，旋转是 `xyzw`。
     pub values: Vec<[f32; 4]>,
+    /// CUBICSPLINE 的**入切线**（每个关键帧一个）；非三次样条为空。
+    ///
+    /// 长度与 `times`/`values` 相同；平移/缩放只读前 3 个分量，旋转读 `xyzw`。
+    pub in_tangents: Vec<[f32; 4]>,
+    /// CUBICSPLINE 的**出切线**；非三次样条为空。
+    pub out_tangents: Vec<[f32; 4]>,
 }
 
 /// 一条 morph target 权重轨道：某个节点上所有 target 的权重随时间怎么变。
@@ -223,7 +226,7 @@ pub struct AnimationTrack {
 pub struct MorphTrack {
     /// 节点下标（[`LoadedModel::nodes`] 的 `mesh` 节点）。
     pub node: usize,
-    /// 插值方式（`CubicSpline` 已在解析时退化为线性）。
+    /// 插值方式；morph 的 `CubicSpline` 当前仍按线性取关键帧值。
     pub interpolation: Interpolation,
     /// 关键帧时间（秒，升序）。
     pub times: Vec<f32>,
@@ -1021,6 +1024,34 @@ fn sample_track(track: &AnimationTrack, t: f32) -> [f32; 4] {
         return a;
     }
     let u = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+    if track.interpolation == Interpolation::CubicSpline
+        && track.in_tangents.len() >= n
+        && track.out_tangents.len() >= n
+    {
+        // glTF 的切线是"每秒"的导数；乘区间长度换成对 u 的导数。
+        let td = t1 - t0;
+        let m0 = track.out_tangents[lo];
+        let m1 = track.in_tangents[hi];
+        let u2 = u * u;
+        let u3 = u2 * u;
+        let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+        let h10 = u3 - 2.0 * u2 + u;
+        let h01 = -2.0 * u3 + 3.0 * u2;
+        let h11 = u3 - u2;
+        let mut out = [0.0f32; 4];
+        for k in 0..4 {
+            out[k] = h00 * a[k] + h10 * td * m0[k] + h01 * b[k] + h11 * td * m1[k];
+        }
+        if track.property == AnimatedProperty::Rotation {
+            let q = Quat::from_xyzw(out[0], out[1], out[2], out[3]);
+            if q.length_squared() > 1e-12 {
+                let q = q.normalize_or_identity();
+                return [q.x, q.y, q.z, q.w];
+            }
+            return a;
+        }
+        return out;
+    }
     if track.property == AnimatedProperty::Rotation {
         let qa = Quat::from_xyzw(a[0], a[1], a[2], a[3]);
         let qb = Quat::from_xyzw(b[0], b[1], b[2], b[3]);
@@ -1229,12 +1260,10 @@ fn model_from_gltf(
             let interpolation = match channel.sampler().interpolation() {
                 gltf::animation::Interpolation::Step => Interpolation::Step,
                 gltf::animation::Interpolation::Linear => Interpolation::Linear,
-                gltf::animation::Interpolation::CubicSpline => {
-                    Interpolation::CubicSplineDegradedToLinear
-                }
+                gltf::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
             };
-            // CUBICSPLINE 的每个关键帧有 3 个值（入切线、值、出切线）：只取"值"。
-            let cubic = interpolation == Interpolation::CubicSplineDegradedToLinear;
+            // CUBICSPLINE 的每个关键帧有 3 个值（入切线、值、出切线）。
+            let cubic = interpolation == Interpolation::CubicSpline;
             // morph 输出是展平的标量数组，必须先知道这个节点的 target 数才能切帧。
             let morph_target_count = target_node
                 .mesh()
@@ -1286,10 +1315,20 @@ fn model_from_gltf(
                     continue;
                 }
             };
-            let values: Vec<[f32; 4]> = if cubic {
-                values.into_iter().skip(1).step_by(3).collect()
+            let (values, in_tangents, out_tangents) = if cubic {
+                // 布局是 [入切线, 值, 出切线] × N；三组分别收集，供 Hermite 用。
+                let raw = values;
+                let mut vals = Vec::with_capacity(raw.len() / 3);
+                let mut ins = Vec::with_capacity(raw.len() / 3);
+                let mut outs = Vec::with_capacity(raw.len() / 3);
+                for chunk in raw.as_chunks::<3>().0 {
+                    ins.push(chunk[0]);
+                    vals.push(chunk[1]);
+                    outs.push(chunk[2]);
+                }
+                (vals, ins, outs)
             } else {
-                values
+                (values, Vec::new(), Vec::new())
             };
             if times.is_empty() || values.is_empty() {
                 continue;
@@ -1302,6 +1341,8 @@ fn model_from_gltf(
                 interpolation,
                 times,
                 values,
+                in_tangents,
+                out_tangents,
             });
         }
         model.animations.push(clip);
@@ -1971,6 +2012,33 @@ f 1/1/1 2/2/1 3/3/1 4/4/1
         assert_eq!(model.meshes.len(), 1);
         assert_eq!(model.meshes[0].data.triangle_count(), 2);
         assert_eq!(model.meshes[0].data.vertex_count(), 4);
+    }
+
+    #[test]
+    fn cubic_spline_uses_tangents() {
+        // p0=0, p1=1, 出切线 2/s、入切线 0：u=.5 的 Hermite 值是 .75，不是线性的 .5。
+        let track = AnimationTrack {
+            node: 0,
+            property: AnimatedProperty::Translation,
+            interpolation: Interpolation::CubicSpline,
+            times: vec![0.0, 1.0],
+            values: vec![[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            in_tangents: vec![[0.0; 4], [0.0; 4]],
+            out_tangents: vec![[2.0, 0.0, 0.0, 0.0], [0.0; 4]],
+        };
+        let mid = sample_track(&track, 0.5);
+        assert!(
+            (mid[0] - 0.75).abs() < 1e-6,
+            "Hermite 中点应为 .75，实际 {}",
+            mid[0]
+        );
+        assert!((sample_track(&track, 0.0)[0]).abs() < 1e-6);
+        assert!((sample_track(&track, 1.0)[0] - 1.0).abs() < 1e-6);
+
+        // 切线字段不完整（旧数据/手写）时退回线性，不 panic。
+        let mut broken = track.clone();
+        broken.in_tangents.clear();
+        assert!((sample_track(&broken, 0.5)[0] - 0.5).abs() < 1e-6);
     }
 
     #[test]

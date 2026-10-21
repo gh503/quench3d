@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **CUBICSPLINE 真值（第 76 轮）**：glTF TRS 动画不再只取中间关键帧值。解析器保留每个
+  关键帧的 `[入切线, 值, 出切线]`，`AnimationTrack` 新增 `in_tangents` / `out_tangents`；
+  `Interpolation::CubicSpline` 用 Hermite 基函数按区间时长缩放切线，旋转分量求值后
+  归一化。切线缺失/长度不齐时退回线性。morph 权重轨道的 CUBICSPLINE 仍只取值（线性）。
+  回归：`cubic_spline_uses_tangents`（u=.5 的 .75 vs 线性 .5）+
+  `cubic_spline_tangents_survive_parsing_and_sampling`（手搓 GLB → 采样 x=.75）。
 - **时间驱动动画状态机（第 75 轮）**：场景格式新增 `models[].animator`
   （`initial` / `states` / `transitions`），与 `models[].animation` 互斥。当前状态
   停留 `after` 秒后开始过渡，`fade` 秒内从旧 clip smoothstep 淡入新 clip；淡入完成后
