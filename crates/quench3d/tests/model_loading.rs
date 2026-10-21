@@ -729,3 +729,61 @@ fn scene_blended_animation_advances_both_clips() {
         "t=.5 混合后该在 10 + (1.5+3.5)/2 = 12.5，实际 {x}"
     );
 }
+
+/// 淡入：`fade=0.5` 时 t=.25 的权重是 smoothstep(.5)=0.5，t=.5 到 1。
+///
+/// 用与 `scene_blended_animation_advances_both_clips` 同一对 clip（第二条整体 +2），
+/// 这样断言能同时钉住"时间前进"和"权重曲线"：t=.25 位移 1.75，t=.5 位移 3.5。
+#[test]
+fn scene_blend_fades_in_over_time() {
+    use quench3d::math::{Quat, Transform};
+    use quench3d::scene::Scene;
+
+    let mut model =
+        load_model_from_bytes("nodes.glb", &nodes_with_animation_glb()).expect("该能解析");
+    let mut second = model.animations[0].clone();
+    second.name = "移动2".into();
+    for track in &mut second.tracks {
+        if track.property == quench3d::assets::AnimatedProperty::Translation {
+            for value in &mut track.values {
+                value[0] += 2.0;
+            }
+        }
+    }
+    model.animations.push(second);
+    let model = std::sync::Arc::new(model);
+
+    let mut scene = Scene::new();
+    let base = Transform::new(Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+    let objects: Vec<usize> = (0..model.meshes.len())
+        .map(|i| scene.add_named(i as u32, 0, base, &format!("片段{i}")))
+        .collect();
+    let right = model
+        .meshes
+        .iter()
+        .position(|m| m.name.starts_with("右/"))
+        .expect("「右」片段该在");
+
+    scene.play_model_animation_blend_with_fade(
+        model.clone(),
+        objects.clone(),
+        vec![base; model.meshes.len()],
+        model.player("移动").expect("primary"),
+        model.player("移动2").expect("secondary"),
+        quench3d::scene::BlendOptions::with_fade(1.0, 0.5),
+    );
+
+    scene.advance_animations(0.25);
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!(
+        (x - 11.75).abs() < 1e-4,
+        "t=.25 权重 0.5，位移应为 (0.75+2.75)/2=1.75，实际 {x}"
+    );
+
+    scene.advance_animations(0.25);
+    let x = scene.objects[objects[right]].transform.position.x;
+    assert!(
+        (x - 13.5).abs() < 1e-4,
+        "淡入结束权重 1，t=.5 应完全取第二条（位移 3.5），实际 {x}"
+    );
+}

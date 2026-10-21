@@ -32,6 +32,14 @@
 
 ### 新增
 
+- **双 clip 一次性淡入（第 72 轮）**：`models[].animation.blend.fade` 给出淡入秒数；
+  第二条 clip 的权重从第一帧的 0 按 smoothstep 升到 `weight`，`fade=0` 或省略
+  保持上一轮的立即生效行为。场景层新增
+  `Scene::play_model_animation_blend_with_fade`；报告 `models[].blend.fade`
+  原样回显。边界：只做**一次性**淡入，没有循环淡入/任意权重曲线/状态机。
+  回归：`scene_blend_fades_in_over_time`（t=.25 权重 0.5 位移 1.75、t=.5 权重 1
+  位移 3.5）+ `model_animation_blend_is_reported_and_rendered` 的 fade 回显 +
+  结构校验拒绝负 `fade`。
 - **双 clip 固定权重动画混合（第 71 轮）**：`models[].animation.blend =
   { name, start?, speed?, loop?, weight? }` 给第二条 glTF clip；两条各自推进自己的
   时间，先对**局部** TRS 插值（平移/缩放 lerp、旋转 slerp），再统一累乘父子链。

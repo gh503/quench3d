@@ -351,6 +351,7 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
                 duration: second.map(|c| c.duration),
                 tracks: second.map(|c| c.tracks.len()),
                 weight: b.weight.unwrap_or(0.5),
+                fade: b.fade.unwrap_or(0.0),
                 speed: b.speed.unwrap_or(1.0),
                 looping: b.looping.unwrap_or(true),
                 start: b.start.unwrap_or(0.0),
@@ -480,6 +481,8 @@ pub struct ModelBlendStatus {
     pub tracks: Option<usize>,
     /// 第二条 clip 的权重（0 = 只用第一条，1 = 只用第二条）。
     pub weight: f32,
+    /// 淡入时长（秒，缺省 0）。
+    pub fade: f32,
     /// 播放倍速（缺省 1）。
     pub speed: f32,
     /// 是否循环（缺省 true）。
@@ -3169,13 +3172,16 @@ pub fn setup_visuals(
                         secondary.looping = b.looping.unwrap_or(true);
                         secondary.time = b.start.unwrap_or(0.0);
                         secondary.advance(0.0);
-                        engine.scene.play_model_animation_blend(
+                        engine.scene.play_model_animation_blend_with_fade(
                             model.clone(),
                             objects.clone(),
                             base,
                             player,
                             secondary,
-                            b.weight.unwrap_or(0.5),
+                            quench3d::scene::BlendOptions::with_fade(
+                                b.weight.unwrap_or(0.5),
+                                b.fade.unwrap_or(0.0),
+                            ),
                         );
                     }
                 } else {

@@ -1550,6 +1550,11 @@ pub struct ModelAnimationBlendDoc {
     /// 第二条 clip 的权重（0..=1，缺省 0.5）。0 = 只用第一条，1 = 只用第二条。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<f32>,
+    /// 淡入时长（秒，缺省 0 = 立即到 `weight`）。
+    ///
+    /// 从第一帧的 0 平滑升到 `weight`（smoothstep）；适合一次性过渡，不做循环淡入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade: Option<f32>,
 }
 
 /// 一个外部模型文件。
@@ -5052,6 +5057,15 @@ impl SceneDoc {
                                 ErrorCode::OutOfRange,
                                 format!("{bp}.weight"),
                                 "混合权重必须在 0~1 之间（0 = 只用第一条，1 = 只用第二条）",
+                            ));
+                        }
+                    }
+                    if let Some(f) = b.fade {
+                        if !f.is_finite() || f < 0.0 {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{bp}.fade"),
+                                "淡入时长必须是非负有限值（0 = 立即生效）",
                             ));
                         }
                     }

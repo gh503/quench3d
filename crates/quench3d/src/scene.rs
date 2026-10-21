@@ -128,6 +128,27 @@ impl SceneObject {
     }
 }
 
+/// 第二条 clip 的混合参数：目标权重 + 一次性淡入时长（秒）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlendOptions {
+    /// 淡入结束后第二条 clip 的权重（0..=1）。
+    pub weight: f32,
+    /// 从 0 升到 `weight` 的秒数；0 = 立即生效。
+    pub fade: f32,
+}
+
+impl BlendOptions {
+    /// 立即到 `weight`（`fade = 0`）。
+    pub fn new(weight: f32) -> Self {
+        Self { weight, fade: 0.0 }
+    }
+
+    /// 在 `fade` 秒内从 0 平滑升到 `weight`。
+    pub fn with_fade(weight: f32, fade: f32) -> Self {
+        Self { weight, fade }
+    }
+}
+
 /// 场景里一个"正在播放 glTF 动画"的模型实例。
 ///
 /// 一个模型会展开成多个场景物体（每个网格片段一个），动画要把每个片段自己的矩阵
@@ -144,8 +165,14 @@ pub struct ModelAnimationInstance {
     pub player: crate::assets::ModelAnimationPlayer,
     /// 可选的**第二条**动画（交叉淡化）；`None` = 单 clip。
     pub secondary: Option<crate::assets::ModelAnimationPlayer>,
-    /// 第二条动画的权重（0 = 只用第一条，1 = 只用第二条）。
+    /// 第二条动画的**当前**权重（0 = 只用第一条，1 = 只用第二条）。
     pub blend_weight: f32,
+    /// 淡入结束时的目标权重（缺省 = `blend_weight`，即不淡入）。
+    pub blend_target: f32,
+    /// 淡入时长（秒）；0 = 立即到 `blend_target`。
+    pub blend_fade: f32,
+    /// 淡入已累计的时间（秒）。
+    pub blend_elapsed: f32,
 }
 
 /// 取一个动画实例当前该用的节点世界矩阵（单 clip 或双 clip 混合）。
@@ -350,6 +377,9 @@ impl Scene {
             player,
             secondary: None,
             blend_weight: 0.0,
+            blend_target: 0.0,
+            blend_fade: 0.0,
+            blend_elapsed: 0.0,
         });
         index
     }
@@ -371,6 +401,41 @@ impl Scene {
         secondary: crate::assets::ModelAnimationPlayer,
         weight: f32,
     ) -> usize {
+        self.play_model_animation_blend_with_fade(
+            model,
+            objects,
+            base,
+            primary,
+            secondary,
+            BlendOptions::new(weight),
+        )
+    }
+
+    /// 与 [`Self::play_model_animation_blend`] 相同，但第二条的权重在
+    /// `options.fade` 秒内从 0 **平滑**升到 `options.weight`（smoothstep）。
+    /// `fade = 0` 就是立即生效。
+    ///
+    /// 语义是"从主 clip 淡入到混合姿态"：第一帧完全是第一条，`fade` 秒后到达
+    /// `weight`。适合行走→奔跑这类一次性过渡；不做循环淡入、也不做权重曲线编辑。
+    pub fn play_model_animation_blend_with_fade(
+        &mut self,
+        model: Arc<crate::assets::LoadedModel>,
+        objects: Vec<usize>,
+        base: Vec<Transform>,
+        primary: crate::assets::ModelAnimationPlayer,
+        secondary: crate::assets::ModelAnimationPlayer,
+        options: BlendOptions,
+    ) -> usize {
+        let target = if options.weight.is_finite() {
+            options.weight.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let fade = if options.fade.is_finite() {
+            options.fade.max(0.0)
+        } else {
+            0.0
+        };
         let index = self.animations.len();
         self.animations.push(ModelAnimationInstance {
             model,
@@ -378,11 +443,10 @@ impl Scene {
             base,
             player: primary,
             secondary: Some(secondary),
-            blend_weight: if weight.is_finite() {
-                weight.clamp(0.0, 1.0)
-            } else {
-                0.0
-            },
+            blend_weight: if fade > 0.0 { 0.0 } else { target },
+            blend_target: target,
+            blend_fade: fade,
+            blend_elapsed: 0.0,
         });
         index
     }
@@ -409,6 +473,15 @@ impl Scene {
             a.player.advance(dt);
             if let Some(secondary) = &mut a.secondary {
                 secondary.advance(dt);
+                if a.blend_fade > 0.0 {
+                    let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+                    a.blend_elapsed = (a.blend_elapsed + step).min(a.blend_fade);
+                    let u = (a.blend_elapsed / a.blend_fade).clamp(0.0, 1.0);
+                    // smoothstep：两端一阶导为 0，过渡不会在起止处"顿一下"。
+                    a.blend_weight = a.blend_target * (u * u * (3.0 - 2.0 * u));
+                } else {
+                    a.blend_weight = a.blend_target;
+                }
             }
             let mats = animation_matrices(a);
             updated += apply_matrices(objects, &a.objects, &a.base, &mats);

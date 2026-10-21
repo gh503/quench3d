@@ -6373,6 +6373,23 @@ fn model_animation_blend_is_reported_and_rendered() {
     assert_eq!(m["blend"]["start"], 0.5, "{d}");
     assert!(m["blend"]["duration"].is_number(), "{d}");
 
+    // 1b) fade 原样回显（0.25 秒淡入）
+    let fade = write_scene(
+        &dir,
+        "blend-fade.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{ "path": "skin.glb", "animation": { "name": "lift",
+                "blend": { "name": "lift", "weight": 0.75, "fade": 0.25 } } }]
+        }),
+    );
+    let r = run(&["simulate", fade.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    let b = &d["data"]["models"][0]["blend"];
+    assert_eq!(b["weight"], 0.75, "{d}");
+    assert_eq!(b["fade"], 0.25, "{d}");
+
     // 2) 第二节 clip 名字写错：validate 仍然通过，报告与警告必须点名
     let bad = write_scene(
         &dir,
@@ -6686,6 +6703,17 @@ fn model_animation_structure_is_validated() {
     assert_eq!(code, 2, "第二条 clip 的倍速 0 要拦下");
     assert!(
         paths.contains(&"models[0].animation.blend.speed".to_string()),
+        "{paths:?}"
+    );
+
+    let p = scene(
+        "blend_fade.json",
+        serde_json::json!({ "name": "摆动", "blend": { "name": "摆动", "fade": -0.5 } }),
+    );
+    let (code, paths) = diagnostics(&p);
+    assert_eq!(code, 2, "负的淡入时长要拦下");
+    assert!(
+        paths.contains(&"models[0].animation.blend.fade".to_string()),
         "{paths:?}"
     );
 
