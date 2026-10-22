@@ -3333,6 +3333,7 @@ pub fn setup_visuals(
                             value: c.value,
                         })
                         .collect(),
+                    on_event: t.on_event.clone(),
                 })
                 .collect();
             let initial = anim

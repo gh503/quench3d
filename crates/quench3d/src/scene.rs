@@ -235,6 +235,8 @@ pub struct ModelAnimatorTransition {
     pub fade: f32,
     /// 参数条件；全部满足才允许过渡。空 = 只按时间/播完判断（旧行为）。
     pub conditions: Vec<AnimatorCondition>,
+    /// 可选的事件名：宿主发这个事件时**立即**过渡（忽略 `after`/`on_finished`）。
+    pub on_event: Option<String>,
 }
 
 /// 运行中的状态机：当前状态、已停留时间、正在淡入的目标状态。
@@ -252,6 +254,8 @@ pub struct ModelAnimatorRuntime {
     pub pending: Option<usize>,
     /// 运行时参数（按场景顺序；没有参数时为空）。
     pub parameters: Vec<ModelAnimatorParameter>,
+    /// 已收到、等下一帧帧首处理的事件（只保留一个；同帧多个只保留最后一个）。
+    pub pending_event: Option<String>,
 }
 
 /// 一条两骨 IK 链（模型局部空间）。
@@ -569,25 +573,39 @@ fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
     let Some(current_name) = current_name else {
         return;
     };
+    // 事件在帧首消费：只保留一个，发完这一帧没被任何过渡接住就丢弃。
+    let event = anim.pending_event.take();
     // 过渡在**帧首**判定：本帧开始时已经停留够 after 才切。这样目标 clip
     // 不会被多推进一整帧——它本帧只从 0 开始走这一帧的时间。
-    let transition = anim.transitions.iter().find(|t| {
-        if t.from != current_name {
-            return false;
-        }
-        // 条件驱动的自环会在条件持续满足时每帧重启；只允许时间/播完自环（旧行为）。
-        if !t.conditions.is_empty() && t.to == current_name {
-            return false;
-        }
-        if !conditions_hold(anim, &t.conditions) {
-            return false;
-        }
-        if t.on_finished {
-            // 帧首判定：上一帧 `player.advance` 已经把它置为 finished。
-            player_finished
-        } else {
-            t.after.is_finite() && t.after >= 0.0 && anim.elapsed >= t.after
-        }
+    //
+    // 事件过渡优先于同状态的时间过渡：先在所有事件过渡里找，找不到再退回
+    // 普通时间/播完过渡。这样「攻击键」不会被一个正好到点的 idle→walk 抢走。
+    let event_transition = event.as_deref().and_then(|name| {
+        anim.transitions.iter().find(|t| {
+            t.from == current_name
+                && t.on_event.as_deref() == Some(name)
+                && conditions_hold(anim, &t.conditions)
+        })
+    });
+    let transition = event_transition.or_else(|| {
+        anim.transitions.iter().find(|t| {
+            if t.from != current_name || t.on_event.is_some() {
+                return false;
+            }
+            // 条件驱动的自环会在条件持续满足时每帧重启；只允许时间/播完自环（旧行为）。
+            if !t.conditions.is_empty() && t.to == current_name {
+                return false;
+            }
+            if !conditions_hold(anim, &t.conditions) {
+                return false;
+            }
+            if t.on_finished {
+                // 帧首判定：上一帧 `player.advance` 已经把它置为 finished。
+                player_finished
+            } else {
+                t.after.is_finite() && t.after >= 0.0 && anim.elapsed >= t.after
+            }
+        })
     });
     let Some(transition) = transition else {
         anim.elapsed += step;
@@ -975,6 +993,7 @@ impl Scene {
                 elapsed: 0.0,
                 pending: None,
                 parameters: Vec::new(),
+                pending_event: None,
             }),
         });
         Some(index)
@@ -1021,6 +1040,55 @@ impl Scene {
         };
         param.value = value;
         true
+    }
+
+    /// 发一个离散事件：当前状态有匹配的 `on_event` 过渡时排队，下一帧帧首切换。
+    ///
+    /// 返回 `false` 表示没有状态机的当前状态监听这个事件（不会静默堆积）。
+    /// 同帧多次调用只保留最后一个；过渡事件在帧首优先于同状态的时间过渡。
+    pub fn fire_animator_event(&mut self, animation_index: usize, name: &str) -> bool {
+        if name.trim().is_empty() {
+            return false;
+        }
+        let Some(anim) = self
+            .animations
+            .get_mut(animation_index)
+            .and_then(|a| a.animator.as_mut())
+        else {
+            return false;
+        };
+        let Some(current) = anim.states.get(anim.current).map(|s| s.name.as_str()) else {
+            return false;
+        };
+        if !anim
+            .transitions
+            .iter()
+            .any(|t| t.from == current && t.on_event.as_deref() == Some(name))
+        {
+            return false;
+        }
+        anim.pending_event = Some(name.to_string());
+        true
+    }
+
+    /// 这个状态机里声明过的事件名（去重、保持过渡顺序；给编辑器画按钮）。
+    pub fn animator_event_names(&self, animation_index: usize) -> Vec<String> {
+        let Some(anim) = self
+            .animations
+            .get(animation_index)
+            .and_then(|a| a.animator.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for t in &anim.transitions {
+            if let Some(name) = &t.on_event {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        out
     }
 
     /// 把某个状态机的全部参数重置为场景里的 `default`；返回重置个数。
@@ -2304,6 +2372,11 @@ mod anim_tests {
                     duration: 1.0,
                     ..Default::default()
                 },
+                LoadedAnimation {
+                    name: "jump".into(),
+                    duration: 1.0,
+                    ..Default::default()
+                },
             ],
             skins: Vec::new(),
         })
@@ -2338,6 +2411,7 @@ mod anim_tests {
                 op,
                 value,
             }],
+            on_event: None,
         }
     }
 
@@ -2417,6 +2491,106 @@ mod anim_tests {
         );
         scene.advance_animations(0.0);
         assert_eq!(scene.animations[idx].player.animation, "run", "满 2 秒后切");
+    }
+
+    #[test]
+    fn animator_event_transitions_win_over_due_time_transitions() {
+        let model = condition_model();
+        let states = vec![
+            condition_state("idle", "idle"),
+            condition_state("walk", "run"),
+            condition_state("jump", "jump"),
+        ];
+        let transitions = vec![
+            // 时间过渡写在前面，且 after=0 本帧就到期；事件仍必须赢。
+            ModelAnimatorTransition {
+                from: "idle".into(),
+                to: "walk".into(),
+                after: 0.0,
+                on_finished: false,
+                fade: 0.0,
+                conditions: Vec::new(),
+                on_event: None,
+            },
+            ModelAnimatorTransition {
+                from: "idle".into(),
+                to: "jump".into(),
+                after: 999.0,
+                on_finished: false,
+                fade: 0.0,
+                conditions: Vec::new(),
+                on_event: Some("跳跃".into()),
+            },
+        ];
+        let mut scene = Scene::new();
+        let idx = scene
+            .play_model_animator(model, Vec::new(), Vec::new(), states, transitions, 0)
+            .expect("三个 clip 都在");
+        assert_eq!(scene.animator_event_names(idx), vec!["跳跃".to_string()]);
+        assert!(!scene.fire_animator_event(idx, "不存在"));
+        assert!(scene.fire_animator_event(idx, "跳跃"));
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "jump");
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .pending_event,
+            None,
+            "事件必须被消费一次"
+        );
+    }
+
+    #[test]
+    fn animator_event_conditions_are_checked_before_switching() {
+        let model = condition_model();
+        let states = vec![
+            condition_state("idle", "idle"),
+            condition_state("jump", "jump"),
+        ];
+        let transitions = vec![ModelAnimatorTransition {
+            from: "idle".into(),
+            to: "jump".into(),
+            after: 0.0,
+            on_finished: false,
+            fade: 0.0,
+            conditions: vec![AnimatorCondition {
+                parameter: "speed".into(),
+                op: AnimatorOp::Greater,
+                value: 0.1,
+            }],
+            on_event: Some("跳跃".into()),
+        }];
+        let mut scene = Scene::new();
+        let idx = scene
+            .play_model_animator(model, Vec::new(), Vec::new(), states, transitions, 0)
+            .expect("两个 clip 都在");
+        scene.animations[idx].animator.as_mut().unwrap().parameters =
+            vec![ModelAnimatorParameter {
+                name: "speed".into(),
+                value: 0.0,
+                default: 0.0,
+            }];
+
+        // 事件能排队，但条件不满足 → 不切，事件这一帧丢弃。
+        assert!(scene.fire_animator_event(idx, "跳跃"));
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "idle");
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .pending_event,
+            None
+        );
+
+        // 条件满足后同一个事件才切。
+        assert!(scene.set_animator_parameter(idx, "speed", 1.0));
+        assert!(scene.fire_animator_event(idx, "跳跃"));
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "jump");
     }
 
     #[test]

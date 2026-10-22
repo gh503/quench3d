@@ -145,8 +145,11 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   新 clip 提为主 clip。过渡可带 `conditions`（引用 `parameters`，支持
   `greater/greater_or_equal/less/less_or_equal/equal/not_equal`），全部满足且满足时间
   条件才切；宿主用 `Scene::set_animator_parameter(index, name, value)` 每帧写角色速度/
-  是否着地等输入。参数是浮点，布尔/触发器用 0/1 表达；仍没有**离散事件**（跳一下、
-  攻击命中）和参数曲线。和 `models[].animation` 互斥。报告
+  是否着地等输入。参数是浮点，布尔用 0/1 表达。过渡还可写 `on_event`：宿主调用
+  `Scene::fire_animator_event(index, name)` 发离散事件（跳一下/攻击命中），下一帧帧首
+  **立即**过渡，事件过渡优先于同状态到期的时间过渡；需要 `conditions` 时同样要满足，
+  条件不满足则事件被丢弃。事件只保留一个、消费一次，没有队列/输入缓冲。仍没有参数
+  曲线。和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
 * **两骨 IK（脚/手目标）**：场景里用 `models[].ik` 给角色加链：
   `{ "root": "LeftUpLeg", "mid": "LeftLeg", "tip": "LeftFoot", "target": [x,y,z], "pole": [0,0,1] }`。
@@ -162,7 +165,8 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   普通动画还可从资产里选择 clip（写回 `models[i].animation.name`）；状态机的片段由
   `states` 管，不能在这里单换。状态机的每条过渡可直接改等待秒数、淡入秒数和
   「播完触发」（写回 `transitions[i]`）。状态机有参数时，面板会列出参数滑杆；拖动后
-  立刻按新值判一次过渡（暂停也生效），但只改当前会话、不写场景默认值。模型有 `ik` 时，每条链的目标 XYZ 也可直接
+  立刻按新值判一次过渡（暂停也生效），但只改当前会话、不写场景默认值。有 `on_event`
+  过渡时，面板会为每个事件画「发送 xxx」按钮，点击后同样以 `dt=0` 当场判一次。模型有 `ik` 时，每条链的目标 XYZ 也可直接
   改并写回 `models[i].ik[j].target`，视口里的蒙皮和 `F8` 骨架当场跟着动。
   边界：仍不是完整时间轴（不能加离散事件/参数曲线，不能增删 IK 链）。
 * **CUBICSPLINE 真值**：glTF 动画的 TRS 轨道按 Hermite 基函数使用入/出切线
@@ -237,7 +241,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12469212 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12474495 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -923,8 +927,11 @@ NaN 刚体  : 0
   `models[].animator.parameters` 是**输入参数**（`[{ "name": "speed", "default": 0.0 }]`），
   过渡用 `conditions: [{ "parameter": "speed", "op": "greater", "value": 0.1 }]` 引用；
   `op` 取 `greater/greater_or_equal/less/less_or_equal/equal/not_equal`，条件与
-  `after`/`on_finished` 是**与**关系。参数由宿主写（编辑器面板/`Scene::set_animator_parameter`），
-  场景里的 `default` 只是初值；`validate` 会查参数重名、名字为空、条件引用不存在的参数。
+  `after`/`on_finished` 是**与**关系。过渡还可写 `"on_event": "跳跃"`，由
+  `Scene::fire_animator_event` 触发，忽略 `after`/`on_finished`、但 `conditions` 仍要满足；
+  事件过渡优先于同状态的时间过渡。参数由宿主写（编辑器面板/`Scene::set_animator_parameter`），
+  场景里的 `default` 只是初值；`validate` 会查参数重名、名字为空、条件引用不存在的参数、
+  空事件名。
   `models[].ik` 是**两骨 IK**（需要同时有 `animation` 或 `animator`）：数组里每条链写
   `root/mid/tip` 三个 glTF 节点名、`target` 三维目标、可选 `pole` 方向；名字不存在或
   父子关系不成立时整条跳过，几何保持原姿态。`validate` 只查结构（名字非空、三者不同、
@@ -1265,7 +1272,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 726 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 728 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

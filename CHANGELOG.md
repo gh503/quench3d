@@ -41,6 +41,14 @@
 
 ### 新增
 
+- **动画状态机离散事件（第 98 轮）**：`transitions[].on_event` 声明事件名，宿主用
+  `Scene::fire_animator_event(index,name)` 发事件，下一帧帧首**立即**过渡（忽略
+  `after`/`on_finished`，但 `conditions` 仍要满足）。事件过渡**优先于**同状态到期的时间
+  过渡；事件只保留一个、消费一次，条件不满足或没有监听时丢弃，`fire_animator_event`
+  返回 `false`。编辑器为每个事件画「发送 xxx」按钮，点击后以 `dt=0` 当场判定；过渡行
+  显示事件名。`validate` 检查空事件名，schema 增加 `on_event`。回归：
+  `animator_event_transitions_win_over_due_time_transitions`、
+  `animator_event_conditions_are_checked_before_switching`（总测试 726 → 728）。
 - **参数驱动的动画状态机（第 97 轮）**：`models[].animator` 新增 `parameters`
   （`[{ "name":"speed", "default":0.0 }]`）和过渡的 `conditions`
   （`[{ "parameter":"speed", "op":"greater", "value":0.1 }]`，6 种比较）。条件与

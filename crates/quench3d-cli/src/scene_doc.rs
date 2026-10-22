@@ -1644,6 +1644,9 @@ pub struct ModelAnimatorTransitionDoc {
     /// 参数条件；全部满足（且满足 `after` / `on_finished`）才过渡。空 = 旧行为。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<AnimatorConditionDoc>,
+    /// 可选的事件名；宿主 `Scene::fire_animator_event` 发这个事件时立即过渡。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_event: Option<String>,
 }
 
 /// 一个按**停留时间 + 参数条件**驱动的模型动画状态机。
@@ -5417,6 +5420,15 @@ impl SceneDoc {
                             ));
                         }
                     }
+                    if let Some(event) = &tr.on_event {
+                        if event.trim().is_empty() {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{tp}.on_event"),
+                                "事件名不能为空",
+                            ));
+                        }
+                    }
                     for (ci, cond) in tr.conditions.iter().enumerate() {
                         let cp = format!("{tp}.conditions[{ci}]");
                         if !param_names.contains(&cond.parameter) {
@@ -7933,7 +7945,7 @@ mod tests {
                         { "name": "run", "animation": "run" }
                     ],
                     "transitions": [{
-                        "from": "idle", "to": "run", "after": 0.0,
+                        "from": "idle", "to": "run", "after": 0.0, "on_event": "跳跃",
                         "conditions": [
                             { "parameter": "speed", "op": "greater", "value": 0.1 },
                             { "parameter": "grounded", "op": "greater_or_equal", "value": 0.5 }
@@ -7948,6 +7960,7 @@ mod tests {
         assert_eq!(anim.parameters[1].default, 1.0);
         assert_eq!(anim.transitions[0].conditions.len(), 2);
         assert_eq!(anim.transitions[0].conditions[0].value, 0.1);
+        assert_eq!(anim.transitions[0].on_event.as_deref(), Some("跳跃"));
         let diags: Vec<_> = doc
             .validate()
             .into_iter()
@@ -7962,6 +7975,12 @@ mod tests {
         assert_eq!(
             again.models[0].animator.as_ref().unwrap().transitions[0].conditions[0].parameter,
             "speed"
+        );
+        assert_eq!(
+            again.models[0].animator.as_ref().unwrap().transitions[0]
+                .on_event
+                .as_deref(),
+            Some("跳跃")
         );
 
         // 条件引用不存在的参数：必须是错误，不能静默永远不切。

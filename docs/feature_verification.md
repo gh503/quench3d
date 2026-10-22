@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **726** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **728** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -126,6 +126,7 @@ tools/verify_all.sh
 | 线上 Pages 启动 | `tools/probe_deployed.sh [URL]` | HTTP 200 + 线上 wasm 第一帧 + 遮罩收起；网络不通跳过 |
 | Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/P 前后 UI 状态与中央视口截图都必须变；F5/F8 只断言状态（默认场景可能没有接触/动画），Tab 断言相机模式（Orbit→Fly） |
 | 模型骨骼叠加 | `cargo test -p quench3d --lib model_skeleton` | 三关节链（中间夹一个非关节节点）只产出 root→mid、mid→tip 两条边；叠加层再乘模型世界变换（+10,+2） |
+| 状态机事件 | `cargo test -p quench3d --lib animator_event` | 事件过渡写在到期的时间过渡之后仍优先；同帧发事件→`dt=0` 切到 jump；事件只消费一次；条件不满足时不切且事件丢弃；未知事件/无监听返回 false |
 | 状态机参数条件 | `cargo test -p quench3d --lib animator_` | 参数 0→1 后 `dt=0` 立即 idle→run，反向条件回 idle；`after=2` 时 1 秒不切、满 2 秒后下一帧切；未知参数/NaN 被拒绝、重置回 default |
 | 参数场景格式 | `cargo test -p quench3d-cli --lib animator_parameters_and` | `parameters/conditions` 序列化往返；条件引用不存在参数、参数重名都在 `validate` 报错 |
 | 两骨 IK | `cargo test -p quench3d --lib two_bone` / `set_model_ik` | 可达目标：末端误差 <1e-3、两骨长度不变、pole=+Z 时膝盖往 +Z；不可达目标夹到 2.0 不拉伸；坏链整条跳过、世界矩阵逐位不变；`set_model_ik` 后骨骼叠加层末端 = 目标 |
@@ -149,8 +150,8 @@ python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 
 ## 6. 明确未覆盖（不要当成绿）
 
-* **动画状态机**：时间/播完过渡之外，第 97 轮加了 `parameters` + `conditions`（浮点输入、6 种比较、与时间条件是“与”），编辑器参数滑杆改完立刻判一次过渡；仍没有离散事件、参数曲线、输入缓冲。
-* **GPU 蒙皮 / 动画混合 / IK**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，**纯蒙皮**走顶点着色器（每顶点最多 4 关节、128 关节 uniform 调色板；`Scene::gpu_skinning=false` 可退回 CPU，带 morph 仍走 CPU）。双 clip 混合、参数驱动状态机、morph target（静态 + `weights` 动画 + 双 clip 插值）、两骨 IK（`models[].ik`）已做；**离散事件状态机、morph+skin 的 GPU 路径、IK/FK 权重混合**仍未做。
+* **动画状态机**：时间/播完过渡之外，第 97 轮加了 `parameters` + `conditions`（浮点输入、6 种比较、与时间条件是“与”），第 98 轮加了 `on_event` 离散事件（优先于到期的时间过渡，事件只消费一次）；编辑器有参数滑杆和事件发送按钮；仍没有参数曲线、事件队列/输入缓冲。
+* **GPU 蒙皮 / 动画混合 / IK**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，**纯蒙皮**走顶点着色器（每顶点最多 4 关节、128 关节 uniform 调色板；`Scene::gpu_skinning=false` 可退回 CPU，带 morph 仍走 CPU）。双 clip 混合、参数/事件驱动状态机、morph target（静态 + `weights` 动画 + 双 clip 插值）、两骨 IK（`models[].ik`）已做；**morph+skin 的 GPU 路径、IK/FK 权重混合、事件队列/输入缓冲**仍未做。
 * **IBL / HDRI / 环境 cubemap**：只有解析式环境高光。
 * **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除。
 * **音频、脚本层、粒子、贴花、地形、多视口**：没有。

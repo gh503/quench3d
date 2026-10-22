@@ -1681,6 +1681,27 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             }
                         }
                     }
+                    let event_names: Vec<String> = animator
+                        .transitions
+                        .iter()
+                        .filter_map(|t| t.on_event.clone())
+                        .fold(Vec::new(), |mut names, name| {
+                            if !names.contains(&name) {
+                                names.push(name);
+                            }
+                            names
+                        });
+                    if !event_names.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("事件").small().strong());
+                            for name in &event_names {
+                                if ui.small_button(format!("发送 {name}")).clicked() {
+                                    animator.pending_event = Some(name.clone());
+                                    step_animator = true;
+                                }
+                            }
+                        });
+                    }
                     let current = animator
                         .states
                         .get(animator.current)
@@ -1945,6 +1966,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                             on_finished: false,
                                             fade: 0.0,
                                             conditions: Vec::new(),
+                                            on_event: None,
                                         },
                                     );
                                     if models[index].is_some() {
@@ -1972,6 +1994,13 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         let mut changed = false;
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{from} → {to}")).small());
+                            if let Some(event) = &transition.on_event {
+                                ui.label(
+                                    RichText::new(format!("事件 {event}"))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(240, 190, 90)),
+                                );
+                            }
                             let response = ui.add_enabled(
                                 !transition.on_finished,
                                 egui::DragValue::new(&mut transition.after)

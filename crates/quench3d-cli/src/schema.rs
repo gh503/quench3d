@@ -844,13 +844,22 @@ pub fn json_schema() -> Value {
         d
     });
     defs.insert("modelAnimatorTransition".into(), {
-        let mut d = def(&["from", "to", "after", "on_finished", "fade", "conditions"]);
+        let mut d = def(&[
+            "from",
+            "to",
+            "after",
+            "on_finished",
+            "fade",
+            "conditions",
+            "on_event",
+        ]);
         d["properties"]["after"] = json!({ "type": "number", "minimum": 0.0 });
         d["properties"]["on_finished"] = json!({ "type": "boolean", "default": false });
         d["properties"]["conditions"] = json!({
             "type": "array",
             "items": { "$ref": "#/$defs/modelAnimatorCondition" }
         });
+        d["properties"]["on_event"] = json!({ "type": "string", "minLength": 1 });
         d["required"] = json!(["from", "to"]);
         d
     });

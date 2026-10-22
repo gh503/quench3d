@@ -129,6 +129,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
                     op: quench3d::scene::AnimatorOp::Greater,
                     value: 0.1,
                 }],
+                on_event: Some("跳跃".into()),
             }],
             current: 0,
             elapsed: 0.25,
@@ -138,6 +139,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
                 value: 0.5,
                 default: 0.0,
             }],
+            pending_event: None,
         }),
     }
 }
@@ -314,6 +316,10 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "重置参数"),
         "参数重置按钮没有绘制"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "发送 跳跃"),
+        "事件发送按钮没有绘制"
     );
     assert!(
         shapes_contain_text(&output.shapes, "待机 → 走"),
