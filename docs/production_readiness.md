@@ -733,7 +733,7 @@ gap 表里与资产搜索路径（#11）同源，等那一项一起做；**编�
 | 场景格式 | **没有新字段** | 查询不是场景内容；`--mask` 与 `objects[].collision_layer` 是同一套层号（单向 vs 对称的区别写进了 schema 与 README） |
 | CLI | `query` 子命令（`--ray` / `--overlap` / `--all` / `--mask` / `--no-sensors` / `--max` / `--steps` / `--index`） | 报告里 `tested` 是"实际检查了几个刚体"（加速的可见证据）；`--dry-run` / `--no-clobber` / `--out` **明确报错**而不是悄悄忽略 |
 | MCP | 新增 `quench3d_query`（只读 / 幂等 / 不出网） | 与 CLI 共用 `runner::parse_ray_query` / `parse_overlap_query`，语法不会漂移 |
-| 编辑器 | F7「查询探针」（相机中心射线：命中画红箭头 + 绿色法线） | `center_probe(camera, world, max)` 是纯函数（离线用例钉住）；画线本身没法离线验证（诚实边界） |
+| 编辑器 | F7「查询探针」、F8「模型骨骼」（关节线段 + 关节点） | `center_probe(camera, world, max)` 与 `skeleton_edges` 是纯函数（离线用例钉住边数/端点/世界变换）；画线本身没法离线验证（诚实边界） |
 
 **踩过的坑**：① `broadphase.compute_pairs` 在 `proxies.len() < 2` 或"没有可动体"时**直接 return**，
 网格根本没建——想复用它当查询索引会踩到"静态场景查不到东西"，所以 `QueryIndex` 自带一份网格
@@ -2492,9 +2492,9 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**714** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**716** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
-* `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
+* `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
   F6=`bounds`、F7=`query`、P=`paused` true→false）；F5 只断言 `contacts`，Tab 断言
   `camera` Orbit→Fly。

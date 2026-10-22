@@ -335,6 +335,7 @@ impl Inner {
             contacts: self.engine.debug.physics_contacts,
             bounds: self.engine.debug.body_bounds,
             query: self.engine.debug.query_probe,
+            bones: self.engine.debug.bones,
         });
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
@@ -650,6 +651,7 @@ struct UiDebugState {
     contacts: bool,
     bounds: bool,
     query: bool,
+    bones: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -667,6 +669,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         contacts,
         bounds,
         query,
+        bones,
     } = state;
     let Some(window) = web_sys::window() else {
         return;
@@ -680,7 +683,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query}"
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }

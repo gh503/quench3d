@@ -36,6 +36,12 @@
 
 ### 新增
 
+- **模型骨骼叠加（第 95 轮）**：`F8` 开关在调试层画出所有播放中模型的关节线段（父关节 → 最近关节祖先，
+  中间的非关节变换节点自动跳过）与关节点；线段乘模型当前世界变换，所以移动/旋转模型后骨架跟着走。
+  纯函数 `skeleton_edges` 有两组离线用例（三关节链 2 条边、空 clip + 世界平移 (10,2,0)），
+  Web 探针在 `ui_debug=1` 下断言 `bones` false→true。回归：
+  `skeleton_edges_connect_joints_and_skip_non_joint_nodes` /
+  `model_skeleton_lines_follow_the_model_world_transform`（总测试 714 → 716）。
 - **GPU 蒙皮（第 94 轮）**：顶点格式加入 `JOINTS_0/WEIGHTS_0`（`Vertex.joints/weights`），
   PBR 与阴影着色器都按关节矩阵变形。场景每帧把所有**纯蒙皮**实例的关节矩阵拼进
   128 关节的 uniform 调色板（8 KB；只满足 WebGL2 最低 4 KB uniform 的设备可退回 CPU），实例只带

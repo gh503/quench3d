@@ -84,6 +84,8 @@ pub struct DebugOptions {
     pub body_bounds: bool,
     /// 从相机中心打一条射线，画出命中的位置与法线（"我看的这块是什么"）。
     pub query_probe: bool,
+    /// 画出播放中模型的骨骼线段（父关节 → 子关节）。
+    pub bones: bool,
     /// 是否启用（总开关）。
     pub enabled: bool,
 }
@@ -96,6 +98,7 @@ impl Default for DebugOptions {
             velocities: false,
             body_bounds: false,
             query_probe: false,
+            bones: false,
             enabled: true,
         }
     }
@@ -375,7 +378,7 @@ impl Engine {
         }
     }
 
-    /// 内置快捷键（Tab 相机模式、R 聚焦、F3/F4 网格阴影、F5/F6 调试、P 暂停、Esc 退出）。
+    /// 内置快捷键（Tab 相机模式、R 聚焦、F3/F4 网格阴影、F5~F8 调试、P 暂停、Esc 退出）。
     ///
     /// 自己写事件循环（编辑器）时直接调它就能白拿这套快捷键；
     /// 传 `None` 表示"只改状态，不主动退出事件循环"（退出交给调用方看
@@ -405,6 +408,9 @@ impl Engine {
         if self.input.key_pressed(KeyCode::F7) {
             self.debug.query_probe = !self.debug.query_probe;
         }
+        if self.input.key_pressed(KeyCode::F8) {
+            self.debug.bones = !self.debug.bones;
+        }
         if self.input.key_pressed(KeyCode::KeyP) {
             self.paused = !self.paused;
         }
@@ -422,6 +428,11 @@ impl Engine {
         }
         // 查询探针的结果先算好：后面 `lines` 借了 `self.renderer` 的可变引用，
         // 那时就不能再读 `self.camera()` / `self.world` 了。
+        let skeleton = if self.debug.bones {
+            self.scene.model_skeleton_lines()
+        } else {
+            Vec::new()
+        };
         let probe = if self.debug.query_probe {
             let camera = self.camera();
             let ray = camera.ndc_ray(Vec2::ZERO);
@@ -432,6 +443,10 @@ impl Engine {
         let lines = &mut self.renderer.lines;
         if self.debug.axes {
             lines.world_axes(3.0, 0.35);
+        }
+        for (a, b) in skeleton {
+            lines.line(a, b, Vec4::new(0.2, 0.95, 0.85, 0.95));
+            lines.contact_point(a, Vec3::Y, 0.025, Vec4::new(1.0, 0.85, 0.2, 0.9));
         }
         if self.debug.physics_contacts {
             for c in self.world.contacts() {

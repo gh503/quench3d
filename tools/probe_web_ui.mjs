@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 真实浏览器里的 Web UI 正向探针：暂停后依次按 F3/F4/R/F6/F7/P/F5/Tab，
+// 真实浏览器里的 Web UI 正向探针：暂停后依次按 F3/F4/R/F6/F7/F8/P/F5/Tab，
 // 截图中央视口并断言状态（多数项还要求像素）变化。
 //
 // 为什么不是只跑 `probe_webgl2.sh`：那条只证明"能启动/第一帧出来了"，不证明
@@ -192,6 +192,8 @@ async function main() {
   // 所以只要求状态切换正确，不强迫截图变化（F6/F7 有几何，必须变）。
   await toggle("接触点 F5", "F5", "F5", 116, false);
   await toggle("查询探针 F7", "F7", "F7", 118);
+  // F8 只在有播放模型时画骨头；默认场景没有动画，只验状态切换。
+  await toggle("骨骼 F8", "F8", "F8", 119, false);
   await toggle("暂停 P", "p", "KeyP", 80);
   // Tab 只切相机模式：状态必须变，但不强制中央视口立刻不同。
   await toggle("相机模式 Tab", "Tab", "Tab", 9, false);

@@ -9,7 +9,7 @@
 //! 带刚体的物体不能有父物体（位姿归物理管）；删除物体要调 [`Scene::remove`]
 //! （它负责把子孙提到祖父、保持它们的世界位姿、并把后面的父下标前移）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use quench3d_math::{Mat4, Quat, Transform, Vec2, Vec3, Vec4};
@@ -288,6 +288,36 @@ fn gpu_skin_plan(
         }
     }
     (palette, plan)
+}
+
+/// 一个已蒙皮模型的骨骼线段（模型局部空间，父关节 → 子关节）。
+///
+/// 只画 `skins[].joints` 里的关节，并且只连**最近关节祖先**——中间可能隔着
+/// 非关节节点（glTF 的变换分组），跳过它们，骨架才不会断。
+fn skeleton_edges(model: &crate::assets::LoadedModel, worlds: &[Mat4]) -> Vec<(Vec3, Vec3)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for skin in &model.skins {
+        for &node in &skin.joints {
+            let mut parent = model.nodes.get(node).and_then(|n| n.parent);
+            while let Some(p) = parent {
+                if skin.joints.contains(&p) {
+                    if seen.insert((p, node)) {
+                        let (Some(a), Some(b)) = (
+                            worlds.get(p).map(Mat4::translation),
+                            worlds.get(node).map(Mat4::translation),
+                        ) else {
+                            break;
+                        };
+                        out.push((a, b));
+                    }
+                    break;
+                }
+                parent = model.nodes.get(p).and_then(|n| n.parent);
+            }
+        }
+    }
+    out
 }
 
 /// 状态机的一步：推进当前状态计时，命中过渡就建立淡入（或立即切换）。
@@ -964,6 +994,28 @@ impl Scene {
         }
     }
 
+    /// 当前所有播放中模型的骨骼线段（世界空间），给调试叠加层用。
+    ///
+    /// 没有动画/蒙皮时返回空；同一根骨头被多个 skin 引用时只画一次。
+    pub fn model_skeleton_lines(&self) -> Vec<(Vec3, Vec3)> {
+        let mut out = Vec::new();
+        for a in &self.animations {
+            let Some(&object_index) = a.objects.first() else {
+                continue;
+            };
+            let Some(worlds) = animation_worlds(a) else {
+                continue;
+            };
+            let base = self.world_transform(object_index);
+            out.extend(
+                skeleton_edges(&a.model, &worlds)
+                    .into_iter()
+                    .map(|(a, b)| (base.transform_point(a), base.transform_point(b))),
+            );
+        }
+        out
+    }
+
     /// 提交全部可见物体到渲染器。
     pub fn submit(&self, renderer: &mut Renderer) {
         let (palette, skin_plan) = gpu_skin_plan(&self.animations, self.gpu_skinning);
@@ -1555,9 +1607,10 @@ mod anim_tests {
     use super::*;
     use crate::assets::{
         AnimatedProperty, AnimationTrack, Interpolation, LoadedAnimation, LoadedMesh, LoadedModel,
-        LoadedNode,
+        LoadedNode, LoadedSkin,
     };
     use quench3d_math::{Mat4, Quat};
+    use std::sync::Arc;
 
     /// 造一个 2 网格 / 2 节点的模型：节点 1 是"滑轮"，绑定姿态在 x=+2，
     /// 动画 1 秒内把它从 x=2 移到 x=4。
@@ -1754,5 +1807,90 @@ mod anim_tests {
         assert!(scene.animations.is_empty(), "clear 要清掉动画登记");
         assert_eq!(scene.advance_animations(1.0), 0);
         assert!(scene.objects.is_empty());
+    }
+
+    #[test]
+    fn skeleton_edges_connect_joints_and_skip_non_joint_nodes() {
+        let model = LoadedModel {
+            name: "rig".into(),
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            images: Vec::new(),
+            nodes: vec![
+                LoadedNode {
+                    name: "root".into(),
+                    ..Default::default()
+                },
+                LoadedNode {
+                    name: "group".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+                LoadedNode {
+                    name: "mid".into(),
+                    parent: Some(1),
+                    translation: Vec3::new(1.0, 0.0, 0.0),
+                    ..Default::default()
+                },
+                LoadedNode {
+                    name: "tip".into(),
+                    parent: Some(2),
+                    translation: Vec3::new(1.0, 0.0, 0.0),
+                    ..Default::default()
+                },
+            ],
+            animations: Vec::new(),
+            // `group` 不是关节：root→mid 必须直接连起来，骨架不能断。
+            skins: vec![LoadedSkin {
+                joints: vec![0, 2, 3],
+                inverse_bind: vec![Mat4::IDENTITY; 3],
+            }],
+        };
+        let worlds = model.bind_pose();
+        let edges = skeleton_edges(&model, &worlds);
+        assert_eq!(edges.len(), 2, "root→mid、mid→tip 两条边");
+        assert_eq!(edges[0].0, Vec3::ZERO);
+        assert_eq!(edges[0].1, Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(edges[1].0, Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(edges[1].1, Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn model_skeleton_lines_follow_the_model_world_transform() {
+        let model = Arc::new(LoadedModel {
+            name: "rig".into(),
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            images: Vec::new(),
+            nodes: vec![
+                LoadedNode {
+                    name: "root".into(),
+                    ..Default::default()
+                },
+                LoadedNode {
+                    name: "mid".into(),
+                    parent: Some(0),
+                    translation: Vec3::new(1.0, 0.0, 0.0),
+                    ..Default::default()
+                },
+            ],
+            animations: vec![LoadedAnimation {
+                name: "idle".into(),
+                ..Default::default()
+            }],
+            skins: vec![LoadedSkin {
+                joints: vec![0, 1],
+                inverse_bind: vec![Mat4::IDENTITY; 2],
+            }],
+        });
+        let mut scene = Scene::new();
+        let base = Transform::new(Vec3::new(10.0, 2.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+        let object = scene.add_named(1, 1, base, "rig");
+        let player = model.player("idle").expect("空 clip 也能建播放器");
+        scene.play_model_animation(Arc::clone(&model), vec![object], vec![base], player);
+        let lines = scene.model_skeleton_lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, Vec3::new(10.0, 2.0, 0.0));
+        assert_eq!(lines[0].1, Vec3::new(11.0, 2.0, 0.0));
     }
 }
