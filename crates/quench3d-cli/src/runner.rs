@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use quench3d::physics::{BodyType, PhysicsWorld, QueryFilter, Shape};
 use quench3d::prelude::*;
-use quench3d::render::{RenderStats, Vertex};
+use quench3d::render::{environment::EnvironmentMap, RenderStats, Vertex};
 use serde::{Deserialize, Serialize};
 
 use crate::scene_doc::{
@@ -3043,7 +3043,7 @@ pub fn setup_visuals(
     let resolved = resolve_includes(doc)?;
     let expanded = resolved.expanded();
     let doc = &expanded;
-    apply_lighting(engine, doc);
+    apply_lighting(engine, doc)?;
 
     // 材质（贴图按路径加载并按 (路径, 是否 sRGB) 缓存，多个材质共用一张图只上一次显存）
     let mut materials: BTreeMap<String, MaterialId> = BTreeMap::new();
@@ -3841,8 +3841,24 @@ pub fn ssao_options(doc: &SceneDoc) -> quench3d::render::SsaoOptions {
 /// "存盘后重新载入"必须落在同一套光照默认值上。从前编辑器默认场景吃的是
 /// `Lighting::default()`，而载入/撤销走的是这里（没写 `preset` = `Lighting::studio()`，
 /// 带两盏补光），两条路径的默认值不同 —— 于是"撤销一次就凭空多出两盏点光源"。
-pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
+pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) -> Result<(), RunError> {
     let l = &doc.lighting;
+    // 环境贴图先解码（失败就把错误交出去，不静默退回解析式天空）。
+    let environment = match l.environment_map.as_deref() {
+        Some(path) => {
+            let resolved = doc
+                .resolve_asset(path)
+                .ok_or_else(|| RunError::scene(format!("找不到环境贴图 \"{path}\"")))?;
+            let map = EnvironmentMap::load(
+                &resolved,
+                l.environment_intensity.unwrap_or(1.0),
+                l.environment_rotation_deg.unwrap_or(0.0),
+            )
+            .map_err(|e| RunError::scene(format!("lighting.environment_map: {e}")))?;
+            Some(std::sync::Arc::new(map))
+        }
+        None => None,
+    };
     // 未知预设由 `SceneDoc::validate` 拦下（`load_scene` 会拒绝带 error 的场景），
     // 所以这里的兜底分支只对"没写 preset"生效。
     engine.scene.lighting = match l.preset.as_deref() {
@@ -3920,6 +3936,11 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) {
     if let Some(lights) = &l.spot_lights {
         lighting.spot_lights = lights.iter().map(spot_light_from_doc).collect();
     }
+    lighting.environment = environment.clone();
+    engine
+        .renderer
+        .set_environment_map(&engine.gpu, environment.as_deref());
+    Ok(())
 }
 
 /// 单盏点光源：场景文档 → 引擎。

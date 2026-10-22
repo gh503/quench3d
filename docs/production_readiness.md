@@ -34,7 +34,7 @@
 
 | 能力 | 对标 | quench3d 现状 | 等级 |
 |---|---|---|---|
-| 前向 PBR | 全部 | 金属度/粗糙度工作流 + 解析式环境高光（无 HDRI/cubemap）；直接光照手感正确 | ✅ |
+| 前向 PBR | 全部 | 金属度/粗糙度工作流 + IBL 环境贴图（等距柱状 HDR/PNG/JPEG，手工预滤波 cubemap）；直接光照手感正确 | ✅ |
 | HDR 管线 | three.js / Unity | `rgba16float` 中间目标（`renderer.rs:41`）+ ACES 色调映射（`shaders/post.wgsl:26`，Narkowicz 近似）+ 可选半分辨率 bloom（`renderer.rs:253`、`shaders/bloom.wgsl`）+ 标量曝光（`light.rs:177`） | ✅ |
 | 色调映射可选性 | 全部 | 算子**不可选不可关**，只有一条 ACES 路径（→ H1） | 🟠 |
 | 阴影 | 全部 | 方向光 1~4 级 CSM（2×2 图集，视空间深度选级，`lighting.shadow_quality.cascades`）+ 3×3 PCF；聚光灯一张透视 2D 阴影图、点光源立方体阴影（各自整帧一盏，缺省关闭）。分辨率 512–4096（缺省 2048） | ✅ |
@@ -46,7 +46,7 @@
 | 透明排序 | 全部 | 半透明按实例 AABB 中心到相机的距离**全局由远到近**逐实例绘制，不同材质/网格之间也正确；代价是透明物体不合批 | ✅ |
 | LOD | 引擎级 | 手工 LOD：`models[].lods` 按相机距离换静态粗模，10% 滞回；无自动减面/自动生成、动画模型不支持、无遮挡剔除 | 🟡 |
 | 相机 | 全部 | 透视 + 正交（`camera.rs:7`）；**一次 render 只吃一个相机**，无多视口 | 🟡 |
-| 天空 / 环境反射 | 全部 | 程序化天空 + 常量环境项（`light.rs:107`）+ **解析式环境高光**（反射方向取同一套天空，`RendererOptions.environment`）；**仍无 HDRI/IBL/cubemap 预滤波、无 SSR** | 🟠 |
+| 天空 / 环境反射 | 全部 | 程序化天空 + 常量环境项 + **IBL 环境贴图**（`lighting.environment_map`，64px 7 级预滤波 cubemap）；无图时退回解析式天空；**无精确 PMREM/GGX、无 SSR** | 🟡 |
 | 调试叠加层 | 全部 | 网格 / 坐标轴 / 接触点 / 包围盒线框；**动捕 3D 骨骼**也走调试线段 | 🟡 |
 | 摄像头/动捕 | Unity + MediaPipe/SMPL-X | **实验**：普通 RGB → MediaPipe Pose 33 点（2D/3D）+ 分割轮廓 + 可选 MiDaS 相对深度；编辑器显示画面/轮廓/骨架并叠 3D 骨骼；深度可按内参反投影成相对尺度点云并在视口显示。单帧、单人、无体型拟合、无米制深度、无 TSDF、Web 未接 | 🟡 |
 
@@ -237,7 +237,7 @@
 | 场景 | 结论 | 决定性阻断项 | 可以替换的子集 |
 |---|---|---|---|
 | S1 查看/检查模型 | **不能替代** | H1 色彩管理未声明、H2 导入单位/up-axis 未处理（贴图导出静默丢失**本轮已修**，见 §5.3） | 无头批量体检 + 缩略图 |
-| S2 场景可视化 | **不能替代** | 无 HDRI/IBL（只有解析式环境高光）；LOD 只有静态手工层级；输出色彩管线单一不可选、无 EXR | three.js 应用里的白模/静态演示 + 批量出图 + 回归门禁 |
+| S2 场景可视化 | **不能替代** | IBL 只支持等距柱状 HDR/PNG/JPEG（无 `.exr`/精确 PMREM）；LOD 只有静态手工层级；输出色彩管线单一不可选、无 EXR | three.js 应用里的白模/静态演示 + 批量出图 + 回归门禁 |
 | S3 物理仿真 | **有条件替代（窄）** | 无行业基准 V&V；确定性未划跨平台边界；无接触力导出/接触 ID | 确定性刚体参数扫描 / CI 回归 / 教学 |
 | S4 游戏 | **不能替代** | 动画、音频、UI、输入映射、存档四件全无；无存档迁移 | 刚体玩法原型的物理核心 |
 | S5 Web 分发 | **不能替代** | wasm 11 MB；真机 WebGPU 未验证（只有 SwiftShader）；H1 色彩；无无障碍 | 内部演示嵌入 |
@@ -716,7 +716,7 @@ gap 表里与资产搜索路径（#11）同源，等那一项一起做；**编�
 原因经常是**取景**而不是功能）。
 
 **没做（诚实边界）**：阴影贴图分辨率不在场景文件（改它要重建纹理与绑定组）；没有线性雾的起止距离
-（引擎只有指数雾）；~~没有聚光灯与点光阴影（#24）~~ IBL/环境贴图（#26）仍没有（只有解析式环境高光）、
+（引擎只有指数雾）；~~没有聚光灯与点光阴影（#24）~~ IBL/环境贴图（#26）第 100 轮已补（手工预滤波，无精确 PMREM）、
 聚光灯（第 49 轮）与聚光/点光阴影（第 54/55 轮）已落地、没有基于日期的天光（#24/#26）。
 
 ### 8.5 「查询补全 + 查询加速结构」怎么落的（第 19 轮，已跑门禁）
@@ -2420,23 +2420,27 @@ if let Some(v) = doc.physics.static_friction_speed {
   MSAA 4× 时更高；
   这是为了不改主 pass 管线布局（所有管线必须同一 attachment 数量）。
 
-### 23.5 解析式环境高光（不是 IBL）
+### 23.5 IBL 环境贴图 + 解析式天空（第 100 轮）
 
-**做了什么**：`pbr.wgsl` 的 `environment_radiance(dir)` 复刻 `sky.wgsl` 的天顶/地平线/
-地面渐变与太阳光晕；金属/光滑材质用 `reflect(-view_dir, n)` 取环境色，再用 Karis
-split-sum 近似 `environment_brdf` 算环境高光。粗糙度用"反射色 → 环境光"的混合代替
-预滤波。`RendererOptions.environment` 缺省开，经 `Frame.cascade_info.w` 传给着色器；
-关掉恢复旧的半球环境光路径。
+**做了什么**：`lighting.environment_map`（等距柱状 `.hdr`/`.png`/`.jpg`）在装载时解码成
+线性 RGB，CPU 生成 64×64×6、7 级 mip 的 cubemap：mip 0 直接采样，之后每级在方向锥内
+按粗糙度做 12~84 个方向的平均。运行时 `pbr.wgsl` 的 `environment_radiance(dir, roughness)`
+按 `roughness * max_mip` 采样，金属/光滑材质得到环境反射，漫反射用最高 mip 的平均照度；
+`environment_intensity` 与 `environment_rotation_deg` 控制亮度与绕 Y 旋转。没有贴图
+（`env_params.y < 0.5`）时走原来的解析式天空，**旧场景像素不变**。
 
-**验证**：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline
-analytic_environment`——同一个金属球只切开关，像素必须变化；`cargo test -p
-quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
+环境贴图挂在 **group 3**（蒙皮调色板所在的全局 bind group），因为 WebGL2 只保证 4 个
+bind group；纹理固定 64px/7 mip，换图只 `write_texture` 覆写内容，bind group 不重建。
+
+**验证**：`cargo test -p quench3d-render --lib environment`（Radiance 平铺/新 RLE/旧 RLE、
+6 面/mip 递减）；`cargo test -p quench3d-cli --test cli_e2e environment_map_changes_pixels`
+（无太阳/环境光时，黑球在 HDR 下中心亮度比无图高 >60）。
 
 **边界**：
 
-* 不是 IBL：没有 HDRI/cubemap，没有按粗糙度预滤波，没有 BRDF LUT，没有屏幕空间反射。
-* 反射只包含天空/地面/太阳光晕；场景里的物体不会出现在金属反射里。
-* 环境色只由天空颜色与太阳驱动；换 HDRI 仍要另做一轮资源/绑定/预滤波。
+* 只支持标准 `-Y height +X width` 朝向；不含 `.exr`；LDR 图只做 sRGB→线性。
+* 预滤波是锥形平均，不是精确 GGX/PMREM，没有 BRDF LUT；没有从环境图提取太阳/局部光。
+* 反射里不会出现场景物体（没有 SSR/平面反射）。
 
 
 ---
@@ -2494,7 +2498,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**732** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**740** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
@@ -2503,7 +2507,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
 **仍未做**：morph+skin 的 GPU 路径（纯蒙皮已 GPU 化）、离散事件驱动的动画状态机、
-IBL/HDRI、自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
+自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---
 

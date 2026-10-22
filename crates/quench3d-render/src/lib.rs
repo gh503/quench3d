@@ -44,6 +44,7 @@ pub mod camera;
 pub mod cascade;
 pub mod color;
 pub mod context;
+pub mod environment;
 pub mod light;
 pub mod lines;
 pub mod material;

@@ -26,6 +26,11 @@ struct SkinPalette {
     joints: array<mat4x4<f32>, 128>,
 };
 @group(3) @binding(0) var<uniform> skin_palette: SkinPalette;
+// IBL：预滤波 cubemap 挂在 group 3（WebGL2 的 bind group 上限是 4 个）。
+// 没有贴图时 y=0，仍走解析式天空（旧场景像素不变）。
+@group(3) @binding(1) var env_map: texture_cube<f32>;
+@group(3) @binding(2) var env_sampler: sampler;
+@group(3) @binding(3) var<uniform> env_params: vec4<f32>;
 
 fn skin_matrix(base: u32, joint_ids: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
     let total = weights.x + weights.y + weights.z + weights.w;
@@ -373,11 +378,9 @@ fn sample_spot_shadow(world: vec3<f32>, n: vec3<f32>, n_dot_l: f32) -> f32 {
     return pcf_3x3(spot_shadow_map, uv, ndc.z - depth_bias, texel);
 }
 
-// 解析式环境：与 `sky.wgsl` 同一条渐变 + 太阳光晕，用作金属/光滑材质的反射。
-//
-// 这不是 HDRI/IBL：没有 cubemap、没有按粗糙度预滤波，只按反射方向直接取天空色。
-// 好处是零额外纹理/绑定，GL/WebGL2 与原生走同一条路径；边界写在 README/§23.5。
-fn environment_radiance(dir: vec3<f32>) -> vec3<f32> {
+// 解析式环境：与 `sky.wgsl` 同一条渐变 + 太阳光晕。
+// 只在没有环境贴图（`env_params.y < 0.5`）时使用，保证旧场景像素不变。
+fn analytic_environment(dir: vec3<f32>) -> vec3<f32> {
     let t = clamp(dir.y, -1.0, 1.0);
     var color = mix(frame.sky_horizon.rgb, frame.sky_zenith.rgb, smoothstep(0.0, 0.7, t));
     color = mix(color, frame.sky_ground.rgb, smoothstep(0.0, -0.35, t));
@@ -387,6 +390,19 @@ fn environment_radiance(dir: vec3<f32>) -> vec3<f32> {
     let disc = smoothstep(0.9993, 0.9998, cos_angle) * 6.0;
     color = color + frame.light_color.rgb * frame.light_dir.w * (glow + disc);
     return color;
+}
+
+// 环境辐照/反射：有 IBL 贴图时按粗糙度取对应 mip；否则退回解析式天空。
+// `roughness` 只影响贴图路径，解析路径保持原来的方向取值。
+fn environment_radiance(dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+    if (env_params.y < 0.5) {
+        return analytic_environment(dir);
+    }
+    let c = cos(env_params.w);
+    let s = sin(env_params.w);
+    let rotated = vec3<f32>(c * dir.x - s * dir.z, dir.y, s * dir.x + c * dir.z);
+    let mip = clamp(roughness, 0.0, 1.0) * env_params.z;
+    return textureSampleLevel(env_map, env_sampler, rotated, mip).rgb * env_params.x;
 }
 
 // Karis 的 split-sum 环境 BRDF 近似（不用 LUT）。
@@ -555,9 +571,9 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
             // 反射方向取环境色；粗糙度用"反射色 → 环境光"的混合代替预滤波。
             // 对金属这是主要能量来源，对电介质只补一点高光。
             let reflected = reflect(-view_dir, n);
-            let env_diffuse = mix(ambient_irradiance, environment_radiance(n), 0.65);
+            let env_diffuse = mix(ambient_irradiance, environment_radiance(n, 1.0), 0.65);
             let env_reflection = mix(
-                environment_radiance(reflected),
+                environment_radiance(reflected, roughness),
                 ambient_irradiance,
                 roughness * roughness,
             );

@@ -833,6 +833,16 @@ fn write_test_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) {
     writer.write_image_data(rgba).expect("写 PNG 像素");
 }
 
+/// 写一个平铺 Radiance RGBE（无 RLE）测试环境图。
+fn write_test_hdr(path: &std::path::Path, w: usize, h: usize, rgb: [u8; 3], e: u8) {
+    let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n".to_vec();
+    bytes.extend_from_slice(format!("-Y {h} +X {w}\n").as_bytes());
+    for _ in 0..w * h {
+        bytes.extend_from_slice(&[rgb[0], rgb[1], rgb[2], e]);
+    }
+    std::fs::write(path, bytes).expect("写 HDR 环境图");
+}
+
 /// 解码渲染输出的 PNG（RGBA8）。
 fn decode_rgba(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
     let file = std::fs::File::open(path).expect("打开 PNG");
@@ -2310,6 +2320,67 @@ fn bright_pixels(rgba: &[u8]) -> usize {
         .iter()
         .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200)
         .count()
+}
+
+/// IBL：环境贴图真的进入着色（没有太阳/环境光时，黑球被 HDR 天空照亮）。
+#[test]
+fn environment_map_changes_pixels() {
+    let doctor = run(&["doctor", "--json"]).json();
+    let gpu = doctor["data"]["gpu_available"].as_bool().unwrap();
+
+    let dir = temp_dir("environment");
+    write_test_hdr(&dir.join("sky.hdr"), 8, 4, [180, 150, 110], 128);
+    let scene = |env: bool, out: &str| {
+        let env_line = if env {
+            r#", "environment_map": "sky.hdr", "environment_intensity": 1.0"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{
+                "lighting": {{ "preset": "none", "ambient": 0.0, "sky": false{env_line} }},
+                "materials": {{ "m": {{ "color": [1,1,1], "metallic": 0.0, "roughness": 0.4 }} }},
+                "objects": [
+                    {{ "name": "ball", "shape": {{ "type": "sphere", "radius": 1 }}, "material": "m", "position": [0,1,0] }}
+                ],
+                "camera": {{ "position": [0,1,5], "look_at": [0,1,0] }},
+                "simulate": {{ "steps": 0 }},
+                "render": {{ "output": "{out}", "width": 160, "height": 120, "msaa": 1 }}
+            }}"#
+        )
+    };
+    let plain = dir.join("plain.json");
+    let env = dir.join("env.json");
+    std::fs::write(&plain, scene(false, "plain.png")).unwrap();
+    std::fs::write(&env, scene(true, "env.png")).unwrap();
+    if !gpu {
+        let d = run(&["validate", env.to_str().unwrap(), "--json"]).json();
+        assert_eq!(d["ok"], true, "没有 GPU 也应当通过场景校验：{d}");
+        return;
+    }
+    for scene_path in [&plain, &env] {
+        let out = dir.join(if *scene_path == plain {
+            "plain.png"
+        } else {
+            "env.png"
+        });
+        let r = run(&[
+            "render",
+            scene_path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    }
+    let (w, h, plain_px) = decode_rgba(&dir.join("plain.png"));
+    let (_, _, env_px) = decode_rgba(&dir.join("env.png"));
+    let (pr, pg, pb) = center_mean(w, h, &plain_px);
+    let (er, eg, eb) = center_mean(w, h, &env_px);
+    assert!(
+        er + eg + eb > pr + pg + pb + 60.0,
+        "HDR 环境贴图应当照亮黑球：无图 ({pr:.1},{pg:.1},{pb:.1}) vs 有图 ({er:.1},{eg:.1},{eb:.1})"
+    );
 }
 
 /// 点光源接线：**不写**字段 = 保留预设补光，写 `[]` = 显式清空，给一盏红灯 = 画面真的变红。

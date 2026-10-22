@@ -2199,6 +2199,18 @@ pub struct LightingDoc {
     /// **投影时的质量**。**不写 = 用引擎缺省**（strength 0.85、radius 28 米）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow_quality: Option<ShadowQualityDoc>,
+    /// 环境贴图（IBL）：等距柱状 `.hdr` / `.png` / `.jpg`。
+    ///
+    /// 路径相对场景文件解析（与材质贴图同一套搜索路径）。不写 = 继续用解析式天空，
+    /// 旧场景像素不变；写了就按 cubemap 采样，太阳/点光源仍照常叠加。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_map: Option<String>,
+    /// 环境贴图强度倍率，缺省 1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_intensity: Option<f32>,
+    /// 环境贴图绕 Y 轴旋转（度），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_rotation_deg: Option<f32>,
     /// 天空渐变的三个颜色。
     ///
     /// 不写就跟随 `preset`（`day`/`night` 各有自己的天空）；写了的通道覆盖预设。
@@ -6482,6 +6494,58 @@ impl SceneDoc {
             }
         }
 
+        // 环境贴图（IBL）：路径必须存在，否则渲染会静默退回解析式天空。
+        if let Some(path) = self.lighting.environment_map.as_deref() {
+            if path.trim().is_empty() {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::InvalidValue,
+                    "lighting.environment_map",
+                    "环境贴图路径不能为空",
+                ));
+            } else {
+                let lower = path.to_ascii_lowercase();
+                if !(lower.ends_with(".hdr")
+                    || lower.ends_with(".png")
+                    || lower.ends_with(".jpg")
+                    || lower.ends_with(".jpeg"))
+                {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::InvalidValue,
+                        "lighting.environment_map",
+                        format!("建议使用 .hdr/.png/.jpg 环境贴图，当前是 \"{path}\""),
+                    ));
+                }
+                if self.resolve_asset(path).is_none() {
+                    out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::AssetNotFound,
+                            "lighting.environment_map",
+                            format!("找不到环境贴图 \"{path}\""),
+                        )
+                        .with_hint("路径相对场景文件解析；也可以放进 assets.search_paths"),
+                    );
+                }
+            }
+        }
+        if let Some(i) = self.lighting.environment_intensity {
+            if !i.is_finite() || i < 0.0 {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "lighting.environment_intensity",
+                    "环境贴图强度必须是非负有限数",
+                ));
+            }
+        }
+        if let Some(r) = self.lighting.environment_rotation_deg {
+            if !r.is_finite() {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "lighting.environment_rotation_deg",
+                    "环境贴图旋转必须是有限数",
+                ));
+            }
+        }
+
         // 相机
         if let Some(f) = self.camera.fov_deg {
             if !f.is_finite() || !(1.0..=179.0).contains(&f) {
@@ -8118,6 +8182,55 @@ mod tests {
             .validate()
             .iter()
             .any(|d| d.severity == Severity::Error && d.path.ends_with("parameters[1].name")));
+    }
+
+    #[test]
+    fn environment_map_is_validated_and_loadable() {
+        let dir = std::env::temp_dir().join(format!("quench3d_env_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hdr = dir.join("sky.hdr");
+        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n".to_vec();
+        bytes.extend_from_slice(b"-Y 1 +X 1\n");
+        bytes.extend_from_slice(&[128, 96, 64, 128]);
+        std::fs::write(&hdr, bytes).unwrap();
+        let path = hdr.to_string_lossy().to_string();
+        let doc = SceneDoc::from_value(json!({
+            "lighting": {
+                "environment_map": path,
+                "environment_intensity": 2.0,
+                "environment_rotation_deg": 45.0
+            }
+        }))
+        .unwrap();
+        let errors: Vec<_> = doc
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(doc.lighting.environment_intensity, Some(2.0));
+
+        let missing = SceneDoc::from_value(json!({
+            "lighting": { "environment_map": dir.join("nope.hdr").to_string_lossy() }
+        }))
+        .unwrap();
+        assert!(
+            missing
+                .validate()
+                .iter()
+                .any(|d| d.path == "lighting.environment_map" && d.severity == Severity::Error),
+            "不存在的环境贴图必须在 validate 阶段报错"
+        );
+
+        let bad = SceneDoc::from_value(json!({
+            "lighting": { "environment_map": path, "environment_intensity": -1.0 }
+        }))
+        .unwrap();
+        assert!(bad
+            .validate()
+            .iter()
+            .any(|d| d.path == "lighting.environment_intensity" && d.severity == Severity::Error));
     }
 
     #[test]

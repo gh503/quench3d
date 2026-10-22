@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, Frustum};
 use crate::context::{vertex_layout, FrameError, GpuContext};
+use crate::environment::{EnvironmentCube, EnvironmentMap};
 use crate::light::{Lighting, PointLight, SpotLight, MAX_POINT_LIGHTS};
 use crate::lines::{DebugLines, LineVertex};
 use crate::material::{MaterialDesc, MaterialId, MeshId, TextureId};
@@ -204,6 +205,13 @@ pub struct FrameUniforms {
     /// x = 1 / 单面边长, y = `tan(半面角)`（≈ 1.01 的那个余量）,
     /// z = 法线偏移（纹素个数）, w = 斜率因子的系数。
     pub point_shadow_texel: [f32; 4],
+}
+
+/// 环境贴图 uniform：x = 强度, y = 是否有贴图（0/1）, z = 最大 mip, w = 绕 Y 旋转（弧度）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct EnvironmentParams {
+    values: [f32; 4],
 }
 
 /// 单盏点光源的 uniform 数据。
@@ -795,6 +803,9 @@ pub struct Renderer {
     meshes: Vec<GpuMesh>,
     materials: Vec<GpuMaterial>,
     textures: Vec<GpuTexture>,
+    /// 环境贴图 IBL 的固定 cubemap（换图只覆写内容）；无图时全黑，shader 走解析式天空。
+    environment_texture: wgpu::Texture,
+    environment_params: wgpu::Buffer,
     white_texture: GpuTexture,
     flat_normal_texture: GpuTexture,
     black_texture: GpuTexture,
@@ -980,6 +991,70 @@ pub enum MaterialTextureSlot {
     Emissive,
 }
 
+/// 把 CPU 预滤波 cubemap 上传成 `Rgba16Float` 立方体贴图。
+///
+/// `write_texture` 的 `bytes_per_row` 必须是 256 的倍数，所以每个 mip 按行补齐；
+/// 面顺序与 [`EnvironmentCube`] 一致（+X/-X/+Y/-Y/+Z/-Z）。
+fn create_environment_texture(device: &wgpu::Device, size: u32, mips: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("quench3d-environment-cube"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 6,
+        },
+        mip_level_count: mips,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// 把 CPU 预滤波 cubemap 覆写进固定纹理（尺寸/mip 必须与创建时一致）。
+fn write_environment_cube(queue: &wgpu::Queue, texture: &wgpu::Texture, cube: &EnvironmentCube) {
+    for (level, mip) in cube.mips.iter().enumerate() {
+        let row_bytes = mip.size as usize * 8;
+        let padded = row_bytes.div_ceil(256) * 256;
+        for (face, pixels) in mip.faces.iter().enumerate() {
+            let mut bytes = vec![0u8; padded * mip.size as usize];
+            for (i, p) in pixels.iter().enumerate() {
+                let offset = (i / mip.size as usize) * padded + (i % mip.size as usize) * 8;
+                for (k, c) in p.iter().enumerate().take(3) {
+                    let bits = half::f16::from_f32(c.clamp(0.0, 65504.0)).to_bits();
+                    bytes[offset + k * 2..offset + k * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+                }
+                let one = half::f16::from_f32(1.0).to_bits();
+                bytes[offset + 6..offset + 8].copy_from_slice(&one.to_le_bytes());
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: face as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(mip.size),
+                },
+                wgpu::Extent3d {
+                    width: mip.size,
+                    height: mip.size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+}
+
 impl Renderer {
     /// 创建渲染器（分配管线与默认资源）。
     pub fn new(ctx: &GpuContext, options: RendererOptions) -> Self {
@@ -1071,18 +1146,90 @@ impl Renderer {
             ],
         });
 
+        // 环境贴图（IBL）固定挂在 group 3：与蒙皮调色板共用**全局** bind group。
+        // 贴图尺寸固定 64×64×6、7 级 mip，换贴图只覆写内容，bind group 不用重建；
+        // WebGL2 的 bind group 上限是 4 个，所以不能为 IBL 单开 group 4。
+        let environment_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-environment-params"),
+            size: std::mem::size_of::<EnvironmentParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let environment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("quench3d-environment-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let environment_texture = create_environment_texture(device, 64, 7);
+        let environment_view = environment_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("quench3d-environment-cube-view"),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        let black = EnvironmentMap {
+            width: 1,
+            height: 1,
+            pixels: vec![[0.0; 3]],
+            intensity: 1.0,
+            rotation: 0.0,
+        }
+        .to_cube(64);
+        write_environment_cube(&ctx.queue, &environment_texture, &black);
+        ctx.queue.write_buffer(
+            &environment_params,
+            0,
+            bytemuck::bytes_of(&EnvironmentParams {
+                values: [0.0, 0.0, 0.0, 0.0],
+            }),
+        );
+
         let skin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("quench3d-skin-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(SKIN_PALETTE_BYTES),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(SKIN_PALETTE_BYTES),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<EnvironmentParams>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
         });
         let skin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quench3d-skin-palette"),
@@ -1093,10 +1240,24 @@ impl Renderer {
         let skin_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quench3d-skin-bind-group"),
             layout: &skin_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: skin_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: skin_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&environment_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&environment_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: environment_params.as_entire_binding(),
+                },
+            ],
         });
 
         let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1820,6 +1981,8 @@ impl Renderer {
             meshes: Vec::new(),
             materials: Vec::new(),
             textures: Vec::new(),
+            environment_texture,
+            environment_params,
             white_texture,
             flat_normal_texture,
             black_texture,
@@ -2027,6 +2190,42 @@ impl Renderer {
     }
 
     /// 上传纹理，返回句柄。
+    /// 设置（或清除）IBL 环境贴图；`None` 回到解析式天空。
+    ///
+    /// 上传/预滤波是**装载时**一次性的，渲染循环只换 bind group + uniform。
+    pub fn set_environment_map(&mut self, ctx: &GpuContext, map: Option<&EnvironmentMap>) {
+        let (cube, params) = match map {
+            Some(map) => {
+                let cube = map.to_cube(64);
+                (
+                    cube,
+                    EnvironmentParams {
+                        values: [map.intensity.max(0.0), 1.0, 6.0, map.rotation],
+                    },
+                )
+            }
+            None => {
+                let cube = EnvironmentMap {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![[0.0; 3]],
+                    intensity: 1.0,
+                    rotation: 0.0,
+                }
+                .to_cube(64);
+                (
+                    cube,
+                    EnvironmentParams {
+                        values: [0.0, 0.0, 0.0, 0.0],
+                    },
+                )
+            }
+        };
+        write_environment_cube(&ctx.queue, &self.environment_texture, &cube);
+        ctx.queue
+            .write_buffer(&self.environment_params, 0, bytemuck::bytes_of(&params));
+    }
+
     pub fn add_texture(&mut self, ctx: &GpuContext, image: &ImageData, srgb: bool) -> TextureId {
         let options = if srgb {
             crate::texture::TextureOptions::color()

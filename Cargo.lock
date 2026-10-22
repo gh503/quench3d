@@ -2232,6 +2232,7 @@ name = "quench3d-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "half",
  "image",
  "log",
  "pollster",

@@ -293,6 +293,8 @@ pub struct Lighting {
     pub exposure: f32,
     /// 阴影强度（0 = 无阴影，1 = 全黑阴影）。
     pub shadow_strength: f32,
+    /// IBL 环境贴图（CPU 副本；渲染器另有 GPU cubemap）。
+    pub environment: Option<std::sync::Arc<crate::environment::EnvironmentMap>>,
 }
 
 impl Default for Lighting {
@@ -307,6 +309,7 @@ impl Default for Lighting {
             fog: FogParams::default(),
             exposure: 1.0,
             shadow_strength: 0.85,
+            environment: None,
         }
     }
 }

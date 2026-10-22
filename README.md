@@ -151,6 +151,12 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   条件不满足则事件被丢弃。事件只保留一个、消费一次，没有队列/输入缓冲。仍没有参数
   曲线。和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
+* **IBL / HDRI 环境光**：`lighting.environment_map` 指向等距柱状 `.hdr` / `.png` / `.jpg`，
+  装载时解码成线性 RGB 并预滤波成 6 面 cubemap（64×64、7 级 mip）；着色器按粗糙度取
+  对应 mip，金属/光滑表面能看到环境反射，漫反射也吃这张图的平均照度。可调
+  `environment_intensity` 与 `environment_rotation_deg`。不写这个字段 = 继续用解析式天空，
+  **旧场景像素不变**。边界：只支持标准 `-Y h +X w` 朝向；预滤波是锥形平均近似，不是
+  精确 PMREM/GGX；没有从 HDRI 自动提取太阳/局部光。
 * **手工 LOD（远处换粗模）**：`models[].lods` 给静态模型挂替换层：
   `[{ "path": "tree_low.glb", "min_distance": 25 }]`。基础模型用到第一个距离，之后每层
   用到下一层距离；所有层共用同一个位置/朝向/缩放。引擎每帧按相机距离切可见层级，
@@ -246,7 +252,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12493299 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12513298 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -640,7 +646,7 @@ quench3d::write_png(&image, "out.png")?;
 | 着色 | 前向 Cook–Torrance PBR（金属度/粗糙度）、法线贴图、指数雾；物体写**线性 HDR** |
 | 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一 ACES 色调映射（**唯一一份**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`）。**GL/WebGL2 上 SSAO 与深度解析按能力整体关闭**（naga 的 GLSL 后端不支持读深度纹理，见 [production_readiness §12.7](docs/production_readiness.md)）；tonemap / bloom / FXAA 不受影响 |
 | 阴影 | 太阳：单张（级联时 2×2 图集）`Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段，主 pass 按视空间深度选级。**局部光阴影**：`SpotLight.cast_shadows`（一张透视 2D 深度图，视锥 = 外锥角）与 `PointLight.cast_shadows`（**立方体阴影**：`texture_depth_2d_array` 6 层，每层 90°，面选择 + 面内 uv 是 CPU 纯函数、WGSL 逐字镜像，靠"公式 == 矩阵"的 CPU 测试保证两边一致）；两者**各自整帧只支持一盏**（第一盏要求投影的），缺点都是缺省 `false`（老场景像素逐位不变），两套图互相独立 |
-| 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **解析式环境高光**（金属/光滑材质按反射方向取同一套天空/地面/太阳光晕；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。环境高光**不是 HDRI/IBL**：没有 cubemap、没有按粗糙度预滤波，只覆盖天空/地面方向，没有屏幕空间反射 |
+| 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **IBL 环境贴图**（`lighting.environment_map`，等距柱状 HDR/PNG/JPEG → 64px 7 级预滤波 cubemap，按粗糙度采样）或解析式环境高光（不写贴图时；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。IBL 没有精确 PMREM/GGX、没有屏幕空间反射 |
 | 天空/地面 | 全屏三角形程序化天空（三个渐变颜色可从 `lighting.sky_colors` 调）+ 解析无限网格（`fwidth` 抗锯齿 + 深度写入） |
 | 批处理 | 不透明按 (材质, 网格) 分批 + 实例化（96 字节/实例）+ 逐实例视锥剔除；**半透明按相机距离全局由远到近逐实例绘制**（按实例 AABB 中心排序，不再按批次/材质 id 顺序），叠玻璃不会因提交顺序闪错 |
 | 其它 | MSAA（1/2/4/8；GL/WebGL2 上按能力夹到 1）、Alpha 混合与 Alpha 裁剪、无光照材质、调试线段/接触点/包围盒 |
@@ -937,6 +943,12 @@ NaN 刚体  : 0
   事件过渡优先于同状态的时间过渡。参数由宿主写（编辑器面板/`Scene::set_animator_parameter`），
   场景里的 `default` 只是初值；`validate` 会查参数重名、名字为空、条件引用不存在的参数、
   空事件名。
+  `lighting.environment_map` 是**等距柱状环境图**：路径相对场景文件解析，支持
+  `.hdr`（Radiance `32-bit_rle_rgbe`）/`.png`/`.jpg`；`environment_intensity` 缺省 1，
+  `environment_rotation_deg` 缺省 0。装载时生成 64px、7 级 mip 的 cubemap，按粗糙度
+  取样；不写就保留解析式天空。`validate` 会检查文件存在与强度非负。边界：只支持
+  `-Y height +X width` 朝向；预滤波为锥形平均，不是精确 GGX/PMREM；不会从环境图
+  自动生成太阳或局部光。
   `models[].lods` 是**手工 LOD**（只支持静态模型）：`[{ "path": "tree_low.glb",
   "min_distance": 25 }]`；基础模型从距离 0 显示到第一个 `min_distance`，第 j 个替换层
   显示到 `lods[j+1].min_distance`，最后一层到无穷远。距离必须 > 0 且严格递增；
@@ -1282,7 +1294,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 732 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 740 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

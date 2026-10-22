@@ -1031,6 +1031,29 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         .default_open(false)
         .show(ui, |ui| {
             let mut changed = false;
+            if let Some(map) = doc
+                .base_doc
+                .as_ref()
+                .and_then(|d| d.lighting.environment_map.as_deref())
+            {
+                let intensity = doc
+                    .base_doc
+                    .as_ref()
+                    .and_then(|d| d.lighting.environment_intensity)
+                    .unwrap_or(1.0);
+                let rotation = doc
+                    .base_doc
+                    .as_ref()
+                    .and_then(|d| d.lighting.environment_rotation_deg)
+                    .unwrap_or(0.0);
+                ui.label(
+                    RichText::new(format!(
+                        "IBL 环境贴图：{map}（强度 {intensity:.2}，旋转 {rotation:.0}°）"
+                    ))
+                    .small()
+                    .color(egui::Color32::from_rgb(150, 210, 240)),
+                );
+            }
             local_lights_section(ui, engine, &mut changed);
             {
                 let light = &mut engine.scene.lighting;

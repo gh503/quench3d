@@ -831,7 +831,7 @@ impl Doc {
         // 这类分叉以前被 `scene_to_json` 对局部光"沿用底稿"藏住了。
         let no_lighting =
             quench3d_cli::scene_doc::SceneDoc::from_json("{}").expect("空场景文档必须能解析");
-        quench3d_cli::runner::apply_lighting(engine, &no_lighting);
+        let _ = quench3d_cli::runner::apply_lighting(engine, &no_lighting);
 
         // ---- 地面：物理上是无限半空间，视觉上是一张同高度的平面 ----
         //

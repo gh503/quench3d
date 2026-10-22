@@ -41,6 +41,15 @@
 
 ### 新增
 
+- **IBL / HDRI 环境光照（第 100 轮）**：`lighting.environment_map` 支持等距柱状
+  `.hdr`（Radiance RGBE，平铺/新 RLE/旧 RLE）/`.png`/`.jpg`，装载时解码成线性 RGB，
+  CPU 生成 64×64×6、7 级 mip 的预滤波 cubemap；`pbr.wgsl` 按粗糙度取 mip，金属/光滑
+  表面有环境反射，漫反射也吃环境平均照度。`environment_intensity` / `_rotation_deg`
+  可调；不写 = 解析式天空，**旧场景像素不变**。环境贴图挂在 group 3（WebGL2 的 4 个
+  bind group 上限），固定纹理换图只覆写内容。`validate` 检查文件存在、强度非负、旋转
+  有限；schema 同步。回归：6 条 `environment` 单测（含两种 RLE）、
+  `environment_map_is_validated_and_loadable`、`environment_map_changes_pixels`（无太阳/
+  环境光时 HDR 照亮黑球，总亮度差 >60；总测试 732 → 740）。
 - **静态模型手工 LOD（第 99 轮）**：`models[].lods` 给静态模型挂粗模替换层
   `[{ "path":"tree_low.glb", "min_distance":25 }]`。基础模型显示到第一个距离，之后每层
   显示到下一层距离、最后一层到无穷远；所有层共用基础模型的位姿/缩放，碰撞仍用基础模型。
