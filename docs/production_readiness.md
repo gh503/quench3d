@@ -224,7 +224,7 @@
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
 | 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」「导出 GLB」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`/`.glb`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图、节点树、位置/旋转动画）；骨骼/morph 动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
-| 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
+| 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；`--encoder mp4` 可选调用外部 ffmpeg 直接封装 MP4，PNG 路线仍给建议命令 | 直接产出 H.265/无 ffmpeg 的 MP4 | **1 人月**（纯 Rust 编码器） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
 | 版本升级路径 | 全部 | **无迁移器**（版本不符直接报错，`scene_doc.rs:1325`） | 旧文件能一键升到新版本并留备份 | **0.5–1 人月** | ❌ |
 

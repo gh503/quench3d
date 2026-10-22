@@ -789,8 +789,9 @@ quench3d query scene.json --overlap "box:2,1,2@0,1,0~0,45,0" # 斜 45° 的探�
 `--steps N` 可以先跑 N 步物理再查（"落地之后那个箱子在哪"），
 `--index` 换用查询加速结构（单次查询反而更贵，见 §9 边界）。
 
-**仿真视频（`movie`）**：逐帧推进物理并渲染。两条路：PNG 序列交给 `ffmpeg`，
-或者用**内置纯 Rust 编码器**直接出 GIF/APNG（不装任何外部工具）：
+**仿真视频（`movie`）**：逐帧推进物理并渲染。三条路：PNG 序列交给 `ffmpeg`、
+用**内置纯 Rust 编码器**直接出 GIF/APNG（不装任何外部工具），或 `--encoder mp4`
+让引擎调外部 `ffmpeg` 直接封装 MP4：
 
 ```bash
 # 路线 A：PNG 序列 + ffmpeg（长视频、高压缩率）
@@ -798,6 +799,9 @@ quench3d movie scene.json --frames 300 --frames-dir frames --json
 # data.frames_dir / data.trace / data.digest / data.ffmpeg / data.probes（写了 probes 才有）
 ffmpeg -framerate 60 -i frames/frame_%05d.png -c:v libx264 -preset slow -crf 18 \
        -pix_fmt yuv420p -movflags +faststart movie.mp4
+
+# 路线 C：引擎直接调 ffmpeg 编 MP4（需要 PATH 里有 ffmpeg；CRF 18 / yuv420p）
+quench3d movie scene.json --frames 300 --encoder mp4 --out clip.mp4 --json
 
 # 预检：只校验 + 跑物理（几毫秒），不花 GPU 时间、不写任何文件
 quench3d render scene.json --dry-run --json
@@ -1313,7 +1317,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 768 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 769 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

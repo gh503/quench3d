@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **768** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **769** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -43,6 +43,7 @@ tools/verify_all.sh
 | `validate` / 诊断码 / 退出码 | `cargo test -p quench3d-cli` | 每条诊断路径 + 退出码 0/2/3 |
 | 场景 → OBJ 导出 | `cargo test -p quench3d-cli --lib obj_export`；`quench3d export target/tmp/export_scene.json target/tmp/export_demo.obj` 后 `quench3d info target/tmp/export_demo.obj` | 4 个用例：层级/材质/面数、模板实例展开、导出再导入三角形数一致、凸包进入 `skipped[]`；实际导出 2 物体/449 顶点/780 三角形，`info` 读回 2 mesh/780 三角形、包围盒与场景一致 |
 | 单帧 `render` PNG | `cargo test -p quench3d-cli --test cli_e2e render_produces` | 合法 PNG、尺寸/统计 |
+| 视频编码 MP4 | `cargo test -p quench3d-cli --test cli_e2e movie_encodes_mp4_when_ffmpeg_is_available` | 有 ffmpeg 时 3 帧 64×64 → 带 `ftyp` 的 MP4、`bytes>0`、trace 落在输出旁；无 ffmpeg/GPU 自动跳过 |
 | 单帧黄金图 | `cargo test -p quench3d-cli --test cli_e2e golden_png_comparison` | 同场景 0 差异；换颜色 `golden_mismatch`；缺图/多输出/dry-run 的退出码 |
 | 多输出 + no-clobber | `... multiple_render_outputs` | 两张路径/尺寸先解析、整体不写半套 |
 | 命名相机 + `camera_name` | `... camera_flag` / `multiple_render_outputs` | 已知名/`default`/未知名；报告字段 |

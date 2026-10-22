@@ -1579,6 +1579,66 @@ fn malformed_overrides_are_rejected_instead_of_silently_doing_nothing() {
     let _ = std::fs::remove_file(&scene);
 }
 
+/// MP4：外部 ffmpeg 存在时才跑；输出必须是带 ftyp box 的 MP4。
+#[test]
+fn movie_encodes_mp4_when_ffmpeg_is_available() {
+    let ffmpeg = matches!(
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+        Ok(status) if status.success()
+    );
+    if !ffmpeg {
+        eprintln!("跳过：没有 ffmpeg");
+        return;
+    }
+    let doctor = run(&["doctor", "--json"]).json();
+    if !doctor["data"]["gpu_available"].as_bool().unwrap_or(false) {
+        eprintln!("跳过：没有 GPU");
+        return;
+    }
+    let dir = temp_dir("movie_mp4");
+    let scene = dir.join("s.json");
+    std::fs::write(
+        &scene,
+        r#"{
+            "ground": { "size": 10 },
+            "objects": [{ "name": "箱", "shape": { "type": "box", "size": [1, 1, 1] },
+                          "position": [0, 3, 0], "body": "dynamic" }],
+            "camera": { "position": [6, 3.5, 7], "look_at": [0, 0.8, 0] },
+            "render": { "width": 64, "height": 64, "msaa": 1 }
+        }"#,
+    )
+    .unwrap();
+    let out = dir.join("clip.mp4");
+    let r = run(&[
+        "movie",
+        scene.to_str().unwrap(),
+        "--frames",
+        "3",
+        "--encoder",
+        "mp4",
+        "--out",
+        out.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stderr={}\nstdout={}", r.stderr, r.stdout);
+    let data = r.json()["data"].clone();
+    assert_eq!(data["encoder"], "mp4");
+    assert_eq!(data["frames"], 3);
+    assert!(data["bytes"].as_u64().unwrap() > 0);
+    let bytes = std::fs::read(&out).expect("MP4 应落盘");
+    assert!(bytes.len() > 32, "MP4 太小");
+    assert_eq!(&bytes[4..8], b"ftyp", "MP4 缺少 ftyp box");
+    let trace = data["trace"].as_str().unwrap();
+    assert!(
+        std::path::Path::new(trace).exists(),
+        "trace 应跟着 MP4 落在旁边：{trace}"
+    );
+}
+
 /// 仿真视频：帧序列 + trace.jsonl，且同场景两次录制必须逐像素一致。
 #[test]
 fn movie_records_deterministic_frame_sequence() {

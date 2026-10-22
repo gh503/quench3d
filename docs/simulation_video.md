@@ -15,6 +15,7 @@
 | `SequenceParams` | 同上 | `frames` / `steps_per_frame` / `dt` / `warmup_frames`，附 `duration()` / `fps()` / `total_steps()` |
 | CLI 录制命令 | `quench3d movie <场景>`（`crates/quench3d-cli/src/runner.rs::run_movie`） | 输出 `frame_00000.png…` + `trace.jsonl`，返回建议的 `ffmpeg` 命令 |
 | 内置编码器 | `--encoder gif|apng`（+ `--out`） | 纯 Rust、免外部工具，直接产出可播放单文件；换编码器**不改变像素摘要** |
+| MP4 编码器 | `--encoder mp4 --out clip.mp4` | 调外部 `ffmpeg`（libx264 / crf 18 / yuv420p）；需要 PATH 里有 ffmpeg；换编码器**不改变像素摘要** |
 | 参数 | `--frames` `--steps-per-frame` `--frames-dir` `--fps` `--warmup` `--encoder` `--out` | 数值全部校验；`--steps`/`--trace` 等 simulate 专用参数会**直接报错**而不是被忽略；`--out` 与 `--frames-dir` 的意图冲突也会报错 |
 | 可复现断言 | 报告里的 `digest`（`fnv1a64:…`，覆盖帧号 + 像素） | 测试钉住「同场景两次录制摘要一致」 |
 | 断点续录 | 已存在的帧跳过，报告里报 `skipped` | 长视频中断后重跑即可接上 |
@@ -48,7 +49,7 @@ ffprobe: codec=h264 640×400 pix_fmt=yuv420p nb_frames=300 duration=5.000000 siz
 | 逐帧状态记录 | ✅ 已有（`trace.jsonl`） | `run_movie` 每帧写一行：帧号、累计步数、仿真时间、绘制统计 |
 | 无头"推进 N 帧"（跑 update/fixed_update/render 循环） | ✅ **已补** | `render_sequence_with_game`（`app.rs`）：帧体顺序与窗口循环一致，固定步长 |
 | 复用一个 GPU 上下文渲染多帧 | ✅ **已补** | `render_sequence` 只建一次 `GpuContext::headless`，内部循环（原来逐帧调用会每次重建） |
-| 视频编码 | 🟢 GIF/APNG 已内置（纯 Rust）；MP4/H.264 仍交给 ffmpeg | MP4/H.264 内嵌涉及 GPL + 专利池，不做是有意的，见 §3.2 许可 |
+| 视频编码 | 🟢 GIF/APNG 已内置（纯 Rust）；MP4/H.264 由 `--encoder mp4` 调外部 ffmpeg | 不把 ffmpeg/H.264 编进二进制（GPL + 专利池），只做进程调用，见 §3.2 许可 |
 | 时间缩放 / 慢动作 | ✅ 通过 `--fps` 实现（只改播放速度，不改仿真） | 引擎级 `time_scale` 仍未做 |
 | 音轨 | ❌ 无音频系统 | 引擎/平台层审计 |
 
@@ -144,7 +145,7 @@ ffmpeg -framerate 60 -i frames/frame_%05d.png \
 | H.264（libx264） | **GPL + AVC 专利池** | 兼容性最好 | 内嵌需谨慎评估许可；建议继续交给 ffmpeg |
 | HEVC | 专利更复杂 | — | 不建议内嵌 |
 
-**建议**：`--encoder png|gif|apng`（全部纯 Rust、免专利）内置；**MP4/H.264 交给 ffmpeg**。
+**建议**：`--encoder png|gif|apng`（全部纯 Rust、免专利）内置；**MP4/H.264 交给 ffmpeg**，`--encoder mp4` 只是替用户调用它，不把编码器链进二进制。
 
 ### 3.2a 内置编码器的口径与限制（已实现）
 
@@ -211,6 +212,7 @@ quench3d movie scene.json --frames 60 --encoder apng --out demo.png    # 无损
 | 2 | CLI `--frames/--fps/--frames-dir/--steps-per-frame/--warmup` → PNG 序列 + `trace.jsonl` | ✅ 已做 | `quench3d movie`；崩溃可续；像素摘要可断言 |
 | 3 | 文档：一条 `ffmpeg` 命令 + `yuv420p/faststart` 说明 | ✅ 已做 | README + 本文；建议命令由 `data.ffmpeg` 直接给出 |
 | 4 | `--encoder gif|apng`（纯 Rust，免专利） | ✅ 已做 | `gif` 0.13 + `png` 0.18；流式写入（不缓存全片）；见 §3.2a |
+| 4b | `--encoder mp4`（外部 ffmpeg） | ✅ 已做 | rawvideo 经 stdin 流式喂给 ffmpeg，不在内存攒全片；ffmpeg 缺失时报错而不是静默降级 |
 | 5 | Web 端 `MediaRecorder`/WebCodecs 录制 + 页面按钮 | ⬜ 待做 | wasm 单线程要注意耗时；API 已具备 |
 | 6 | 可选：内置 MP4（rav1e/AV1 + `mp4` mux）或 openh264 | ⬜ 待做 | 注意许可（见 3.2） |
 | 7 | 可选：累积采样（运动模糊）、分块渲染超大分辨率 | ⬜ 待做 | 对标 UE Movie Render Queue |

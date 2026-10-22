@@ -11,7 +11,9 @@
 //! 渲染时再把它交给引擎，可视物体按名字与刚体关联。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Instant;
 
 use quench3d::physics::{BodyType, PhysicsWorld, QueryFilter, Shape};
@@ -4483,6 +4485,8 @@ pub enum MovieEncoder {
     Gif,
     /// 单个 APNG（无损动画 PNG）。
     Apng,
+    /// 单个 MP4：通过外部 `ffmpeg`（libx264）编码。
+    Mp4,
 }
 
 impl MovieEncoder {
@@ -4492,6 +4496,7 @@ impl MovieEncoder {
             Self::Png => "png",
             Self::Gif => "gif",
             Self::Apng => "apng",
+            Self::Mp4 => "mp4",
         }
     }
 
@@ -4501,6 +4506,7 @@ impl MovieEncoder {
             "png" => Some(Self::Png),
             "gif" => Some(Self::Gif),
             "apng" => Some(Self::Apng),
+            "mp4" => Some(Self::Mp4),
             _ => None,
         }
     }
@@ -4516,6 +4522,7 @@ impl MovieEncoder {
             Self::Png => "frames",
             Self::Gif => "movie.gif",
             Self::Apng => "movie.png",
+            Self::Mp4 => "movie.mp4",
         }
     }
 }
@@ -4546,6 +4553,11 @@ enum FrameSink {
         writer: Box<png::Writer<std::io::BufWriter<std::fs::File>>>,
         delay_num: u16,
         delay_den: u16,
+    },
+    /// 外部 ffmpeg 的 rawvideo stdin；收尾时关闭 stdin 并等它写完 MP4。
+    Mp4 {
+        stdin: Option<ChildStdin>,
+        child: Child,
     },
 }
 
@@ -4606,6 +4618,65 @@ impl FrameSink {
                     delay_den,
                 })
             }
+            MovieEncoder::Mp4 => {
+                let path = output
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from(MovieEncoder::Mp4.default_output()));
+                if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+                    return Err(RunError::io(format!(
+                        "MP4/H.264 需要偶数宽高，当前 {width}x{height}"
+                    )));
+                }
+                let path_str = path
+                    .to_str()
+                    .ok_or_else(|| RunError::io("MP4 路径不是 UTF-8"))?;
+                let mut child = Command::new("ffmpeg")
+                    .args([
+                        "-y",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "rawvideo",
+                        "-pixel_format",
+                        "rgba",
+                        "-video_size",
+                        &format!("{width}x{height}"),
+                        "-framerate",
+                        &fps.max(0.01).to_string(),
+                        "-i",
+                        "pipe:0",
+                        "-an",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "medium",
+                        "-crf",
+                        "18",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        path_str,
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| {
+                        RunError::io(format!(
+                            "启动 ffmpeg 失败（movie --encoder mp4 需要 ffmpeg）：{e}"
+                        ))
+                    })?;
+                let stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| RunError::io("ffmpeg 没有 stdin"))?;
+                Ok(Self::Mp4 {
+                    stdin: Some(stdin),
+                    child,
+                })
+            }
         }
     }
 
@@ -4662,6 +4733,13 @@ impl FrameSink {
                     .map_err(|e| format!("写入 APNG 第 {frame} 帧失败: {e}"))?;
                 Ok((true, 0))
             }
+            Self::Mp4 { stdin, .. } => {
+                let stdin = stdin.as_mut().ok_or("MP4 stdin 已经关闭")?;
+                stdin
+                    .write_all(&image.rgba)
+                    .map_err(|e| format!("写入 MP4 第 {frame} 帧失败: {e}"))?;
+                Ok((true, 0))
+            }
         }
     }
 
@@ -4684,6 +4762,20 @@ impl FrameSink {
             Self::Apng { writer, .. } => writer
                 .finish()
                 .map_err(|e| RunError::io(format!("收尾 APNG 失败: {e}"))),
+            Self::Mp4 { mut stdin, child } => {
+                let _ = stdin.take();
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| RunError::io(format!("等待 ffmpeg 失败: {e}")))?;
+                if !output.status.success() {
+                    return Err(RunError::io(format!(
+                        "ffmpeg 编码 MP4 失败（退出码 {:?}）：{}",
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -4922,6 +5014,9 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
     // 时长跟着变（60 fps → 20 ms/帧 → 实际 50 fps）。这是格式限制，
     // 但必须说出来，不能让用户对着 0.48 s 的视频纳闷。
     let mut notes: Vec<String> = Vec::new();
+    if opts.encoder == MovieEncoder::Mp4 {
+        notes.push("MP4 由 ffmpeg/libx264 直接编码（yuv420p，crf 18）".to_string());
+    }
     if opts.encoder == MovieEncoder::Gif {
         let cs = 100.0 / opts.fps;
         let rounded = cs.round().max(1.0);

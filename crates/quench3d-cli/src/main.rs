@@ -766,14 +766,16 @@ fn dispatch(args: &Args) -> i32 {
                             report.width,
                             report.height,
                             report.bytes / 1024,
-                            if report.encoder == "gif" {
-                                "256 色，可直接播放"
-                            } else {
-                                "无损，可直接播放"
+                            match report.encoder.as_str() {
+                                "gif" => "256 色，可直接播放",
+                                "mp4" => "H.264/yuv420p，可直接播放",
+                                _ => "无损，可直接播放",
                             },
                         )
                     };
-                    let mut tail = if report.ffmpeg.is_empty() {
+                    let mut tail = if report.encoder == "mp4" {
+                        "ffmpeg 已直接编码 MP4；不需要再转码".to_string()
+                    } else if report.ffmpeg.is_empty() {
                         "内置编码已产出可直接播放的文件；要 mp4 再自行转码".to_string()
                     } else {
                         report.ffmpeg.clone()
@@ -1366,7 +1368,7 @@ fn movie_options(
             "movie",
             ErrorInfo::new(
                 "invalid",
-                "--out 只对单文件编码器有效（--encoder gif|apng）",
+                "--out 只对单文件编码器有效（--encoder gif|apng|mp4）",
             )
             .hint("PNG 序列请用 --frames-dir 指定目录"),
             started,
@@ -2029,8 +2031,8 @@ fn help_text() -> String {
   --frames <n>           movie 输出帧数（缺省 60）
   --steps-per-frame <n>  movie 每帧推进的物理步数（缺省 1）
   --frames-dir <目录>    movie 帧序列目录（缺省 frames；仅 --encoder png）
-  --encoder <格式>       movie 封装：png（缺省，帧序列）| gif | apng（后两者内置，免 ffmpeg）
-  --out <文件>           movie 单文件输出（仅 --encoder gif|apng；缺省 movie.gif / movie.png）
+  --encoder <格式>       movie 封装：png（缺省，帧序列）| gif | apng（内置，免 ffmpeg）| mp4（调外部 ffmpeg）
+  --out <文件>           movie 单文件输出（仅 --encoder gif|apng|mp4；缺省 movie.gif / movie.png / movie.mp4）
   --fps <n>              movie 视频帧率（缺省 = 等价帧率 1/(dt×steps-per-frame)）
   --no-sleep             bench 关闭睡眠，测「一直在算」的最坏情况
   --no-render            bench 跳过渲染测量（无 GPU 时更快）

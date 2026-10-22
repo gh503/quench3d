@@ -41,6 +41,13 @@
 
 ### 新增
 
+- **`movie --encoder mp4`（第 115 轮）**：渲染帧通过 stdin rawvideo 流式喂给外部
+  `ffmpeg`（libx264 / crf 18 / yuv420p / faststart），直接产出 MP4；不把
+  ffmpeg/H.264 链进二进制。`--out` 指定文件，缺省 `movie.mp4`；奇宽高在启动
+  ffmpeg 前报错；ffmpeg 缺失/失败给出可读错误。PNG/GIF/APNG 行为不变。
+  回归：1 个 CLI e2e（有 ffmpeg 才跑）断言 `ftyp`、`bytes>0`、trace 位置；
+  总测试 768 → 769。
+
 - **glTF 位置/旋转动画导出（第 114 轮）**：`animations[]` 转成 glTF clip；
   `position` → VEC3 translation channel，`rotation`（欧拉角）→ VEC4 四元数 rotation
   channel，输入时间按 `start + t/speed` 烘进 accessor，`LINEAR` 采样。目标按物体名

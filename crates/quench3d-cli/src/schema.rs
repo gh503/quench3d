@@ -177,7 +177,7 @@ pub fn schema() -> Value {
                     { "name": "--frames", "type": "u32", "required": false, "description": "输出帧数（缺省 60，上限 100000）" },
                     { "name": "--steps-per-frame", "type": "u32", "required": false, "description": "每帧推进的物理步数（缺省 1，上限 1000）" },
                     { "name": "--frames-dir", "type": "path", "required": false, "description": "帧序列目录（缺省 frames）；已存在的帧会跳过，便于续录。仅 --encoder png" },
-                    { "name": "--encoder", "type": "enum", "required": false, "description": "封装格式：png（缺省，帧序列）| gif | apng。gif/apng 为内置纯 Rust 编码器，直接产出可播放的单文件，不需要 ffmpeg；gif 只有 256 色且帧延迟粒度为 10 ms" },
+                    { "name": "--encoder", "type": "enum", "required": false, "description": "封装格式：png（缺省，帧序列）| gif | apng | mp4。gif/apng 为内置纯 Rust 编码器，不需要 ffmpeg；mp4 调外部 ffmpeg（libx264/yuv420p）；gif 只有 256 色且帧延迟粒度为 10 ms" },
                     { "name": "--out", "type": "path", "required": false, "description": "单文件输出路径（仅 --encoder gif|apng；缺省 movie.gif / movie.png）" },
                     { "name": "--fps", "type": "f32", "required": false, "description": "视频帧率（缺省 = 等价帧率 1/(dt×steps-per-frame)）：调小=慢动作，调大=加速" },
                     { "name": "--warmup", "type": "u32", "required": false, "description": "预热帧数（缺省 0）：只推进不输出，丢弃首帧脏画面" },
@@ -188,7 +188,7 @@ pub fn schema() -> Value {
                     { "name": "--no-clobber", "type": "flag", "required": false, "description": "单文件输出或帧目录已存在（非空）就报错，而不是覆盖/续录；要续录就别加这个开关" }
                 ],
                 "output": "{ frames_dir, encoder, output, trace, frames, skipped, fps, duration, steps_per_frame, dt, total_steps, warmup_frames, width, height, bytes, digest, objects, camera_position, probes[]?, sensors[]?, first_frame?, last_frame?, ffmpeg, notes, dry_run?, would_write[]?, elapsed_ms }",
-                "notes": "帧数与时长由物理步决定、与墙钟无关；同一场景两次录制 digest 相同（换编码器也不改变 digest）。--encoder png 时 ffmpeg 字段给出编码命令：ffmpeg -framerate N -i frames/frame_%05d.png -c:v libx264 -crf 18 -pix_fmt yuv420p movie.mp4；gif/apng 时该字段为空串，可直接播放，notes 里会提示格式限制（如 GIF 的 10 ms 延迟粒度）",
+                "notes": "帧数与时长由物理步决定、与墙钟无关；同一场景两次录制 digest 相同（换编码器也不改变 digest）。--encoder png 时 ffmpeg 字段给出编码命令：ffmpeg -framerate N -i frames/frame_%05d.png -c:v libx264 -crf 18 -pix_fmt yuv420p movie.mp4；gif/apng/mp4 时该字段为空串，可直接播放；notes 里会提示格式限制（如 GIF 的 10 ms 延迟粒度）",
                 "examples": [
                     "quench3d movie scene.json --frames 120 --frames-dir frames --json",
                     "quench3d movie scene.json --frames 300 --steps-per-frame 1 --fps 30 --frames-dir slowmo",
