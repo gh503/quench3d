@@ -1518,6 +1518,52 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         }
                     }
                 }
+                if !animation.ik.is_empty() {
+                    ui.label(RichText::new("IK 目标（模型局部空间）").small().strong());
+                    for (chain_index, chain) in animation.ik.iter_mut().enumerate() {
+                        ui.label(
+                            RichText::new(format!(
+                                "#{chain_index} {} → {} → {}",
+                                chain.root, chain.mid, chain.tip
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                        let mut target = [chain.target.x, chain.target.y, chain.target.z];
+                        let mut changed = false;
+                        ui.horizontal(|ui| {
+                            for (axis, value) in ["X", "Y", "Z"].iter().zip(target.iter_mut()) {
+                                let response = ui.add(
+                                    egui::DragValue::new(value)
+                                        .speed(0.01)
+                                        .prefix(format!("{axis} ")),
+                                );
+                                if response.drag_started() {
+                                    begin_edit = true;
+                                }
+                                if response.changed() {
+                                    changed = true;
+                                    if !response.dragged() {
+                                        record_edit = true;
+                                    }
+                                }
+                                if response.drag_stopped() {
+                                    end_edit = true;
+                                }
+                            }
+                        });
+                        if changed {
+                            chain.target = Vec3::new(target[0], target[1], target[2]);
+                            if models[index].is_some() {
+                                if let Some(path) = doc.set_ik_target(&objects, chain_index, target)
+                                {
+                                    changed_model = Some(path);
+                                }
+                            }
+                            refresh = true;
+                        }
+                    }
+                }
                 ui.horizontal(|ui| {
                     let mut speed = animation.player.speed;
                     let response = ui.add(

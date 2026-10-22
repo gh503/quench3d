@@ -10,6 +10,11 @@
 
 ### 修复
 
+- **`Quat::from_rotation_arc` 在非 90° 夹角时转过头**。旧实现把四元数实部写成
+  `sqrt(1 + dot)`，只有 90°（dot=0）碰巧正确；任意夹角旋转角会偏大，两骨 IK 因此
+  永远对不准目标。改成标准最短弧 `normalize([cross, 1 + dot])`，并加一条
+  `Y → (0, 0.6, 0.8)` 的任意夹角用例。这是库函数修正，现有调用方（IK、旋转朝向）
+  都受益。
 - **Web UI 探针的默认端口被占用时假红**。`tools/probe_web_ui.sh` 固定用 8140，别的会话/
   残留服务占着时本地静态服务起不来，浏览器加载不到页面，探针就报"30 秒内遮罩没有收起"，
   看起来像渲染回归。现在启动前先探测端口，占用则自动换 8141~8199；本次实测在 8140
@@ -36,6 +41,18 @@
 
 ### 新增
 
+- **两骨 IK（第 96 轮）**：场景格式新增 `models[].ik`：
+  `{ "root": "LeftUpLeg", "mid": "LeftLeg", "tip": "LeftFoot", "target": [x,y,z],
+  "pole": [0,0,1] }`。按 glTF 节点名引用，目标/极向量在模型局部空间；每帧采样后解
+  两骨三角形，只改 root/mid 朝向，骨骼长度不变；不可达目标夹到最长/最短、不拉伸。
+  求解在蒙皮之前，所以 CPU 蒙皮、GPU 关节调色板、刚性片段和 `F8` 骨骼叠加层看到
+  同一份关节矩阵。编辑器「动画」面板可直接改每条链的 target XYZ 并写回场景；没有
+  `animation`/`animator` 时 `validate` 报错，坏链/缺失节点整条跳过。回归：
+  `two_bone_ik_reaches_target_and_keeps_bone_lengths`、
+  `two_bone_ik_clamps_unreachable_target_without_stretching`、
+  `two_bone_ik_skips_missing_or_broken_chains`、`set_model_ik_drives_the_skeleton_lines`、
+  `model_ik_chains_roundtrip_through_the_scene_format`、`set_ik_target_writes_the_model_chain`
+  （总测试 716 → 722）。
 - **模型骨骼叠加（第 95 轮）**：`F8` 开关在调试层画出所有播放中模型的关节线段（父关节 → 最近关节祖先，
   中间的非关节变换节点自动跳过）与关节点；线段乘模型当前世界变换，所以移动/旋转模型后骨架跟着走。
   纯函数 `skeleton_edges` 有两组离线用例（三关节链 2 条边、空 clip + 世界平移 (10,2,0)），

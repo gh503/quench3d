@@ -94,6 +94,13 @@ fn fake_animation_instance() -> ModelAnimationInstance {
         blend_fade: 0.0,
         blend_elapsed: 0.0,
         morph_weights: None,
+        ik: vec![quench3d::scene::IkChain {
+            root: "大腿".into(),
+            mid: "小腿".into(),
+            tip: "脚".into(),
+            target: Vec3::new(0.0, 0.2, 0.1),
+            pole: Some(Vec3::Z),
+        }],
         animator: Some(ModelAnimatorRuntime {
             states: vec![
                 ModelAnimatorState {
@@ -162,6 +169,7 @@ fn fake_plain_animation_instance() -> ModelAnimationInstance {
         blend_fade: 0.0,
         blend_elapsed: 0.0,
         morph_weights: None,
+        ik: Vec::new(),
         animator: None,
     }
 }

@@ -130,14 +130,14 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   （最多 128 个矩阵），不再重算/重传整张顶点缓冲。场景里用 `models[].animation`
   选一条 clip；`Scene::gpu_skinning = false` 可退回 CPU 对照。
   边界：每顶点最多 4 关节；带 morph 的蒙皮网格仍走 CPU（先 morph 再蒙皮）；
-  没有 IK（状态机见下）；`info` 会列出 `skins` / `skinned_meshes`。
+  IK 见下；`info` 会列出 `skins` / `skinned_meshes`。
 * **morph target（静态权重 + 权重动画）**：带 glTF `targets` 的网格解析逐顶点
   `POSITION/NORMAL/TANGENT` 位移；场景里用 `models[].morph_weights` 覆盖权重
   （0~1，缺项按 0）。glTF 的 `weights` 动画轨道会随 `models[].animation` 自动采样，
   按节点应用到对应网格；蒙皮模型按"先 morph、再乘关节矩阵"的顺序变形，静态模型
   在装载后立即写回 GPU 顶点缓冲。手工 `morph_weights` 优先于动画轨道。
   边界：双 clip 混合会按 `blend_weight` 逐 target 插值两条 clip 的 morph 权重；
-  没有编辑器滑杆；`models[].collide` 的碰撞体仍是绑定姿态。`info` 会报 `morph_targets`，动画报告
+  编辑器「动画」面板可勾选手动覆盖并拖动每个 target 的滑杆；`models[].collide` 的碰撞体仍是绑定姿态。`info` 会报 `morph_targets`，动画报告
   会报 `animation.morph_tracks`。
 * **时间/结束驱动动画状态机**：场景里用 `models[].animator` 声明 `states` 与
   `transitions`；当前状态停留 `after` 秒后切到目标状态，或写
@@ -145,14 +145,22 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   （0 = 立即切），淡入完成后新 clip 提为主 clip。它仍没有输入参数/事件；
   和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
+* **两骨 IK（脚/手目标）**：场景里用 `models[].ik` 给角色加链：
+  `{ "root": "LeftUpLeg", "mid": "LeftLeg", "tip": "LeftFoot", "target": [x,y,z], "pole": [0,0,1] }`。
+  按 glTF 节点名引用，目标与极向量都在**模型局部空间**；每帧采样动画后解两骨三角形，
+  只改 root/mid 的朝向，骨骼长度不变，`pole` 决定膝盖往哪边弯。求解在蒙皮之前，
+  所以 CPU 蒙皮、GPU 关节调色板、刚性片段和 `F8` 骨骼叠加层看到同一份关节矩阵。
+  边界：只支持两骨（大腿-小腿 / 上臂-前臂）；目标超出可达范围时夹到最长/最短，
+  不拉伸；必须有 `animation` 或 `animator` 提供初始关节姿态；没有 IK/FK 权重混合。
 * **动画面板**：右侧「动画」列出场景里每个播放实例的 clip、时长、倍速、循环/播完
   状态和状态机当前状态；**倍速/循环可改并写回 `models[i].animation`（或状态机当前
   state）**，可撤销，存盘生效。拖动「时间」滑杆时**暂停也立刻**重算位姿与蒙皮/morph
   顶点（`Scene::refresh_animations_with_renderer`），但时间本身只改当前会话。
   普通动画还可从资产里选择 clip（写回 `models[i].animation.name`）；状态机的片段由
   `states` 管，不能在这里单换。状态机的每条过渡可直接改等待秒数、淡入秒数和
-  「播完触发」（写回 `transitions[i]`）。边界：仍不是完整时间轴（不能加事件/
-  增删状态或过渡）。
+  「播完触发」（写回 `transitions[i]`）。模型有 `ik` 时，每条链的目标 XYZ 也可直接
+  改并写回 `models[i].ik[j].target`，视口里的蒙皮和 `F8` 骨架当场跟着动。
+  边界：仍不是完整时间轴（不能加事件/增删状态、过渡或 IK 链）。
 * **CUBICSPLINE 真值**：glTF 动画的 TRS 轨道按 Hermite 基函数使用入/出切线
   （旋转在分量求值后归一化）；解析器保留三段 `[入切线, 值, 出切线]`，不再退化线性。
   morph 权重轨道的 CUBICSPLINE 仍只取关键帧值（按线性采样）。
@@ -225,7 +233,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12412439 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12439016 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -908,6 +916,10 @@ NaN 刚体  : 0
   （`found` / `duration` / `tracks` / `blend` + 资产里可用的 `clips`）——名字写错只给警告，
   几何保持绑定姿态，不会让场景非法。`loop` 缺省 **true**（与 `animations[].loop` 缺省 false
   相反：模型片段通常是循环的）；`loop: false` 播完停在最后一帧。
+  `models[].ik` 是**两骨 IK**（需要同时有 `animation` 或 `animator`）：数组里每条链写
+  `root/mid/tip` 三个 glTF 节点名、`target` 三维目标、可选 `pole` 方向；名字不存在或
+  父子关系不成立时整条跳过，几何保持原姿态。`validate` 只查结构（名字非空、三者不同、
+  目标/极向量有限、必须有动画段）；资产里到底有没有这些节点由报告/实际效果决定。
   `blend` 是**第二条 clip 的交叉淡化**：两条 clip 各自推进自己的时间，再对局部 TRS
   插值（旋转 slerp），最后统一累乘父子链；`weight` 缺省 0.5，0 = 只用第一条，1 = 只用第二条。
   `fade` 缺省 0 = 立即到 `weight`；写成正数时从第一帧的 0 **smoothstep** 升到 `weight`，
@@ -1244,7 +1256,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 716 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 722 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

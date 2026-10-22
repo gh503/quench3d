@@ -3321,6 +3321,19 @@ pub fn setup_visuals(
                 initial,
             );
         }
+        if let (Some(index), Some(chains)) = (animation_index, &m.ik) {
+            let chains = chains
+                .iter()
+                .map(|c| quench3d::scene::IkChain {
+                    root: c.root.clone(),
+                    mid: c.mid.clone(),
+                    tip: c.tip.clone(),
+                    target: v3(c.target),
+                    pole: c.pole.map(v3),
+                })
+                .collect();
+            engine.scene.set_model_ik(index, chains);
+        }
         if let Some(weights) = &m.morph_weights {
             // 场景覆盖：先把 GPU 上的绑定姿态网格换成 morph 后的几何（静态模型
             // 也要生效）；动画实例则同时记住权重，之后每帧 morph + skin。

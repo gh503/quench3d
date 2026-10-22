@@ -131,7 +131,9 @@ impl Quat {
             return Self::from_axis_angle(a, core::f32::consts::PI);
         }
         let c = f.cross(t);
-        Self::new(c.x, c.y, c.z, (1.0 + d).sqrt()).normalize_or_identity()
+        // 标准最短弧：q = normalize([cross, 1 + dot])。
+        // 不能把 w 写成 sqrt(1 + dot)：那只在 90° 时碰巧正确，任意夹角都会转过头。
+        Self::new(c.x, c.y, c.z, 1.0 + d).normalize_or_identity()
     }
 
     /// 从观察方向与上方向构造朝向。
@@ -440,6 +442,14 @@ mod tests {
         assert!((q.mul_vec3(Vec3::X) - Vec3::Y).length() < 1e-5);
         let q2 = Quat::from_rotation_arc(Vec3::X, Vec3::NEG_X);
         assert!((q2.mul_vec3(Vec3::X) - Vec3::NEG_X).length() < 1e-4);
+        // 任意夹角（不是 90°）：旧实现把 w 写成 sqrt(1+d)，会转过头。
+        let to = Vec3::new(0.0, 0.6, 0.8);
+        let q3 = Quat::from_rotation_arc(Vec3::Y, to);
+        assert!(
+            (q3.mul_vec3(Vec3::Y) - to).length() < 1e-5,
+            "Y 应精确转到 {to:?}，实际 {:?}",
+            q3.mul_vec3(Vec3::Y)
+        );
     }
 
     #[test]

@@ -1616,6 +1616,23 @@ pub struct ModelAnimatorDoc {
     pub transitions: Vec<ModelAnimatorTransitionDoc>,
 }
 
+/// 一条两骨 IK 链（模型局部空间）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelIkDoc {
+    /// 大腿 / 上臂节点名。
+    pub root: String,
+    /// 小腿 / 前臂节点名。
+    pub mid: String,
+    /// 脚 / 手节点名。
+    pub tip: String,
+    /// 末端目标位置（模型局部空间，不受模型自身 position/rotation/scale 影响）。
+    pub target: [f32; 3],
+    /// 弯曲方向提示（模型局部空间的方向，不是点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pole: Option<[f32; 3]>,
+}
+
 /// 一个外部模型文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1646,6 +1663,12 @@ pub struct ModelDoc {
     /// 可选的时间驱动状态机；与 `animation` 互斥。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animator: Option<ModelAnimatorDoc>,
+    /// 两骨 IK 链（需要模型同时有 `animation` 或 `animator` 才会求解）。
+    ///
+    /// 每条链按 glTF **节点名字**引用 `root → mid → tip`，目标/极向量都在模型
+    /// 局部空间。求解释放在每帧采样之后、蒙皮之前，CPU/GPU 蒙皮与骨骼叠加层一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ik: Option<Vec<ModelIkDoc>>,
     /// 播放模型里的一条 glTF 动画；**不写 = 静止**（老行为逐字节不变）。
     ///
     /// 名字不存在不会让场景非法（`validate` 不读资产），但会在 `simulate` / `render`
@@ -5164,6 +5187,65 @@ impl SceneDoc {
                     }
                 }
             }
+            if let Some(chains) = &m.ik {
+                if chains.is_empty() {
+                    out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{p}.ik"),
+                            "IK 链数组是空的",
+                        )
+                        .with_hint("要么删掉整个 `ik` 段，要么至少写一条链"),
+                    );
+                }
+                if m.animation.is_none() && m.animator.is_none() {
+                    out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{p}.ik"),
+                            "IK 需要模型同时有 `animation` 或 `animator`",
+                        )
+                        .with_hint(
+                            "IK 在每帧采样之后求解；没有任何动画实例时没有关节矩阵可用。                             给模型加一条 `animation`（哪怕只有一帧）再写 `ik`",
+                        ),
+                    );
+                }
+                for (j, c) in chains.iter().enumerate() {
+                    let cp = format!("{p}.ik[{j}]");
+                    for (field, value) in [("root", &c.root), ("mid", &c.mid), ("tip", &c.tip)] {
+                        if value.trim().is_empty() {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{cp}.{field}"),
+                                "关节名不能为空",
+                            ));
+                        }
+                    }
+                    if c.root == c.mid || c.mid == c.tip || c.root == c.tip {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            &cp,
+                            "root / mid / tip 必须是三个不同的节点",
+                        ));
+                    }
+                    if !c.target.iter().all(|v| v.is_finite()) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{cp}.target"),
+                            "IK 目标必须是有限数",
+                        ));
+                    }
+                    if let Some(pole) = c.pole {
+                        if !pole.iter().all(|v| v.is_finite()) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{cp}.pole"),
+                                "IK 极向量必须是有限数",
+                            ));
+                        }
+                    }
+                }
+            }
             if m.animator.is_some() && m.animation.is_some() {
                 out.push(Diagnostic::error_code(
                     ErrorCode::InvalidValue,
@@ -7730,6 +7812,65 @@ mod tests {
             cleared.lighting.point_lights.as_ref().map(|v| v.len()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn model_ik_chains_roundtrip_through_the_scene_format() {
+        let doc = SceneDoc::from_value(json!({
+            "models": [{
+                "path": "rig.glb",
+                "animation": { "name": "idle" },
+                "ik": [{
+                    "root": "LeftUpLeg",
+                    "mid": "LeftLeg",
+                    "tip": "LeftFoot",
+                    "target": [0.0, 0.2, 0.1],
+                    "pole": [0.0, 0.0, 1.0]
+                }]
+            }]
+        }))
+        .unwrap();
+        let chain = &doc.models[0].ik.as_ref().expect("ik 段应保留")[0];
+        assert_eq!(chain.root, "LeftUpLeg");
+        assert_eq!(chain.tip, "LeftFoot");
+        assert_eq!(chain.target, [0.0, 0.2, 0.1]);
+        assert_eq!(chain.pole, Some([0.0, 0.0, 1.0]));
+
+        // 再序列化一次仍可读回（编辑器保存场景时不会把 IK 丢掉）。
+        let text = serde_json::to_string(&doc).unwrap();
+        let again = SceneDoc::from_value(serde_json::from_str(&text).unwrap()).unwrap();
+        assert_eq!(
+            again.models[0].ik.as_ref().unwrap()[0].target,
+            [0.0, 0.2, 0.1]
+        );
+
+        // 没有动画实例时 IK 无法求解：必须当场报错，不能静默不动。
+        let no_anim = SceneDoc::from_value(json!({
+            "models": [{
+                "path": "rig.glb",
+                "ik": [{ "root": "a", "mid": "b", "tip": "c", "target": [0.0, 0.0, 0.0] }]
+            }]
+        }))
+        .unwrap();
+        let ik_errors: Vec<String> = no_anim
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error && d.path.starts_with("models[0].ik"))
+            .map(|d| d.path)
+            .collect();
+        assert!(
+            ik_errors.iter().any(|p| p == "models[0].ik"),
+            "缺 animation/animator 应报错：{ik_errors:?}"
+        );
+
+        // 拼错的字段必须报错，而不是静默忽略。
+        assert!(SceneDoc::from_value(json!({
+            "models": [{
+                "path": "rig.glb",
+                "ik": [{ "root": "a", "mid": "b", "tip": "c", "target": [0.0, 0.0, 0.0], "poles": [0.0, 1.0, 0.0] }]
+            }]
+        }))
+        .is_err());
     }
 
     #[test]

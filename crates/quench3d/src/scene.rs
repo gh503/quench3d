@@ -197,6 +197,26 @@ pub struct ModelAnimatorRuntime {
     pub pending: Option<usize>,
 }
 
+/// 一条两骨 IK 链（模型局部空间）。
+///
+/// `root → mid → tip` 按 glTF **节点名字**引用；求解只改这两根骨头的朝向，
+/// 骨骼长度保持不变。`target` 是模型局部空间的位置（不是世界空间，也不受
+/// `models[].position/rotation/scale` 影响）。`pole` 是弯曲方向的提示向量，
+/// 缺省沿用当前膝盖/肘部的弯曲方向。
+#[derive(Clone, Debug, PartialEq)]
+pub struct IkChain {
+    /// 大腿 / 上臂节点名。
+    pub root: String,
+    /// 小腿 / 前臂节点名。
+    pub mid: String,
+    /// 脚 / 手节点名。
+    pub tip: String,
+    /// 末端目标位置（模型局部空间）。
+    pub target: Vec3,
+    /// 弯曲方向提示（模型局部空间的方向向量，不需要归一化）。
+    pub pole: Option<Vec3>,
+}
+
 /// 场景里一个"正在播放 glTF 动画"的模型实例。
 ///
 /// 一个模型会展开成多个场景物体（每个网格片段一个），动画要把每个片段自己的矩阵
@@ -225,15 +245,157 @@ pub struct ModelAnimationInstance {
     pub morph_weights: Option<Vec<f32>>,
     /// 可选的状态机；`None` = 单/双 clip 播放。
     pub animator: Option<ModelAnimatorRuntime>,
+    /// 两骨 IK 链；空 = 不做 IK。
+    pub ik: Vec<IkChain>,
 }
 
 /// 取一个动画实例当前该用的节点世界矩阵（单 clip 或双 clip 混合）。
 fn animation_worlds(a: &ModelAnimationInstance) -> Option<Vec<Mat4>> {
-    match &a.secondary {
+    let mut worlds = match &a.secondary {
         Some(secondary) => a
             .model
             .blended_node_worlds(&a.player, secondary, a.blend_weight),
         None => a.player.node_worlds(&a.model),
+    }?;
+    solve_ik_chains(&a.model, &mut worlds, &a.ik);
+    Some(worlds)
+}
+
+/// 节点名 → 下标；空名字不参与匹配。
+fn node_index(model: &crate::assets::LoadedModel, name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    model.nodes.iter().position(|n| n.name == name)
+}
+
+/// `node` 是不是 `ancestor` 的后代（含自身）。
+fn is_descendant(model: &crate::assets::LoadedModel, node: usize, ancestor: usize) -> bool {
+    let mut current = Some(node);
+    let mut depth = 0;
+    while let Some(i) = current {
+        if i == ancestor {
+            return true;
+        }
+        depth += 1;
+        if depth > model.nodes.len() {
+            return false;
+        }
+        current = model.nodes.get(i).and_then(|n| n.parent);
+    }
+    false
+}
+
+/// 绕 `pivot` 旋转一棵子树（`node` 及其所有后代）的世界矩阵。
+fn rotate_subtree(
+    model: &crate::assets::LoadedModel,
+    worlds: &mut [Mat4],
+    node: usize,
+    pivot: Vec3,
+    rotation: Quat,
+) {
+    if !rotation.is_finite() {
+        return;
+    }
+    let m = Mat4::from_rotation_translation_scale(pivot, rotation, Vec3::ONE)
+        * Mat4::from_rotation_translation_scale(-pivot, Quat::IDENTITY, Vec3::ONE);
+    for (i, world) in worlds.iter_mut().enumerate() {
+        if is_descendant(model, i, node) {
+            *world = m * *world;
+        }
+    }
+}
+
+/// 解一个两骨三角形：返回 `(新的中间关节点, 新的末端点)`。
+///
+/// 目标超出可达范围时夹到最长/最短距离（不拉伸骨骼）；`pole` 只决定往哪边弯，
+/// 不改变目标距离。
+fn two_bone_solution(
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+    target: Vec3,
+    pole: Option<Vec3>,
+) -> Option<(Vec3, Vec3)> {
+    let l1 = (b - a).length();
+    let l2 = (c - b).length();
+    if !l1.is_finite() || !l2.is_finite() || l1 <= 1e-5 || l2 <= 1e-5 {
+        return None;
+    }
+    let to_target = target - a;
+    let distance = to_target.length();
+    if !distance.is_finite() || distance <= 1e-5 {
+        return None;
+    }
+    let dir = to_target.normalize_or_zero();
+    if dir == Vec3::ZERO {
+        return None;
+    }
+    let reach = (l1 + l2 - 1e-4).max((l1 - l2).abs() + 1e-4);
+    let d = distance.clamp((l1 - l2).abs() + 1e-4, reach);
+    let cos = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
+    let sin = (1.0 - cos * cos).max(0.0).sqrt();
+
+    // 弯曲方向：优先用 pole，其次保持原来的弯曲平面；退化时随便挑一个垂直方向。
+    let base_bend = pole.filter(|p| p.length_squared() > 1e-8).unwrap_or(b - a);
+    let mut bend = base_bend - dir * base_bend.dot(dir);
+    if bend.length_squared() <= 1e-8 {
+        let axis = if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+        bend = dir.cross(axis);
+    }
+    let bend = bend.normalize_or_zero();
+    if bend == Vec3::ZERO {
+        return None;
+    }
+    let mid = a + dir * (l1 * cos) + bend * (l1 * sin);
+    let tip = a + dir * d;
+    Some((mid, tip))
+}
+
+/// 依次应用所有 IK 链。链引用缺失/不构成父子关系/退化时整条跳过，不抛错。
+fn solve_ik_chains(model: &crate::assets::LoadedModel, worlds: &mut [Mat4], chains: &[IkChain]) {
+    for chain in chains {
+        let (Some(root), Some(mid), Some(tip)) = (
+            node_index(model, &chain.root),
+            node_index(model, &chain.mid),
+            node_index(model, &chain.tip),
+        ) else {
+            continue;
+        };
+        if root == mid
+            || mid == tip
+            || !is_descendant(model, mid, root)
+            || !is_descendant(model, tip, mid)
+        {
+            continue;
+        }
+        let (Some(&wr), Some(&wm), Some(&wt)) =
+            (worlds.get(root), worlds.get(mid), worlds.get(tip))
+        else {
+            continue;
+        };
+        let a = wr.translation();
+        let b = wm.translation();
+        let c = wt.translation();
+        let Some((mid_goal, tip_goal)) = two_bone_solution(a, b, c, chain.target, chain.pole)
+        else {
+            continue;
+        };
+
+        let q1 = Quat::from_rotation_arc(
+            (b - a).normalize_or_zero(),
+            (mid_goal - a).normalize_or_zero(),
+        );
+        rotate_subtree(model, worlds, root, a, q1);
+
+        // 根骨旋转后重新取中间点；再绕它把末端对准目标。
+        let b_now = worlds[mid].translation();
+        let c_now = worlds[tip].translation();
+        let q2 = Quat::from_rotation_arc(
+            (c_now - b_now).normalize_or_zero(),
+            (tip_goal - b_now).normalize_or_zero(),
+        );
+        rotate_subtree(model, worlds, mid, b_now, q2);
     }
 }
 
@@ -613,6 +775,7 @@ impl Scene {
             blend_fade: 0.0,
             blend_elapsed: 0.0,
             morph_weights: None,
+            ik: Vec::new(),
             animator: None,
         });
         index
@@ -682,6 +845,7 @@ impl Scene {
             blend_fade: fade,
             blend_elapsed: 0.0,
             morph_weights: None,
+            ik: Vec::new(),
             animator: None,
         });
         index
@@ -727,6 +891,7 @@ impl Scene {
             blend_fade: 0.0,
             blend_elapsed: 0.0,
             morph_weights: None,
+            ik: Vec::new(),
             animator: Some(ModelAnimatorRuntime {
                 states,
                 transitions,
@@ -752,6 +917,25 @@ impl Scene {
         };
         a.morph_weights = weights;
         true
+    }
+
+    /// 覆盖某个动画实例的两骨 IK 链（空 = 关闭）。
+    ///
+    /// 求解发生在**每帧采样之后、蒙皮之前**：CPU 蒙皮、GPU 调色板、刚性片段和
+    /// 骨骼叠加层看到的是同一份关节世界矩阵。
+    pub fn set_model_ik(&mut self, animation_index: usize, chains: Vec<IkChain>) -> bool {
+        let Some(a) = self.animations.get_mut(animation_index) else {
+            return false;
+        };
+        a.ik = chains;
+        true
+    }
+
+    /// 某个动画实例当前的 IK 链（编辑器展示/测试用）。
+    pub fn model_ik(&self, animation_index: usize) -> Option<&[IkChain]> {
+        self.animations
+            .get(animation_index)
+            .map(|a| a.ik.as_slice())
     }
 
     /// 推进所有模型动画 `dt` 秒并把当前帧落到物体上；返回更新的物体数。
@@ -1853,6 +2037,134 @@ mod anim_tests {
         assert_eq!(edges[0].1, Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(edges[1].0, Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(edges[1].1, Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    fn three_bone_model() -> LoadedModel {
+        LoadedModel {
+            name: "rig".into(),
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            images: Vec::new(),
+            nodes: vec![
+                LoadedNode {
+                    name: "root".into(),
+                    ..Default::default()
+                },
+                LoadedNode {
+                    name: "mid".into(),
+                    parent: Some(0),
+                    translation: Vec3::new(0.0, 1.0, 0.0),
+                    ..Default::default()
+                },
+                LoadedNode {
+                    name: "tip".into(),
+                    parent: Some(1),
+                    translation: Vec3::new(0.0, 1.0, 0.0),
+                    ..Default::default()
+                },
+            ],
+            animations: vec![LoadedAnimation {
+                name: "idle".into(),
+                ..Default::default()
+            }],
+            skins: vec![LoadedSkin {
+                joints: vec![0, 1, 2],
+                inverse_bind: vec![Mat4::IDENTITY; 3],
+            }],
+        }
+    }
+
+    fn ik_chain(target: Vec3, pole: Option<Vec3>) -> IkChain {
+        IkChain {
+            root: "root".into(),
+            mid: "mid".into(),
+            tip: "tip".into(),
+            target,
+            pole,
+        }
+    }
+
+    #[test]
+    fn two_bone_ik_reaches_target_and_keeps_bone_lengths() {
+        let model = three_bone_model();
+        let mut worlds = model.bind_pose();
+        let chain = ik_chain(Vec3::new(0.0, 1.5, 0.5), Some(Vec3::Z));
+        solve_ik_chains(&model, &mut worlds, &[chain]);
+        let a = worlds[0].translation();
+        let b = worlds[1].translation();
+        let c = worlds[2].translation();
+        assert!((a - Vec3::ZERO).length() < 1e-4, "根关节不该被移动");
+        assert!(
+            (c - Vec3::new(0.0, 1.5, 0.5)).length() < 1e-3,
+            "末端应到达目标，实际 {c:?}"
+        );
+        assert!(((b - a).length() - 1.0).abs() < 1e-3, "上骨长度不能变");
+        assert!(((c - b).length() - 1.0).abs() < 1e-3, "下骨长度不能变");
+        assert!(b.z > 0.1, "pole=+Z 时膝盖应往 +Z 弯，实际 {b:?}");
+    }
+
+    #[test]
+    fn two_bone_ik_clamps_unreachable_target_without_stretching() {
+        let model = three_bone_model();
+        let mut worlds = model.bind_pose();
+        solve_ik_chains(
+            &model,
+            &mut worlds,
+            &[ik_chain(Vec3::new(0.0, 0.0, 10.0), None)],
+        );
+        let a = worlds[0].translation();
+        let b = worlds[1].translation();
+        let c = worlds[2].translation();
+        assert!(
+            (c.length() - 2.0).abs() < 1e-3,
+            "最长只能伸到 2，实际 {c:?}"
+        );
+        assert!(((b - a).length() - 1.0).abs() < 1e-3);
+        assert!(((c - b).length() - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn two_bone_ik_skips_missing_or_broken_chains() {
+        let model = three_bone_model();
+        let mut worlds = model.bind_pose();
+        let before = worlds.clone();
+        solve_ik_chains(
+            &model,
+            &mut worlds,
+            &[IkChain {
+                root: "root".into(),
+                mid: "tip".into(), // tip 不是 root 的直接后代顺序
+                tip: "mid".into(),
+                target: Vec3::new(1.0, 1.0, 1.0),
+                pole: None,
+            }],
+        );
+        assert_eq!(worlds, before, "坏链整条跳过，不能留下半截旋转");
+    }
+
+    #[test]
+    fn set_model_ik_drives_the_skeleton_lines() {
+        let model = Arc::new(three_bone_model());
+        let mut scene = Scene::new();
+        let base = Transform::default();
+        let object = scene.add_named(1, 1, base, "rig");
+        let player = model.player("idle").expect("空 clip 也能建播放器");
+        let index =
+            scene.play_model_animation(Arc::clone(&model), vec![object], vec![base], player);
+        assert!(scene.set_model_ik(
+            index,
+            vec![ik_chain(Vec3::new(0.0, 1.5, 0.5), Some(Vec3::Z))]
+        ));
+        let lines = scene.model_skeleton_lines();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            (lines[0].1 - lines[1].0).length() < 1e-3,
+            "两段骨头应共用中间关节点"
+        );
+        assert!(
+            (lines[1].1 - Vec3::new(0.0, 1.5, 0.5)).length() < 1e-3,
+            "骨骼叠加层看到的末端应已 IK 到目标"
+        );
     }
 
     #[test]
