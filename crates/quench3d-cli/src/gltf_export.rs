@@ -10,16 +10,19 @@
 //! 只接受 PNG/JPEG；路径缺失/读不到/格式不支持会在 `skipped` 里报告，导出继续。
 //! Web 端没有文件系统，贴图统一报告为未嵌入，几何照常导出。
 //!
-//! **刻意不做的事**：节点是扁平的（世界变换直接烘进顶点，父子层级不写进 glTF），
-//! `uv_scale` 的平铺也不写（glTF 2.0 core 没有，不擅自加扩展）；目标是"能在别的工具里
-//! 打开看到同样的几何/颜色/主要贴图"，不是无损编辑往返。
+//! **节点树**：父子关系写成 glTF 节点 `children`，节点只带局部 `translation` /
+//! `rotation`；物体 `scale` 与部件局部位姿烘进顶点。这样别的工具里能继续按层级选中，
+//! 世界位置也与引擎一致。父链成环时断开成根并在 `skipped` 里报告。
+//!
+//! **刻意不做的事**：`uv_scale` 的平铺不写（glTF 2.0 core 没有，不擅自加扩展）；
+//! 目标是"能在别的工具里打开看到同样的几何/颜色/主要贴图与层级"，不是无损编辑往返。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::obj_export::{mesh_for_shape, resolve_world};
+use crate::obj_export::mesh_for_shape;
 use crate::scene_doc::SceneDoc;
 use quench3d::prelude::{Mat4, Vec3};
 
@@ -63,21 +66,69 @@ pub fn export_gltf_with_base(
         .enumerate()
         .map(|(i, o)| (o.name.clone().unwrap_or_else(|| format!("objects[{i}]")), i))
         .collect();
-    let mut worlds: Vec<Option<Mat4>> = vec![None; doc.objects.len()];
-    for i in 0..doc.objects.len() {
-        resolve_world(i, &doc.objects, &names, &mut worlds, &mut Vec::new());
+    // 父链（下标）：只认能在 `names` 里找到的父物体；环在导出时断开成根。
+    let mut parent_of: Vec<Option<usize>> = doc
+        .objects
+        .iter()
+        .map(|o| o.parent.as_ref().and_then(|p| names.get(p)).copied())
+        .collect();
+    let mut cycle_notes = Vec::new();
+    for i in 0..parent_of.len() {
+        let mut seen = vec![false; parent_of.len()];
+        let mut cur = Some(i);
+        while let Some(j) = cur {
+            if seen[j] {
+                parent_of[i] = None;
+                cycle_notes.push(format!("objects[{i}]: 父链成环，已按根物体导出"));
+                break;
+            }
+            seen[j] = true;
+            cur = parent_of[j];
+        }
     }
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); doc.objects.len()];
+    for (i, p) in parent_of.iter().enumerate() {
+        if let Some(p) = p {
+            children[*p].push(i);
+        }
+    }
+    let roots: Vec<usize> = (0..doc.objects.len())
+        .filter(|i| parent_of[*i].is_none())
+        .collect();
 
     let mut buffer: Vec<u8> = Vec::new();
     let mut buffer_views: Vec<Value> = Vec::new();
     let mut accessors: Vec<Value> = Vec::new();
     let mut meshes: Vec<Value> = Vec::new();
-    let mut nodes: Vec<Value> = Vec::new();
     let mut materials: Vec<Value> = Vec::new();
     let mut material_index: BTreeMap<String, usize> = BTreeMap::new();
     let mut images: Vec<Value> = Vec::new();
     let mut textures: Vec<Value> = Vec::new();
     let mut skipped = Vec::new();
+    skipped.extend(cycle_notes);
+    // glTF 节点树：节点只带局部平移/旋转；物体缩放与部件局部位姿烘进顶点。
+    // 这样父子层级在别的工具里仍然可见，世界位置也不会变。
+    let mut nodes: Vec<Value> = (0..doc.objects.len())
+        .map(|i| {
+            let object = &doc.objects[i];
+            let pos = Vec3::from_array(object.position.unwrap_or([0.0, 0.0, 0.0]));
+            let q = runner::euler_quat(object.rotation_deg);
+            let name = object
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("objects[{i}]"));
+            json!({
+                "name": name,
+                "translation": [pos.x, pos.y, pos.z],
+                "rotation": [q.x, q.y, q.z, q.w],
+            })
+        })
+        .collect();
+    for (p, kids) in children.iter().enumerate() {
+        if !kids.is_empty() {
+            nodes[p]["children"] = json!(kids);
+        }
+    }
     let mut texture_cache: BTreeMap<String, Option<usize>> = BTreeMap::new();
     let mut unlit = false;
     // 先把用到的材质贴图全部装进 buffer，后面写 material 时只查索引。
@@ -120,9 +171,9 @@ pub fn export_gltf_with_base(
             .name
             .clone()
             .unwrap_or_else(|| format!("objects[{i}]"));
-        let world = worlds[i].unwrap_or(Mat4::IDENTITY);
         let scale = Vec3::from_array(object.scale.unwrap_or([1.0, 1.0, 1.0]));
-        let object_mat = world * Mat4::from_scale(scale);
+        // 顶点只到物体局部空间；世界位置由父节点链的 translation/rotation 提供。
+        let object_mat = Mat4::from_scale(scale);
         let parts = object.parts();
         if parts.is_empty() {
             skipped.push(format!("{name}: 没有形状"));
@@ -155,7 +206,7 @@ pub fn export_gltf_with_base(
             let part_mat =
                 Mat4::from_translation(Vec3::from_array(part.position.unwrap_or([0.0, 0.0, 0.0])))
                     * Mat4::from_quat(runner::euler_quat(part.rotation_deg));
-            // 与 OBJ 导出同一套变换：物体世界位姿 × 物体缩放 × 部件局部位姿。
+            // 物体缩放 × 部件局部位姿；父链由 glTF 节点树表达。
             // `mesh_scale` 是图元网格自身的半径/半高缩放（例如球半径 0.5 → 1）。
             let transform = object_mat * Mat4::from_scale(mesh_scale) * part_mat;
             let normal_mat = transform.inverse().transpose();
@@ -214,10 +265,7 @@ pub fn export_gltf_with_base(
             "name": name,
             "primitives": primitives,
         }));
-        nodes.push(json!({
-            "name": name,
-            "mesh": meshes.len() - 1,
-        }));
+        nodes[i]["mesh"] = json!(meshes.len() - 1);
         objects += 1;
     }
 
@@ -235,7 +283,7 @@ pub fn export_gltf_with_base(
             "generator": "quench3d gltf_export",
         },
         "scene": 0,
-        "scenes": [{ "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
+        "scenes": [{ "nodes": roots }],
     });
     // 空场景不要写空数组：glTF 2.0 的 buffers/accessors 等数组出现时要求至少一项。
     if !nodes.is_empty() {
@@ -577,19 +625,23 @@ mod tests {
             .starts_with("data:application/octet-stream;base64,"));
         assert!(out.triangles > 0 && out.vertices > 0);
 
-        // 子物体的世界位置 = 父位置 + 子局部位置；几何已经烘进顶点，节点是扁平的。
+        // 父链是真正的节点树：根节点只含父，子节点挂在 children 下。
+        assert_eq!(json["scenes"][0]["nodes"], json!([0]));
+        assert_eq!(json["nodes"][0]["children"], json!([1]));
+        assert_eq!(json["nodes"][0]["translation"], json!([1.0, 0.0, 0.0]));
+        assert_eq!(json["nodes"][1]["translation"], json!([0.0, 2.0, 0.0]));
+        // 子几何只到物体局部空间（球心在原点），世界位移由节点 translation 提供。
         let pos_accessor = json["meshes"][1]["primitives"][0]["attributes"]["POSITION"]
             .as_u64()
             .unwrap() as usize;
         let min = json["accessors"][pos_accessor]["min"].as_array().unwrap();
-        // 子球半径 0.5、中心 x=1（父在 x=1）→ 最小 X 是 0.5。
         assert!(
-            (min[0].as_f64().unwrap() - 0.5).abs() < 1e-3,
-            "子物体 X 范围不对：{min:?}"
+            (min[0].as_f64().unwrap() + 0.5).abs() < 1e-3,
+            "子物体局部 X 范围不对：{min:?}"
         );
         assert!(
-            (min[1].as_f64().unwrap() - 1.5).abs() < 1e-3,
-            "子物体 Y 范围不对：{min:?}"
+            (min[1].as_f64().unwrap() + 0.5).abs() < 1e-3,
+            "子物体局部 Y 范围不对：{min:?}"
         );
     }
 
@@ -656,6 +708,34 @@ mod tests {
             .get("baseColorTexture")
             .is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nested_nodes_keep_three_levels_of_translation() {
+        let doc = SceneDoc::from_json(
+            r#"{
+                "objects": [
+                    { "name": "根", "shape": { "type": "sphere", "radius": 0.5 }, "position": [1, 0, 0] },
+                    { "name": "中", "shape": { "type": "sphere", "radius": 0.5 }, "parent": "根", "position": [0, 2, 0] },
+                    { "name": "孙", "shape": { "type": "sphere", "radius": 0.5 }, "parent": "中", "position": [0, 0, 3] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let out = export_gltf(&doc).expect("导出必须成功");
+        let json: Value = serde_json::from_str(&out.json).unwrap();
+        assert_eq!(json["scenes"][0]["nodes"], json!([0]));
+        assert_eq!(json["nodes"][0]["children"], json!([1]));
+        assert_eq!(json["nodes"][1]["children"], json!([2]));
+        assert_eq!(json["nodes"][1]["translation"], json!([0.0, 2.0, 0.0]));
+        assert_eq!(json["nodes"][2]["translation"], json!([0.0, 0.0, 3.0]));
+        // 孙球局部包围盒仍是单位球，世界位置靠 1 + 2 + 3 的节点链得到。
+        let pos_accessor = json["meshes"][2]["primitives"][0]["attributes"]["POSITION"]
+            .as_u64()
+            .unwrap() as usize;
+        let min = json["accessors"][pos_accessor]["min"].as_array().unwrap();
+        assert!((min[0].as_f64().unwrap() + 0.5).abs() < 1e-3);
+        assert!((min[1].as_f64().unwrap() + 0.5).abs() < 1e-3);
     }
 
     #[test]

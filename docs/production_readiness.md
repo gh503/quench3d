@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF（CLI + 编辑器，含贴图）；节点层级/动画未导出 | ✅（OBJ/glTF 几何） |
+| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF（CLI + 编辑器，含贴图与节点树）；动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -413,7 +413,7 @@
 | 校验口径 | 场景校验器要求被引用的贴图**文件存在**（`texture.rs` 校验路径），所以"应用"失败要给出可读原因，而不是静默保留旧贴图 |
 
 **其它两条已核过的落点**：glTF/OBJ 导入在 `assets.rs:261/465/500`（OBJ 不带材质）；
-模型**导出**已补 OBJ（图元 → OBJ/MTL）与单文件 glTF 2.0（第 107 轮，几何/材质标量/内嵌 base64；第 109 轮补 PNG/JPEG 贴图内嵌），都能被本引擎重新导入；仍缺节点层级/动画导出。
+模型**导出**已补 OBJ（图元 → OBJ/MTL）与单文件 glTF 2.0（第 107 轮，几何/材质标量/内嵌 base64；第 109 轮补 PNG/JPEG 贴图内嵌），都能被本引擎重新导入；仍缺动画导出。
 版本检查（`scene_doc.rs` 的 `validate`）现在是**版本不符直接报错**，并且明确**不做**迁移器：
 这个格式还没有外部使用者，与其维护一条"读旧版"的路径，不如让旧文件拿到一条清楚的诊断。
 再加字段时请同步改 `VERSION`（当前 2）。
@@ -2576,8 +2576,9 @@ base64 buffer、父位移烘进子几何的包围盒、凸包跳过）；`cargo 
 cli_e2e export_writes_single_file_gltf`（CLI 真的落盘 → `info model.gltf` 读回三角形数
 与包围盒一致）。
 
-**边界**：节点是扁平的（父子关系烘成世界坐标），不导出动画/骨骼/morph；四边形
-等非三角图元会三角化；这是"能在别的工具里看到同样几何/颜色/贴图"的导出，不是无损编辑往返。
+**边界**：父子关系写成节点树（局部 translation/rotation），不导出动画/骨骼/morph；
+四边形等非三角图元会三角化；这是"能在别的工具里看到同样几何/颜色/贴图/层级"的导出，
+不是无损编辑往返。
 
 ### 23.13 编辑器导出 glTF（第 108 轮）
 
@@ -2615,6 +2616,23 @@ CLI e2e `export_gltf_embeds_texture_from_scene_directory` 真的写 PNG 到场�
 
 **边界**：只支持 PNG/JPEG；不写 `uv_scale` 的平铺（core glTF 无此字段，会进 `skipped`）；
 Web 导出不带贴图；贴图不重编码、不压缩、不生成 mipmap。
+
+### 23.15 glTF 节点树导出（第 110 轮）
+
+**做了什么**：不再把父位移烘进子顶点。每个场景物体对应一个 glTF 节点，节点写局部
+`translation` + 四元数 `rotation`，`children` 按 `parent` 串起来，`scenes[0].nodes`
+只列根节点；物体 `scale` 与部件局部位姿仍烘进顶点，所以世界位置不变。父链成环时
+断开成根并在 `skipped` 里报告。空/跳过的物体也保留空节点，避免孙物体失去父链。
+
+**验证**：`cargo test -p quench3d-cli --lib gltf_export` 的
+`exports_valid_gltf_with_embedded_buffer_and_transforms` 断言 `scenes[0].nodes=[0]`、
+`nodes[0].children=[1]`、父子局部 translation 与**局部**几何包围盒；
+`nested_nodes_keep_three_levels_of_translation` 断言三级链
+`根→中→孙` 的 children/translation；CLI e2e 仍用 `info model.gltf` 读回三角形数
+与包围盒（导入器会应用节点链）。总测试 761 → 762。
+
+**边界**：动画/骨骼/morph 仍不导出；`scale` 不在节点上（烘进顶点），所以外部工具
+里不能单独改节点缩放；节点名可能重复。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

@@ -41,6 +41,12 @@
 
 ### 新增
 
+- **glTF 节点树导出（第 110 轮）**：不再把父位移烘进子顶点。每个物体写一个节点，
+  节点带局部 `translation`/`rotation`，`children` 按 `parent` 串联，场景只列根节点；
+  物体缩放与部件变换仍烘进顶点，所以世界位置不变。父链成环会断开并进 `skipped`；
+  空/跳过物体保留空节点，孙物体不会失去父链。
+  回归：2 个 lib 单测（父子/三级孙）更新与新增（总测试 761 → 762）。
+
 - **glTF 贴图内嵌（第 109 轮）**：`quench3d export scene.json model.gltf` 现在按场景目录
   解析 `base_color_texture` / `normal_texture` / `metallic_roughness_texture` /
   `emissive_texture`，把 PNG/JPEG 原字节内嵌进 `.gltf` 的同一个 base64 buffer，并写
