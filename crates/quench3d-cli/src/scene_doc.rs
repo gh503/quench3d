@@ -2148,6 +2148,13 @@ pub struct LightingDoc {
     /// 结果乘在整幅 HDR 颜色上（不区分直接光/间接光）——这是后处理式 SSAO 的固有简化。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssao: Option<SsaoDoc>,
+    /// 深度景深（DoF）。
+    ///
+    /// **不写 = 关闭**（像素与加这个功能之前一致）；写了这一节就是打开。
+    /// 后处理式：按像素到焦平面的距离做圆盘模糊，天空不参与。
+    /// **只在能读深度纹理的后端生效**（原生 wgpu）；GL/WebGL2 会忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dof: Option<DofDoc>,
 }
 
 /// 指数距离雾配置。
@@ -2269,6 +2276,24 @@ pub struct BloomDoc {
     /// 天空与太阳圆盘可以远大于 1，所以阈值 1.0 通常只有太阳/自发光/高光会触发。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<f32>,
+}
+
+/// 深度景深配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DofDoc {
+    /// 是否启用，缺省 true（写了这一节就是想开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 对焦距离（视空间米），缺省 2.0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<f32>,
+    /// 光圈强度（0 = 不模糊），缺省 0.4。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aperture: Option<f32>,
+    /// 最大模糊半径（像素，按 64px 参考尺寸缩放），缺省 8.0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_blur: Option<f32>,
 }
 
 /// 物理步进配置。
@@ -6014,6 +6039,56 @@ impl SceneDoc {
             }
         }
 
+        // DoF：焦距为正、光圈/半径非负；开着但光圈 0 要提醒
+        if let Some(d) = &self.lighting.dof {
+            let enabled = d.enabled.unwrap_or(true);
+            if let Some(focus) = d.focus {
+                if !focus.is_finite() || focus <= 0.0 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.dof.focus",
+                        "景深对焦距离必须是正数（视空间米）",
+                    ));
+                }
+            }
+            if let Some(aperture) = d.aperture {
+                if !aperture.is_finite() || aperture < 0.0 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.dof.aperture",
+                        "景深光圈必须是非负数",
+                    ));
+                } else if aperture == 0.0 && enabled {
+                    out.push(
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
+                            "lighting.dof.aperture",
+                            "景深开着但光圈为 0，等于不模糊",
+                        )
+                        .with_hint("给个正数（例如 0.4），或者去掉 dof 这一节"),
+                    );
+                }
+            }
+            if let Some(max_blur) = d.max_blur {
+                if !max_blur.is_finite() || max_blur < 0.0 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.dof.max_blur",
+                        "景深最大模糊半径必须是非负数",
+                    ));
+                } else if max_blur > 64.0 {
+                    out.push(
+                        Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
+                            "lighting.dof.max_blur",
+                            "最大模糊半径超过 64px，画面会糊成一片",
+                        )
+                        .with_hint("常用 4~16"),
+                    );
+                }
+            }
+        }
+
         // FXAA：阈值必须落在 (0, 1) 这个量级，否则要么永远不触发要么糊成一片
         if let Some(f) = &self.lighting.fxaa {
             let enabled = f.enabled.unwrap_or(true);
@@ -6677,6 +6752,74 @@ mod tests {
         assert!(
             SceneDoc::from_json(r#"{"objects":[],"lighting":{"bloom":{"knee":1.0}}}"#).is_err()
         );
+    }
+
+    #[test]
+    fn dof_defaults_and_validation() {
+        // 缺省 = 关闭：不写这一节时序列化结果里不该冒出新字段
+        let doc = SceneDoc::from_json(r#"{"objects":[]}"#).unwrap();
+        assert!(doc.lighting.dof.is_none());
+        let text = serde_json::to_string(&doc).unwrap();
+        assert!(!text.contains("dof"), "不写就不该出现在输出里：{text}");
+
+        // 写了空节：字段留给渲染器缺省，且不报错
+        let doc = SceneDoc::from_json(r#"{"objects":[],"lighting":{"dof":{}}}"#).unwrap();
+        let d = doc.lighting.dof.expect("dof 节应当被解析出来");
+        assert_eq!(d.enabled, None);
+        assert_eq!(d.focus, None);
+        assert_eq!(d.aperture, None);
+        assert_eq!(d.max_blur, None);
+        assert!(!SceneDoc::has_errors(&doc.validate()));
+
+        // 焦距 <= 0、光圈/半径 < 0 是错误；光圈 0 与超大半径是警告
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[],"lighting":{"dof":{"focus":0.0,"aperture":-1.0,"max_blur":-2.0}}}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        for path in [
+            "lighting.dof.focus",
+            "lighting.dof.aperture",
+            "lighting.dof.max_blur",
+        ] {
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.path == path && d.severity == Severity::Error),
+                "{path} 应当报错：{diags:?}"
+            );
+        }
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[],"lighting":{"dof":{"aperture":0.0,"max_blur":100.0}}}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "lighting.dof.aperture" && d.severity == Severity::Warning));
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "lighting.dof.max_blur" && d.severity == Severity::Warning));
+        assert!(!SceneDoc::has_errors(&diags));
+
+        // 拼错字段要报未知字段
+        assert!(SceneDoc::from_json(r#"{"objects":[],"lighting":{"dof":{"focal":1.0}}}"#).is_err());
+
+        // 映射：不写关闭；空节打开并用渲染器缺省；写了就用写的值
+        use crate::runner::dof_options;
+        let plain = SceneDoc::from_json(r#"{"objects":[]}"#).unwrap();
+        assert!(!dof_options(&plain).enabled);
+        let bare = SceneDoc::from_json(r#"{"objects":[],"lighting":{"dof":{}}}"#).unwrap();
+        let b = dof_options(&bare);
+        assert!(b.enabled);
+        assert!((b.focus - 2.0).abs() < 1e-6 && (b.max_blur - 8.0).abs() < 1e-6);
+        let tuned = SceneDoc::from_json(
+            r#"{"objects":[],"lighting":{"dof":{"focus":3.5,"aperture":0.7,"max_blur":12.0}}}"#,
+        )
+        .unwrap();
+        let t = dof_options(&tuned);
+        assert!(t.enabled && (t.focus - 3.5).abs() < 1e-6);
+        assert!((t.aperture - 0.7).abs() < 1e-6 && (t.max_blur - 12.0).abs() < 1e-6);
     }
 
     #[test]

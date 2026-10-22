@@ -167,6 +167,12 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         strength: Some(opts.ssao.strength),
         samples: Some(opts.ssao.samples),
     });
+    lighting.dof = Some(quench3d_cli::scene_doc::DofDoc {
+        enabled: Some(opts.dof.enabled),
+        focus: Some(opts.dof.focus),
+        aperture: Some(opts.dof.aperture),
+        max_blur: Some(opts.dof.max_blur),
+    });
     lighting.sky_colors = Some(quench3d_cli::scene_doc::SkyColorsDoc {
         zenith: Some([light.sky.zenith.x, light.sky.zenith.y, light.sky.zenith.z]),
         horizon: Some([
@@ -814,6 +820,7 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     engine.renderer.options.bloom = runner::bloom_options(&doc);
     engine.renderer.options.fxaa = runner::fxaa_options(&doc);
     engine.renderer.options.ssao = runner::ssao_options(&doc);
+    engine.renderer.options.dof = runner::dof_options(&doc);
     let name = doc.name.clone().unwrap_or_else(|| "scene".to_string());
     Ok(Installed {
         objects: engine.scene.len(),

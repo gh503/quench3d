@@ -32,6 +32,15 @@
 
 ### 新增
 
+- **景深（DoF，第 89 轮）**：后处理新增深度景深，`post.wgsl` 用单采样深度算
+  CoC，在 tonemap 前做 16 tap 黄金角圆盘模糊；天空不参与。`RendererOptions.dof`
+  + 场景 `lighting.dof { enabled, focus, aperture, max_blur }`，CLI 与编辑器共用
+  `runner::dof_options`，编辑器存盘会写回。UI 顶栏新增「景深（DoF）」开关与
+  对焦/光圈/模糊半径。缺省关闭，关闭时像素不变；GL/WebGL2 读不了深度，整段被
+  `@gl-depth` 剥离。顺带修复顶栏 `horizontal_wrapped` 换行后控件被裁掉的问题
+  （顶栏现在有 240px 最小高度，SSAO/FXAA/DoF/水等控件重新可见）。回归：
+  `dof_defaults_and_validation` + `depth_of_field_blurs_out_of_focus_edges` +
+  `ui_smoke` 的「景深（DoF）」文本断言。
 - **过渡端点与初始状态编辑（第 88 轮）**：每条过渡新增「端点」行，两个下拉框可改
   `from/to`（自环被拒绝）；状态机新增「初始（立即切换）」下拉，改初始状态会立即
   切到该状态并重建播放器，同时写回 `animator.initial`。过渡端点变化会取消正在进行

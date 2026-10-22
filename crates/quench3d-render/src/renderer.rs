@@ -111,8 +111,8 @@ fn post_wgsl_for(ssao: bool) -> Cow<'static, str> {
     }
     debug_assert!(!dropping, "post.wgsl 的 {GL_DEPTH_BEGIN} 区段没有闭合");
     debug_assert_eq!(
-        regions, 3,
-        "post.wgsl 的深度区段应当是 3 段（绑定/函数/调用点）"
+        regions, 4,
+        "post.wgsl 的深度区段应当是 4 段（绑定 / 函数 / SSAO 调用点 / DoF 调用点）"
     );
     out.shrink_to_fit();
     Cow::Owned(out)
@@ -467,6 +467,8 @@ pub struct PostUniforms {
     pub water_extra: [f32; 4],
     /// xyz = 太阳方向（从光源射向场景），w = 强度。
     pub water_sun: [f32; 4],
+    /// 景深：x = 开关（0/1），y = 对焦距离（米），z = 光圈，w = 最大模糊像素。
+    pub dof: [f32; 4],
 }
 
 /// 屏幕空间水面选项。
@@ -516,6 +518,37 @@ impl Default for BloomOptions {
             enabled: false,
             intensity: 0.6,
             threshold: 1.0,
+        }
+    }
+}
+
+/// 深度景深（DoF）配置：按像素到焦平面的距离做圆盘模糊。
+///
+/// 这是**后处理式**实现：只读单采样深度，不区分前景/背景的遮挡顺序（前景模糊会
+/// 轻微漏到清晰背景上）；天空（深度 = 1）不参与模糊。缺省关闭，关闭时后处理完全
+/// 不读这一组参数，像素与加这个功能之前一致。
+///
+/// **仅原生/支持深度纹理的后端生效**：GL/WebGL2 的后处理着色器会把深度相关代码剥离，
+/// 打开开关也不会改变画面。
+#[derive(Clone, Copy, Debug)]
+pub struct DofOptions {
+    /// 是否启用。
+    pub enabled: bool,
+    /// 对焦距离（视空间米）。
+    pub focus: f32,
+    /// 光圈强度：`|距离-焦距|/焦距 * aperture` 是 0~1 的模糊半径系数。
+    pub aperture: f32,
+    /// 最大模糊半径（像素，按 64px 参考尺寸缩放）。
+    pub max_blur: f32,
+}
+
+impl Default for DofOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            focus: 2.0,
+            aperture: 0.4,
+            max_blur: 8.0,
         }
     }
 }
@@ -614,6 +647,8 @@ pub struct RendererOptions {
     /// 解析式环境高光（缺省开启）：金属/光滑材质按反射方向取程序化天空，
     /// 而不是只用半球环境光。没有 HDRI/cubemap，属于便宜近似。
     pub environment: bool,
+    /// 深度景深（缺省关闭）。
+    pub dof: DofOptions,
 }
 
 impl Default for RendererOptions {
@@ -631,6 +666,7 @@ impl Default for RendererOptions {
             ssao: SsaoOptions::default(),
             water: WaterOptions::default(),
             environment: true,
+            dof: DofOptions::default(),
         }
     }
 }
@@ -2793,6 +2829,12 @@ impl Renderer {
                     .unwrap_or((Vec3::new(0.42, -0.78, 0.46), 0.0));
                 [d.x, d.y, d.z, i]
             },
+            dof: [
+                if self.options.dof.enabled { 1.0 } else { 0.0 },
+                self.options.dof.focus.max(1e-3),
+                self.options.dof.aperture.max(0.0),
+                self.options.dof.max_blur.max(0.0),
+            ],
         };
         ctx.queue
             .write_buffer(&self.post_uniform, 0, bytemuck::bytes_of(&post));
@@ -3667,7 +3709,7 @@ mod tests {
     /// 2 个 vec4 = 352 字节。
     #[test]
     fn post_uniforms_size_matches_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<PostUniforms>(), 352);
+        assert_eq!(std::mem::size_of::<PostUniforms>(), 368);
         assert_eq!(std::mem::size_of::<PostUniforms>() % 16, 0);
     }
 

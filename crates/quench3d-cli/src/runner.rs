@@ -3689,6 +3689,21 @@ pub fn bloom_options(doc: &SceneDoc) -> quench3d::render::BloomOptions {
     }
 }
 
+/// 把场景里的景深配置翻成渲染器选项（缺省关闭）。
+/// 编辑器共用，理由见 [`bloom_options`]。
+pub fn dof_options(doc: &SceneDoc) -> quench3d::render::DofOptions {
+    let Some(d) = &doc.lighting.dof else {
+        return quench3d::render::DofOptions::default();
+    };
+    let defaults = quench3d::render::DofOptions::default();
+    quench3d::render::DofOptions {
+        enabled: d.enabled.unwrap_or(true),
+        focus: d.focus.unwrap_or(defaults.focus),
+        aperture: d.aperture.unwrap_or(defaults.aperture),
+        max_blur: d.max_blur.unwrap_or(defaults.max_blur),
+    }
+}
+
 /// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。
 /// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。编辑器共用，理由见 [`bloom_options`]。
 pub fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
@@ -4088,6 +4103,7 @@ fn run_render_single(
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
             ssao: ssao_options(doc),
+            dof: dof_options(doc),
             shadow_cascades: shadow_cascades(doc),
             shadow_split_lambda: shadow_split_lambda(doc),
             ..Default::default()
@@ -4619,6 +4635,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
             ssao: ssao_options(doc),
+            dof: dof_options(doc),
             shadow_cascades: shadow_cascades(doc),
             shadow_split_lambda: shadow_split_lambda(doc),
             ..Default::default()

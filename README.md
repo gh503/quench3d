@@ -219,7 +219,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12373036 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12385860 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -1236,7 +1236,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 701 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 703 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1703,7 +1703,7 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   `TriMesh↔TriMesh`、`Plane↔Plane` 不产生接触。
   `Joint::Fixed` 的角约束是速度级的：焊接的是**创建时**的相对姿态，不是参考姿态。
 * 渲染：单张阴影贴图（大场景需要更小的 `shadow_radius` 或后续加 CSM）；
-  有 HDR 中间目标 + bloom + FXAA + SSAO，但**还没有**景深 / TAA / AO 去噪（AO 是 16 抽样
+  有 HDR 中间目标 + bloom + FXAA + SSAO + 景深（DoF），但**还没有** TAA / AO 去噪（AO 是 16 抽样
   交错梯度噪声，接触处仍有轻微颗粒）、没有骨骼动画、没有延迟管线；
   Alpha 混合物体不写深度（后处理链已经能把混合放到 tonemap 之前，见 §4）。
 * 工程：窗口截图需要能创建 GPU 设备；无头验证依赖软件光栅（lavapipe）时较慢。
@@ -1745,7 +1745,7 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   **固定 example 名**（`web_client`）打包的，页面 `import` 的符号必须与之一致
   （`tools/check_web.mjs` 会静态核对）。
 * MCP：只实现 stdio 传输与工具（无 resources / prompts / HTTP SSE）。
-* 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO 都在；景深 / TAA 还没接，
+* 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO + 景深都在；TAA 还没接，
   详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
 * SSAO 是**深度-only**、无去噪：没有法线缓冲（法线由深度重建），也没有单独的 AO 模糊
   （AO 直接在后处理里算完就用）。表现是接触处有轻微颗粒（16 抽样 + 交错梯度噪声），

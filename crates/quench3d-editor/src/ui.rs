@@ -105,7 +105,12 @@ fn combine_rule_combo(ui: &mut Ui, label: &str, value: &mut Option<CombineRule>)
 
 /// 顶部工具栏。
 fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, req: &mut Requests) {
-    egui::Panel::top("quench3d-toolbar").show(ui, |ui| {
+    // `horizontal_wrapped` 的 min-size 只报一行；如果面板按这个最小高度布局，
+    // 换行后的控件会被整块裁掉（DoF/SSAO/水的开关曾因此看不见）。显式给一个
+    // 足够容纳多行的最小高度。
+    egui::Panel::top("quench3d-toolbar")
+        .min_size(240.0)
+        .show(ui, |ui| {
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let (play_label, play_hint) = if engine.paused {
@@ -269,6 +274,34 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                 .on_hover_text(
                     "屏幕空间环境光遮蔽：让物体与地面接触的缝隙、墙角变暗。\n                     深度-only 实现，只影响间接光的近似；半径/强度在场景文件的 lighting.ssao 里调。",
                 );
+            ui.checkbox(&mut engine.renderer.options.dof.enabled, "景深（DoF）")
+                .on_hover_text(
+                    "按像素到焦平面的距离做圆盘模糊；天空不参与。\n                     只在能读深度的后端（原生 wgpu）生效，GL/WebGL2 会忽略。",
+                );
+            ui.add_enabled_ui(engine.renderer.options.dof.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("对焦");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.dof.focus)
+                            .speed(0.05)
+                            .range(0.1..=100.0)
+                            .suffix("m"),
+                    );
+                    ui.label("光圈");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.dof.aperture)
+                            .speed(0.01)
+                            .range(0.0..=4.0),
+                    );
+                    ui.label("模糊");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.dof.max_blur)
+                            .speed(0.1)
+                            .range(0.0..=32.0)
+                            .suffix("px"),
+                    );
+                });
+            });
             water_section(ui, engine);
             ui.checkbox(&mut engine.debug.axes, "坐标轴");
 

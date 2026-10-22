@@ -797,7 +797,7 @@ gap 表里与资产搜索路径（#11）同源，等那一项一起做；**编�
 最后选了不依赖法线精度的深度比较。
 
 **没做（诚实边界）**：AO 没有单独的目标与双边模糊（所以接触处有轻微颗粒，16 抽样 + IGN）；
-没有 TAA / 景深 / CSM；FXAA 是 console 档（无子像素锯齿消除）。
+没有 TAA / CSM；FXAA 是 console 档（无子像素锯齿消除）。
 
 ### 8.2 「场景层级（父子变换）+ 格式 v2」怎么落的（第 16 轮，已跑门禁）
 
@@ -2490,7 +2490,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**701** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**703** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

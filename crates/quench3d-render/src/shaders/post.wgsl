@@ -53,6 +53,8 @@ struct PostParams {
     water_extra: vec4<f32>,
     // xyz = 太阳方向（从光源射向场景），w = 强度
     water_sun: vec4<f32>,
+    // 景深：x = 开关（0/1），y = 对焦距离（视空间米），z = 光圈，w = 最大模糊像素
+    dof: vec4<f32>,
 };
 
 /// Narkowicz 2015 的 ACES 近似（全项目唯一一份）。
@@ -269,6 +271,34 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
             hdr = mix(hdr, water_col + foam_col * foam * 0.35, visible * (0.58 + 0.24 * fresnel));
         }
     }
+
+    // ---------- 景深（DoF） ----------
+    // 后处理式：用单采样深度算每个像素到焦平面的距离，再在 HDR 上做固定 16 tap
+    // 的黄金角圆盘模糊。天空（depth = 1）不参与；GL/WebGL2 读不了深度，整段被
+    // `@gl-depth` 剥离，打开开关也不会改变画面。
+    //@gl-depth-begin
+    if (post.dof.x > 0.5) {
+        let depth = textureLoad(depth_texture, coord, 0);
+        if (depth < 1.0) {
+            let p = view_pos(uv, depth);
+            let dist = -p.z;
+            let focus = max(post.dof.y, 0.01);
+            let coc = clamp(abs(dist - focus) / focus * max(post.dof.z, 0.0), 0.0, 1.0);
+            let radius = max(post.dof.w, 0.0) * coc;
+            if (radius > 0.25) {
+                let rot = interleaved_gradient(f32(coord.x), f32(coord.y)) * 6.2831853;
+                var sum = vec3<f32>(0.0);
+                for (var i = 0; i < 16; i += 1) {
+                    let a = f32(i) * 2.3999632 + rot;
+                    let r = sqrt((f32(i) + 0.5) / 16.0);
+                    let off = vec2<f32>(cos(a), sin(a)) * r * radius * texel;
+                    sum = sum + textureSampleLevel(hdr_texture, hdr_sampler, uv + off, 0.0).rgb;
+                }
+                hdr = sum / 16.0;
+            }
+        }
+    }
+    //@gl-depth-end
 
     return vec4<f32>(aces_tonemap(hdr), 1.0);
 }

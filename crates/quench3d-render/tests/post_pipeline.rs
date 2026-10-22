@@ -14,7 +14,7 @@
 
 use quench3d_render::context::with_gpu_tests;
 use quench3d_render::prelude::*;
-use quench3d_render::{BloomOptions, FxaaOptions, RendererOptions};
+use quench3d_render::{BloomOptions, DofOptions, FxaaOptions, RendererOptions};
 
 const W: u32 = 64;
 const H: u32 = 64;
@@ -1390,5 +1390,78 @@ fn grid_writes_depth_and_hides_lines_below_the_floor() {
     assert_ne!(
         visible.rgba, blank.rgba,
         "地面上方的线段也没画出来：线段渲染本身坏了"
+    );
+}
+
+/// 景深：同一对焦外的高对比边缘，打开 DoF 后必须真的糊开；把对焦拉回物体
+/// 所在深度则应当与关闭时几乎一致（证明不是"只要是 DoF 就整体变糊"）。
+#[test]
+fn depth_of_field_blurs_out_of_focus_edges() {
+    let Some((mut ctx, mut renderer)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    if matches!(ctx.adapter_info.backend, wgpu::Backend::Gl) {
+        eprintln!("跳过：GL 后端没有深度纹理，DoF 着色器会整段剥离");
+        return;
+    }
+    let red = renderer.add_material(&ctx, MaterialDesc::from_srgb(1.0, 0.0, 0.0, 1.0).unlit());
+    let green = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.0, 1.0, 0.0, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    // 两个立方体在画面中心形成一条红/绿竖直边，深度都在 z=0（相机在 z=10）。
+    renderer.draw(
+        cube,
+        red,
+        InstanceDesc::from_position(vec3(-0.75, 0.0, 0.0), 1.5),
+    );
+    renderer.draw(
+        cube,
+        green,
+        InstanceDesc::from_position(vec3(0.75, 0.0, 0.0), 1.5),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 10.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let lighting = Lighting {
+        exposure: 1.0,
+        ..Default::default()
+    };
+    let sharp = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染（DoF 关闭）");
+    renderer.options.dof = DofOptions {
+        enabled: true,
+        focus: 1.0,
+        aperture: 1.0,
+        max_blur: 12.0,
+    };
+    let blurred = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染（DoF 开启、焦点在 1m）");
+    let changed = (0..W * H)
+        .filter(|i| {
+            let i = (*i * 4) as usize;
+            (0..3).any(|c| (sharp.rgba[i + c] as i32 - blurred.rgba[i + c] as i32).abs() > 4)
+        })
+        .count();
+    assert!(
+        changed > 100,
+        "焦外边缘应当被明显模糊，实际只有 {changed} 个像素变化"
+    );
+
+    // 光圈归零：同一套 DoF 参数、同一个深度图，画面必须回到与关闭时逐像素一致，
+    // 证明上面的差异确实来自 DoF 的模糊半径，而不是别的随机/缓存差异。
+    renderer.options.dof.aperture = 0.0;
+    let focused = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染（DoF 开启、光圈 0）");
+    let still_changed = (0..W * H)
+        .filter(|i| {
+            let i = (*i * 4) as usize;
+            (0..3).any(|c| (sharp.rgba[i + c] as i32 - focused.rgba[i + c] as i32).abs() > 4)
+        })
+        .count();
+    assert_eq!(
+        still_changed, 0,
+        "光圈为 0 时 DoF 不该改变任何像素，实际有 {still_changed} 个"
     );
 }
