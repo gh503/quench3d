@@ -261,7 +261,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12812769 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12820707 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -705,13 +705,16 @@ canvas → egui 纹理；页面脚本（例如 MediaPipe Tasks Vision）可调�
 window.quench3dCameraPose(JSON.stringify({
   present: true, confidence: 0.9,
   landmarks: [{ x: 0.5, y: 0.2 }, /* … 归一化图像坐标，至少 2 点 */],
+  // 可选：MediaPipe 世界坐标（米，髋部原点），给了就在 3D 视口里画骨架
+  world: [{ x: 0.0, y: 0.0, z: 0.0 }, /* … */],
 }));
 window.quench3dCameraPoseClear();
 ```
 
 桌面「打开」与「导出 glTF/GLB」都会先弹内置文件选择器（导出可改路径/文件名）。
-读端会把 33 点连接画成洋红骨架。**浏览器里不内置推理**（没有 MediaPipe 模型与
-文件协议），骨架/轮廓/深度仍走桌面 Python 管线。需要 https 或 `localhost`。
+读端把 2D 33 点连接画成洋红骨架，有 `world` 时按同一套 35 根骨在 3D 视口里画
+teal/gold 骨架。**浏览器里不内置推理**（没有 MediaPipe 模型与文件协议），
+骨架/轮廓/深度仍走桌面 Python 管线。需要 https 或 `localhost`。
 `tools/probe_web_camera.sh` 用 Chrome 假摄像头 + `?camera=1` 做端到端截图探针，
 并注入 33 点姿态、断言 `camera_pose=true` 且截图里真的有洋红像素。
 

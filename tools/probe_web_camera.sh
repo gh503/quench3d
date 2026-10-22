@@ -50,6 +50,7 @@ import numpy as np
 out = Path(sys.argv[1])
 a = Image.open(out / "camera-a.png").convert("RGB")
 b = Image.open(out / "camera-b.png").convert("RGB")
+c = Image.open(out / "camera-c.png").convert("RGB")
 diff = np.asarray(ImageChops.difference(a, b)).max(axis=2)
 # 摄像头窗口默认在左上；取视频区域（避开窗口标题/按钮）比较两帧运动。
 crop = diff[70:360, 30:430]
@@ -64,5 +65,12 @@ pose_pixels = int(magenta.sum())
 print(f"外部姿态洋红像素：{pose_pixels}")
 if pose_pixels < 200:
     raise SystemExit("FAIL probe-web-camera：camera_pose=true 但画面里找不到骨架颜色")
-print("PASS probe-web-camera：摄像头预览两帧有运动 + 外部姿态真的画出来了")
+# 3D 世界点只在视口里；避开左上摄像头窗口与右栏，比较 b/c 的视口裁剪。
+ba = np.asarray(b)[250:760, 460:900].astype(np.int16)
+ca = np.asarray(c)[250:760, 460:900].astype(np.int16)
+world_changed = int((np.abs(ba - ca).max(axis=2) > 18).sum())
+print(f"3D 世界骨架视口变化像素：{world_changed} / {ba.shape[0] * ba.shape[1]}")
+if world_changed < 50:
+    raise SystemExit("FAIL probe-web-camera：camera_world=true 但视口里没有 3D 骨架变化")
+print("PASS probe-web-camera：摄像头预览运动 + 2D 洋红骨架 + 3D 视口骨架")
 PY

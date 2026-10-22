@@ -79,7 +79,7 @@ async function pickBackend() {
 }
 
 // 打开场景文件：Rust 侧（场景面板的「打开」按钮）调这里，
-// 外部姿态提供者（MediaPipe / 自训练模型）可调用这两个全局函数把 2D 骨架
+// 外部姿态提供者（MediaPipe / 自训练模型）可调用这两个全局函数把 2D/3D 骨架
 // 交给编辑器；不调用时预览完全不受影响。真正的推理不在本页面内置。
 window.quench3dCameraPose = (json) => set_camera_pose(String(json));
 window.quench3dCameraPoseClear = () => clear_camera_pose();

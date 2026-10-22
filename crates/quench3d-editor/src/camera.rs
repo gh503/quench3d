@@ -34,11 +34,8 @@ use std::{
 
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions};
-#[cfg(not(target_arch = "wasm32"))]
 use quench3d_math::Vec3;
-#[cfg(not(target_arch = "wasm32"))]
 use quench3d_render::DebugLines;
-#[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
 
 /// MediaPipe Pose 的 33 点连接表。
@@ -84,11 +81,9 @@ pub const POSE_CONNECTIONS: [(usize, usize); 35] = [
 ];
 
 /// 3D 骨架的放置点。世界单位是米；把人放在默认场景相机看得见的位置。
-#[cfg(not(target_arch = "wasm32"))]
 const MOCAP_ORIGIN: Vec3 = Vec3::new(2.2, 1.0, 0.0);
 
 /// 一个 2D/3D 关键点。
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 pub struct Landmark {
     /// 图像归一化 x（0..1）。
@@ -777,7 +772,6 @@ fn add_point_lines(lines: &mut DebugLines, points: &[Vec3]) {
 }
 
 /// 把 33 个世界点画成骨骼与关节点；抽出来是为了能脱离轮询线程做单测。
-#[cfg(not(target_arch = "wasm32"))]
 fn add_pose_lines(lines: &mut DebugLines, world: &[Landmark]) {
     let bone_color = quench3d_math::Vec4::new(0.2, 1.0, 0.75, 0.95);
     let joint_color = quench3d_math::Vec4::new(1.0, 0.85, 0.25, 0.95);
@@ -805,7 +799,6 @@ fn add_pose_lines(lines: &mut DebugLines, world: &[Landmark]) {
 /// MediaPipe：x 向右、y **向下**、z 向后为正，原点在髋部。
 /// 引擎：y 向上、z 向屏幕外（相机在 +z 看向 -z）。所以 y/z 取反，
 /// 再平移到 `MOCAP_ORIGIN`，避免骨架埋在默认场景的原点物体里。
-#[cfg(not(target_arch = "wasm32"))]
 fn world_to_scene(lm: Landmark) -> Vec3 {
     Vec3::new(
         lm.x + MOCAP_ORIGIN.x,
@@ -851,6 +844,9 @@ struct WebPoseJson {
     confidence: f32,
     #[serde(default)]
     landmarks: Vec<WebLandmarkJson>,
+    /// 可选的世界坐标 33 点；给了就在 3D 视口里画骨架（与桌面管线同一套连接表）。
+    #[serde(default)]
+    world: Vec<Landmark>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -880,9 +876,13 @@ thread_local! {
 /// 视为"没有骨架"。调用方（页面）负责把 `window.quench3dCameraPose` 接到推理结果。
 #[cfg(target_arch = "wasm32")]
 pub fn set_web_pose(json: &str) {
-    let parsed: Option<WebPoseJson> = serde_json::from_str(json)
-        .ok()
-        .and_then(|pose: WebPoseJson| (pose.present && pose.landmarks.len() >= 2).then_some(pose));
+    let parsed: Option<WebPoseJson> =
+        serde_json::from_str(json)
+            .ok()
+            .and_then(|pose: WebPoseJson| {
+                (pose.present && (pose.landmarks.len() >= 2 || pose.world.len() >= 2))
+                    .then_some(pose)
+            });
     if parsed.is_none() {
         web_sys::console::warn_1(
             &"quench3d camera: 忽略无效姿态 JSON（需要 present + >=2 landmarks）".into(),
@@ -997,7 +997,18 @@ impl CameraFeed {
     }
 
     /// 无 3D 骨架可叠；Web 端只画预览图上的外部注入 2D 骨架。
-    pub fn add_lines(&self, _lines: &mut quench3d_render::DebugLines) {}
+    pub fn add_lines(&self, lines: &mut DebugLines) {
+        if let Some(pose) = web_pose() {
+            if pose.world.len() >= 2 {
+                add_pose_lines(lines, &pose.world);
+            }
+        }
+    }
+
+    /// 当前姿态是否带 3D 世界点（只注入 2D 时为 false）。
+    pub fn has_world_pose(&self) -> bool {
+        web_pose().is_some_and(|pose| pose.world.len() >= 2)
+    }
 
     /// 当前是否有外部 JS 注入的姿态。
     pub fn has_pose(&self) -> bool {
@@ -1125,7 +1136,7 @@ impl CameraFeed {
                     }
                     ui.label(
                         egui::RichText::new(
-                            "需要 https 或 localhost；内置推理不在浏览器里，外部 JS 可用 window.quench3dCameraPose(json) 注入 2D 骨架。",
+                            "需要 https 或 localhost；内置推理不在浏览器里，外部 JS 可用 window.quench3dCameraPose(json) 注入 2D/3D 骨架。",
                         )
                         .small()
                         .weak(),
@@ -1148,7 +1159,7 @@ impl CameraFeed {
                         }
                     }
                     ui.label(
-                        egui::RichText::new("预览 + 外部 JS 注入的 2D 骨架；深度/轮廓仍用桌面 Python 管线")
+                        egui::RichText::new("预览 + 外部 JS 注入的 2D 骨架 / 3D 世界点；深度/轮廓仍用桌面 Python 管线")
                             .small()
                             .weak(),
                     );

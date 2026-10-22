@@ -98,6 +98,32 @@ async function main() {
   const b = await send("Page.captureScreenshot", { format: "png" });
   writeFileSync(`${outDir}/camera-b.png`, Buffer.from(b.data, "base64"));
 
+  // 只注入 3D 世界点（landmarks 为空）：2D 骨架消失，只留视口里的 3D 骨架。
+  const injectedWorld = await send("Runtime.evaluate", {
+    expression: `(() => {
+      const world = Array.from({ length: 33 }, (_, i) => ({
+        x: -0.30 + 0.60 * (i % 2),
+        y: 0.90 - 1.20 * (i / 32),
+        z: 0.0,
+        visibility: 1.0,
+      }));
+      window.quench3dCameraPose(JSON.stringify({ present: true, confidence: 0.9, landmarks: [], world }));
+      return "ok";
+    })()`,
+    returnByValue: true,
+  });
+  if (injectedWorld.result?.value !== "ok") die("3D 世界点注入失败");
+  await sleep(400);
+  const worldState = await send("Runtime.evaluate", {
+    expression: `document.body.dataset.quench3dUi || ""`,
+    returnByValue: true,
+  });
+  if (!/camera_world=true/.test(worldState.result?.value || "")) {
+    die(`注入世界点后没有 camera_world=true：${worldState.result?.value}`);
+  }
+  const c = await send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(`${outDir}/camera-c.png`, Buffer.from(c.data, "base64"));
+
   // 清空后再确认状态落回 false —— 反向也走同一条 API。
   await send("Runtime.evaluate", {
     expression: `window.quench3dCameraPoseClear()`,
@@ -108,11 +134,11 @@ async function main() {
     expression: `document.body.dataset.quench3dUi || ""`,
     returnByValue: true,
   });
-  if (/camera_pose=true/.test(cleared.result?.value || "")) {
-    die(`清空姿态后 camera_pose 仍为 true：${cleared.result?.value}`);
+  if (/camera_pose=true|camera_world=true/.test(cleared.result?.value || "")) {
+    die(`清空姿态后 camera_pose/camera_world 仍为 true：${cleared.result?.value}`);
   }
   ws.close();
-  console.log("PASS 摄像头截图与外部姿态注入：camera-a.png / camera-b.png");
+  console.log("PASS 摄像头截图与外部姿态注入：camera-a/b/c.png");
 }
 
 main().catch((e) => die(e.stack || String(e)));

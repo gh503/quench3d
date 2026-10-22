@@ -2763,7 +2763,7 @@ Web 端不写窗口位置（浏览器管窗口）。
 断言「时间轴」和读数 `0.250s / 1.000s` 真的画出来（假动画实例的 `player.time=0.25`、
 duration=1.0）——数据改了画面会跟着红。
 
-### 23.24 Web 摄像头外部 2D 骨架注入（第 120 轮）
+### 23.24 Web 摄像头外部 2D/3D 骨架注入（第 120 / 123 轮）
 
 **做了什么**：Web 预览窗口仍用 `getUserMedia`，但页面现在暴露：
 
@@ -2774,13 +2774,18 @@ duration=1.0）——数据改了画面会跟着红。
 * 预览图上按 `POSE_CONNECTIONS`（35 根骨）画洋红线段 + 黄点，右上角标
   `外部骨架 <confidence>`；`data-quench3d-ui` 增加 `camera_pose`。
 
+**第 123 轮补 3D**：JSON 增加可选 `world: [{x,y,z,visibility}]`；`CameraFeed::add_lines`
+在 Web 端复用与桌面相同的 `add_pose_lines`（35 根骨 + 关节球），`camera_world` 进入
+`data-quench3d-ui`。2D/3D 可只给一边。
+
 **边界**：浏览器里**没有内置 MediaPipe/模型**；这只是"外部推理 → 编辑器"的接线口，
 需要页面自己加载 MediaPipe Tasks Vision 或别的姿态模型。桌面 Python 管线仍是完整
 轮廓/深度/3D 骨骼的路径。
 
 **验证**：`tools/probe_web_camera.sh` 用假摄像头，注入 33 点后断言
-`camera_pose=true`、截图里洋红像素 3921（假摄像头是绿色，洋红只可能来自骨架），
-再调 `quench3dCameraPoseClear()` 断言回 `false`。`pose_screen_pos_maps_and_clamps`
+`camera_pose=true`、截图里洋红像素 3920；再注入 33 个 `world` 点，断言
+`camera_world=true` 且视口裁剪（避开摄像头窗口/右栏）有 177 个像素变化；最后
+`quench3dCameraPoseClear()` 断言两个状态都回 `false`。`pose_screen_pos_maps_and_clamps`
 （原生单测）钉住归一化坐标 → 预览图矩形、越界夹取与 NaN 回中心。
 
 ### 23.25 桌面内置文件选择器（第 121 轮）

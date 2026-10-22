@@ -41,6 +41,11 @@
 
 ### 新增
 
+- **Web 摄像头外部 3D 世界点（第 123 轮）**：`set_camera_pose` 接受可选
+  `world` 33 点；`add_lines` 在 Web 端复用桌面 `add_pose_lines`，3D 视口画 35 根骨；
+  `camera_world` 进入 `data-quench3d-ui`。探针注入 2D + 3D，断言状态和 177 个视口
+  变化像素，再清空回 false。仍不内置推理。
+
 - **桌面导出路径选择器（第 122 轮）**：导出 glTF/GLB 先弹内置选择器，默认同名换
   扩展名；结果只进 `Doc::export_path`，不会污染场景路径。Web 仍直接下载。测试总数
   779 → 780（导出路径 helper 新增 1 条）。
