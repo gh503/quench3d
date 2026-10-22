@@ -41,6 +41,14 @@
 
 ### 新增
 
+- **面板布局持久化（第 113 轮）**：顶部「布局」菜单可调左/右栏宽度（左 140–340、
+  右 180–420），面板用 `min_size/max_size` 强制生效；桌面写
+  `$XDG_STATE_HOME/quench3d/layout.json`（原子写），Web 写
+  `localStorage["quench3d.editor.layout.v1"]`，坏文件/NaN/越界静默回默认。布局不进
+  场景文件、不进撤销历史；启动时载入。
+  回归：2 个布局单测（JSON/夹紧/文件往返）+ `ui_smoke` 断言 300/340 真的落到面板宽度
+  （总测试 765 → 767）。
+
 - **编辑器导出 GLB（第 112 轮）**：顶部工具栏加「导出 GLB」，复用
   `scene_to_gltf` 的场景语义后再转 BIN chunk（`glb_from_json`）；桌面写同名 `.glb`，
   Web 新增 `download_bytes` 用 Blob 下载二进制。状态栏报告物体/三角形/字节数。

@@ -205,6 +205,8 @@ fn all_editor_panels_draw_in_one_frame() {
         return;
     };
     let mut doc = Doc::new();
+    doc.layout.outliner_width = 300.0;
+    doc.layout.inspector_width = 340.0;
     doc.build_default_scene(&mut engine);
     engine.scene.animations.push(fake_animation_instance());
     engine
@@ -248,6 +250,21 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "导出 GLB"),
         "工具栏没有画出「导出 GLB」按钮"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "布局"),
+        "工具栏没有画出「布局」菜单"
+    );
+    let first_requests = requests.expect("panels 必须返回本帧请求");
+    assert!(
+        (first_requests.outliner_width - 300.0).abs() < 1.0,
+        "左栏宽度没有按布局值生效：{}",
+        first_requests.outliner_width
+    );
+    assert!(
+        (first_requests.inspector_width - 340.0).abs() < 1.0,
+        "右栏宽度没有按布局值生效：{}",
+        first_requests.inspector_width
     );
     assert!(
         shapes_contain_text(&output.shapes, "动画（2 个实例）"),

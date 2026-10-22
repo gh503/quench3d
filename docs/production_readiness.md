@@ -101,7 +101,7 @@
 | 网格与吸附 | 全部 | 1 单位网格 + gizmo 吸附；**网格不随尺度自适应** | 🟠 |
 | 场景树 / 属性面板 / 状态栏 | 全部 | 有 | ✅ |
 | 文件对话框 | 全部 | 无（桌面用路径文本，Web 用上传/下载） | 🟠 |
-| 崩溃恢复 / 自动保存 / 布局持久化 | 全部 | **自动保存 + 崩溃恢复 ✅ 第 92 轮，Web localStorage ✅ 第 103 轮**（桌面 30s、原子写、正常退出清理；Web 30s、`localStorage` 版本化键、F9/F10 恢复/丢弃、恢复不覆盖原场景）；布局持久化仍无 | 🟡 |
+| 崩溃恢复 / 自动保存 / 布局持久化 | 全部 | **自动保存 + 崩溃恢复 ✅ 第 92 轮，Web localStorage ✅ 第 103 轮，面板布局 ✅ 第 113 轮**（桌面 30s、原子写、正常退出清理；Web 30s、`localStorage` 版本化键、F9/F10 恢复/丢弃、恢复不覆盖原场景；布局宽度独立文件/localStorage） | 🟡 |
 | 历史面板 / 快捷键自定义 / 命令搜索 | Blender / Godot | 无 | ❌ |
 | 编辑模式（顶点/边/面） | Blender / Unity | 无 | ❌ |
 
@@ -2509,7 +2509,7 @@ particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红
 `PASS 自动保存写入：... 字节` 与 `PASS 自动保存 F9`。
 
 **边界**：Web 没有"正常退出"钩子，所以恢复点只会在手动保存/下载或用户丢弃时清；
-布局（面板宽度/窗口位置）仍不持久化；localStorage 约 5MB，场景过大时写失败只记日志。
+窗口位置仍不持久化；面板宽度已持久化（`layout.json` / `localStorage["quench3d.editor.layout.v1"]`）。localStorage 约 5MB，场景过大时写失败只记日志。
 
 ### 23.9 编辑器框选（第 104 轮）
 
@@ -2662,6 +2662,23 @@ editor_glb_export_has_valid_chunks`（magic/version/总长度、JSON chunk、无
 
 **边界**：按钮仍不弹文件对话框（桌面按当前场景路径换扩展名）；Web 下载依赖浏览器
 Blob；GLB 不含动画。
+
+### 23.18 面板布局持久化（第 113 轮）
+
+**做了什么**：左/右栏宽度改成显式偏好，顶部「布局」菜单里两个滑杆（左栏 140–340、
+右栏 180–420）改宽度；面板用 `min_size/max_size` 强制，不依赖 egui 的拖拽分隔条
+（Canvas 探针里那条命中区曾经不稳定）。桌面写
+`$XDG_STATE_HOME/quench3d/layout.json`（临时文件 + rename），Web 写
+`localStorage["quench3d.editor.layout.v1"]`；坏文件/NaN/越界静默回默认，布局不进
+场景文件、不进撤销历史。布局在 `EditorApp` 启动时载入。
+
+**验证**：`cargo test -p quench3d-editor --lib layout`（JSON 往返、NaN/越界夹紧、
+坏文件回默认、文件原子写往返）；`ui_smoke` 把布局设成 300/340 后断言
+`Requests.outliner_width==300`、`inspector_width==340`，并断言工具栏画出「布局」。
+总测试 765 → 767。
+
+**边界**：只有宽度，没有面板折叠/顺序/窗口位置；滑杆是唯一入口（没有拖拽分隔条）；
+Web 端 localStorage 被禁时保存失败只写状态栏。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

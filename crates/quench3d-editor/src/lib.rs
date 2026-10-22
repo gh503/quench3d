@@ -28,6 +28,7 @@ pub mod camera;
 pub mod doc;
 pub mod gizmo;
 pub mod history;
+pub mod layout;
 pub mod scene_io;
 pub mod ui;
 

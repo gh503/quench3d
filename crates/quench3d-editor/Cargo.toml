@@ -28,13 +28,14 @@ egui-wgpu = "0.37"
 # 编不过）。所以关掉默认特性，桌面端单独把剪贴板/链接加回来，Web 端交给浏览器。
 egui-winit = { version = "0.37", default-features = false }
 winit = "0.30"
+# 布局偏好/场景 JSON 在桌面和 Web 都要用（Web 写 localStorage）。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1.0"
 env_logger = "0.11"
-# 摄像头动捕的 latest.json 协议；只在桌面端读文件。
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# 摄像头动捕只在桌面端读文件；serde 本身已提到通用依赖。
 egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

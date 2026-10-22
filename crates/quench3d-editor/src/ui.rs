@@ -58,6 +58,10 @@ pub struct Requests {
     pub export_gltf: bool,
     /// 顶部「导出 GLB」：写/下载二进制 GLB。
     pub export_glb: bool,
+    /// 本帧左栏实际宽度（测试/探针用；不是布局输入）。
+    pub outliner_width: f32,
+    /// 本帧右栏实际宽度。
+    pub inspector_width: f32,
     /// 打开场景文件。
     pub load: bool,
     /// 截图（当前窗口内容 → PNG）。
@@ -82,7 +86,7 @@ pub fn panels(
     view.additive = false;
     top_bar(ui, engine, doc, gizmo, &mut req);
     status_bar(ui, engine, doc, gizmo);
-    outliner(ui, engine, doc);
+    outliner(ui, engine, doc, &mut req);
     inspector(ui, engine, doc, &mut req);
     viewport(ui, engine, doc, view, gizmo);
     let ctx = ui.ctx().clone();
@@ -429,6 +433,39 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
             {
                 req.screenshot = true;
             }
+            ui.menu_button("布局", |ui| {
+                ui.set_min_width(220.0);
+                ui.label(RichText::new("面板宽度（逻辑像素）").small().weak());
+                let mut changed = false;
+                changed |= ui
+                    .add(
+                        egui::Slider::new(
+                            &mut doc.layout.outliner_width,
+                            crate::layout::OUTLINER_MIN..=crate::layout::OUTLINER_MAX,
+                        )
+                        .text("左栏"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(
+                            &mut doc.layout.inspector_width,
+                            crate::layout::INSPECTOR_MIN..=crate::layout::INSPECTOR_MAX,
+                        )
+                        .text("右栏"),
+                    )
+                    .changed();
+                if ui.button("恢复默认").clicked() {
+                    doc.layout = crate::layout::Layout::default();
+                    changed = true;
+                }
+                if changed {
+                    doc.layout.clamp();
+                    if let Err(e) = doc.layout.save() {
+                        doc.status = format!("布局保存失败：{e}");
+                    }
+                }
+            });
             if ui.button("？").on_hover_text("快捷键与操作说明").clicked() {
                 doc.show_help = !doc.show_help;
             }
@@ -554,9 +591,15 @@ fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Opti
 /// * **导入的模型**：在引擎里它是"一个子网格一个物体"，散在列表里看不出它们是一伙的 ——
 ///   按 [`Doc::model_instances`] 收进 `模型 #i · 路径` 分组，成员照旧可点选、可 `⌖` 聚焦，
 ///   分组标题上还有"整组聚焦"。
-fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
-    egui::Panel::left("quench3d-outliner")
-        .default_size(190.0)
+fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
+    let width = doc
+        .layout
+        .outliner_width
+        .clamp(crate::layout::OUTLINER_MIN, crate::layout::OUTLINER_MAX);
+    let response = egui::Panel::left("quench3d-outliner")
+        .default_size(width)
+        .min_size(width)
+        .max_size(width)
         .show(ui, |ui| {
             ui.heading("场景");
             let selected = doc.selection().len();
@@ -643,6 +686,7 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 }
             });
         });
+    req.outliner_width = response.response.rect.width();
 }
 
 /// 画一棵子树（父物体 + 缩进的子物体），并在模型实例的第一个成员处插入分组标题。
@@ -2379,9 +2423,15 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     }
 }
 
-fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Requests) {
-    egui::Panel::right("quench3d-inspector")
-        .default_size(260.0)
+fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
+    let width = doc
+        .layout
+        .inspector_width
+        .clamp(crate::layout::INSPECTOR_MIN, crate::layout::INSPECTOR_MAX);
+    let response = egui::Panel::right("quench3d-inspector")
+        .default_size(width)
+        .min_size(width)
+        .max_size(width)
         .show(ui, |ui| {
             ui.heading("属性");
             ui.separator();
@@ -2705,6 +2755,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                 }
             });
         });
+    req.inspector_width = response.response.rect.width();
 }
 
 /// 中央视口（3D 画面本身由引擎画，这里只放交互与叠加提示）。

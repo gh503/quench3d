@@ -203,6 +203,8 @@ pub struct Doc {
     pub status: String,
     /// 是否显示帮助窗口。
     pub show_help: bool,
+    /// 左/右面板宽度（使用偏好，不写进场景文件）。
+    pub layout: crate::layout::Layout,
     /// 崩溃恢复文件的内容（`Some` = 工具栏显示"恢复 / 丢弃"）。
     pub recovery: Option<String>,
     /// 一次性自动保存请求：恢复出来的场景在历史里是"干净"的（`can_undo()==false`），
@@ -806,6 +808,7 @@ impl Doc {
             file_path: "scene.json".to_string(),
             status: "就绪".to_string(),
             show_help: false,
+            layout: crate::layout::Layout::default(),
             recovery: None,
             needs_autosave: false,
             history: crate::history::History::default(),

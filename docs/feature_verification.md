@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **765** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **767** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -131,6 +131,7 @@ tools/verify_all.sh
 | 父子同选 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history selected_parent` | 父+子同选时驱动者=父、子不进组；同层旁人仍进组；只选子时驱动者=子 |
 | 编辑器导出 glTF | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history editor_gltf_export` | 顶部「导出 glTF」→ `scene_to_gltf` 合法、节点数=物体数、三角形>0；桌面写同名 `.gltf`、Web 下载 |
 | 编辑器导出 GLB | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history editor_glb_export_has_valid_chunks` | 顶部「导出 GLB」→ `scene_to_glb` 的 magic/version/length、JSON chunk 合法且无 data URI、节点数=物体数；桌面写同名 `.glb`、Web 用 Blob 下载字节 |
+| 面板布局持久化 | `cargo test -p quench3d-editor --lib layout` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 「布局」菜单滑杆改左/右栏宽度；`ui_smoke` 设 300/340 后断言面板实际宽度同值；本地 JSON 原子写/坏文件回默认、Web localStorage；布局不进场景文件/历史 |
 | glTF/GLB 导出 | `cargo test -p quench3d-cli --lib gltf_export` / `cargo test -p quench3d-cli --test cli_e2e export_writes_single_file_gltf` / `export_writes_glb_that_info_can_read` / `export_gltf_embeds_texture_from_scene_directory` | 合法 glTF 2.0 / GLB（JSON+BIN chunk）、内嵌 base64、父子节点树（局部 translation/rotation，孙级也行）；相对场景目录的 PNG/JPEG 真的进 images/textures 并挂到材质；CLI 落盘后 `info model.gltf` 三角形数/包围盒一致；凸包/缺贴图跳过有报告 |
 | 复制粘贴 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history copy_and_paste` / `tools/probe_web_ui.sh` | Ctrl+C 不改场景/不进历史；Ctrl+V +2、自动重名、根物体、刚体存在、撤销/重做；浏览器框选 7 个后 Ctrl+C/V，`objects 7 → 14` 且截图变化 |
 | 框选 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history box_select` / `tools/probe_web_ui.sh` | 只按屏幕中心命中、Shift 追加、空框清空；浏览器 Shift+拖动后 `selected` 从 1 变 7，截图出现选框/选中轮廓 |
