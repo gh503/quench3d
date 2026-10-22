@@ -291,6 +291,9 @@ impl Inner {
             if requests.save {
                 self.save_scene();
             }
+            if requests.export_gltf {
+                self.export_gltf();
+            }
             if requests.load {
                 self.load_scene();
             }
@@ -522,6 +525,55 @@ impl Inner {
                     self.doc.needs_autosave = false;
                 }
                 Err(e) => self.doc.status = format!("下载失败：{e}"),
+            }
+        }
+    }
+
+    /// 导出单文件 glTF 2.0（当前场景旁放一个同名 `.gltf`；Web 走下载）。
+    fn export_gltf(&mut self) {
+        let saved = match crate::scene_io::scene_to_gltf(&self.engine, &self.doc) {
+            Ok(saved) => saved,
+            Err(e) => {
+                self.doc.status = format!("导出 glTF 失败：{e}");
+                return;
+            }
+        };
+        let mut note = String::new();
+        if !saved.skipped.is_empty() {
+            note = format!("（跳过：{}）", saved.skipped.join("、"));
+        }
+        let path = std::path::Path::new(&self.doc.file_path).with_extension("gltf");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match std::fs::write(&path, saved.json.as_bytes()) {
+                Ok(()) => {
+                    self.doc.status = format!(
+                        "已导出 {}（{} 个物体 / {} 三角形 / {} 字节）{note}",
+                        path.display(),
+                        saved.objects,
+                        saved.triangles,
+                        saved.json.len()
+                    );
+                }
+                Err(e) => self.doc.status = format!("导出 glTF 失败：{e}"),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("scene.gltf");
+            match crate::scene_io::download_text(name, &saved.json) {
+                Ok(()) => {
+                    self.doc.status = format!(
+                        "已下载 {name}（{} 个物体 / {} 三角形 / {} 字节）{note}",
+                        saved.objects,
+                        saved.triangles,
+                        saved.json.len()
+                    );
+                }
+                Err(e) => self.doc.status = format!("下载 glTF 失败：{e}"),
             }
         }
     }

@@ -63,6 +63,38 @@ pub fn export_base_doc(base: &SceneDoc, notes: &mut Vec<String>) -> Result<Scene
     Ok(merged)
 }
 
+/// glTF 导出结果（单文件 `.gltf`，几何以 base64 内嵌）。
+pub struct SavedGltf {
+    /// `.gltf` JSON 文本。
+    pub json: String,
+    /// 写出的物体数。
+    pub objects: usize,
+    /// 三角形数。
+    pub triangles: usize,
+    /// 没法带进 glTF 的说明（贴图、导入模型、凸包…）。
+    pub skipped: Vec<String>,
+}
+
+/// 把引擎当前场景导出成单文件 glTF 2.0。
+///
+/// 先走 [`scene_to_json`]（它负责把编辑器懂的部分写回底稿、把场景格式表达不了的物体
+/// 记进 `skipped`），再把这份 JSON 解析回 `SceneDoc` 交给 CLI 的 glTF 导出器。这样
+/// 编辑器/CLI 两条导出路径看到的是同一份场景语义，不会各写一套。
+pub fn scene_to_gltf(engine: &Engine, doc: &Doc) -> Result<SavedGltf, String> {
+    let saved = scene_to_json(engine, doc)?;
+    let scene = SceneDoc::from_json(&saved.json)
+        .map_err(|e| format!("导出的场景 JSON 不能重新解析：{e:?}"))?;
+    let out = quench3d_cli::gltf_export::export_gltf(&scene)?;
+    let mut skipped = saved.skipped;
+    skipped.extend(out.skipped);
+    Ok(SavedGltf {
+        json: out.json,
+        objects: out.objects,
+        triangles: out.triangles,
+        skipped,
+    })
+}
+
 /// 把引擎当前场景导出成 `quench3d.scene` JSON。
 pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     // 没法用场景格式表达的物体（导入的模型、凸包…）与"这次存盘做了什么"都记在这里。

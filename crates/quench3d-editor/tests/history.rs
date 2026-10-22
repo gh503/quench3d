@@ -567,3 +567,25 @@ fn selected_parent_suppresses_child_in_the_transform_group() {
     doc.select_only(Some(child));
     assert_eq!(doc.drag_driver(&engine, child), child);
 }
+
+/// 编辑器的"导出 glTF"和 CLI 用同一条场景语义：导出的 JSON 合法、节点数与场景图元对得上。
+#[test]
+fn editor_gltf_export_is_valid_and_contains_the_scene() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    doc.reset_history(&engine);
+    let exported = scene_io::scene_to_gltf(&engine, &doc).expect("glTF 导出必须成功");
+    let json: serde_json::Value =
+        serde_json::from_str(&exported.json).expect("导出的 glTF 必须是合法 JSON");
+    assert_eq!(json["asset"]["version"], "2.0");
+    assert!(exported.objects > 0, "默认场景至少要有可导出的图元");
+    assert_eq!(
+        json["nodes"].as_array().unwrap().len(),
+        exported.objects,
+        "每个导出物体一个节点"
+    );
+    assert!(exported.triangles > 0);
+}

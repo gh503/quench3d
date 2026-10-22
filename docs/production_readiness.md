@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **部分**：`quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**（图元物体、模板/实例展开、父级位姿、颜色/金属度/粗糙度/自发光/alpha；base64 内嵌几何；凸包、`models[]`、贴图跳过并报告）→ 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上 | 已落地 OBJ + glTF；贴图嵌入/节点层级/动画未导出 | ✅（OBJ/glTF 几何） |
+| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光；base64 内嵌；凸包、`models[]`、贴图跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF（CLI + 编辑器）；贴图嵌入/节点层级/动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -2579,6 +2579,21 @@ cli_e2e export_writes_single_file_gltf`（CLI 真的落盘 → `info model.gltf`
 **边界**：节点是扁平的（父子关系烘成世界坐标），不导出动画/骨骼/贴图/morph；四边形
 等非三角图元会三角化；这是"能在别的工具里看到同样几何/颜色"的导出，不是无损编辑往返。
 
+### 23.13 编辑器导出 glTF（第 108 轮）
+
+**做了什么**：顶部工具栏加「导出 glTF」。`scene_io::scene_to_gltf` 先调用已有的
+`scene_to_json`（保证编辑器懂的部分写回底稿、无法表达的物体进 `skipped`），再把 JSON
+解析回 `SceneDoc` 交给 CLI 的 `gltf_export`，所以编辑器和 CLI 看到的是同一份场景语义。
+桌面写到当前场景同名 `.gltf`；Web 走 `download_text` 下载。状态栏报告物体/三角形/字节数
+与跳过项。
+
+**验证**：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history
+editor_gltf_export_is_valid_and_contains_the_scene`（合法 glTF、`nodes.len()==objects`、
+三角形 >0）；CLI 导出与 `info` 往返见 §23.12。
+
+**边界**：按钮不弹文件对话框（桌面用当前场景路径换扩展名，Web 下载）；贴图/外部模型/
+凸包/层级/动画仍不导出；导出失败只改状态栏，不改场景、不进历史。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -2632,7 +2647,7 @@ cli_e2e export_writes_single_file_gltf`（CLI 真的落盘 → `info model.gltf`
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**757** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**758** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

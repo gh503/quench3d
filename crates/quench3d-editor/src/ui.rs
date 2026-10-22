@@ -54,6 +54,8 @@ impl Viewport {
 pub struct Requests {
     /// 保存场景文件。
     pub save: bool,
+    /// 把当前场景导出成单文件 glTF 2.0。
+    pub export_gltf: bool,
     /// 打开场景文件。
     pub load: bool,
     /// 截图（当前窗口内容 → PNG）。
@@ -403,6 +405,13 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
             }
             if ui.button("保存").on_hover_text("写出 scene.json").clicked() {
                 req.save = true;
+            }
+            if ui
+                .button("导出 glTF")
+                .on_hover_text("把当前场景的图元导出成单文件 glTF 2.0（几何内嵌）")
+                .clicked()
+            {
+                req.export_gltf = true;
             }
             if ui
                 .button("截图")

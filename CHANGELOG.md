@@ -41,6 +41,9 @@
 
 ### 新增
 
+- **编辑器导出 glTF（第 108 轮）**：顶部「导出 glTF」按钮；`scene_to_gltf` 复用
+  `scene_to_json` 再交给 CLI 导出器，桌面写同名 `.gltf`、Web 下载，状态栏报物体/三角形/
+  跳过项。回归：原生编辑器导出单测（总测试 757 → 758）。
 - **单文件 glTF 2.0 导出（第 107 轮）**：`quench3d export scene.json model.gltf` 按扩展名
   写 glTF 2.0（几何 base64 内嵌、材质标量、alpha/自发光），几何烘进世界空间；复用 OBJ
   导出的形状/父级逻辑。贴图、`models[]`、凸包跳过并报告。回归：2 个 lib 单测 + 1 个
