@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **781** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **782** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -111,7 +111,7 @@ tools/verify_all.sh
 | 功能 | 正向证据 | 判据 |
 | --- | --- | --- |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
-| 桌面文件选择器 | `cargo test -p quench3d-editor --lib picker` | 目录/扩展名过滤；保存补后缀与覆盖确认；三帧窗口画出标题/文件名/文件项 |
+| 桌面文件选择器 | `cargo test -p quench3d-editor --lib picker` | 目录/扩展名过滤；保存补后缀与覆盖确认；三帧窗口画出标题/文件名/文件项；Enter 确认 / Esc 取消 |
 | 导出路径选择 | `picker_result_updates_path_and_request` | 选 `/tmp/c.gltf` 后 `export_path` 正确、`export_gltf` 请求置位，场景路径不被改写 |
 | 单 clip 时间轴 | `cargo test -p quench3d-editor --lib timeline` + `ui_smoke` | 像素→时间夹取；UI 同帧画出「时间轴」和 `0.250s / 1.000s` 读数 |
 | 桌面窗口位置 | `cargo test -p quench3d-editor --lib layout` | `layout.json` 往返保留窗口坐标；半截/离谱坐标退回默认；Wayland 不生效（协议无窗口位置） |

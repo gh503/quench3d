@@ -121,6 +121,12 @@ impl FilePicker {
         if !self.open {
             return Outcome::Cancelled;
         }
+        // 键盘：Esc 取消，Enter 确认。放在窗口外处理，输入框有焦点时也能用。
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.open = false;
+            return Outcome::Cancelled;
+        }
+        let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
         let mut open = self.open;
         let mut picked = None;
         egui::Window::new(&self.title)
@@ -198,6 +204,7 @@ impl FilePicker {
                     if ui.button("取消").clicked() {
                         self.open = false;
                     }
+                    ui.label(egui::RichText::new("Enter 确认 · Esc 取消").small().weak());
                     if self.confirm_overwrite {
                         ui.colored_label(
                             egui::Color32::YELLOW,
@@ -206,6 +213,13 @@ impl FilePicker {
                     }
                 });
             });
+        if enter && self.open {
+            match self.finish() {
+                Ok(Some(result)) => picked = Some(result),
+                Ok(None) => {}
+                Err(e) => self.error = Some(e),
+            }
+        }
         self.open = open;
         if let Some(result) = picked {
             self.open = false;
@@ -398,6 +412,54 @@ mod tests {
         assert!(contains_text(&shapes, "打开场景"), "窗口标题没画出来");
         assert!(contains_text(&shapes, "文件名"), "文件名输入框没画出来");
         assert!(contains_text(&shapes, "a.json"), "文件列表没画出来");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn key_input(key: egui::Key) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn enter_confirms_and_escape_cancels() {
+        let dir = temp_dir("keys");
+        std::fs::write(dir.join("yes.json"), "{}").unwrap();
+        let ctx = egui::Context::default();
+
+        let mut picker = FilePicker::for_open(&dir, &["json"], "打开场景");
+        picker.filename = "yes.json".to_string();
+        let mut outcome = None;
+        let mut output = ctx.run_ui(key_input(egui::Key::Enter), |ui| {
+            outcome = Some(picker.show(ui.ctx()));
+        });
+        output.textures_delta.clear();
+        match outcome {
+            Some(Outcome::Picked(result)) => {
+                assert_eq!(result.path, dir.join("yes.json"));
+                assert_eq!(result.mode, PickMode::Open);
+            }
+            _ => panic!("Enter 应当确认并返回 Picked"),
+        }
+
+        let mut picker = FilePicker::for_open(&dir, &["json"], "打开场景");
+        let mut outcome = None;
+        let mut output = ctx.run_ui(key_input(egui::Key::Escape), |ui| {
+            outcome = Some(picker.show(ui.ctx()));
+        });
+        output.textures_delta.clear();
+        assert!(matches!(outcome, Some(Outcome::Cancelled)), "Esc 应当取消");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -2815,13 +2815,15 @@ duration=1.0）——数据改了画面会跟着红。
 * 「保存」按钮右键菜单「另存为…」→ 目录 + 文件名；缺扩展名自动补 `.json`；
   目标已存在时先要求再点一次「保存」确认覆盖；
 * 选择结果复用原有 `Requests::load/save`：写 `doc.file_path` 后走同一条载入/保存路径；
+* 键盘 `Enter` 确认、`Esc` 取消（输入框有焦点时也生效）；
 * Web 端仍用浏览器原生文件输入/下载，不受影响。
 
 **验证**：`cargo test -p quench3d-editor --lib picker` 四条：
 目录/扩展名过滤与目录优先；保存补扩展名 + 覆盖二次确认；打开不存在的文件报错；
 以及**三帧 egui 窗口测试**断言标题「打开场景」、`文件名` 输入框和 `a.json` 列表项
 真的画出；`picker_result_updates_path_and_request` 断言选完后 `doc.file_path` 和
-`Requests::load/save` 同步变化。`ui_smoke` 仍全绿（工具栏没有因为新按钮挤掉「导出 GLB」）。
+`Requests::load/save` 同步变化；`enter_confirms_and_escape_cancels` 断言 Enter
+返回 `Picked` 且路径正确、Esc 返回 `Cancelled`。`ui_smoke` 仍全绿（工具栏没有因为新按钮挤掉「导出 GLB」）。
 
 **边界**：文件列表是同步 `read_dir`，超大目录会卡一帧；没有书签/最近目录；
 `picker` 是会话状态，不进撤销/场景文件。
