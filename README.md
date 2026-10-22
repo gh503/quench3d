@@ -758,7 +758,7 @@ quench3d schema --json                   # 能力清单：命令、参数、场�
 | `doctor` | 环境自检 | 否 |
 | `info <模型>` | glTF/GLB/OBJ：网格、材质、贴图、顶点、三角形、包围盒 | 否 |
 | `validate <场景>` | 校验场景，返回全部诊断（带 JSON 路径） | 否 |
-| `export <场景> [模型.obj]` | 把图元物体导出为 OBJ + MTL（本引擎可重新导入） | 否 |
+| `export <场景> [模型.obj\|模型.gltf]` | 图元物体 → OBJ + MTL；扩展名 `.gltf` 时导出**单文件 glTF 2.0**（base64 内嵌几何，本引擎可重新导入） | 否 |
 | `simulate <场景>` | 只跑物理，报告每个刚体的位置 / 速度 / 位移 / 休眠 / 接触，可按 `--trace` 采集轨迹 | 否 |
 | `query <场景>` | 几何查询：`--ray` 射线（`--all` 给沿路全部命中）/ `--overlap` 任意形状重叠，可配层掩码与传感器开关 | 否 |
 | `render <场景>` | 无窗口渲染成 PNG（可先步进物理） | 是 |
@@ -772,6 +772,7 @@ quench3d schema --json                   # 能力清单：命令、参数、场�
 quench3d example --out scene.json
 quench3d validate scene.json --json
 quench3d export scene.json model.obj                    # 图元 → OBJ/MTL
+quench3d export scene.json model.gltf                   # 图元 → 单文件 glTF 2.0
 quench3d simulate scene.json --steps 600 --json
 quench3d simulate scene.json --trace-all --json            # 附带每条轨迹的结论
 quench3d render scene.json --out scene.png --width 960 --height 600
@@ -1311,7 +1312,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 754 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 757 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

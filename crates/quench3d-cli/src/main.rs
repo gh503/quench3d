@@ -453,6 +453,51 @@ fn dispatch(args: &Args) -> i32 {
                 }
                 Err(e) => return fail(args, "export", report::doc_error_info(&e), started),
             };
+            let is_gltf = std::path::Path::new(&out_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
+            if is_gltf {
+                let exported = match quench3d_cli::gltf_export::export_gltf(&doc) {
+                    Ok(exported) => exported,
+                    Err(e) => {
+                        return fail(args, "export", ErrorInfo::new("export_failed", e), started)
+                    }
+                };
+                if let Err(e) = std::fs::write(&out_path, &exported.json) {
+                    return fail(
+                        args,
+                        "export",
+                        ErrorInfo::new("write_failed", format!("写 {out_path} 失败：{e}")),
+                        started,
+                    );
+                }
+                let value = json!({
+                    "scene": scene_path,
+                    "out": out_path,
+                    "format": "gltf",
+                    "objects": exported.objects,
+                    "vertices": exported.vertices,
+                    "triangles": exported.triangles,
+                    "skipped": exported.skipped,
+                });
+                return finish(args, "export", Ok(value), started, |v| {
+                    println!(
+                        "已导出 {}（glTF 2.0：{} 个物体 / {} 顶点 / {} 三角形）",
+                        v["out"].as_str().unwrap_or(""),
+                        v["objects"].as_u64().unwrap_or(0),
+                        v["vertices"].as_u64().unwrap_or(0),
+                        v["triangles"].as_u64().unwrap_or(0),
+                    );
+                    if let Some(skipped) = v["skipped"].as_array() {
+                        for s in skipped {
+                            if let Some(s) = s.as_str() {
+                                println!("  跳过：{s}");
+                            }
+                        }
+                    }
+                });
+            }
             let exported = match quench3d_cli::obj_export::export_obj(&doc, &out_path) {
                 Ok(exported) => exported,
                 Err(e) => return fail(args, "export", ErrorInfo::new("export_failed", e), started),
@@ -1923,7 +1968,7 @@ fn help_text() -> String {
   doctor                环境自检：平台、CPU、GPU 适配器、图形后端
   info <模型>            检查 glTF/GLB/OBJ：网格/材质/顶点/三角形/包围盒
   validate <场景>        校验场景 JSON，返回带路径的诊断
-  export <场景> [模型.obj] 把图元物体导出为 OBJ + MTL（可被本引擎重新导入）
+  export <场景> [模型.obj|模型.gltf] 把图元物体导出为 OBJ + MTL 或单文件 glTF 2.0
   render <场景>          无窗口渲染成 PNG（可先步进物理）
   movie <场景>           录制仿真视频：PNG 序列 + trace.jsonl（交 ffmpeg），或直接出 GIF/APNG
   simulate <场景>        只跑物理，输出每个刚体的位置/速度/位移/休眠

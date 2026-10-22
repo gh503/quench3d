@@ -181,7 +181,7 @@ pub fn export_obj(doc: &SceneDoc, out_name: &str) -> Result<ObjExport, String> {
     })
 }
 
-fn resolve_world(
+pub(crate) fn resolve_world(
     i: usize,
     objects: &[ObjectDoc],
     names: &BTreeMap<String, usize>,
@@ -211,7 +211,7 @@ fn resolve_world(
     world
 }
 
-fn mesh_for_shape(shape: &crate::scene_doc::ShapeDoc) -> Option<(MeshData, Vec3)> {
+pub(crate) fn mesh_for_shape(shape: &crate::scene_doc::ShapeDoc) -> Option<(MeshData, Vec3)> {
     let scale = runner::render_scale(shape, 1.0);
     let mesh = match shape.kind {
         ShapeKind::Box => MeshData::cube(1.0),

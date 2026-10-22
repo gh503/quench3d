@@ -135,14 +135,17 @@ pub fn schema() -> Value {
             },
             {
                 "name": "export",
-                "summary": "把场景里的图元物体导出为 Wavefront OBJ + MTL；导入的 models[] 与凸包会列进 skipped",
+                "summary": "把场景里的图元物体导出为 Wavefront OBJ + MTL，或按扩展名 .gltf 导出单文件 glTF 2.0（base64 内嵌 buffer）；导入的 models[]、凸包、贴图会列进 skipped",
                 "args": [
                     { "name": "scene", "type": "path", "required": true, "description": "场景 JSON 路径" },
-                    { "name": "out", "type": "path", "required": false, "description": "输出 OBJ 路径；缺省与场景同名 .obj" }
+                    { "name": "out", "type": "path", "required": false, "description": "输出路径；.gltf 走 glTF 2.0，否则 OBJ + MTL；缺省与场景同名 .obj" }
                 ],
                 "output": "{ scene, out, mtl, objects, vertices, triangles, skipped[] }",
                 "notes": "只导出 objects/templates/instances 展开后的图元几何；贴图不嵌入 MTL，材质只写标量色/粗糙度/自发光/透明度；导出的是文档初始位姿，不是物理步进后的快照",
-                "examples": ["quench3d export scene.json model.obj --json"]
+                "examples": [
+                    "quench3d export scene.json model.obj --json",
+                    "quench3d export scene.json model.gltf --json"
+                ]
             },
             {
                 "name": "render",

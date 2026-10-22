@@ -24,6 +24,7 @@
 pub mod agent;
 pub mod bench;
 pub mod generate;
+pub mod gltf_export;
 pub mod llm;
 pub mod mcp;
 pub mod obj_export;

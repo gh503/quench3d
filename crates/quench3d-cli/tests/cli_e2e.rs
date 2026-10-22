@@ -7363,6 +7363,68 @@ fn export_writes_obj_and_mtl_that_info_can_read() {
     assert!((size[2].as_f64().unwrap() - 3.0).abs() < 1e-5, "{size:?}");
 }
 
+#[test]
+fn export_writes_single_file_gltf_that_info_can_read() {
+    let dir = temp_dir("export_gltf");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "format":"quench3d.scene","version":2,"name":"export",
+          "objects":[
+            {"name":"box","shape":{"type":"box","size":[2,1,3]},"position":[0,1,0]},
+            {"name":"ball","shape":{"type":"sphere","radius":0.5},"position":[3,1,0],
+             "material":"red"}
+          ],
+          "materials":{"red":{"color":[1,0,0]}}
+        }"#,
+    )
+    .expect("写临时场景");
+    let gltf = dir.join("model.gltf");
+    let r = run(&[
+        "export",
+        scene.to_str().unwrap(),
+        gltf.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stderr={}\nstdout={}", r.stderr, r.stdout);
+    let env = r.json();
+    assert_eq!(env["ok"], true);
+    assert_eq!(env["data"]["format"], "gltf");
+    assert_eq!(env["data"]["objects"], 2);
+    assert_eq!(env["data"]["triangles"].as_u64().unwrap(), 12 + 768);
+    assert!(gltf.exists(), "glTF 没有落盘");
+
+    let text = std::fs::read_to_string(&gltf).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).expect("glTF 必须是合法 JSON");
+    assert_eq!(json["asset"]["version"], "2.0");
+    assert_eq!(json["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(json["meshes"].as_array().unwrap().len(), 2);
+    assert!(
+        json["buffers"][0]["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:application/octet-stream;base64,"),
+        "几何应内嵌在 .gltf 里，不依赖外部 .bin"
+    );
+
+    // 本引擎的 glTF 导入器能读回来。
+    let info = run(&["info", gltf.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        info.code, 0,
+        "stderr={}\nstdout={}",
+        info.stderr, info.stdout
+    );
+    let info = info.json();
+    assert_eq!(
+        info["data"]["triangles"].as_u64().unwrap(),
+        env["data"]["triangles"].as_u64().unwrap()
+    );
+    assert_eq!(info["data"]["meshes"].as_u64().unwrap(), 2);
+    let size = info["data"]["bounds_size"].as_array().unwrap();
+    assert!((size[0].as_f64().unwrap() - 4.5).abs() < 1e-5, "{size:?}");
+}
+
 /// 公告板粒子：同一相机/光照下，有粒子的画面中心必须比没粒子更红。
 #[test]
 fn particle_billboards_change_pixels() {

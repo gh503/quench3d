@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **部分**：`quench3d export` 写出 OBJ + MTL（图元物体、模板/实例展开、父级位姿；凸包与 `models[]` 跳过并报告）→ 能被 Blender/本引擎重新导入；贴图不嵌入、无 glTF | `quench3d export scene.json model.obj` 导出后 `info model.obj` 三角形的包围盒/数量对得上 | 已落地 OBJ；glTF/贴图嵌入另算 | ✅（OBJ） |
+| 模型**导出** | Blender / 引擎 | **部分**：`quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**（图元物体、模板/实例展开、父级位姿、颜色/金属度/粗糙度/自发光/alpha；base64 内嵌几何；凸包、`models[]`、贴图跳过并报告）→ 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上 | 已落地 OBJ + glTF；贴图嵌入/节点层级/动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -413,7 +413,7 @@
 | 校验口径 | 场景校验器要求被引用的贴图**文件存在**（`texture.rs` 校验路径），所以"应用"失败要给出可读原因，而不是静默保留旧贴图 |
 
 **其它两条已核过的落点**：glTF/OBJ 导入在 `assets.rs:261/465/500`（OBJ 不带材质）；
-模型**导出**已补 OBJ（图元 → OBJ/MTL，可被本引擎重新导入）；仍缺 glTF 与贴图嵌入，"只进不出"只算部分解除。
+模型**导出**已补 OBJ（图元 → OBJ/MTL）与单文件 glTF 2.0（第 107 轮，几何/材质标量/内嵌 base64），都能被本引擎重新导入；仍缺贴图嵌入、节点层级/动画导出。
 版本检查（`scene_doc.rs` 的 `validate`）现在是**版本不符直接报错**，并且明确**不做**迁移器：
 这个格式还没有外部使用者，与其维护一条"读旧版"的路径，不如让旧文件拿到一条清楚的诊断。
 再加字段时请同步改 `VERSION`（当前 2）。
@@ -2562,6 +2562,23 @@ selected_parent_suppresses_child_in_the_transform_group`（父+子组为空、�
 原点（组为空），不再绕"父子平均位置"；`selection_center` 仍按全部选中项算（gizmo 的
 屏幕锚点用驱动者世界位置）。
 
+### 23.12 单文件 glTF 2.0 导出（第 107 轮）
+
+**做了什么**：新增 `crates/quench3d-cli/src/gltf_export.rs`。`quench3d export scene.json
+model.gltf` 按扩展名走 glTF 分支；复用 OBJ 导出的形状→网格与父级世界变换逻辑，把每个
+部件的顶点/法线/UV/索引烘进世界空间，写成一个 `data:application/octet-stream;base64,...`
+buffer（所以 `.gltf` 单文件、不额外落 `.bin`）。材质写 `pbrMetallicRoughness`
+（baseColor/metallic/roughness）、`emissiveFactor`、alpha<1 时 `alphaMode=BLEND`。
+贴图、`models[]` 外部资产、凸包按既有边界跳过并写进 `skipped`。
+
+**验证**：`cargo test -p quench3d-cli --lib gltf_export`（合法 JSON、2 节点/2 mesh、
+base64 buffer、父位移烘进子几何的包围盒、凸包跳过）；`cargo test -p quench3d-cli --test
+cli_e2e export_writes_single_file_gltf`（CLI 真的落盘 → `info model.gltf` 读回三角形数
+与包围盒一致）。
+
+**边界**：节点是扁平的（父子关系烘成世界坐标），不导出动画/骨骼/贴图/morph；四边形
+等非三角图元会三角化；这是"能在别的工具里看到同样几何/颜色"的导出，不是无损编辑往返。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -2615,7 +2632,7 @@ selected_parent_suppresses_child_in_the_transform_group`（父+子组为空、�
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**754** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**757** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
