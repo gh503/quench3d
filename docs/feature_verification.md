@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **703** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **704** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -86,6 +86,7 @@ tools/verify_all.sh
 | 景深参数/校验 | `cargo test -p quench3d-cli --lib dof_defaults_and_validation` | 不写 = 关闭且不序列化；焦距≤0/光圈<0/半径为负报错；光圈 0、半径 100 警告；映射值一致 |
 | 景深像素变化 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline depth_of_field_blurs_out_of_focus_edges` | 光圈 1 时焦外边缘至少 100 像素变化；光圈归 0 后与关闭逐像素一致 |
 | 景深开关绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「景深（DoF）」；顶栏最小高度修复后不再被换行裁掉 |
+| 整场景重载释放显存 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test scene_roundtrip reloading_scene_reclaims_renderer_assets` | 连开同一份场景 4 次，网格/材质/贴图数量与场景物体数每次回到同一规模，不累加 |
 | 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |

@@ -1065,3 +1065,49 @@ fn fluids_survive_editor_roundtrip() {
     assert_eq!(f.iterations, 5);
     assert_eq!(f.max_particles, 1200);
 }
+
+/// 反复"打开"同一份场景，渲染器资源表必须回到同一规模。
+///
+/// 以前载入只清 `Scene`，不清 `Renderer` 的网格/材质/贴图：每打开一次就把上一份
+/// 场景的显存再占一遍，而新场景句柄从 0 开始——旧批次还可能指向同号的新资源。
+#[test]
+fn reloading_scene_reclaims_renderer_assets() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = r#"{
+      "format": "quench3d.scene",
+      "version": 2,
+      "name": "reload",
+      "objects": [
+        { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
+          "position": [0, 1, 0], "body": "dynamic" },
+        { "name": "ball", "shape": { "type": "sphere", "radius": 0.4 },
+          "position": [2, 1, 0], "body": "dynamic" }
+      ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("第一次载入必须成功");
+    let first = (
+        engine.renderer.mesh_count(),
+        engine.renderer.material_count(),
+        engine.renderer.texture_count(),
+        engine.scene.len(),
+    );
+    for round in 0..3 {
+        scene_io::load_text_into_doc(&mut engine, &mut doc, source)
+            .unwrap_or_else(|e| panic!("第 {} 次重载失败：{e}", round + 2));
+        let now = (
+            engine.renderer.mesh_count(),
+            engine.renderer.material_count(),
+            engine.renderer.texture_count(),
+            engine.scene.len(),
+        );
+        assert_eq!(
+            now,
+            first,
+            "第 {} 次重载后资源表/场景规模漂移：{first:?} → {now:?}",
+            round + 2
+        );
+    }
+}

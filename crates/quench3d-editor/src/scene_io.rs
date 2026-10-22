@@ -807,6 +807,11 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     // 物理世界与可视场景都换掉：先清干净，再按文档重建。
     let build = runner::build_world(&doc).map_err(|e| e.to_string())?;
     engine.scene.clear();
+    // 旧场景的网格/材质/贴图不能跟着句柄空间一起留着：否则每次"打开"都会把上一份
+    // 场景的显存再占一遍，而新场景的句柄从 0 开始，旧批次还可能引用同号资源。
+    // 先清渲染器资源，再用空的 AssetCache 重建内置图元。
+    engine.renderer.clear_scene_assets();
+    engine.assets = quench3d::AssetCache::new(&mut engine.renderer, &engine.gpu);
     engine.world = build.world;
     let instances =
         runner::setup_visuals(engine, &doc, &build.handles).map_err(|e| e.to_string())?;

@@ -32,6 +32,12 @@
 
 ### 新增
 
+- **整场景重载释放显存（第 90 轮）**：`Renderer::clear_scene_assets()` 丢弃旧网格/材质/贴图
+  并重置句柄空间，编辑器 `install_doc` 在清 `Scene` 后调用它、重建 `AssetCache`；反复
+  "打开"同一份场景不再累加显存，旧批次也不会指向同号新资源。仍**没有**按句柄的
+  `remove_*`/引用计数，单场景内反复 `load_model` 依旧只增不减。顺带给渲染器加了
+  `mesh_count/material_count/texture_count` 诊断计数。回归：
+  `reloading_scene_reclaims_renderer_assets`（连开 4 次，资源表与物体数不漂移）。
 - **景深（DoF，第 89 轮）**：后处理新增深度景深，`post.wgsl` 用单采样深度算
   CoC，在 tonemap 前做 16 tap 黄金角圆盘模糊；天空不参与。`RendererOptions.dof`
   + 场景 `lighting.dof { enabled, focus, aperture, max_blur }`，CLI 与编辑器共用

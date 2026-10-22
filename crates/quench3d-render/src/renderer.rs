@@ -1864,6 +1864,39 @@ impl Renderer {
         self.add_mesh_named(ctx, mesh, "mesh")
     }
 
+    /// 丢弃所有场景资源（网格/材质/贴图），把句柄空间重置到 0。
+    ///
+    /// **调用方必须先清空 `Scene` 与任何缓存了旧句柄的结构**（编辑器的
+    /// `AssetCache` 就是这样一个结构），否则旧句柄会指向新上传的同号资源。
+    /// 内置的默认贴图（白/平法线/黑）保留，它们不占用户句柄空间。
+    pub fn clear_scene_assets(&mut self) {
+        self.meshes.clear();
+        self.materials.clear();
+        self.textures.clear();
+        self.staging.clear();
+        self.visible.clear();
+        self.visible_ranges.clear();
+        self.batches.clear();
+        self.batch_index.clear();
+        self.draw_order.clear();
+        self.stats = RenderStats::default();
+    }
+
+    /// 已上传的用户网格数量（测试/诊断用；不含内置平铺资源）。
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+
+    /// 已上传的用户材质数量（测试/诊断用）。
+    pub fn material_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    /// 已上传的用户贴图数量（测试/诊断用；不含内置默认贴图）。
+    pub fn texture_count(&self) -> usize {
+        self.textures.len()
+    }
+
     /// 上传网格并命名（调试用）。
     pub fn add_mesh_named(&mut self, ctx: &GpuContext, mesh: &MeshData, name: &str) -> MeshId {
         let device = &ctx.device;

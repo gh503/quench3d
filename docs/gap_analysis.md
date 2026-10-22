@@ -104,8 +104,9 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
    像素级测试 `double_sided_flag_renders_back_faces`（背面像素数 左≈0 / 右>200）。
 3. **离屏读回阻塞渲染线程**：`map_async` 后 `poll(wait_indefinitely)` + `mpsc::recv()`（`renderer.rs:1486-1490`），
    且截图由渲染线程调用（`facade/app.rs:213-221`）→ 连续截图会卡帧。
-4. **GPU 资源只增不减**：`meshes/materials/textures` 无任何 `remove_*`/`destroy` API（0 命中），资源表 append-only
-   （`renderer.rs:262-267`）→ 反复 `load_model` 会持续涨显存（每帧不泄漏，但生命周期不可回收）。
+4. **GPU 资源生命周期**：`meshes/materials/textures` 没有按句柄的 `remove_*`/引用计数，资源表仍 append-only
+   （`renderer.rs`）；第 90 轮补了 `Renderer::clear_scene_assets()`，**整场景重载**（编辑器打开/撤销/重做）会丢掉旧资源并重建
+   `AssetCache`，不再累积；但**单次场景内**反复 `load_model`/`add_mesh` 仍会持续涨显存。
 5. **地面网格的 `frag_depth` 无效**：管线 `depth_write_enabled: false`（`renderer.rs:650-656`），
    所以 `grid.wgsl:22,80` 的深度写入被忽略，而注释声称"写入真实深度" → 网格不遮挡其后绘制的调试线段。
 6. **阴影尺寸有两个来源**：`DirectionalLight.shadow_map_size`（`light.rs:19`，用于纹素吸附）与
@@ -178,7 +179,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 
 **应用层缺失**：~~父子层级~~ ✅（2026-10-17 第 16 轮：`objects[].parent` + 局部/世界变换 + 格式 v2）、
 存档/快照 ❌、事件总线 ❌、输入映射/手柄/触屏 ❌、音频 ❌、脚本层 ❌、
-资源异步与热重载 ❌、资源释放 ❌（只增不减，反复 `load_model` 必涨显存）、确定性回放（物理有、帧循环无）🟡。
+资源异步与热重载 ❌、资源释放 🟡（整场景重载 ✅ 第 90 轮；单场景内逐资源仍只增不减）、确定性回放（物理有、帧循环无）🟡。
 ~~**其中一条对 Web 目标是硬伤**：`assets.rs` 里 `wasm32` 零命中且依赖 `Path::exists()`（`:231`）
 → **浏览器里加载 glTF/OBJ 一律 NotFound**（现在 web 演示只用内置图元，所以没人撞上）。~~
 ✅ **已修**（2026-10-15）：新增不依赖文件系统的 `assets::load_model_from_bytes(name, bytes)`
@@ -187,7 +188,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 `tools/check_web.mjs` 跑示例导出的两个探针，断言"按路径加载"的报错含 `load_model_from_bytes`、
 "从字节加载"解析出 `meshes=1 triangles=1`（`cargo check --target wasm32` 只能证明编译得过）。
 原生侧 4 条单测含**手搓的最小 GLB**（一个三角形，格式每个字节都在测试里可见）。
-**仍未做**：显存释放（CPU 侧缓存已做，但 GPU 缓冲仍只增不减）。
+**部分做**：整场景重载会释放旧 GPU 资源（第 90 轮）；单场景内逐资源释放仍未做。
 
 **可观测性**：物理 crate 连 `log` 依赖都没有（病态输入、数值夹紧全部静默）；无帧阶段/GPU 计时
 （`timestamp_writes: None`）；bench 的内存统计只支持 Linux；渲染/CLI **无 golden、无图像哈希**
@@ -322,7 +323,7 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 | 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM ✅（1~4）、聚光灯/点光阴影 ✅（各一盏）、透明距离排序 ✅、解析式环境高光 ✅、IBL/环境贴图（0）、景深 ✅（深度后处理）/TAA（0）、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属只有天空/地面反射，没有环境贴图里的具体物体；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
 | 玩法层（物理） | 碰撞过滤 layer/mask ✅、传感器/触发事件 ✅（轮询式，无回调总线）、CCD 🟡（中心射线式）、复合形状（1 刚体 1 形状）、关节限位/马达补全、持久流形/特征 ID、物理材质与 combine（0）、快照回放、渲染插值（`interpolat` = 0）、地形高度场（0） | PhysX 5 / Jolt / Rapier / Box2D 的标配 | 队友互不碰撞、拾取/伤害区、子弹穿墙、载具悬挂、存档与回滚、高刷平滑 |
 | 工程/平台层 | **摄像头动捕（实验）**：桌面 Linux 普通 RGB + MediaPipe Pose/分割 + 可选 MiDaS 相对深度；编辑器轮询 `latest.*` 显示 2D 轮廓/骨架并叠 3D 骨骼。**没有** SMPL/SMPL-X 体型、多人体、米制深度、TSDF/点云、时间同步；Web 端未接 | Unity/Godot 的 VideoPlayer + XR/AR 管线、MediaPipe、SMPL-X | 能看姿态，不能直接变成可驱动角色的体型/网格；普通 RGB 的深度只有相对值 |
-| 工程/平台层 | 存档、音频（0）、输入抽象（手柄/触屏/重绑定 = 0，只有键鼠 + `movement_axes`）、脚本层（0）、渲染资源释放（渲染器 `remove_*` = **0**，资源表 append-only）、**Web 端 glTF/OBJ 加载（`assets.rs` 用 `Path::exists()`，wasm 下必 NotFound）**、发布工程 | Unity/Godot 的 Asset/Input/Audio/Save 子系统；Bevy 的 asset server | 项目做完变不成产品；Web 端连模型都加载不了 |
+| 工程/平台层 | 存档、音频（0）、输入抽象（手柄/触屏/重绑定 = 0，只有键鼠 + `movement_axes`）、脚本层（0）、渲染资源释放（整场景重载 ✅ 第 90 轮；逐资源 `remove_*` = 0，场景内仍 append-only）、**Web 端 glTF/OBJ 加载（`assets.rs` 用 `Path::exists()`，wasm 下必 NotFound）**、发布工程 | Unity/Godot 的 Asset/Input/Audio/Save 子系统；Bevy 的 asset server | 项目做完变不成产品；Web 端连模型都加载不了 |
 
 #### 档 D：agent 向（差异化优势，但仍有缺口）
 
@@ -647,7 +648,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 24 |（部分 ✅）第 51 轮：编辑器有了级联 UI，且载入/存盘与 CLI 共用同一份映射（预览==渲染）| 24 |（部分 ✅）第 49 轮加了**聚光灯**：`lighting.spot_lights`（引擎 `SpotLight` + 与点光源共享 8 盏名额 + WGSL 圆锥平滑过渡 + 校验 + 测试 + 本机 GPU 量化）。**仍缺**：~~点光源不投影（要立方体阴影图）~~ 第 55 轮补上了（见 24d）；聚光灯的阴影见 24d| 局部光只能照明、不能互相遮挡 | 🟡 部分（第 42~43 轮）：**CSM 已落地并已量化**——`lighting.shadow_quality.cascades`（1~4，缺省 1 = 老行为逐像素不变）+ `split_lambda`（0~1）；CPU 侧 `cascade.rs`（PSSM 切分 / 视锥角点 / 切段角点 / 每级矩阵 + 分块纹素对齐）有几何断言与"每级 bias 都等于同一纹素数"的不变式（无显卡可跑）；渲染侧画进 2×2 图集、着色器按视空间深度选级；e2e 覆盖校验（0/5/1.5 报错）；`examples/shadow_probe` 级联 sweep 给出**实测数字**（`docs/production_readiness.md` §12.2）：级联换到的是**覆盖**（60 米外投射体单级 0 个影子像素，2/3/4 级 5/3/3 个，落点误差 ≤0.6px），而"小场景 + far=500"下单级反而清晰约 33 倍（纹素足迹 0.0273 vs 0.893）。**没做**：点光源阴影（立方体阴影图）；聚光灯阴影见 24d | 渲染 |
 | 25 | 后处理链骨架（HDR 中间目标 + tonemap 移出物体着色器）✅ 2026-10-16 + Bloom ✅（`lighting.bloom`）+ FXAA ✅（`lighting.fxaa`）+ SSAO ✅（`lighting.ssao`，深度-only、无去噪）+ 景深 ✅（`lighting.dof`，深度后处理、GL 剥离）+ TAA ❌ | 引擎（大） |
 | 26 | IBL / 环境贴图（解析式环境高光已补，真实 cubemap/HDRI 仍未） | 引擎 |
-| 27 | 资源管线：Web 端模型加载（bytes/fetch）✅ 2026-10-15（`load_model_from_bytes` + wasm 探针验证）+ **CPU 侧模型缓存 ✅ 第 41 轮**（`assets::ModelCache`：进程内、规范化路径为 key、按 `(文件长度, mtime)` 失效、256 MiB 估算预算 + LRU 淘汰、`stats()`；`simulate` 报告的 `model_cache{...}` 是可达观测口径，e2e 钉住"同文件两条引用 = 1 次解析 + 1 次命中"、"不同文件 2 次解析"、"没模型的场景报告里不出现这个字段"）+ **显存释放仍 ❌**（GPU 缓冲还是只增不减，反复 `load_model` 必涨显存——这条本轮没动，见 readiness §11） | 引擎 |
+| 27 | 资源管线：Web 端模型加载（bytes/fetch）✅ 2026-10-15（`load_model_from_bytes` + wasm 探针验证）+ **CPU 侧模型缓存 ✅ 第 41 轮**（`assets::ModelCache`：进程内、规范化路径为 key、按 `(文件长度, mtime)` 失效、256 MiB 估算预算 + LRU 淘汰、`stats()`；`simulate` 报告的 `model_cache{...}` 是可达观测口径，e2e 钉住"同文件两条引用 = 1 次解析 + 1 次命中"、"不同文件 2 次解析"、"没模型的场景报告里不出现这个字段"）+ **整场景显存释放 ✅ 第 90 轮**（`Renderer::clear_scene_assets` + 重建 `AssetCache`；反复打开场景不再累加）；**单场景内逐资源释放仍 ❌**（反复 `load_model` 还是涨，见 readiness §11） | 引擎 |
 | 28 | agent 幂等与安全：`--out` 冲突保护 ✅、`--dry-run` ✅、**API key 不再走 argv** ✅、MCP annotations/outputSchema ✅（全部 2026-10-15） | 交付 |
 | 29 | 事件总线 ✅ 2026-10-18（`PhysicsWorld::events()/drain_events()/take_events()`，7 种事件：接触开始/结束、传感器进入/离开、睡眠/唤醒、关节断裂；队列有上限 4096 + `events_dropped()` 记账；`simulate` 报告里输出 `events[]`（物体名 + 步号）+ `events_dropped`；**仍缺**生命周期钩子与用户回调——没有脚本层，`on_scene_loaded`/`on_destroy` 只能由宿主轮询，编辑器只有状态栏只读显示） | 引擎 |
 | 30 | ✅ 已完成（第 32/33/37 轮）：测试数/示例数每轮随门禁更新；`--locked` 在 CI 每条 cargo 命令上；**`cargo doc -D warnings`** 进门禁第七段 + CI（修掉 16 处既有 rustdoc 告警，无 allow 掩盖）；**MSRV 已由 CI 验证**——`msrv (1.90)` 腿用 1.90.0 工具链对 `quench3d-math/physics/render` + `quench3d` + `quench3d-cli` 跑 `cargo check --locked --all-targets`（第 37 轮首次跑通，全绿），`Cargo.toml` 的注释同步改成"已验证"。**边界**：编辑器不在这一腿里（它单独声明 1.95，egui 0.37 要求），所以 MSRV 的适用范围是"工作区除编辑器"；`msrv` 腿只跑 ubuntu（Windows/macOS 由 stable 腿覆盖） | 文档/CI |

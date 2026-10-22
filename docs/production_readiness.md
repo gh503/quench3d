@@ -873,8 +873,10 @@ RGBA 实际长度），超出按 LRU 淘汰；单个模型自己就超过预算�
 **可达性**：`simulate` 的报告里多出 `model_cache{hits,misses,evictions,entries,bytes,budget}`；
 **没有任何模型参与时不出现这个字段**，所以老场景的报告逐字节不变。
 
-**没做（诚实边界）**：**显存释放**。GPU 缓冲仍然是只增不减——反复 `load_model` 照样涨显存，
-本轮只把**解析**（解压 / glTF / 贴图解码）省下来了。要做真正的显存回收，需要引用计数 +
+**部分做了（第 90 轮）**：**整场景重载**会调用 `Renderer::clear_scene_assets()` 丢掉旧
+网格/材质/贴图并重建 `AssetCache`，反复"打开"同一份场景不再累加显存；但**单次场景内**
+的 `load_model` / `add_mesh` 仍是只增不减（没有按句柄的 `remove_*`/引用计数）。要做真正的
+逐资源回收，需要引用计数 +
 渲染器侧的缓冲池（或者按场景重建整个渲染器），那是另一件大活，没在本轮假装做完。
 另外缓存**不跨进程**：跑两次命令就是两次解析（要跨进程就得落盘，属于资源管线后续）。
 
@@ -2490,7 +2492,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**703** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**704** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
