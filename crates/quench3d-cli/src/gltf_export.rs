@@ -591,6 +591,85 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
+/// 把 [`GltfExport`] 转成二进制 `.glb`（JSON chunk + BIN chunk，无 base64）。
+///
+/// `.gltf` 里的 `data:...;base64,...` 是单文件方案；`.glb` 把同一份字节放进 BIN
+/// chunk，省掉 base64 的 33% 膨胀，加载器也不需要解码 data URI。JSON 里的
+/// `buffers[0].uri` 必须删掉，否则规范要求外部资源。
+pub fn to_glb(export: &GltfExport) -> Result<Vec<u8>, String> {
+    let mut root: Value =
+        serde_json::from_str(&export.json).map_err(|e| format!("glTF JSON 解析失败：{e}"))?;
+    let bin = match root["buffers"].get(0) {
+        Some(buffer) => {
+            let uri = buffer["uri"]
+                .as_str()
+                .ok_or("glTF buffer 缺少内嵌 data URI")?;
+            let payload = uri
+                .strip_prefix("data:application/octet-stream;base64,")
+                .ok_or("glTF buffer 不是内嵌 base64")?;
+            base64_decode(payload)?
+        }
+        None => Vec::new(),
+    };
+    if let Some(buffer) = root["buffers"].get_mut(0) {
+        buffer
+            .as_object_mut()
+            .ok_or("buffers[0] 不是对象")?
+            .remove("uri");
+    }
+    let json = serde_json::to_string(&root).map_err(|e| format!("glTF JSON 序列化失败：{e}"))?;
+    let mut json_bytes = json.into_bytes();
+    while !json_bytes.len().is_multiple_of(4) {
+        json_bytes.push(b' ');
+    }
+    let mut bin_bytes = bin;
+    while !bin_bytes.len().is_multiple_of(4) {
+        bin_bytes.push(0);
+    }
+    let has_bin = !bin_bytes.is_empty();
+    let total = 12 + 8 + json_bytes.len() + if has_bin { 8 + bin_bytes.len() } else { 0 };
+    let total = u32::try_from(total).map_err(|_| "GLB 超过 4 GiB")?;
+    let mut out = Vec::with_capacity(total as usize);
+    out.extend_from_slice(b"glTF");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&total.to_le_bytes());
+    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // 'JSON'
+    out.extend_from_slice(&json_bytes);
+    if has_bin {
+        out.extend_from_slice(&(bin_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x004E_4942u32.to_le_bytes()); // 'BIN\0'
+        out.extend_from_slice(&bin_bytes);
+    }
+    Ok(out)
+}
+
+/// 解标准 base64（带/不带 `=` 填充都接受）；只给 GLB 的 BIN 提取用。
+fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for byte in text.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let Some(value) = TABLE.iter().position(|b| *b == byte) else {
+            return Err(format!("base64 里有非法字符：{}", byte as char));
+        };
+        acc = (acc << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    if bits != 0 && bits != 2 && bits != 4 {
+        return Err("base64 尾部位数不合法".to_string());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +721,43 @@ mod tests {
         assert!(
             (min[1].as_f64().unwrap() + 0.5).abs() < 1e-3,
             "子物体局部 Y 范围不对：{min:?}"
+        );
+    }
+
+    #[test]
+    fn glb_has_aligned_json_and_bin_chunks_without_data_uri() {
+        let out = export_gltf(&scene()).expect("导出必须成功");
+        let glb = to_glb(&out).expect("GLB 转换必须成功");
+        assert_eq!(&glb[0..4], b"glTF");
+        assert_eq!(u32::from_le_bytes(glb[4..8].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(glb[8..12].try_into().unwrap()) as usize,
+            glb.len()
+        );
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        assert!(json_len.is_multiple_of(4), "JSON chunk 必须 4 字节对齐");
+        assert_eq!(
+            u32::from_le_bytes(glb[16..20].try_into().unwrap()),
+            0x4E4F_534A
+        );
+        let json: Value = serde_json::from_slice(&glb[20..20 + json_len]).unwrap();
+        assert_eq!(json["asset"]["version"], "2.0");
+        assert!(
+            json["buffers"][0].get("uri").is_none(),
+            "GLB 不能留 data URI"
+        );
+        let bin_header = 20 + json_len;
+        let bin_len =
+            u32::from_le_bytes(glb[bin_header..bin_header + 4].try_into().unwrap()) as usize;
+        assert_eq!(
+            u32::from_le_bytes(glb[bin_header + 4..bin_header + 8].try_into().unwrap()),
+            0x004E_4942
+        );
+        assert!(bin_len > 0 && bin_len.is_multiple_of(4));
+        assert_eq!(bin_header + 8 + bin_len, glb.len());
+        assert_eq!(
+            json["buffers"][0]["byteLength"].as_u64().unwrap() as usize,
+            bin_len
         );
     }
 

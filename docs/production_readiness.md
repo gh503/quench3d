@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF（CLI + 编辑器，含贴图与节点树）；动画未导出 | ✅（OBJ/glTF 几何） |
+| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图与节点树）；动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -2633,6 +2633,21 @@ Web 导出不带贴图；贴图不重编码、不压缩、不生成 mipmap。
 
 **边界**：动画/骨骼/morph 仍不导出；`scale` 不在节点上（烘进顶点），所以外部工具
 里不能单独改节点缩放；节点名可能重复。
+
+### 23.16 GLB 二进制导出（第 111 轮）
+
+**做了什么**：`quench3d export scene.json model.glb` 走同一套场景/贴图/节点树导出器，
+把 `.gltf` 里 base64 的 buffer 解出来放进 GLB 的 BIN chunk，JSON chunk 删掉
+`buffers[0].uri`，两个 chunk 都按 4 字节对齐；文件头 magic/version/length 按 GLB 2.0
+写。`.gltf` 路径保持原样（base64 单文件）。
+
+**验证**：lib 单测 `glb_has_aligned_json_and_bin_chunks_without_data_uri`（magic、
+version、总长度、JSON/BIN chunk 类型与对齐、无 data URI、byteLength 一致）；CLI e2e
+`export_writes_glb_that_info_can_read`（落盘 → `info model.glb` 读回三角形数与 mesh 数）。
+总测试 762 → 764。
+
+**边界**：GLB 仍只含几何/材质/贴图/节点树，不含动画；Web 编辑器按钮仍只写 `.gltf`
+（浏览器没有本地文件系统，导出走下载文本）。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

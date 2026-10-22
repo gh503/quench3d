@@ -7475,6 +7475,56 @@ fn export_gltf_embeds_texture_from_scene_directory() {
     );
 }
 
+/// GLB：同一份 glTF 场景写成二进制 chunk，`info` 能读回同样的几何。
+#[test]
+fn export_writes_glb_that_info_can_read() {
+    let dir = temp_dir("export_glb");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "objects":[
+            {"name":"box","shape":{"type":"box","size":[2,1,3]},"position":[0,1,0]},
+            {"name":"ball","shape":{"type":"sphere","radius":0.5},"position":[3,1,0],"parent":"box"}
+          ]
+        }"#,
+    )
+    .unwrap();
+    let glb = dir.join("model.glb");
+    let r = run(&[
+        "export",
+        scene.to_str().unwrap(),
+        glb.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stderr={}\nstdout={}", r.stderr, r.stdout);
+    let env = r.json();
+    assert_eq!(env["data"]["format"], "glb");
+    assert_eq!(env["data"]["objects"], 2);
+    let bytes = std::fs::read(&glb).expect("GLB 应落盘");
+    assert_eq!(&bytes[0..4], b"glTF");
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 2);
+    assert_eq!(
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize,
+        bytes.len()
+    );
+    let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_len]).unwrap();
+    assert!(json["buffers"][0].get("uri").is_none());
+    let info = run(&["info", glb.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        info.code, 0,
+        "stderr={}\nstdout={}",
+        info.stderr, info.stdout
+    );
+    let info = info.json();
+    assert_eq!(
+        info["data"]["triangles"].as_u64().unwrap(),
+        env["data"]["triangles"].as_u64().unwrap()
+    );
+    assert_eq!(info["data"]["meshes"].as_u64().unwrap(), 2);
+}
+
 /// 公告板粒子：同一相机/光照下，有粒子的画面中心必须比没粒子更红。
 #[test]
 fn particle_billboards_change_pixels() {

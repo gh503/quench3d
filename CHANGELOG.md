@@ -41,6 +41,12 @@
 
 ### 新增
 
+- **GLB 二进制导出（第 111 轮）**：`quench3d export scene.json model.glb` 复用 glTF 场景/
+  贴图/节点树导出器，把 base64 buffer 解进 GLB 的 BIN chunk，JSON chunk 去掉
+  `buffers[0].uri`，两个 chunk 4 字节对齐，文件头按 GLB 2.0 写；`.gltf` 路径不变。
+  回归：1 个 lib 单测 + 1 个 CLI e2e（落盘后用 `info model.glb` 读回三角形数/mesh 数，
+  总测试 762 → 764）。
+
 - **glTF 节点树导出（第 110 轮）**：不再把父位移烘进子顶点。每个物体写一个节点，
   节点带局部 `translation`/`rotation`，`children` 按 `parent` 串联，场景只列根节点；
   物体缩放与部件变换仍烘进顶点，所以世界位置不变。父链成环会断开并进 `skipped`；

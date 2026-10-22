@@ -453,11 +453,13 @@ fn dispatch(args: &Args) -> i32 {
                 }
                 Err(e) => return fail(args, "export", report::doc_error_info(&e), started),
             };
-            let is_gltf = std::path::Path::new(&out_path)
+            let ext = std::path::Path::new(&out_path)
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
-            if is_gltf {
+                .unwrap_or("");
+            let is_gltf = ext.eq_ignore_ascii_case("gltf");
+            let is_glb = ext.eq_ignore_ascii_case("glb");
+            if is_gltf || is_glb {
                 let base = std::path::Path::new(scene_path)
                     .parent()
                     .unwrap_or_else(|| std::path::Path::new("."));
@@ -473,7 +475,22 @@ fn dispatch(args: &Args) -> i32 {
                             )
                         }
                     };
-                if let Err(e) = std::fs::write(&out_path, &exported.json) {
+                let payload = if is_glb {
+                    match quench3d_cli::gltf_export::to_glb(&exported) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return fail(
+                                args,
+                                "export",
+                                ErrorInfo::new("export_failed", e),
+                                started,
+                            )
+                        }
+                    }
+                } else {
+                    exported.json.as_bytes().to_vec()
+                };
+                if let Err(e) = std::fs::write(&out_path, &payload) {
                     return fail(
                         args,
                         "export",
@@ -481,10 +498,11 @@ fn dispatch(args: &Args) -> i32 {
                         started,
                     );
                 }
+                let format = if is_glb { "glb" } else { "gltf" };
                 let value = json!({
                     "scene": scene_path,
                     "out": out_path,
-                    "format": "gltf",
+                    "format": format,
                     "objects": exported.objects,
                     "vertices": exported.vertices,
                     "triangles": exported.triangles,
@@ -493,8 +511,9 @@ fn dispatch(args: &Args) -> i32 {
                 });
                 return finish(args, "export", Ok(value), started, |v| {
                     println!(
-                        "已导出 {}（glTF 2.0：{} 个物体 / {} 顶点 / {} 三角形 / {} 张贴图）",
+                        "已导出 {}（{}：{} 个物体 / {} 顶点 / {} 三角形 / {} 张贴图）",
                         v["out"].as_str().unwrap_or(""),
+                        v["format"].as_str().unwrap_or("glTF"),
                         v["objects"].as_u64().unwrap_or(0),
                         v["vertices"].as_u64().unwrap_or(0),
                         v["triangles"].as_u64().unwrap_or(0),
@@ -1979,7 +1998,7 @@ fn help_text() -> String {
   doctor                环境自检：平台、CPU、GPU 适配器、图形后端
   info <模型>            检查 glTF/GLB/OBJ：网格/材质/顶点/三角形/包围盒
   validate <场景>        校验场景 JSON，返回带路径的诊断
-  export <场景> [模型.obj|模型.gltf] 把图元物体导出为 OBJ + MTL 或单文件 glTF 2.0
+  export <场景> [模型.obj|模型.gltf|模型.glb] 把图元物体导出为 OBJ + MTL 或单文件 glTF 2.0/GLB
   render <场景>          无窗口渲染成 PNG（可先步进物理）
   movie <场景>           录制仿真视频：PNG 序列 + trace.jsonl（交 ffmpeg），或直接出 GIF/APNG
   simulate <场景>        只跑物理，输出每个刚体的位置/速度/位移/休眠
