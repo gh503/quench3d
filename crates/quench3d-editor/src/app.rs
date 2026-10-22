@@ -178,7 +178,7 @@ impl Inner {
             match crate::scene_io::load_file_into_doc(&mut engine, &mut doc, path) {
                 Ok((objects, _)) => {
                     doc.file_path = path.display().to_string();
-                    doc.selected = if objects > 0 { Some(0) } else { None };
+                    doc.select_only(if objects > 0 { Some(0) } else { None });
                     doc.status = format!("已载入 {}（{objects} 个物体）", path.display());
                 }
                 Err(e) => doc.status = format!("载入 {} 失败：{e}", path.display()),
@@ -356,7 +356,14 @@ impl Inner {
                 self.viewport.rect.height().max(1.0),
             );
             let ray = self.engine.camera().screen_ray(local, viewport);
-            self.doc.selected = self.doc.pick(&self.engine, &ray);
+            let picked = self.doc.pick(&self.engine, &ray);
+            if self.viewport.additive {
+                if let Some(index) = picked {
+                    self.doc.toggle_selected(index);
+                }
+            } else {
+                self.doc.select_only(picked);
+            }
         }
 
         let screen = ScreenDescriptor {
@@ -508,7 +515,8 @@ impl Inner {
             let path = std::path::PathBuf::from(self.doc.file_path.clone());
             match crate::scene_io::load_file_into_doc(&mut self.engine, &mut self.doc, &path) {
                 Ok((objects, _)) => {
-                    self.doc.selected = if objects > 0 { Some(0) } else { None };
+                    self.doc
+                        .select_only(if objects > 0 { Some(0) } else { None });
                     self.doc.capture_baseline(&self.engine);
                     self.doc.reset_history(&self.engine);
                     self.doc.status = format!("已载入 {}（{objects} 个物体）", path.display());
@@ -534,7 +542,8 @@ impl Inner {
         match crate::scene_io::load_text_into_doc(&mut self.engine, &mut self.doc, &text) {
             Ok((objects, _)) => {
                 self.doc.recovery = None;
-                self.doc.selected = if objects > 0 { Some(0) } else { None };
+                self.doc
+                    .select_only(if objects > 0 { Some(0) } else { None });
                 self.doc.capture_baseline(&self.engine);
                 self.doc.reset_history(&self.engine);
                 self.autosave.clear();
@@ -582,7 +591,8 @@ impl Inner {
     pub fn apply_scene_json(&mut self, text: &str) {
         match crate::scene_io::load_text_into_doc(&mut self.engine, &mut self.doc, text) {
             Ok((objects, path)) => {
-                self.doc.selected = if objects > 0 { Some(0) } else { None };
+                self.doc
+                    .select_only(if objects > 0 { Some(0) } else { None });
                 self.doc.file_path = path;
                 self.doc.capture_baseline(&self.engine);
                 self.doc.reset_history(&self.engine);

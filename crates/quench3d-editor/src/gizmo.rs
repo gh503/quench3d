@@ -135,6 +135,10 @@ struct Drag {
     sign: f32,
     /// 当前状态文本（画在光标旁边）。
     hud: String,
+    /// 组变换的轴心（单选的物体位置；多选时是选中物体的中心）。
+    pivot: Vec3,
+    /// 多选时一起动的附加物体（按下时的世界变换）。
+    group: Vec<(usize, Transform)>,
 }
 
 /// gizmo 的全部可变状态。
@@ -213,7 +217,10 @@ impl Gizmo {
             return true;
         }
 
-        let screen = Screen::project(self, engine, rect, index);
+        let pivot = doc
+            .selection_center(engine)
+            .unwrap_or_else(|| engine.scene.world_transform(index).position);
+        let screen = Screen::project(self, engine, rect, index, pivot);
 
         // ---- 1. 已经在拖：每帧从 start_transform 重算 ----
         if self.drag.is_some() {
@@ -221,6 +228,10 @@ impl Gizmo {
                 // 指针跑出窗口：先按当前状态画着，等它回来。
                 self.paint(ui, engine, doc, rect, &screen, None);
                 return true;
+            };
+            let (group, drag_pivot) = {
+                let drag = self.drag.as_ref().expect("正在拖");
+                (drag.group.clone(), drag.pivot)
             };
             let (transform, hud) = {
                 let drag = self.drag.as_ref().expect("正在拖");
@@ -303,13 +314,41 @@ impl Gizmo {
                     }
                 }
             };
+            // 多选时主物体也要绕组中心转/缩放，否则"整组"只有其它人在动。
+            // 注意附加物体仍用未绕心的 `transform` 算增量，避免把主物体的绕心位移
+            // 又当成平移加给它们（那样会平移两次）。
+            let primary_transform = if group.is_empty() {
+                transform
+            } else {
+                let start = self
+                    .drag
+                    .as_ref()
+                    .map(|d| d.start_transform)
+                    .unwrap_or(transform);
+                group_member_transform(start, start, transform, drag_pivot)
+            };
             // 拖拽算出来的是**世界**变换，写回时按层级换算成局部（没有父物体时就是它自己）。
             // 有父物体时这是必须的：把世界位移直接加到局部位置上，父物体一转就会走错方向。
-            engine.scene.set_world_transform(index, transform);
+            engine.scene.set_world_transform(index, primary_transform);
             // 模型（glTF/OBJ 引用）展开出来的物体：**整组一起动**，并把新变换写回
             // `models[i]` —— 这就是"视口里实时拖动模型"，存盘后位置也保得住。
             // 普通物体这一步什么都不做（返回 false）。
-            doc.apply_transform_to_model_group(engine, index, transform);
+            doc.apply_transform_to_model_group(engine, index, primary_transform);
+            // 多选：把同一个"主物体的变化量"应用到其它选中物体，绕组中心旋转/缩放。
+            for (member, start) in &group {
+                let member_transform = group_member_transform(
+                    *start,
+                    self.drag
+                        .as_ref()
+                        .map(|d| d.start_transform)
+                        .unwrap_or(transform),
+                    transform,
+                    drag_pivot,
+                );
+                engine.scene.set_world_transform(*member, member_transform);
+                doc.apply_transform_to_model_group(engine, *member, member_transform);
+                freeze_body(engine, *member);
+            }
             doc.push_transform_to_physics(engine);
             freeze_body(engine, index);
             doc.record_edit(engine); // 事务中 → 只标脏，抬起时合成一步
@@ -344,7 +383,7 @@ impl Gizmo {
                 handle = Some(Handle::Uniform);
             }
             if let Some(handle) = handle {
-                self.drag = Some(self.begin_drag(engine, index, &screen, handle, pointer));
+                self.drag = Some(self.begin_drag(engine, doc, index, &screen, handle, pointer));
                 doc.begin_history_transaction();
                 doc.status = format!("开始{}…", self.mode.label());
                 self.paint(ui, engine, doc, rect, &screen, None);
@@ -360,6 +399,7 @@ impl Gizmo {
     fn begin_drag(
         &self,
         engine: &Engine,
+        doc: &Doc,
         index: usize,
         screen: &Screen,
         handle: Handle,
@@ -393,6 +433,8 @@ impl Gizmo {
             start_vector: pointer - screen.center.to_vec2(),
             sign,
             hud: String::new(),
+            pivot: screen.pivot,
+            group: doc.group_selection(engine),
         }
     }
 
@@ -612,6 +654,8 @@ fn translate_offset(drag: &Drag, delta_px: EVec2, ctrl: bool, shift: bool) -> Ve
 struct Screen {
     /// 轴心在屏幕上的位置。
     center: Pos2,
+    /// 轴心的世界坐标（组变换绕它旋转/缩放）。
+    pivot: Vec3,
     /// 三根轴（世界空间）。
     axes: [Vec3; 3],
     /// 三根轴的箭头 / 方块屏幕位置。
@@ -631,10 +675,9 @@ struct Screen {
 
 impl Screen {
     /// 把轴心、三根轴、旋转圆全部投影到屏幕。
-    fn project(gizmo: &Gizmo, engine: &Engine, rect: Rect, index: usize) -> Screen {
-        // 手柄画在物体的**世界**位置（有父物体时 `transform` 是局部的）。
+    fn project(gizmo: &Gizmo, engine: &Engine, rect: Rect, index: usize, pivot: Vec3) -> Screen {
+        // 手柄的轴方向仍取主选物体的世界朝向（多选时不强行统一各物体的旋转）。
         let world = engine.scene.world_transform(index);
-        let pivot = world.position;
         let q = world.rotation;
         let camera = engine
             .orbit
@@ -717,6 +760,7 @@ impl Screen {
 
         Screen {
             center,
+            pivot,
             axes,
             tips,
             axis_dir,
@@ -842,6 +886,46 @@ pub fn axis_translation(
     d
 }
 
+/// 把主物体的"本次变化量"套到另一个选中物体上。
+///
+/// 平移直接加位移；旋转/缩放绕 `pivot`（多选中心）做刚体变换。这样多选时
+/// 拖动的是**整组**，而不是各转各的。
+fn group_member_transform(
+    start: Transform,
+    primary_start: Transform,
+    primary_now: Transform,
+    pivot: Vec3,
+) -> Transform {
+    let dq = primary_now.rotation * primary_start.rotation.conjugate();
+    let ratio = |now: f32, before: f32| {
+        if before.abs() > 1e-6 {
+            now / before
+        } else {
+            1.0
+        }
+    };
+    let ds = Vec3::new(
+        ratio(primary_now.scale.x, primary_start.scale.x),
+        ratio(primary_now.scale.y, primary_start.scale.y),
+        ratio(primary_now.scale.z, primary_start.scale.z),
+    );
+    let scaled = Vec3::new(
+        (start.position.x - pivot.x) * ds.x,
+        (start.position.y - pivot.y) * ds.y,
+        (start.position.z - pivot.z) * ds.z,
+    );
+    let position = pivot + dq * scaled + (primary_now.position - primary_start.position);
+    Transform::new(
+        position,
+        dq * start.rotation,
+        Vec3::new(
+            start.scale.x * ds.x,
+            start.scale.y * ds.y,
+            start.scale.z * ds.z,
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,6 +936,7 @@ mod tests {
         let center = Pos2::new(100.0, 100.0);
         Screen {
             center,
+            pivot: Vec3::ZERO,
             axes: [Vec3::X, Vec3::Y, Vec3::Z],
             tips: [
                 Pos2::new(188.0, 100.0),
@@ -883,6 +968,8 @@ mod tests {
             start_vector: EVec2::X,
             sign: 1.0,
             hud: String::new(),
+            pivot: Vec3::ZERO,
+            group: Vec::new(),
         }
     }
 
@@ -1006,5 +1093,35 @@ mod tests {
         // 线段之外：算到端点的距离，而不是到延长线的距离。
         assert!((distance_to_segment(EVec2::new(-4.0, 0.0), a, b) - 4.0).abs() < 1e-5);
         assert!((distance_to_segment(EVec2::new(14.0, 0.0), a, b) - 4.0).abs() < 1e-5);
+    }
+    #[test]
+    fn group_member_follows_translate_rotate_and_scale_around_pivot() {
+        let pivot = Vec3::new(0.0, 0.0, 0.0);
+        let start = Transform::new(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+        let primary = Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
+
+        // 平移 (0,1,0)：成员整体跟着走。
+        let moved = Transform::new(Vec3::new(0.0, 1.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+        let out = group_member_transform(start, primary, moved, pivot);
+        assert!((out.position - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-5);
+
+        // 绕 Y 转 90°：成员从 +X 转到 -Z。
+        let turned = Transform::new(
+            Vec3::ZERO,
+            Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2),
+            Vec3::ONE,
+        );
+        let out = group_member_transform(start, primary, turned, pivot);
+        assert!(
+            (out.position - Vec3::new(0.0, 0.0, -2.0)).length() < 1e-5,
+            "{:?}",
+            out.position
+        );
+
+        // 均匀放大 2 倍：成员到轴心的距离也翻倍。
+        let scaled = Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::splat(2.0));
+        let out = group_member_transform(start, primary, scaled, pivot);
+        assert!((out.position - Vec3::new(4.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((out.scale - Vec3::splat(2.0)).length() < 1e-5);
     }
 }

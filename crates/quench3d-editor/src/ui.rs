@@ -22,6 +22,8 @@ pub struct Viewport {
     pub dragging: bool,
     /// 这一帧指针被变换 gizmo 接管了（此时不要转视角、也不要拾取）。
     pub gizmo_active: bool,
+    /// 这次点击是否按着 Shift/Ctrl（多选）。
+    pub additive: bool,
 }
 
 impl Default for Viewport {
@@ -32,6 +34,7 @@ impl Default for Viewport {
             click: None,
             dragging: false,
             gizmo_active: false,
+            additive: false,
         }
     }
 }
@@ -69,6 +72,7 @@ pub fn panels(
 ) -> Requests {
     let mut req = Requests::default();
     view.click = None;
+    view.additive = false;
     top_bar(ui, engine, doc, gizmo, &mut req);
     status_bar(ui, engine, doc, gizmo);
     outliner(ui, engine, doc);
@@ -504,11 +508,15 @@ fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Opti
     }
     let mut focus = None;
     ui.horizontal(|ui| {
-        if ui
-            .selectable_label(doc.selected == Some(index), label)
-            .clicked()
-        {
-            doc.selected = Some(index);
+        let response = ui.selectable_label(doc.is_selected(index), label);
+        if response.clicked() {
+            let additive =
+                ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl);
+            if additive {
+                doc.toggle_selected(index);
+            } else {
+                doc.select_only(Some(index));
+            }
         }
         if ui.small_button("⌖").on_hover_text("聚焦").clicked() {
             focus = Some(index);
@@ -530,6 +538,14 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         .default_size(190.0)
         .show(ui, |ui| {
             ui.heading("场景");
+            let selected = doc.selection().len();
+            if selected > 1 {
+                ui.label(
+                    RichText::new(format!("已选 {selected} 个（Shift 点选增减）"))
+                        .small()
+                        .color(egui::Color32::from_rgb(240, 200, 120)),
+                );
+            }
             ui.label(RichText::new(doc.status.clone()).small().weak());
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -595,7 +611,7 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     if let Some(bounds) = engine.scene.bounds_of(&engine.renderer, &indices) {
                         engine.orbit.focus_on(&bounds);
                     }
-                    doc.selected = indices.first().copied();
+                    doc.select_only(indices.first().copied());
                 }
             });
         });
@@ -2356,7 +2372,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, _req: &mut Request
                 return;
             };
             if index >= engine.scene.objects.len() {
-                doc.selected = None;
+                doc.select_only(None);
                 return;
             }
 
@@ -2687,6 +2703,8 @@ fn viewport(
                 if let Some(pos) = response.interact_pointer_pos() {
                     let local = Vec2::new(pos.x - rect.left(), pos.y - rect.top());
                     view.click = Some(local);
+                    view.additive =
+                        ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl);
                 }
             }
 

@@ -294,3 +294,66 @@ fn history_is_bounded_and_new_edits_drop_the_redo_chain() {
     doc.record_edit(&engine);
     assert!(!doc.history.can_redo(), "新编辑必须清空重做链");
 }
+/// 多选删除：一次删掉所有选中物体，下标的后续物体不受伤。
+#[test]
+fn delete_selected_removes_every_selected_object() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    let a = doc.spawn(&mut engine, Primitive::Cube);
+    let b = doc.spawn(&mut engine, Primitive::Sphere);
+    let c = doc.spawn(&mut engine, Primitive::Cylinder);
+    let keep = c + 1;
+    let a_name = engine.scene.objects[a].name.clone();
+    let b_name = engine.scene.objects[b].name.clone();
+
+    doc.select_only(Some(a));
+    doc.toggle_selected(b);
+    doc.delete_selected(&mut engine);
+
+    assert!(
+        !engine
+            .scene
+            .objects
+            .iter()
+            .any(|o| o.name == a_name || o.name == b_name),
+        "多选删除必须删掉全部选中物体：{:?}",
+        scene_names(&engine)
+    );
+    assert_eq!(engine.scene.objects.len(), keep - 2, "只该删两个");
+    assert_eq!(doc.selection().len(), 1, "删完保留一个主选中");
+}
+
+/// 多选复制：每个选中物体各复制一份，复制体成为新的多选。
+#[test]
+fn duplicate_selected_copies_every_member() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    let a = doc.spawn(&mut engine, Primitive::Cube);
+    let b = doc.spawn(&mut engine, Primitive::Sphere);
+    let before = engine.scene.objects.len();
+    doc.select_only(Some(a));
+    doc.toggle_selected(b);
+    let center = doc.selection_center(&engine).expect("多选必须有中心");
+    let expected =
+        (engine.scene.world_transform(a).position + engine.scene.world_transform(b).position) * 0.5;
+    assert!(
+        (center - expected).length() < 1e-5,
+        "组轴心应当是选中物体的中心"
+    );
+    assert_eq!(
+        doc.group_selection(&engine).len(),
+        1,
+        "组变换成员应排除主选中"
+    );
+    doc.duplicate_selected(&mut engine);
+    assert_eq!(engine.scene.objects.len(), before + 2, "应当复制两份");
+    assert_eq!(doc.selection().len(), 2, "复制体应当继承多选");
+    assert_ne!(doc.selected, Some(a), "主选中应当指向复制体");
+    assert_ne!(doc.selected, Some(b), "主选中应当指向复制体");
+}

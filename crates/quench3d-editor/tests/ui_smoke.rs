@@ -336,6 +336,32 @@ fn all_editor_panels_draw_in_one_frame() {
     // `FullOutput` 的纹理增量必须显式消费，否则 epaint 在析构时会 panic；
     // 真实渲染器会把它们上传/释放，测试里只需要认账。
     output.textures_delta.clear();
+
+    // 正向验证多选的 UI 反馈：第二帧把两个物体标成选中，场景树标题必须出现计数。
+    doc.select_only(Some(1));
+    doc.toggle_selected(2);
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 1100.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    assert!(
+        shapes_contain_text(&output.shapes, "已选 2 个"),
+        "多选时场景树没有显示选中数量"
+    );
+    output.textures_delta.clear();
     let requests = requests.expect("`panels` 必须被调用");
     assert!(!requests.save && !requests.load && !requests.screenshot);
     // 状态栏/属性面板会写 `doc.status`，不该被 UI 清空。

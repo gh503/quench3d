@@ -41,6 +41,16 @@
 
 ### 新增
 
+- **编辑器多选 + 成组变换（第 101 轮）**：场景树/视口 `Shift`/`Ctrl` 点选加减选，
+  `Doc.extra_selected` 保存附加选中；多选 gizmo 的轴心取所有选中物体世界位置的平均值，
+  平移/旋转/缩放把同一增量套到整组（绕中心旋转/缩放，主物体也绕心），一次拖拽仍只记
+  一步历史；「复制」「删除」按整组执行。`Doc::selection` / `is_selected` /
+  `select_only` / `toggle_selected` / `selection_center` / `group_selection` 提供统一语义；
+  同一模型展开的其它网格不重复套用（主物体的模型组已经带走）。场景树显示已选数量。
+  回归：`multi_selection_toggle_keeps_a_primary_and_dedups`、
+  `group_member_follows_translate_rotate_and_scale_around_pivot`、
+  `delete_selected_removes_every_selected_object`、`duplicate_selected_copies_every_member`
+  （总测试 740 → 744）。边界：框选、父子同选的层级抑制仍未做。
 - **IBL / HDRI 环境光照（第 100 轮）**：`lighting.environment_map` 支持等距柱状
   `.hdr`（Radiance RGBE，平铺/新 RLE/旧 RLE）/`.png`/`.jpg`，装载时解码成线性 RGB，
   CPU 生成 64×64×6、7 级 mip 的预滤波 cubemap；`pbr.wgsl` 按粗糙度取 mip，金属/光滑

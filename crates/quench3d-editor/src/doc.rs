@@ -163,8 +163,10 @@ fn model_rotation(m: &quench3d_cli::scene_doc::ModelDoc) -> Quat {
 
 /// 编辑器文档层：场景内容的可撤销副本 + 界面状态（选中、状态栏、帮助开关）。
 pub struct Doc {
-    /// 当前选中的场景对象下标（`None` = 没选）。
+    /// 当前**主选中**的场景对象下标（`None` = 没选）；gizmo 的轴心默认在它上面。
     pub selected: Option<usize>,
+    /// 额外选中的物体（Shift / Ctrl 点选）。不包含 `selected` 本身。
+    pub extra_selected: Vec<usize>,
     /// 场景文件路径（桌面用真实路径；浏览器里当下载文件名）。
     pub file_path: String,
     /// 最近一条给用户看的状态提示。
@@ -218,6 +220,93 @@ impl Doc {
     /// 可变访问底稿（编辑器"模型"面板用它把模型变换写回 `models`）。
     pub fn base_doc_mut(&mut self) -> Option<&mut quench3d_cli::scene_doc::SceneDoc> {
         self.base_doc.as_mut()
+    }
+
+    // -----------------------------------------------------------------------
+    // 多选
+    // -----------------------------------------------------------------------
+
+    /// 当前选中的全部物体（主选中在前，去重）。
+    pub fn selection(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.extra_selected.len() + 1);
+        if let Some(primary) = self.selected {
+            out.push(primary);
+        }
+        for &i in &self.extra_selected {
+            if !out.contains(&i) {
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    /// 某个物体是否被选中（主选或附加）。
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected == Some(index) || self.extra_selected.contains(&index)
+    }
+
+    /// 只选中一个物体（普通点击 / 打开场景 / 新建物体）。
+    pub fn select_only(&mut self, index: Option<usize>) {
+        self.selected = index;
+        self.extra_selected.clear();
+    }
+
+    /// Shift/Ctrl 点选：切换该物体，保留其它已选。
+    ///
+    /// 关掉主选中时把第一个附加选中提为主选中，而不是把整组清空——
+    /// 这样连续 Shift 点选时 gizmo 不会突然消失。
+    pub fn toggle_selected(&mut self, index: usize) {
+        match self.selected {
+            None => self.selected = Some(index),
+            Some(primary) if primary == index => {
+                if self.extra_selected.is_empty() {
+                    self.selected = None;
+                } else {
+                    self.selected = Some(self.extra_selected.remove(0));
+                }
+            }
+            Some(_) => {
+                if let Some(pos) = self.extra_selected.iter().position(|&i| i == index) {
+                    self.extra_selected.remove(pos);
+                } else {
+                    self.extra_selected.push(index);
+                }
+            }
+        }
+    }
+
+    /// 多选 gizmo 的轴心：所有选中物体世界位置的平均值。
+    pub fn selection_center(&self, engine: &Engine) -> Option<Vec3> {
+        let mut sum = Vec3::ZERO;
+        let mut n = 0usize;
+        for index in self.selection() {
+            if index < engine.scene.objects.len() {
+                sum += engine.scene.world_transform(index).position;
+                n += 1;
+            }
+        }
+        (n > 0).then(|| sum / n as f32)
+    }
+
+    /// 组变换要一起动的附加物体（下标 + **按下时**的世界变换）。
+    ///
+    /// 同一个模型展开出来的其它网格不在这里：主物体已经通过
+    /// [`Self::apply_transform_to_model_group`] 把整组模型带走了，再动一次会双倍位移。
+    pub fn group_selection(&self, engine: &Engine) -> Vec<(usize, Transform)> {
+        let Some(primary) = self.selected else {
+            return Vec::new();
+        };
+        let primary_model = self.model_of_object(primary);
+        self.extra_selected
+            .iter()
+            .copied()
+            .filter(|&i| i < engine.scene.objects.len() && i != primary)
+            .filter(|&i| match primary_model {
+                Some(model) => self.model_of_object(i) != Some(model),
+                None => true,
+            })
+            .map(|i| (i, engine.scene.world_transform(i)))
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -649,6 +738,7 @@ impl Doc {
     pub fn new() -> Self {
         Self {
             selected: None,
+            extra_selected: Vec::new(),
             file_path: "scene.json".to_string(),
             status: "就绪".to_string(),
             show_help: false,
@@ -746,9 +836,13 @@ impl Doc {
 
     /// 选中的下标越界就取消选中（撤销/重做后物体数量会变）。
     fn clamp_selection(&mut self, engine: &Engine) {
+        self.extra_selected.retain(|&i| i < engine.scene.len());
         if let Some(index) = self.selected {
             if index >= engine.scene.len() {
-                self.selected = None;
+                self.selected = self.extra_selected.first().copied();
+                if !self.extra_selected.is_empty() {
+                    self.extra_selected.remove(0);
+                }
             }
         }
     }
@@ -905,7 +999,7 @@ impl Doc {
 
         engine.orbit.focus = Vec3::new(0.0, 1.2, 0.0);
         engine.orbit.distance = 11.0;
-        self.selected = Some(1);
+        self.select_only(Some(1));
         self.capture_baseline(engine);
         self.status = format!("已建默认场景（{} 个物体）", engine.scene.len());
     }
@@ -943,58 +1037,81 @@ impl Doc {
             .scene
             .add_with_body(mesh, material, body, &engine.world, &name);
         engine.scene.objects[index].color = Vec4::ONE;
-        self.selected = Some(index);
+        self.select_only(Some(index));
         self.status = format!("已添加 {name}");
         index
     }
 
-    /// 复制当前选中的物体（位置往旁边挪一点，免得完全重叠）。
+    /// 复制选中的物体（位置往旁边挪一点，免得完全重叠）；多选时批量复制。
     pub fn duplicate_selected(&mut self, engine: &mut Engine) {
-        let Some(object) = self.selected_object(engine).cloned() else {
+        let originals: Vec<_> = self
+            .selection()
+            .into_iter()
+            .filter(|&i| i < engine.scene.objects.len())
+            .collect();
+        if originals.is_empty() {
             return;
-        };
-        let name = self.unique_name(engine, &object.name);
-        let position = object.transform.position + Vec3::new(1.2, 0.2, 0.0);
-        let mut body = None;
-        if let Some(handle) = object.body {
-            if let Some(src) = engine.world.body(handle) {
-                let shape = src.shape.clone();
-                let kind = if src.is_dynamic() {
-                    BodyKind::Dynamic
-                } else {
-                    BodyKind::Static
-                };
-                let builder = match kind {
-                    BodyKind::Dynamic => BodyBuilder::dynamic(shape),
-                    _ => BodyBuilder::r#static(shape),
-                };
-                body = Some(engine.world.add_builder(builder.position(position)));
-            }
         }
-        let index = match body {
-            Some(handle) => engine.scene.add_with_body(
-                object.mesh,
-                object.material,
-                handle,
-                &engine.world,
-                &name,
-            ),
-            None => engine.scene.add_named(
-                object.mesh,
-                object.material,
-                Transform::new(position, object.transform.rotation, object.transform.scale),
-                &name,
-            ),
+        let mut made = Vec::with_capacity(originals.len());
+        for (n, &index) in originals.iter().enumerate() {
+            let object = engine.scene.objects[index].clone();
+            let name = self.unique_name(engine, &object.name);
+            let offset = 1.2 * (n as f32 + 1.0);
+            let position = object.transform.position + Vec3::new(offset, 0.2, 0.0);
+            let mut body = None;
+            if let Some(handle) = object.body {
+                if let Some(src) = engine.world.body(handle) {
+                    let shape = src.shape.clone();
+                    let kind = if src.is_dynamic() {
+                        BodyKind::Dynamic
+                    } else {
+                        BodyKind::Static
+                    };
+                    let builder = match kind {
+                        BodyKind::Dynamic => BodyBuilder::dynamic(shape),
+                        _ => BodyBuilder::r#static(shape),
+                    };
+                    body = Some(engine.world.add_builder(builder.position(position)));
+                }
+            }
+            let copy = match body {
+                Some(handle) => engine.scene.add_with_body(
+                    object.mesh,
+                    object.material,
+                    handle,
+                    &engine.world,
+                    &name,
+                ),
+                None => engine.scene.add_named(
+                    object.mesh,
+                    object.material,
+                    Transform::new(position, object.transform.rotation, object.transform.scale),
+                    &name,
+                ),
+            };
+            engine.scene.objects[copy].color = object.color;
+            engine.scene.objects[copy].metallic = object.metallic;
+            engine.scene.objects[copy].roughness = object.roughness;
+            engine.scene.objects[copy].emissive_strength = object.emissive_strength;
+            // 复制体跟原物体**同一个父物体**（同在父坐标系里，偏移量也在这个坐标系里；
+            // 父物体带旋转时偏移方向会跟着转，这是"同级复制"该有的行为）。
+            engine.scene.objects[copy].parent = object.parent;
+            made.push(copy);
+        }
+        let count = made.len();
+        let mut iter = made.into_iter();
+        self.select_only(iter.next());
+        self.extra_selected.extend(iter);
+        self.status = if count == 1 {
+            format!(
+                "已复制 {}",
+                self.selected_object(engine)
+                    .map(|o| o.name.clone())
+                    .unwrap_or_default()
+            )
+        } else {
+            format!("已复制 {count} 个物体")
         };
-        engine.scene.objects[index].color = object.color;
-        engine.scene.objects[index].metallic = object.metallic;
-        engine.scene.objects[index].roughness = object.roughness;
-        engine.scene.objects[index].emissive_strength = object.emissive_strength;
-        // 复制体跟原物体**同一个父物体**（同在父坐标系里，偏移量也在这个坐标系里；
-        // 父物体带旋转时偏移方向会跟着转，这是"同级复制"该有的行为）。
-        engine.scene.objects[index].parent = object.parent;
-        self.selected = Some(index);
-        self.status = format!("已复制 {name}");
     }
 
     /// 给物体换父物体（`parent` 为 `None` 就是提成根物体）。
@@ -1025,41 +1142,55 @@ impl Doc {
         }
     }
 
-    /// 删掉选中的物体（连同它的刚体）。
+    /// 删掉选中的物体（连同它们的刚体）；多选时一次删完，算一步历史。
     pub fn delete_selected(&mut self, engine: &mut Engine) {
-        let Some(index) = self.selected else {
+        let mut indices = self.selection();
+        indices.retain(|&i| i < engine.scene.objects.len());
+        indices.sort_unstable();
+        indices.dedup();
+        let Some(&first) = indices.first() else {
+            self.select_only(None);
             return;
         };
-        if index >= engine.scene.objects.len() {
-            self.selected = None;
-            return;
+        let count = indices.len();
+        let mut names = Vec::with_capacity(count);
+        let mut children = 0usize;
+        let mut was_model_mesh = false;
+        // 从后往前删：前面的下标不会因为后面的删除而改变。
+        for &index in indices.iter().rev() {
+            if index >= engine.scene.objects.len() {
+                continue;
+            }
+            was_model_mesh |= self.model_of_object(index).is_some();
+            children += engine.scene.children_of(index).len();
+            let Some(object) = engine.scene.remove(index) else {
+                continue;
+            };
+            names.push(object.name.clone());
+            if let Some(handle) = object.body {
+                engine.world.remove_body(handle);
+            }
+            self.forget_object(index);
         }
-        // 删的是模型展开出来的网格吗？删之前先问清楚（删完下标就变了）。
-        let was_model_mesh = self.model_of_object(index).is_some();
-        // 子物体数也要在删之前数（删完它们的父下标已经变了）。
-        let children = engine.scene.children_of(index).len();
-        // 用 `scene.remove`：它会把子物体提到祖父、并把后面所有物体的父下标前移。
-        let Some(object) = engine.scene.remove(index) else {
-            return;
-        };
-        if let Some(handle) = object.body {
-            engine.world.remove_body(handle);
-        }
-        // 物体下标整体前移：模型映射必须跟着挪，否则"拖模型"会拖到别人身上。
-        self.forget_object(index);
-        self.selected = if engine.scene.objects.is_empty() {
+        names.reverse();
+        let next = if engine.scene.objects.is_empty() {
             None
         } else {
-            Some(index.min(engine.scene.objects.len() - 1))
+            Some(first.min(engine.scene.objects.len() - 1))
         };
-        self.status = format!("已删除 {}", object.name);
+        self.select_only(next);
+        if count == 1 {
+            self.status = format!("已删除 {}", names.first().cloned().unwrap_or_default());
+        } else {
+            self.status = format!("已删除 {count} 个物体：{}", names.join("、"));
+        }
         if children > 0 {
             self.status
                 .push_str(&format!("（{children} 个子物体提到了上一级）"));
         }
         if was_model_mesh {
             self.status
-                .push_str("（模型引用还在文件里；这个网格存盘后重开会随模型回来）");
+                .push_str("（模型引用还在文件里；这些网格存盘后重开会随模型回来）");
         }
     }
 
@@ -1068,7 +1199,7 @@ impl Doc {
         engine.scene.clear();
         engine.world.clear();
         self.model_instances.clear();
-        self.selected = None;
+        self.select_only(None);
         self.capture_baseline(engine);
         self.status = "已清空场景".to_string();
     }
@@ -1178,6 +1309,36 @@ mod tests {
             assert!(shape.local_aabb().is_valid(), "{p:?} AABB 非法");
             assert!(!shape.is_static_only(), "{p:?} 不该是静态专用形状");
         }
+    }
+
+    #[test]
+    fn multi_selection_toggle_keeps_a_primary_and_dedups() {
+        let mut doc = Doc::new();
+        doc.toggle_selected(3);
+        assert_eq!(doc.selected, Some(3));
+        assert!(doc.extra_selected.is_empty());
+
+        doc.toggle_selected(5);
+        doc.toggle_selected(7);
+        assert_eq!(doc.selection(), vec![3, 5, 7]);
+        assert!(doc.is_selected(5));
+
+        // 再点一次 5：从附加里移除，主选中不变。
+        doc.toggle_selected(5);
+        assert_eq!(doc.selection(), vec![3, 7]);
+
+        // 点主选中：把第一个附加提为主选中，而不是整组清空。
+        doc.toggle_selected(3);
+        assert_eq!(doc.selected, Some(7));
+        assert!(doc.extra_selected.is_empty());
+
+        doc.toggle_selected(7);
+        assert_eq!(doc.selected, None);
+
+        doc.select_only(Some(1));
+        assert_eq!(doc.selection(), vec![1]);
+        doc.select_only(None);
+        assert!(doc.selection().is_empty());
     }
 
     /// 圆锥（第 61 轮补的）确实被接上了，且尺寸与单位网格一致（半径 0.5、半高 0.5）。
