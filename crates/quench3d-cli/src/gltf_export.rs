@@ -14,8 +14,12 @@
 //! `rotation`；物体 `scale` 与部件局部位姿烘进顶点。这样别的工具里能继续按层级选中，
 //! 世界位置也与引擎一致。父链成环时断开成根并在 `skipped` 里报告。
 //!
+//! **动画**：`animations[]` 的位置/欧拉旋转轨道烘成 glTF translation/rotation
+//! sampler（时间轴按 `start`/`speed` 换算，旋转关键帧转成四元数）；`loop`/`weight`
+//! 是引擎运行时语义，glTF 动画本身没有这两个字段，仍按单周期导出。
+//!
 //! **刻意不做的事**：`uv_scale` 的平铺不写（glTF 2.0 core 没有，不擅自加扩展）；
-//! 目标是"能在别的工具里打开看到同样的几何/颜色/主要贴图与层级"，不是无损编辑往返。
+//! 目标是"能在别的工具里打开看到同样的几何/颜色/主要贴图/层级/动画"，不是无损编辑往返。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -40,6 +44,8 @@ pub struct GltfExport {
     pub vertices: usize,
     /// 内嵌的贴图数。
     pub textures: usize,
+    /// 导出的动画条数。
+    pub animations: usize,
     /// 没法带过去的物体/部件说明。
     pub skipped: Vec<String>,
 }
@@ -104,6 +110,7 @@ pub fn export_gltf_with_base(
     let mut material_index: BTreeMap<String, usize> = BTreeMap::new();
     let mut images: Vec<Value> = Vec::new();
     let mut textures: Vec<Value> = Vec::new();
+    let mut animations: Vec<Value> = Vec::new();
     let mut skipped = Vec::new();
     skipped.extend(cycle_notes);
     // glTF 节点树：节点只带局部平移/旋转；物体缩放与部件局部位姿烘进顶点。
@@ -269,14 +276,6 @@ pub fn export_gltf_with_base(
         objects += 1;
     }
 
-    let buffer_uri = if buffer.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "data:application/octet-stream;base64,{}",
-            base64(&buffer)
-        ))
-    };
     let mut root = json!({
         "asset": {
             "version": "2.0",
@@ -285,6 +284,112 @@ pub fn export_gltf_with_base(
         "scene": 0,
         "scenes": [{ "nodes": roots }],
     });
+    // 动画：每个 AnimationDoc 一条 clip；位置/旋转轨道各一个 sampler/channel。
+    // 目标按物体名找节点；找不到或轨道非法就跳过并报告，不影响几何。
+    for (anim_index, anim) in doc.animations.iter().enumerate() {
+        let name = anim
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("animation_{anim_index}"));
+        let Some(&node) = names.get(&anim.target) else {
+            skipped.push(format!("{name}: 目标 {} 不存在，动画跳过", anim.target));
+            continue;
+        };
+        let speed = anim.speed.unwrap_or(1.0);
+        if !speed.is_finite() || speed <= 0.0 {
+            skipped.push(format!("{name}: speed 必须 > 0，动画跳过"));
+            continue;
+        }
+        let start = anim.start.unwrap_or(0.0);
+        if !start.is_finite() {
+            skipped.push(format!("{name}: start 不是有限数，动画跳过"));
+            continue;
+        }
+        let mut samplers = Vec::new();
+        let mut channels = Vec::new();
+        let mut add_track = |track: &crate::scene_doc::TrackDoc,
+                             path: &str,
+                             output: TrackOutput,
+                             samplers: &mut Vec<Value>,
+                             channels: &mut Vec<Value>| {
+            if track.times.len() != track.values.len()
+                || track.times.is_empty()
+                || track.times.iter().any(|t| !t.is_finite() || *t < 0.0)
+                || track.times.windows(2).any(|w| w[0] >= w[1])
+            {
+                return Err(format!("{name}: {path} 轨道时间/值不合法"));
+            }
+            let times: Vec<f32> = track.times.iter().map(|t| start + t / speed).collect();
+            let times =
+                push_scalar_accessor(&mut buffer, &mut buffer_views, &mut accessors, &times);
+            let output = match output {
+                TrackOutput::Translation => push_vec3_accessor(
+                    &mut buffer,
+                    &mut buffer_views,
+                    &mut accessors,
+                    &track
+                        .values
+                        .iter()
+                        .map(|v| Vec3::from_array(*v))
+                        .collect::<Vec<_>>(),
+                ),
+                TrackOutput::Rotation => {
+                    let quats: Vec<[f32; 4]> = track
+                        .values
+                        .iter()
+                        .map(|v| {
+                            let q = runner::euler_quat(Some(*v));
+                            [q.x, q.y, q.z, q.w]
+                        })
+                        .collect();
+                    push_quat_accessor(&mut buffer, &mut buffer_views, &mut accessors, &quats)
+                }
+            };
+            let sampler = samplers.len();
+            samplers.push(json!({
+                "input": times,
+                "output": output,
+                "interpolation": "LINEAR",
+            }));
+            channels.push(json!({
+                "sampler": sampler,
+                "target": { "node": node, "path": path },
+            }));
+            Ok(())
+        };
+        if let Some(track) = &anim.position {
+            if let Err(e) = add_track(
+                track,
+                "translation",
+                TrackOutput::Translation,
+                &mut samplers,
+                &mut channels,
+            ) {
+                skipped.push(e);
+            }
+        }
+        if let Some(track) = &anim.rotation {
+            if let Err(e) = add_track(
+                track,
+                "rotation",
+                TrackOutput::Rotation,
+                &mut samplers,
+                &mut channels,
+            ) {
+                skipped.push(e);
+            }
+        }
+        if channels.is_empty() {
+            skipped.push(format!("{name}: 没有可导出的位置/旋转轨道，动画跳过"));
+            continue;
+        }
+        animations.push(json!({
+            "name": name,
+            "samplers": samplers,
+            "channels": channels,
+        }));
+    }
+
     // 空场景不要写空数组：glTF 2.0 的 buffers/accessors 等数组出现时要求至少一项。
     if !nodes.is_empty() {
         root["nodes"] = json!(nodes);
@@ -303,11 +408,18 @@ pub fn export_gltf_with_base(
             "wrapT": 10497,
         }]);
     }
+    if !animations.is_empty() {
+        root["animations"] = json!(animations);
+    }
     if unlit {
         root["extensionsUsed"] = json!(["KHR_materials_unlit"]);
     }
-    if let Some(uri) = buffer_uri {
-        root["buffers"] = json!([{ "byteLength": buffer.len(), "uri": uri }]);
+    // 必须在动画/贴图/几何都追加完之后再编码：否则 accessor 指向的字节不在 URI 里。
+    if !buffer.is_empty() {
+        root["buffers"] = json!([{
+            "byteLength": buffer.len(),
+            "uri": format!("data:application/octet-stream;base64,{}", base64(&buffer)),
+        }]);
     }
     let json =
         serde_json::to_string_pretty(&root).map_err(|e| format!("glTF JSON 序列化失败：{e}"))?;
@@ -317,6 +429,7 @@ pub fn export_gltf_with_base(
         triangles,
         vertices,
         textures: images.len(),
+        animations: animations.len(),
         skipped,
     })
 }
@@ -480,6 +593,95 @@ fn align4(buffer: &mut Vec<u8>) {
     while !buffer.len().is_multiple_of(4) {
         buffer.push(0);
     }
+}
+
+/// 动画轨道输出类型（glTF channel path 的两种）。
+enum TrackOutput {
+    Translation,
+    Rotation,
+}
+
+/// 动画的 bufferView 不带 `target`：`target` 只用于顶点/索引缓冲。
+fn push_anim_view(buffer: &mut Vec<u8>, views: &mut Vec<Value>, data: &[u8]) -> usize {
+    align4(buffer);
+    let offset = buffer.len();
+    buffer.extend_from_slice(data);
+    views.push(json!({
+        "buffer": 0,
+        "byteOffset": offset,
+        "byteLength": data.len(),
+    }));
+    views.len() - 1
+}
+
+fn push_scalar_accessor(
+    buffer: &mut Vec<u8>,
+    views: &mut Vec<Value>,
+    accessors: &mut Vec<Value>,
+    values: &[f32],
+) -> usize {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes());
+        min = min.min(*v);
+        max = max.max(*v);
+    }
+    let view = push_anim_view(buffer, views, &bytes);
+    accessors.push(json!({
+        "bufferView": view,
+        "componentType": 5126,
+        "count": values.len(),
+        "type": "SCALAR",
+        "min": [min],
+        "max": [max],
+    }));
+    accessors.len() - 1
+}
+
+fn push_vec3_accessor(
+    buffer: &mut Vec<u8>,
+    views: &mut Vec<Value>,
+    accessors: &mut Vec<Value>,
+    values: &[Vec3],
+) -> usize {
+    let mut bytes = Vec::with_capacity(values.len() * 12);
+    for v in values {
+        for x in [v.x, v.y, v.z] {
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    let view = push_anim_view(buffer, views, &bytes);
+    accessors.push(json!({
+        "bufferView": view,
+        "componentType": 5126,
+        "count": values.len(),
+        "type": "VEC3",
+    }));
+    accessors.len() - 1
+}
+
+fn push_quat_accessor(
+    buffer: &mut Vec<u8>,
+    views: &mut Vec<Value>,
+    accessors: &mut Vec<Value>,
+    values: &[[f32; 4]],
+) -> usize {
+    let mut bytes = Vec::with_capacity(values.len() * 16);
+    for q in values {
+        for x in q {
+            bytes.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    let view = push_anim_view(buffer, views, &bytes);
+    accessors.push(json!({
+        "bufferView": view,
+        "componentType": 5126,
+        "count": values.len(),
+        "type": "VEC4",
+    }));
+    accessors.len() - 1
 }
 
 fn push_view(buffer: &mut Vec<u8>, views: &mut Vec<Value>, data: &[u8], target: u32) -> usize {
@@ -728,6 +930,58 @@ mod tests {
             (min[1].as_f64().unwrap() + 0.5).abs() < 1e-3,
             "子物体局部 Y 范围不对：{min:?}"
         );
+    }
+
+    #[test]
+    fn animation_tracks_become_translation_and_rotation_channels() {
+        let doc = SceneDoc::from_json(
+            r#"{
+                "objects": [{ "name": "箱", "shape": { "type": "box", "size": [1, 1, 1] } }],
+                "animations": [{
+                    "name": "移动",
+                    "target": "箱",
+                    "start": 1.0,
+                    "speed": 2.0,
+                    "position": { "times": [0.0, 1.0], "values": [[0, 0, 0], [2, 0, 0]] },
+                    "rotation": { "times": [0.0, 1.0], "values": [[0, 0, 0], [0, 90, 0]] }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let out = export_gltf(&doc).expect("导出必须成功");
+        assert_eq!(out.animations, 1);
+        let json: Value = serde_json::from_str(&out.json).unwrap();
+        let anim = &json["animations"][0];
+        assert_eq!(anim["name"], "移动");
+        assert_eq!(anim["channels"].as_array().unwrap().len(), 2);
+        assert_eq!(anim["samplers"].as_array().unwrap().len(), 2);
+        assert_eq!(anim["channels"][0]["target"]["node"], 0);
+        assert_eq!(anim["channels"][0]["target"]["path"], "translation");
+        assert_eq!(anim["channels"][1]["target"]["path"], "rotation");
+        // start=1、speed=2：输入时间 0..1 被烘成 1..1.5。
+        let input = anim["samplers"][0]["input"].as_u64().unwrap() as usize;
+        let accessor = &json["accessors"][input];
+        assert_eq!(accessor["type"], "SCALAR");
+        assert_eq!(accessor["count"], 2);
+        assert_eq!(accessor["min"][0], 1.0);
+        assert_eq!(accessor["max"][0], 1.5);
+        let output = anim["samplers"][1]["output"].as_u64().unwrap() as usize;
+        assert_eq!(json["accessors"][output]["type"], "VEC4");
+        // buffer URI 必须在动画 accessor 也追加完之后再编码。
+        let uri = json["buffers"][0]["uri"].as_str().unwrap();
+        let raw = base64_decode(
+            uri.strip_prefix("data:application/octet-stream;base64,")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            raw.len(),
+            json["buffers"][0]["byteLength"].as_u64().unwrap() as usize
+        );
+        let view = json["accessors"][output]["bufferView"].as_u64().unwrap() as usize;
+        let end = json["bufferViews"][view]["byteOffset"].as_u64().unwrap() as usize
+            + json["bufferViews"][view]["byteLength"].as_u64().unwrap() as usize;
+        assert!(end <= raw.len(), "accessor 越过了内嵌 buffer");
     }
 
     #[test]

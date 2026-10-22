@@ -552,10 +552,11 @@ impl Inner {
             match std::fs::write(&path, saved.json.as_bytes()) {
                 Ok(()) => {
                     self.doc.status = format!(
-                        "已导出 {}（{} 个物体 / {} 三角形 / {} 字节）{note}",
+                        "已导出 {}（{} 个物体 / {} 三角形 / {} 条动画 / {} 字节）{note}",
                         path.display(),
                         saved.objects,
                         saved.triangles,
+                        saved.animations,
                         saved.json.len()
                     );
                 }
@@ -571,9 +572,10 @@ impl Inner {
             match crate::scene_io::download_text(name, &saved.json) {
                 Ok(()) => {
                     self.doc.status = format!(
-                        "已下载 {name}（{} 个物体 / {} 三角形 / {} 字节）{note}",
+                        "已下载 {name}（{} 个物体 / {} 三角形 / {} 条动画 / {} 字节）{note}",
                         saved.objects,
                         saved.triangles,
+                        saved.animations,
                         saved.json.len()
                     );
                 }
@@ -601,10 +603,11 @@ impl Inner {
             match std::fs::write(&path, &saved.bytes) {
                 Ok(()) => {
                     self.doc.status = format!(
-                        "已导出 {}（{} 个物体 / {} 三角形 / {} 字节）{note}",
+                        "已导出 {}（{} 个物体 / {} 三角形 / {} 条动画 / {} 字节）{note}",
                         path.display(),
                         saved.objects,
                         saved.triangles,
+                        saved.animations,
                         saved.bytes.len()
                     );
                 }
@@ -620,9 +623,10 @@ impl Inner {
             match crate::scene_io::download_bytes(name, &saved.bytes) {
                 Ok(()) => {
                     self.doc.status = format!(
-                        "已下载 {name}（{} 个物体 / {} 三角形 / {} 字节）{note}",
+                        "已下载 {name}（{} 个物体 / {} 三角形 / {} 条动画 / {} 字节）{note}",
                         saved.objects,
                         saved.triangles,
+                        saved.animations,
                         saved.bytes.len()
                     );
                 }

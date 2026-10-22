@@ -41,6 +41,12 @@
 
 ### 新增
 
+- **glTF 位置/旋转动画导出（第 114 轮）**：`animations[]` 转成 glTF clip；
+  `position` → VEC3 translation channel，`rotation`（欧拉角）→ VEC4 四元数 rotation
+  channel，输入时间按 `start + t/speed` 烘进 accessor，`LINEAR` 采样。目标按物体名
+  找节点；非法轨道/找不到目标只进 `skipped`。CLI/编辑器共用；编辑器状态栏显示动画
+  条数。回归：1 个 lib 单测（2 channel + 时间轴换算 + VEC4，总测试 767 → 768）。
+
 - **面板布局持久化（第 113 轮）**：顶部「布局」菜单可调左/右栏宽度（左 140–340、
   右 180–420），面板用 `min_size/max_size` 强制生效；桌面写
   `$XDG_STATE_HOME/quench3d/layout.json`（原子写），Web 写

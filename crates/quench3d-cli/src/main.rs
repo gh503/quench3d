@@ -507,17 +507,19 @@ fn dispatch(args: &Args) -> i32 {
                     "vertices": exported.vertices,
                     "triangles": exported.triangles,
                     "textures": exported.textures,
+                    "animations": exported.animations,
                     "skipped": exported.skipped,
                 });
                 return finish(args, "export", Ok(value), started, |v| {
                     println!(
-                        "已导出 {}（{}：{} 个物体 / {} 顶点 / {} 三角形 / {} 张贴图）",
+                        "已导出 {}（{}：{} 个物体 / {} 顶点 / {} 三角形 / {} 张贴图 / {} 条动画）",
                         v["out"].as_str().unwrap_or(""),
                         v["format"].as_str().unwrap_or("glTF"),
                         v["objects"].as_u64().unwrap_or(0),
                         v["vertices"].as_u64().unwrap_or(0),
                         v["triangles"].as_u64().unwrap_or(0),
                         v["textures"].as_u64().unwrap_or(0),
+                        v["animations"].as_u64().unwrap_or(0),
                     );
                     if let Some(skipped) = v["skipped"].as_array() {
                         for s in skipped {

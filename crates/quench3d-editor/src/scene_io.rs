@@ -71,6 +71,8 @@ pub struct SavedGltf {
     pub objects: usize,
     /// 三角形数。
     pub triangles: usize,
+    /// 导出的动画条数。
+    pub animations: usize,
     /// 没法带进 glTF 的说明（缺贴图、导入模型、凸包…）。
     pub skipped: Vec<String>,
 }
@@ -83,6 +85,8 @@ pub struct SavedGlb {
     pub objects: usize,
     /// 三角形数。
     pub triangles: usize,
+    /// 导出的动画条数。
+    pub animations: usize,
     /// 没法带进 GLB 的说明。
     pub skipped: Vec<String>,
 }
@@ -99,6 +103,7 @@ pub fn scene_to_glb(engine: &Engine, doc: &Doc) -> Result<SavedGlb, String> {
         bytes,
         objects: saved.objects,
         triangles: saved.triangles,
+        animations: saved.animations,
         skipped: saved.skipped,
     })
 }
@@ -124,6 +129,7 @@ pub fn scene_to_gltf(engine: &Engine, doc: &Doc) -> Result<SavedGltf, String> {
         json: out.json,
         objects: out.objects,
         triangles: out.triangles,
+        animations: out.animations,
         skipped,
     })
 }

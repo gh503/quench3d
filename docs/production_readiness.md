@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」「导出 GLB」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`/`.glb`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图与节点树）；动画未导出 | ✅（OBJ/glTF 几何） |
+| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」「导出 GLB」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`/`.glb`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图、节点树、位置/旋转动画）；骨骼/morph 动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -413,7 +413,7 @@
 | 校验口径 | 场景校验器要求被引用的贴图**文件存在**（`texture.rs` 校验路径），所以"应用"失败要给出可读原因，而不是静默保留旧贴图 |
 
 **其它两条已核过的落点**：glTF/OBJ 导入在 `assets.rs:261/465/500`（OBJ 不带材质）；
-模型**导出**已补 OBJ（图元 → OBJ/MTL）与单文件 glTF 2.0（第 107 轮，几何/材质标量/内嵌 base64；第 109 轮补 PNG/JPEG 贴图内嵌），都能被本引擎重新导入；仍缺动画导出。
+模型**导出**已补 OBJ（图元 → OBJ/MTL）与单文件 glTF 2.0（第 107 轮，几何/材质标量/内嵌 base64；第 109 轮补 PNG/JPEG 贴图内嵌），都能被本引擎重新导入；第 114 轮补了位置/旋转动画导出，仍缺骨骼/morph 动画。
 版本检查（`scene_doc.rs` 的 `validate`）现在是**版本不符直接报错**，并且明确**不做**迁移器：
 这个格式还没有外部使用者，与其维护一条"读旧版"的路径，不如让旧文件拿到一条清楚的诊断。
 再加字段时请同步改 `VERSION`（当前 2）。
@@ -2576,7 +2576,7 @@ base64 buffer、父位移烘进子几何的包围盒、凸包跳过）；`cargo 
 cli_e2e export_writes_single_file_gltf`（CLI 真的落盘 → `info model.gltf` 读回三角形数
 与包围盒一致）。
 
-**边界**：父子关系写成节点树（局部 translation/rotation），不导出动画/骨骼/morph；
+**边界**：父子关系写成节点树（局部 translation/rotation），位置/旋转动画可导出（第 114 轮），骨骼/morph 动画不导出；
 四边形等非三角图元会三角化；这是"能在别的工具里看到同样几何/颜色/贴图/层级"的导出，
 不是无损编辑往返。
 
@@ -2631,7 +2631,7 @@ Web 导出不带贴图；贴图不重编码、不压缩、不生成 mipmap。
 `根→中→孙` 的 children/translation；CLI e2e 仍用 `info model.gltf` 读回三角形数
 与包围盒（导入器会应用节点链）。总测试 761 → 762。
 
-**边界**：动画/骨骼/morph 仍不导出；`scale` 不在节点上（烘进顶点），所以外部工具
+**边界**：位置/旋转动画可导出，骨骼/morph 仍不导出；`scale` 不在节点上（烘进顶点），所以外部工具
 里不能单独改节点缩放；节点名可能重复。
 
 ### 23.16 GLB 二进制导出（第 111 轮）
@@ -2646,7 +2646,7 @@ version、总长度、JSON/BIN chunk 类型与对齐、无 data URI、byteLength
 `export_writes_glb_that_info_can_read`（落盘 → `info model.glb` 读回三角形数与 mesh 数）。
 总测试 762 → 764。
 
-**边界**：GLB 仍只含几何/材质/贴图/节点树，不含动画。
+**边界**：GLB 含几何/材质/贴图/节点树/位置旋转动画，不含骨骼/morph 动画。
 
 ### 23.17 编辑器导出 GLB（第 112 轮）
 
@@ -2661,7 +2661,7 @@ editor_glb_export_has_valid_chunks`（magic/version/总长度、JSON chunk、无
 764 → 765。
 
 **边界**：按钮仍不弹文件对话框（桌面按当前场景路径换扩展名）；Web 下载依赖浏览器
-Blob；GLB 不含动画。
+Blob；GLB 不含骨骼/morph 动画。
 
 ### 23.18 面板布局持久化（第 113 轮）
 
@@ -2679,6 +2679,23 @@ Blob；GLB 不含动画。
 
 **边界**：只有宽度，没有面板折叠/顺序/窗口位置；滑杆是唯一入口（没有拖拽分隔条）；
 Web 端 localStorage 被禁时保存失败只写状态栏。
+
+### 23.19 glTF 位置/旋转动画导出（第 114 轮）
+
+**做了什么**：`animations[]` 现在会导出。每条 `AnimationDoc` 变一条 glTF clip，
+`position` 轨道 → `translation` channel（VEC3），`rotation` 轨道 → `rotation` channel
+（欧拉角先转四元数，VEC4）；输入时间按 `start + t/speed` 烘进 accessor，采样点
+`LINEAR`。目标按物体名找节点；找不到/轨道时间非法/没有可导出轨道时写进 `skipped`，
+几何照常导出。`loop`/`weight` 是引擎运行时语义，glTF 没有对应字段，仍按单周期导出
+（文档边界里写明）。
+
+**验证**：lib 单测 `animation_tracks_become_translation_and_rotation_channels`
+（1 条动画、2 channel、translation/rotation 路径、`start=1/speed=2` → input min/max
+1.0/1.5、旋转输出 VEC4）；总测试 767 → 768。CLI/编辑器导出共用同一实现，编辑器状态栏
+新增动画条数。
+
+**边界**：骨骼/morph 动画仍不导出；`loop`/`weight`/`speed` 的运行时行为不写进 glTF
+（speed 只烘时间轴）；动画目标必须是场景物体名，`models[]` 内部节点不能单独选。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
