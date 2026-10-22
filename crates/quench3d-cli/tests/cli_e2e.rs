@@ -4557,6 +4557,48 @@ fn json_schema_is_machine_readable() {
 ///
 /// 用 `--dry-run`：这条路径在**取相机**时就失败了，根本不该初始化 GPU
 /// （CI 上没有显卡，能跑到这里本身就是一条约束）。
+/// 真渲染多输出：每张真的按自己的 width/height 写出来（有 GPU 才跑）。
+#[test]
+fn multiple_render_outputs_write_each_requested_size_when_a_gpu_is_present() {
+    let doctor = run(&["doctor", "--json"]).json();
+    if !doctor["data"]["gpu_available"].as_bool().unwrap_or(false) {
+        eprintln!("跳过多输出真渲染：没有可用 GPU");
+        return;
+    }
+    let dir = temp_dir("multi_output_png");
+    let shots = dir.join("shots");
+    let path = dir.join("s.json");
+    let scene = format!(
+        r#"{{
+            "format": "quench3d.scene", "version": 2, "name": "多输出真渲染",
+            "ground": {{ "size": 10 }},
+            "camera": {{ "position": [7, 4.5, 8], "look_at": [0, 1, 0] }},
+            "render": {{
+                "output": {out},
+                "outputs": [
+                    {{ "name": "big", "width": 64, "height": 32 }},
+                    {{ "name": "small", "width": 32, "height": 16 }}
+                ]
+            }}
+        }}"#,
+        out = serde_json::to_string(&shots.join("shot.png")).unwrap()
+    );
+    std::fs::write(&path, scene).unwrap();
+
+    let r = run(&["render", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let v = r.json();
+    let outs = v["data"]["outputs"].as_array().expect("要有 outputs 明细");
+    assert_eq!(outs.len(), 2);
+    for (i, (name, w, h)) in [("big", 64, 32), ("small", 32, 16)].iter().enumerate() {
+        let out = std::path::Path::new(outs[i]["output"].as_str().unwrap());
+        assert!(out.exists(), "第 {i} 张不存在：{}", out.display());
+        assert_eq!(outs[i]["name"], *name);
+        let (dw, dh, _) = decode_rgba(out);
+        assert_eq!((dw, dh), (*w, *h), "第 {i} 张尺寸不对：{name}");
+    }
+}
+
 #[test]
 fn camera_flag_reports_unknown_names_without_touching_the_gpu() {
     let dir = temp_dir("camera_flag");

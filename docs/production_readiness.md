@@ -859,8 +859,26 @@ Prefab / 实例（同一模型引用两次会展开成两批物体，不共享�
 测试：`camera_select_tests::select_camera_swaps_the_camera_and_reports_unknown_names`（单测）+
 `camera_flag_reports_unknown_names_without_touching_the_gpu`（e2e，用 `--dry-run` 证明它不碰 GPU）。
 
-**还没做**：报告里的 `camera_name`；**第 3、4 步**（`render.outputs[]` 多输出、
-`outputs[]` 报告与 `--no-clobber` 的"先查全部目标再写"）。下一步从第 3 步开始。
+**之后补齐**：报告里的 `camera_name`、第 3/4 步的 `render.outputs[]` 与
+`--no-clobber` 已落地，见 §9.3。
+
+### 9.3 进度（第 124 轮）：多输出（第 3、4 步）已落地
+
+`render.outputs[]` 每项支持 `name` / `camera` / `width` / `height`：
+
+* 路径规则：`render.output` 带扩展名时当**前缀**（`shots/shot.png` → `shot-a.png`），
+  不带扩展名或以分隔符结尾时当**目录**；只有一项且没写 `name` 时保持旧路径；
+* 每张按自己的尺寸渲染，`camera` 走与 `--camera` 同一个 `select_camera`；
+* 报告 `outputs[]` 给出每张的 `name/output/width/height/bytes/camera_name`，
+  顶层 `output` 保留第一张、`bytes` 为总和、`would_write` 列出全部目标；
+* `--no-clobber` 在**写盘前**检查所有目标，任一存在就整体退出 2，不留下半套文件；
+* `--golden` 与多输出互斥（多张对一张参考图没有意义），进 GPU 前报参数错误。
+
+**验证**：
+* 无显卡的路径/尺寸/no-clobber/向后兼容：`multiple_render_outputs_resolve_before_writing_and_honour_no_clobber`
+  （`--dry-run`，CI 也跑）；
+* 真渲染：`multiple_render_outputs_write_each_requested_size_when_a_gpu_is_present`
+  用 64×32 与 32×16 两张输出，解码 PNG 断言尺寸分别对得上；无 GPU 时跳过。
 
 ### 11.1 进度（第 41 轮）：模型缓存（CPU 侧）做了什么、没做什么
 
