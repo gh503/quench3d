@@ -95,7 +95,7 @@
 | 变换 gizmo（移动/旋转/缩放） | 全部 | **本轮补上**（世界/局部、Ctrl 吸附、Shift 精细、Esc 取消、屏幕定长、10 px 抓取、命中优先于拾取） | ✅（本轮） |
 | 撤销 / 重做 | 全部 | **本轮补上**（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y，工具栏带可用态） | ✅（本轮） |
 | 数值输入（拖拽改值的输入框） | 全部 | 有（egui `DragValue` + 滑杆） | ✅ |
-| 多选 / 框选 | 全部 | **Shift/Ctrl 点选 + 组变换**（平移/绕中心旋转/缩放、批量复制/删除）+ **Shift/Ctrl 拖动框选**（按屏幕中心、追加、空框清空） | ✅（框选按中心，不做遮挡判断） |
+| 多选 / 框选 | 全部 | **Shift/Ctrl 点选 + 组变换**（平移/绕中心旋转/缩放、批量复制/删除）+ **Shift/Ctrl 拖动框选**（按屏幕中心、追加、空框清空）+ **父子同选只动最上层祖先**（第 106 轮） | ✅（框选按中心，不做遮挡判断） |
 | 复制粘贴（Ctrl+C/V） | 全部 | **内部剪贴板第 105 轮**（Ctrl+C 存世界变换+刚体形状，Ctrl+V 偏移粘贴/自动重名/重建刚体/根物体/可撤销）；不碰系统剪贴板 | 🟡 |
 | 视口导航（轨道/平移/缩放 + 聚焦） | 全部 | 有（左键/中键/Alt 旋转、右键平移、滚轮缩放），**本轮补 `F` 聚焦选中** | ✅ |
 | 网格与吸附 | 全部 | 1 单位网格 + gizmo 吸附；**网格不随尺度自适应** | 🟠 |
@@ -2463,7 +2463,7 @@ particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红
 **边界**：没有贴图/软粒子/粒子间深度排序（按物体距离排序，不按粒子深度）、GPU 粒子、
 发射器形状/曲线；编辑器没有粒子创建/参数面板，只显示并原样保存 JSON 里的段。
 
-### 23.7 编辑器多选 + 成组变换（第 101 轮，框选第 104 轮）
+### 23.7 编辑器多选 + 成组变换（第 101 轮，框选第 104 轮，层级抑制第 106 轮）
 
 **做了什么**：`Doc.extra_selected` 保存主选中之外的物体；场景树与视口都支持
 `Shift`/`Ctrl` 点选加减选，场景树标题显示「已选 N 个」。多选时 gizmo 的轴心是
@@ -2544,6 +2544,24 @@ copy_and_paste_clipboard_rebuilds_objects_and_is_undoable`（复制不改场景/
 不继承父子关系；剪贴板不跨进程/不碰系统剪贴板；粘贴到已删除 mesh 的场景不可能，因为
 打开新场景会清空。
 
+### 23.11 父子同选的层级抑制（第 106 轮）
+
+**问题**：父物体和子物体同时被选中时，gizmo 既给父写变换（子随层级移动），又把子当成
+一个独立组成员再写一次，结果是子物体走两倍。
+
+**做了什么**：`Doc::drag_driver(engine, index)` 沿 `parent` 链找**最上层被选中的祖先**；
+`Doc::group_selection` 只保留"选中集合里的根"（有被选中祖先的物体不进组），并排除
+驱动者本人。gizmo 的投影/开始拖拽/Esc 还原/每帧写回/冻结物理全部改用 `driver`，所以
+父+子同选时只动父，子跟着走；同层其它选中物体仍按组变换。父+子+旁人时，组里只有旁人。
+
+**验证**：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history
+selected_parent_suppresses_child_in_the_transform_group`（父+子组为空、旁人进组、
+只选子时驱动者回到子）。
+
+**边界**：不做"选择时自动去重"（树上仍显示两个都选中）；旋转/缩放父物体时绕父自身
+原点（组为空），不再绕"父子平均位置"；`selection_center` 仍按全部选中项算（gizmo 的
+屏幕锚点用驱动者世界位置）。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -2597,7 +2615,7 @@ copy_and_paste_clipboard_rebuilds_objects_and_is_undoable`（复制不改场景/
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**753** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**754** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

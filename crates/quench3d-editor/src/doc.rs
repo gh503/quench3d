@@ -161,6 +161,27 @@ fn model_rotation(m: &quench3d_cli::scene_doc::ModelDoc) -> Quat {
     }
 }
 
+/// `index` 的祖先链里有没有被选中的物体；用于把"父+子同选"折叠成只动父。
+fn has_selected_ancestor(engine: &Engine, index: usize, selected: &[usize]) -> bool {
+    let mut parent = engine
+        .scene
+        .objects
+        .get(index)
+        .and_then(|object| object.parent);
+    let mut guard = 0;
+    while let Some(p) = parent {
+        if p >= engine.scene.objects.len() || guard > 1024 {
+            return false;
+        }
+        if selected.contains(&p) {
+            return true;
+        }
+        parent = engine.scene.objects[p].parent;
+        guard += 1;
+    }
+    false
+}
+
 /// 剪贴板里的一份物体快照（世界变换 + 可重建的物理形状）。
 #[derive(Clone)]
 struct ClipboardObject {
@@ -310,17 +331,46 @@ impl Doc {
         let Some(primary) = self.selected else {
             return Vec::new();
         };
+        let selected = self.selection();
+        let selected_set = selected.clone();
+        let driver = self.drag_driver(engine, primary);
         let primary_model = self.model_of_object(primary);
-        self.extra_selected
-            .iter()
-            .copied()
-            .filter(|&i| i < engine.scene.objects.len() && i != primary)
+        selected
+            .into_iter()
+            .filter(|&i| i < engine.scene.objects.len() && i != driver)
+            // 只保留"选中集合里的根"：父物体和子物体同时选中时，子物体跟着父物体走，
+            // 不能再单独应用一次变换（会走两倍）。
+            .filter(|&i| !has_selected_ancestor(engine, i, &selected_set))
             .filter(|&i| match primary_model {
                 Some(model) => self.model_of_object(i) != Some(model),
                 None => true,
             })
             .map(|i| (i, engine.scene.world_transform(i)))
             .collect()
+    }
+
+    /// 拖拽时真正该被写变换的物体：如果主选物体有**被选中的祖先**，最上层的那个
+    /// 祖先就是驱动者（子物体会跟着它走）。否则就是主选物体自己。
+    pub fn drag_driver(&self, engine: &Engine, index: usize) -> usize {
+        let selected = self.selection();
+        let mut driver = index;
+        let mut parent = engine
+            .scene
+            .objects
+            .get(index)
+            .and_then(|object| object.parent);
+        let mut guard = 0;
+        while let Some(p) = parent {
+            if p >= engine.scene.objects.len() || guard > 1024 {
+                break;
+            }
+            if selected.contains(&p) {
+                driver = p;
+            }
+            parent = engine.scene.objects[p].parent;
+            guard += 1;
+        }
+        driver
     }
 
     // -----------------------------------------------------------------------

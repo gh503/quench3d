@@ -506,3 +506,64 @@ fn copy_and_paste_clipboard_rebuilds_objects_and_is_undoable() {
     assert_eq!(doc.copy_selected(&engine), 0);
     assert_eq!(doc.paste_clipboard(&mut engine), 2);
 }
+
+/// 父+子同时选中：变换驱动者是父，子不单独进组（否则一秒走两倍）；同层其它物体仍进组。
+#[test]
+fn selected_parent_suppresses_child_in_the_transform_group() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    engine.scene.clear();
+    engine.world.clear();
+    let mesh = engine.assets.mesh(
+        &mut engine.renderer,
+        &engine.gpu,
+        "层级测试盒",
+        &MeshData::box_sized(Vec3::ONE),
+    );
+    let mat = engine.assets.solid_material(
+        &mut engine.renderer,
+        &engine.gpu,
+        Vec4::new(0.3, 0.5, 0.9, 1.0),
+        0.0,
+        0.8,
+    );
+    let parent = engine.scene.add_named(
+        mesh,
+        mat,
+        Transform::new(Vec3::new(2.0, 1.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+        "父",
+    );
+    let child = engine.scene.add_named(
+        mesh,
+        mat,
+        Transform::new(Vec3::new(2.0, 3.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+        "子",
+    );
+    let other = engine.scene.add_named(
+        mesh,
+        mat,
+        Transform::new(Vec3::new(-3.0, 1.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+        "旁人",
+    );
+    let mut doc = Doc::new();
+    doc.set_parent(&mut engine, child, Some(parent));
+    doc.set_parent(&mut engine, other, None);
+
+    doc.select_only(Some(parent));
+    doc.toggle_selected(child);
+    assert_eq!(doc.drag_driver(&engine, child), parent, "子应认父为驱动者");
+    assert!(
+        doc.group_selection(&engine).is_empty(),
+        "只有父+子时，组里不能有子（父会带着它走）"
+    );
+
+    doc.toggle_selected(other);
+    let group = doc.group_selection(&engine);
+    assert_eq!(group.len(), 1, "同层的旁人仍要进组：{group:?}");
+    assert_eq!(group[0].0, other);
+
+    // 只选子时，驱动者回到子自己。
+    doc.select_only(Some(child));
+    assert_eq!(doc.drag_driver(&engine, child), child);
+}

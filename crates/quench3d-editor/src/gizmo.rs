@@ -190,6 +190,8 @@ impl Gizmo {
             self.hover = None;
             return false;
         }
+        // 父+子同时选中时，变换写在最上层被选中的祖先上；子物体跟着层级走。
+        let driver = doc.drag_driver(engine, index);
 
         let pointer_abs = ui.input(|i| i.pointer.hover_pos());
         // 统一用**视口局部坐标**：`world_to_screen` 给的就是视口坐标，
@@ -208,9 +210,9 @@ impl Gizmo {
             // `start_transform` 是**世界**变换：写回时层级里要换算成局部（有父物体时）。
             engine
                 .scene
-                .set_world_transform(index, drag.start_transform);
+                .set_world_transform(driver, drag.start_transform);
             // 拖的是模型成员时，整组一起还原（连同写回 `models[i]` 的那一份）。
-            doc.apply_transform_to_model_group(engine, index, drag.start_transform);
+            doc.apply_transform_to_model_group(engine, driver, drag.start_transform);
             doc.push_transform_to_physics(engine);
             doc.history.abort_transaction();
             doc.status = "已取消拖拽".to_string();
@@ -219,8 +221,8 @@ impl Gizmo {
 
         let pivot = doc
             .selection_center(engine)
-            .unwrap_or_else(|| engine.scene.world_transform(index).position);
-        let screen = Screen::project(self, engine, rect, index, pivot);
+            .unwrap_or_else(|| engine.scene.world_transform(driver).position);
+        let screen = Screen::project(self, engine, rect, driver, pivot);
 
         // ---- 1. 已经在拖：每帧从 start_transform 重算 ----
         if self.drag.is_some() {
@@ -329,11 +331,11 @@ impl Gizmo {
             };
             // 拖拽算出来的是**世界**变换，写回时按层级换算成局部（没有父物体时就是它自己）。
             // 有父物体时这是必须的：把世界位移直接加到局部位置上，父物体一转就会走错方向。
-            engine.scene.set_world_transform(index, primary_transform);
+            engine.scene.set_world_transform(driver, primary_transform);
             // 模型（glTF/OBJ 引用）展开出来的物体：**整组一起动**，并把新变换写回
             // `models[i]` —— 这就是"视口里实时拖动模型"，存盘后位置也保得住。
             // 普通物体这一步什么都不做（返回 false）。
-            doc.apply_transform_to_model_group(engine, index, primary_transform);
+            doc.apply_transform_to_model_group(engine, driver, primary_transform);
             // 多选：把同一个"主物体的变化量"应用到其它选中物体，绕组中心旋转/缩放。
             for (member, start) in &group {
                 let member_transform = group_member_transform(
@@ -350,7 +352,7 @@ impl Gizmo {
                 freeze_body(engine, *member);
             }
             doc.push_transform_to_physics(engine);
-            freeze_body(engine, index);
+            freeze_body(engine, driver);
             doc.record_edit(engine); // 事务中 → 只标脏，抬起时合成一步
             self.paint(ui, engine, doc, rect, &screen, Some(hud));
 
@@ -383,7 +385,7 @@ impl Gizmo {
                 handle = Some(Handle::Uniform);
             }
             if let Some(handle) = handle {
-                self.drag = Some(self.begin_drag(engine, doc, index, &screen, handle, pointer));
+                self.drag = Some(self.begin_drag(engine, doc, driver, &screen, handle, pointer));
                 doc.begin_history_transaction();
                 doc.status = format!("开始{}…", self.mode.label());
                 self.paint(ui, engine, doc, rect, &screen, None);
