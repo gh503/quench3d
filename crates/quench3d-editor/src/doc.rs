@@ -161,6 +161,15 @@ fn model_rotation(m: &quench3d_cli::scene_doc::ModelDoc) -> Quat {
     }
 }
 
+/// 剪贴板里的一份物体快照（世界变换 + 可重建的物理形状）。
+#[derive(Clone)]
+struct ClipboardObject {
+    object: SceneObject,
+    world: Transform,
+    shape: Option<Shape>,
+    dynamic: bool,
+}
+
 /// 编辑器文档层：场景内容的可撤销副本 + 界面状态（选中、状态栏、帮助开关）。
 pub struct Doc {
     /// 当前**主选中**的场景对象下标（`None` = 没选）；gizmo 的轴心默认在它上面。
@@ -180,6 +189,8 @@ pub struct Doc {
     pub needs_autosave: bool,
     /// 撤销 / 重做历史（整场景快照，见 [`crate::history`]）。
     pub history: crate::history::History,
+    /// 编辑器内部剪贴板（Ctrl+C / Ctrl+V）；不碰系统剪贴板。
+    clipboard: Vec<ClipboardObject>,
     /// 用户显式设置的材质贴图/开关（空 = 沿用原文档的继承规则）。
     pub textures: std::collections::HashMap<String, TexturePaths>,
     /// 模型实例映射：`models[i]` ↔ 引擎里由它展开出来的物体。
@@ -748,6 +759,7 @@ impl Doc {
             recovery: None,
             needs_autosave: false,
             history: crate::history::History::default(),
+            clipboard: Vec::new(),
             textures: std::collections::HashMap::new(),
             model_instances: Vec::new(),
             base_doc: None,
@@ -811,6 +823,7 @@ impl Doc {
     pub fn reset_history(&mut self, engine: &Engine) {
         let json = scene_json(engine, self);
         self.history.reset_json(json);
+        self.clipboard.clear();
         self.needs_autosave = false;
         self.status = "历史已重置".to_string();
     }
@@ -1045,6 +1058,94 @@ impl Doc {
         self.select_only(Some(index));
         self.status = format!("已添加 {name}");
         index
+    }
+
+    /// 把当前选择复制进编辑器内部剪贴板（不改变场景，也不记历史）。
+    ///
+    /// 存的是世界变换：粘贴时即使原物体有父物体，也会以根物体出现在同一世界位置，
+    /// 不会因为父坐标系而错位。物理形状单独留一份，粘贴时重建刚体。
+    pub fn copy_selected(&mut self, engine: &Engine) -> usize {
+        let mut clip = Vec::new();
+        for index in self.selection() {
+            let Some(object) = engine.scene.objects.get(index) else {
+                continue;
+            };
+            let world = engine.scene.world_transform(index);
+            let body = object.body.and_then(|h| engine.world.body(h));
+            clip.push(ClipboardObject {
+                object: object.clone(),
+                world,
+                shape: body.map(|b| b.shape.clone()),
+                dynamic: body.map(|b| b.is_dynamic()).unwrap_or(false),
+            });
+        }
+        let count = clip.len();
+        if count == 0 {
+            self.status = "剪贴板：没有选中的物体".to_string();
+            return 0;
+        }
+        self.clipboard = clip;
+        self.status = format!("已复制 {count} 个物体到剪贴板");
+        count
+    }
+
+    /// 粘贴剪贴板内容；返回粘贴出来的物体数。粘贴会记一步历史。
+    pub fn paste_clipboard(&mut self, engine: &mut Engine) -> usize {
+        if self.clipboard.is_empty() {
+            self.status = "剪贴板是空的".to_string();
+            return 0;
+        }
+        let clips = self.clipboard.clone();
+        let mut made = Vec::with_capacity(clips.len());
+        for (n, clip) in clips.iter().enumerate() {
+            let offset = 1.2 * (n as f32 + 1.0);
+            let target = Transform::new(
+                clip.world.position + Vec3::new(offset, 0.2, 0.0),
+                clip.world.rotation,
+                clip.world.scale,
+            );
+            let name = self.unique_name(engine, &clip.object.name);
+            let copy = match &clip.shape {
+                Some(shape) => {
+                    let builder = if clip.dynamic {
+                        BodyBuilder::dynamic(shape.clone())
+                    } else {
+                        BodyBuilder::r#static(shape.clone())
+                    };
+                    let handle = engine
+                        .world
+                        .add_builder(builder.position(target.position).rotation(target.rotation));
+                    let i = engine.scene.add_with_body(
+                        clip.object.mesh,
+                        clip.object.material,
+                        handle,
+                        &engine.world,
+                        &name,
+                    );
+                    engine.scene.set_world_transform(i, target);
+                    i
+                }
+                None => {
+                    engine
+                        .scene
+                        .add_named(clip.object.mesh, clip.object.material, target, &name)
+                }
+            };
+            let dst = &mut engine.scene.objects[copy];
+            dst.color = clip.object.color;
+            dst.metallic = clip.object.metallic;
+            dst.roughness = clip.object.roughness;
+            dst.emissive_strength = clip.object.emissive_strength;
+            dst.parent = None;
+            made.push(copy);
+        }
+        let count = made.len();
+        let mut iter = made.into_iter();
+        self.select_only(iter.next());
+        self.extra_selected.extend(iter);
+        self.record_edit(engine);
+        self.status = format!("已粘贴 {count} 个物体");
+        count
     }
 
     /// 复制选中的物体（位置往旁边挪一点，免得完全重叠）；多选时批量复制。

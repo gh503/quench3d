@@ -2801,6 +2801,7 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.add_space(6.0);
             ui.label(RichText::new("编辑").strong());
             ui.label("左键点击：选中物体；Shift/Ctrl+左键拖动：框选");
+            ui.label("Ctrl+C / Ctrl+V：复制 / 粘贴（编辑器内部剪贴板）");
             ui.label("场景树里的 ⌖ / F：把相机对准这个物体");
             ui.label("属性面板：改名称 / 变换 / 颜色 / 材质 / 物理参数");
             ui.add_space(6.0);

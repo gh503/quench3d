@@ -456,3 +456,53 @@ fn box_select_uses_screen_centers_and_adds_or_clears() {
     );
     assert!(doc.selection().is_empty(), "空框（非追加）要清空选择");
 }
+
+/// Ctrl+C / Ctrl+V：复制不改变场景，粘贴重建物体、记一步历史，且粘贴体是根物体。
+#[test]
+fn copy_and_paste_clipboard_rebuilds_objects_and_is_undoable() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    doc.reset_history(&engine);
+    let before = engine.scene.len();
+    let names = scene_names(&engine);
+    doc.select_only(Some(1));
+    doc.toggle_selected(2);
+    assert_eq!(doc.selection().len(), 2);
+
+    let copied = doc.copy_selected(&engine);
+    assert_eq!(copied, 2);
+    assert_eq!(engine.scene.len(), before, "复制不能改变场景");
+    assert!(!doc.history.can_undo(), "复制不是编辑，不该进历史");
+
+    let pasted = doc.paste_clipboard(&mut engine);
+    assert_eq!(pasted, 2);
+    assert_eq!(engine.scene.len(), before + 2);
+    assert_eq!(doc.selection().len(), 2, "粘贴后应选中新物体");
+    assert!(doc.history.can_undo(), "粘贴要能撤销");
+    let pasted_names: Vec<_> = doc
+        .selection()
+        .iter()
+        .map(|&i| engine.scene.objects[i].name.clone())
+        .collect();
+    for name in &pasted_names {
+        assert!(!names.contains(name), "粘贴体不能和原名重复：{name}");
+    }
+    for &i in &doc.selection() {
+        let object = &engine.scene.objects[i];
+        assert!(object.parent.is_none(), "粘贴体应是根物体");
+        assert!(object.body.is_some(), "有刚体的原物体，粘贴体也要有刚体");
+    }
+
+    doc.undo(&mut engine);
+    assert_eq!(engine.scene.len(), before, "撤销粘贴要回到原数量");
+    doc.redo(&mut engine);
+    assert_eq!(engine.scene.len(), before + 2, "重做粘贴要回来");
+
+    // 空选择复制只改提示，不清掉已有剪贴板。
+    doc.select_only(None);
+    assert_eq!(doc.copy_selected(&engine), 0);
+    assert_eq!(doc.paste_clipboard(&mut engine), 2);
+}

@@ -872,6 +872,14 @@ impl EditorApp {
                                     inner.doc.redo(engine);
                                     return;
                                 }
+                                KeyCode::KeyC => {
+                                    inner.doc.copy_selected(engine);
+                                    return;
+                                }
+                                KeyCode::KeyV => {
+                                    inner.doc.paste_clipboard(engine);
+                                    return;
+                                }
                                 _ => {}
                             }
                         }

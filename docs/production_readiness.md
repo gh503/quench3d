@@ -96,7 +96,7 @@
 | 撤销 / 重做 | 全部 | **本轮补上**（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y，工具栏带可用态） | ✅（本轮） |
 | 数值输入（拖拽改值的输入框） | 全部 | 有（egui `DragValue` + 滑杆） | ✅ |
 | 多选 / 框选 | 全部 | **Shift/Ctrl 点选 + 组变换**（平移/绕中心旋转/缩放、批量复制/删除）+ **Shift/Ctrl 拖动框选**（按屏幕中心、追加、空框清空） | ✅（框选按中心，不做遮挡判断） |
-| 复制粘贴（Ctrl+C/V） | 全部 | 只有"复制"按钮（偏移复制 + 自动重名）；无剪贴板 | 🟠 |
+| 复制粘贴（Ctrl+C/V） | 全部 | **内部剪贴板第 105 轮**（Ctrl+C 存世界变换+刚体形状，Ctrl+V 偏移粘贴/自动重名/重建刚体/根物体/可撤销）；不碰系统剪贴板 | 🟡 |
 | 视口导航（轨道/平移/缩放 + 聚焦） | 全部 | 有（左键/中键/Alt 旋转、右键平移、滚轮缩放），**本轮补 `F` 聚焦选中** | ✅ |
 | 网格与吸附 | 全部 | 1 单位网格 + gizmo 吸附；**网格不随尺度自适应** | 🟠 |
 | 场景树 / 属性面板 / 状态栏 | 全部 | 有 | ✅ |
@@ -2527,6 +2527,23 @@ box_select_uses_screen_centers_and_adds_or_clears`（左/右两个箱子、只�
 **边界**：按中心点命中（大物体边缘在框内但中心在外不算）；不做深度遮挡/透视裁剪；
 框选只处理场景物体，不处理粒子/流体代理；没有"框选减选"。
 
+### 23.10 编辑器内部剪贴板（第 105 轮）
+
+**做了什么**：`Doc.clipboard` 保存选中物体的 `SceneObject` 快照 + **世界变换** + 刚体
+`Shape`/静态动态标记。`Ctrl+C` 只写剪贴板（不记历史、不改场景）；`Ctrl+V` 给每份物体
+加 `(1.2,0.2,0)` 偏移、自动重名、按原形状重建刚体、`parent=None`，并把粘贴体作为一组
+选中；粘贴调用 `record_edit`，所以可撤销/重做。打开/恢复场景时清空剪贴板，避免旧 mesh
+下标落到新场景。`Ctrl+C`/`Ctrl+V` 在 app 的 Ctrl 分支里先于引擎处理。
+
+**验证**：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history
+copy_and_paste_clipboard_rebuilds_objects_and_is_undoable`（复制不改场景/不进历史、粘贴
++2、自动重名、根物体、刚体存在、撤销/重做数量、空选择不清剪贴板）；浏览器
+`tools/probe_web_ui.sh` 在框选 7 个后发 Ctrl+C/V，`objects 7 → 14`，截图变化。
+
+**边界**：只保存视觉字段和刚体形状/静态动态，不保存密度/摩擦/材质贴图覆盖；粘贴体
+不继承父子关系；剪贴板不跨进程/不碰系统剪贴板；粘贴到已删除 mesh 的场景不可能，因为
+打开新场景会清空。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -2580,7 +2597,7 @@ box_select_uses_screen_centers_and_adds_or_clears`（左/右两个箱子、只�
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**752** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**753** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

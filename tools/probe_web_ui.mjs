@@ -356,6 +356,7 @@ async function main() {
     nativeVirtualKeyCode: 16,
     modifiers: 8,
   });
+  await sleep(150);
   await send("Input.dispatchMouseEvent", {
     type: "mousePressed",
     x: 380,
@@ -400,8 +401,11 @@ async function main() {
   });
   await sleep(500);
   const boxed = await uiState();
+  const afterBoxFail = await snap("box-after-fail");
   if (!(selectedOf(boxed) > beforeBoxSelected)) {
-    die(`Shift 框选没有追加选中（之前 ${beforeBoxSelected}，之后 ${selectedOf(boxed)}）：${boxed}`);
+    die(
+      `Shift 框选没有追加选中（之前 ${beforeBoxSelected}，之后 ${selectedOf(boxed)}，画面 ${afterBoxFail}）：${boxed}`,
+    );
   }
   const afterBox = await snap("box-after");
   if (beforeBox === afterBox) {
@@ -416,6 +420,48 @@ async function main() {
   console.log(
     `PASS 框选：selected ${beforeBoxSelected} → ${selectedOf(boxed)}`,
   );
+
+  // ---- Ctrl+C / Ctrl+V：内部剪贴板粘贴出物体 ----
+  const beforePaste = objectsOf(boxed);
+  const ctrlKey = async (type, key, code, vk) =>
+    send("Input.dispatchKeyEvent", {
+      type,
+      key,
+      code,
+      windowsVirtualKeyCode: vk,
+      nativeVirtualKeyCode: vk,
+      modifiers: 2,
+    });
+  await ctrlKey("rawKeyDown", "Control", "ControlLeft", 17);
+  await sleep(100);
+  await ctrlKey("rawKeyDown", "c", "KeyC", 67);
+  await sleep(100);
+  await ctrlKey("keyUp", "c", "KeyC", 67);
+  await ctrlKey("keyUp", "Control", "ControlLeft", 17);
+  await sleep(300);
+  await ctrlKey("rawKeyDown", "Control", "ControlLeft", 17);
+  await sleep(100);
+  await ctrlKey("rawKeyDown", "v", "KeyV", 86);
+  await sleep(100);
+  await ctrlKey("keyUp", "v", "KeyV", 86);
+  await ctrlKey("keyUp", "Control", "ControlLeft", 17);
+  await sleep(700);
+  const pastedState = await uiState();
+  const afterPaste = objectsOf(pastedState);
+  if (!(afterPaste > beforePaste)) {
+    die(`Ctrl+C/V 没有粘贴出新物体（${beforePaste} → ${afterPaste}）：${pastedState}`);
+  }
+  const afterPasteSnap = await snap("clipboard-after");
+  if (afterBox === afterPasteSnap) {
+    die("Ctrl+V 增加了物体但画面没有变化");
+  }
+  results.push({
+    feature: "复制粘贴 Ctrl+C/V",
+    before: afterBox,
+    after: afterPasteSnap,
+    changed: true,
+  });
+  console.log(`PASS 复制粘贴：objects ${beforePaste} → ${afterPaste}`);
 
   // 运行时错误/panic/GL 能力日志都要当失败（与 probe_webgl2 的判据一致）。
   const logs = events
