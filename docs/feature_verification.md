@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **744** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **751** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -126,6 +126,7 @@ tools/verify_all.sh
 | 线上 Pages 启动 | `tools/probe_deployed.sh [URL]` | HTTP 200 + 线上 wasm 第一帧 + 遮罩收起；网络不通跳过 |
 | Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/P 前后 UI 状态与中央视口截图都必须变；F5/F8 只断言状态（默认场景可能没有接触/动画），Tab 断言相机模式（Orbit→Fly） |
 | 模型骨骼叠加 | `cargo test -p quench3d --lib model_skeleton` | 三关节链（中间夹一个非关节节点）只产出 root→mid、mid→tip 两条边；叠加层再乘模型世界变换（+10,+2） |
+| 公告板粒子 | `cargo test -p quench3d --lib particle` / `cargo test -p quench3d-cli --lib particles_parse` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-cli --test cli_e2e particle_billboards` / `cargo test -p quench3d-editor --test history particles_survive` | 生成 N 个隐藏代理物体、初速度/重力积分、面向相机、按寿命淡出、到寿命重生（不额外多飞一帧）、非法参数回退；CLI 同相机下中心红色分量比无粒子高 40；编辑器存盘保留 `particles` 且重新载入建出发射器 |
 | 多选 + 成组变换 | `cargo test -p quench3d-editor --lib multi_selection` / `--lib group_member` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history` | Shift/Ctrl 加减选、主选中提级、去重；组轴心=选中中心；平移/绕中心旋转/缩放三种增量都作用到附加物体；批量删除/复制后下标与选中正确 |
 | IBL/HDRI 环境光照 | `cargo test -p quench3d-render --lib environment` / `cargo test -p quench3d-cli --test cli_e2e environment_map` | Radiance 平铺/新 RLE/旧 RLE 解码；cubemap 6 面/递减 mip；CLI 有 HDR 时黑球中心亮度和 > 无图 +60（无太阳/环境光，只有 IBL）；缺文件/负强度被 `validate` 拒绝 |
 | 手工 LOD 距离切换 | `cargo test -p quench3d --lib lods_` | 3 级 LOD：5m 细模、15m 中模、25m 粗模；19m 仍在 20m 阈值的 10% 滞回带内保持粗模，17m 回到中模；注册后只有基础层可见；空/不递增层级被拒绝 |
@@ -159,7 +160,8 @@ python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 * **IBL / HDRI**：`lighting.environment_map` 已接入（Radiance HDR / PNG / JPEG，等距柱状，64px 7 级预滤波 cubemap）；没有精确 PMREM/GGX、没有从环境图提取太阳、没有`.exr`。
 * **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除 + 静态模型手工 LOD（`models[].lods`，距离 + 10% 滞回）；没有自动减面、动画模型 LOD 或遮挡剔除。
 * **编辑器多选**：Shift/Ctrl 点选 + 组变换已做；框选、层级抑制（父子同选）、成组复制后的模型引用重建仍未做。
-* **音频、脚本层、粒子、贴花、地形、多视口**：没有。
+* **音频、脚本层、贴花、地形、多视口**：没有。
+* **粒子**：CPU 公告板发射器（CLI/场景 JSON）已做；没有 GPU 粒子、软粒子、粒子间排序遮挡、编辑器发射器面板。
 * **Web 摄像头**：只有桌面文件协议；浏览器 `getUserMedia` 未接。
 * **真机 GPU/浏览器矩阵**：只有 headless Chrome + SwiftShader（软件光栅）；真机 WebGPU 未验证。
 * **跨机器的 golden 基线**：`--golden` 已能逐像素比对，但仓库**没有**提交一份

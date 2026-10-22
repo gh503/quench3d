@@ -219,7 +219,10 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             continue;
         }
         // 粒子/水面是渲染代理，不是场景内容：存回去会变成几千个球体物体。
-        if object.fluid_particle.is_some() || object.fluid_surface.is_some() {
+        if object.fluid_particle.is_some()
+            || object.fluid_surface.is_some()
+            || engine.scene.is_particle_object(index)
+        {
             continue;
         }
         let name = if object.name.trim().is_empty() {

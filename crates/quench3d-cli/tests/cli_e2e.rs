@@ -7362,3 +7362,58 @@ fn export_writes_obj_and_mtl_that_info_can_read() {
     assert!((size[1].as_f64().unwrap() - 1.0).abs() < 1e-5, "{size:?}");
     assert!((size[2].as_f64().unwrap() - 3.0).abs() < 1e-5, "{size:?}");
 }
+
+/// 公告板粒子：同一相机/光照下，有粒子的画面中心必须比没粒子更红。
+#[test]
+fn particle_billboards_change_pixels() {
+    let doctor = run(&["doctor", "--json"]).json();
+    if !doctor["data"]["gpu_available"].as_bool().unwrap() {
+        eprintln!("跳过渲染断言：没有可用 GPU");
+        return;
+    }
+    let dir = temp_dir("particles");
+    let plain = dir.join("plain.json");
+    let with = dir.join("with.json");
+    let plain_png = dir.join("plain.png");
+    let with_png = dir.join("with.png");
+    let base = r#"{
+        "camera": { "position": [0, 1.5, 6], "look_at": [0, 1.5, 0] },
+        "lighting": { "sun_intensity": 0, "ambient": 0, "preset": "none" },
+        "render": { "output": "ignored.png", "width": 320, "height": 240, "msaa": 1 }
+    }"#;
+    std::fs::write(&plain, base).unwrap();
+    let particle = r#"{
+        "count": 16,
+        "position": [0, 1.5, 0],
+        "radius": 0,
+        "velocity": [0, 0, 0],
+        "spread": 0,
+        "lifetime": 10,
+        "size": 2.0,
+        "gravity": [0, 0, 0],
+        "color": [1.0, 0.1, 0.05, 1.0]
+    }"#;
+    let mut doc: serde_json::Value = serde_json::from_str(base).unwrap();
+    doc["particles"] = serde_json::from_str(&format!("[{particle}]")).unwrap();
+    std::fs::write(&with, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    for (scene, out) in [(&plain, &plain_png), (&with, &with_png)] {
+        let r = run(&[
+            "render",
+            scene.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(r.code, 0, "渲染失败：{}", r.stderr);
+    }
+    let (w, h, a) = decode_rgba(&plain_png);
+    let (w2, h2, b) = decode_rgba(&with_png);
+    assert_eq!((w, h), (w2, h2));
+    let (ar, ag, ab) = center_mean(w, h, &a);
+    let (br, bg, bb) = center_mean(w, h, &b);
+    assert!(
+        br > ar + 40.0 && br > bg + 30.0 && br > bb + 30.0,
+        "粒子必须让中心变红：无粒子 ({ar:.1},{ag:.1},{ab:.1}) vs 有粒子 ({br:.1},{bg:.1},{bb:.1})"
+    );
+}

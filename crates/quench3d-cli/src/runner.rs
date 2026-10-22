@@ -3451,6 +3451,7 @@ pub fn setup_visuals(
 
     add_water_visuals(engine, doc);
     add_fluid_visuals(engine, doc);
+    add_particle_visuals(engine, doc);
     apply_water_options(engine, doc);
     apply_camera(engine, doc);
     Ok(instances)
@@ -3539,6 +3540,58 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
                 );
             }
         }
+    }
+}
+
+/// 把 `particles` 发射器画成 CPU 公告板粒子（每个粒子一个四边形物体）。
+///
+/// 所有发射器共用一个白色 unlit、alpha 混合的双面四边形材质；颜色来自每颗
+/// 粒子的实例色（含寿命淡出）。`Scene::update_particles` 每帧负责位置/朝向/alpha。
+fn add_particle_visuals(engine: &mut Engine, doc: &SceneDoc) {
+    if doc.particles.is_empty() {
+        return;
+    }
+    let mesh = engine.assets.mesh(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$particle_quad",
+        &MeshData::quad(Vec2::ONE),
+    );
+    let desc = MaterialDesc {
+        base_color: Vec4::ONE,
+        metallic: 0.0,
+        roughness: 1.0,
+        unlit: true,
+        alpha_blend: true,
+        double_sided: true,
+        ..MaterialDesc::default()
+    };
+    let material = engine.assets.material(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$particle_billboard",
+        desc,
+    );
+    for p in &doc.particles {
+        let position = p.position.unwrap_or([0.0, 1.0, 0.0]);
+        let velocity = p.velocity.unwrap_or([0.0, 1.2, 0.0]);
+        let gravity = p.gravity.unwrap_or([0.0, -1.0, 0.0]);
+        let color = p.color.unwrap_or([1.0, 0.65, 0.2, 0.8]);
+        engine.scene.add_particle_system(
+            mesh,
+            material,
+            quench3d::scene::ParticleDesc {
+                count: p.count.unwrap_or(64),
+                position: Vec3::new(position[0], position[1], position[2]),
+                radius: p.radius.unwrap_or(0.1),
+                velocity: Vec3::new(velocity[0], velocity[1], velocity[2]),
+                spread: p.spread.unwrap_or(0.4),
+                lifetime: p.lifetime.unwrap_or(2.0),
+                size: p.size.unwrap_or(0.12),
+                gravity: Vec3::new(gravity[0], gravity[1], gravity[2]),
+                color: Vec4::new(color[0], color[1], color[2], color[3]),
+            },
+        );
     }
 }
 
@@ -4245,6 +4298,8 @@ fn run_render_single(
             return;
         }
         engine.scene.sync_from_physics(&engine.world);
+        // 单帧没有 tick：至少把公告板转向相机、按初始年龄算好 alpha/缩放。
+        engine.scene.update_particles(engine.camera().position, 0.0);
         // 单帧渲染没有"帧时间"：按播放器当前时间（= 场景里的 start）摆一次姿态。
         engine
             .scene

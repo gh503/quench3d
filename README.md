@@ -256,7 +256,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12525591 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12553331 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -997,6 +997,14 @@ NaN 刚体  : 0
   没有焦散/水下体积光/真实波浪。
   `waters` 与 `fluids` 可以同时写，互不替换；两者都给刚体浮力时
   取较大的浸没占比，不会叠加浮力（M3 口径）。
+* `particles` 是 **CPU 公告板粒子**（纯视觉，不参与物理）：`{ "count": 64,
+  "position": [0, 1, 0], "radius": 0.1, "velocity": [0, 1.2, 0], "spread": 0.4,
+  "lifetime": 2.0, "size": 0.12, "gravity": [0, -1, 0], "color": [1, 0.65, 0.2, 0.8] }`。
+  每颗粒子是一个面向相机的四边形（`MeshData::quad`），按寿命二次淡出，寿命到点回到
+  发射器附近重生；`update_particles` 每帧做老化/重力/速度积分/朝向。所有发射器共用一个
+  白色 unlit、alpha 混合、双面材质，颜色来自实例色。**边界**：没有贴图/软粒子/
+  粒子间排序遮挡（透明批次按物体距离排序，不按粒子深度）、没有 GPU 粒子/发射器形状/
+  曲线编辑；编辑器不创建也不编辑粒子，只显示并原样保存场景 JSON 里的 `particles`。
 * 顶层 `water` 是**屏幕空间水外观**（不是第二个水域）：`{ "color": [r,g,b],
   "clarity": 0~1, "wave_strength": 0~4, "foam": 0~2, "refraction": 0~2 }`。
   所有 `waters` / `fluids` 共用这份风格；只影响后处理画面，浮力/粒子结果逐位不变。
@@ -1298,7 +1306,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 744 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 751 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
@@ -1782,8 +1790,8 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 * CLI / 大模型：`ask` 需要有一个正在运行的 OpenAI 兼容服务（本地 Ollama / llama.cpp /
   LM Studio / vLLM，或云端）；`https://` 端点依赖系统 `curl`。模型输出质量取决于所选模型，
   本仓库的测试用假服务覆盖协议与校验，不评价模型本身。
-  场景语法有 `waters` 的解析浮力/半透明水面与 `fluids` 的 CPU PBF 粒子（M3 双向耦合 +
-  M4 低模球粒子，M4.2 可配置屏幕空间水后处理），
+  场景语法有 `waters` 的解析浮力/半透明水面、`fluids` 的 CPU PBF 粒子（M3 双向耦合 +
+  M4 低模球粒子，M4.2 可配置屏幕空间水后处理）与 `particles` 的 CPU 公告板粒子，
   也没有程序化材质。
 * 编辑器：**已有拖拽式变换 gizmo、撤销/重做与父子层级**（见 §1.1），但
   **手柄不支持拖拽中键入数值、不支持轴心切换、不支持框选**（多选自第 101 轮起

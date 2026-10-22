@@ -357,3 +357,35 @@ fn duplicate_selected_copies_every_member() {
     assert_ne!(doc.selected, Some(a), "主选中应当指向复制体");
     assert_ne!(doc.selected, Some(b), "主选中应当指向复制体");
 }
+
+/// 粒子段由编辑器原样保存，并在重新载入时真的建出发射器（不是死字段）。
+#[test]
+fn particles_survive_editor_roundtrip_and_reload() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = serde_json::json!({
+        "particles": [{
+            "count": 3,
+            "position": [1, 2, 3],
+            "lifetime": 5,
+            "size": 0.5,
+            "color": [1, 0.2, 0.1, 1]
+        }]
+    })
+    .to_string();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &source).expect("先载入带粒子的场景");
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出");
+    assert!(
+        saved.json.contains("\"particles\""),
+        "编辑器存盘不能丢掉粒子段：{}",
+        saved.json
+    );
+    scene_io::load_into_engine(&mut engine, &saved.json).expect("载入自己存出来的场景");
+    assert_eq!(engine.scene.particles.len(), 1, "载入后必须有发射器");
+    assert_eq!(engine.scene.particles[0].objects.len(), 3);
+    for &index in &engine.scene.particles[0].objects {
+        assert!(engine.scene.is_particle_object(index));
+    }
+}

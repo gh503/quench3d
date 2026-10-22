@@ -1256,7 +1256,7 @@ impl Doc {
     pub fn pick(&self, engine: &Engine, ray: &Ray) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
         for (index, object) in engine.scene.objects.iter().enumerate() {
-            if !object.visible {
+            if !object.visible || engine.scene.is_particle_object(index) {
                 continue;
             }
             let Some(bounds) = engine.scene.bounds_of(&engine.renderer, &[index]) else {

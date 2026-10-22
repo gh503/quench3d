@@ -368,6 +368,11 @@ pub struct SceneDoc {
     /// 推开，并把法向冲量反推给动态刚体；粒子的自由表面还给刚体浮力/阻尼（M3 双向）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fluids: Vec<FluidDoc>,
+    /// CPU 公告板粒子发射器（纯视觉，不参与物理）。
+    ///
+    /// 不写 = 没有粒子；每颗粒子是一个面向相机的四边形，按寿命淡出。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub particles: Vec<ParticleDoc>,
     /// 屏幕空间水的全局风格（颜色/清澈度/波浪/泡沫/折射）。
     ///
     /// 不写 = 使用渲染器缺省值；写了只影响**画面**，不影响物理（浮力/粒子结果逐位相同）。
@@ -934,6 +939,7 @@ impl Default for SceneDoc {
             ground: None,
             waters: Vec::new(),
             fluids: Vec::new(),
+            particles: Vec::new(),
             water: None,
             materials: BTreeMap::new(),
             include: Vec::new(),
@@ -1073,6 +1079,39 @@ pub struct FluidDoc {
     /// 粒子上限 1~20000，缺省 4000；超出按晶格顺序截断。
     #[serde(default = "default_fluid_max_particles")]
     pub max_particles: usize,
+}
+
+/// CPU 公告板粒子发射器（纯视觉）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticleDoc {
+    /// 粒子数（1~4096），缺省 64。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    /// 发射器中心 `[x, y, z]`，缺省 `[0, 1, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f32; 3]>,
+    /// 初始位置球形半径（米），缺省 0.1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    /// 初速度 `[x, y, z]`（米/秒），缺省 `[0, 1.2, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<[f32; 3]>,
+    /// 速度随机扰动幅度（米/秒），缺省 0.4。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread: Option<f32>,
+    /// 寿命（秒），缺省 2.0；必须 > 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<f32>,
+    /// 四边形边长（米），缺省 0.12；必须 > 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    /// 重力 `[x, y, z]`（米/秒²），缺省 `[0, -1, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gravity: Option<[f32; 3]>,
+    /// 颜色（线性 RGBA），缺省 `[1.0, 0.65, 0.2, 0.8]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 4]>,
 }
 
 impl FluidDoc {
@@ -2592,6 +2631,7 @@ pub fn structural_diagnostics(value: &Value) -> Vec<Diagnostic> {
     check_section::<GroundDoc>(map.get("ground"), "ground", &mut out);
     check_array::<WaterDoc>(map.get("waters"), "waters", &mut out);
     check_array::<FluidDoc>(map.get("fluids"), "fluids", &mut out);
+    check_array::<ParticleDoc>(map.get("particles"), "particles", &mut out);
     check_section::<CameraDoc>(map.get("camera"), "camera", &mut out);
     check_section::<Vec<AnimationDoc>>(map.get("animations"), "animations", &mut out);
     check_section::<BTreeMap<String, CameraDoc>>(map.get("cameras"), "cameras", &mut out);
@@ -3197,6 +3237,7 @@ impl IncludeCtx {
         }
         into.waters.extend(doc.waters.iter().cloned());
         into.fluids.extend(doc.fluids.iter().cloned());
+        into.particles.extend(doc.particles.iter().cloned());
         into.objects.extend(doc.objects.iter().cloned());
         into.models.extend(doc.models.iter().cloned());
         into.joints.extend(doc.joints.iter().cloned());
@@ -3852,6 +3893,65 @@ impl SceneDoc {
                             ),
                         ),
                     );
+                }
+            }
+        }
+        // 公告板粒子：纯视觉，但非法数值会让整组物体退化/NaN，仍当场报。
+        for (i, p) in self.particles.iter().enumerate() {
+            let path = format!("particles[{i}]");
+            if let Some(count) = p.count {
+                if !(1..=4096).contains(&count) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.count"),
+                        "粒子数必须在 1~4096 之间",
+                    ));
+                }
+            }
+            for (name, v) in [
+                ("position", p.position),
+                ("velocity", p.velocity),
+                ("gravity", p.gravity),
+            ] {
+                if let Some(v) = v {
+                    if !v.iter().all(|x| x.is_finite()) {
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.{name}"),
+                            "向量必须是有限数",
+                        ));
+                    }
+                }
+            }
+            for (name, v) in [("radius", p.radius), ("spread", p.spread)] {
+                if let Some(v) = v {
+                    if !(v.is_finite() && v >= 0.0) {
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.{name}"),
+                            "必须是有限的非负数",
+                        ));
+                    }
+                }
+            }
+            for (name, v) in [("lifetime", p.lifetime), ("size", p.size)] {
+                if let Some(v) = v {
+                    if !(v.is_finite() && v > 0.0) {
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.{name}"),
+                            "必须是有限正数",
+                        ));
+                    }
+                }
+            }
+            if let Some(c) = p.color {
+                if !c.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.color"),
+                        "颜色必须是有限数，RGBA 都在 0~1 之间",
+                    ));
                 }
             }
         }
@@ -7499,6 +7599,47 @@ mod tests {
             ),
         ] {
             let doc = SceneDoc::from_value(json!({ "fluids": [fluid] })).expect("结构合法");
+            let diags = doc.validate();
+            assert!(
+                diags.iter().any(|d| d.path == path),
+                "要报 {path}: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn particles_parse_validate_and_roundtrip() {
+        let doc = SceneDoc::from_value(json!({
+            "particles": [
+                { "count": 12, "position": [0, 2, 0], "color": [1, 0.5, 0.2, 0.7] },
+                { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
+                  "velocity": [0, 2, 0], "gravity": [0, -3, 0] }
+            ]
+        }))
+        .expect("particles 要能解析");
+        assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+        assert_eq!(doc.particles.len(), 2);
+        assert_eq!(doc.particles[0].count, Some(12));
+        let text = serde_json::to_string(&doc).expect("序列化");
+        assert!(text.contains("\"particles\""), "粒子段要写回：{text}");
+        let again = SceneDoc::from_json(&text).expect("往返");
+        assert_eq!(again.particles.len(), 2);
+        assert_eq!(again.particles[1].size, Some(0.2));
+
+        for (particle, path) in [
+            (json!({"count": 0}), "particles[0].count"),
+            (json!({"count": 5000}), "particles[0].count"),
+            (json!({"lifetime": 0}), "particles[0].lifetime"),
+            (json!({"size": 0}), "particles[0].size"),
+            (json!({"radius": -1}), "particles[0].radius"),
+            (json!({"spread": -1}), "particles[0].spread"),
+            (json!({"color": [1, 1, 1, 2]}), "particles[0].color"),
+            (json!({"position": [0, "x", 0]}), "particles"),
+        ] {
+            let doc = match SceneDoc::from_value(json!({ "particles": [particle] })) {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
             let diags = doc.validate();
             assert!(
                 diags.iter().any(|d| d.path == path),

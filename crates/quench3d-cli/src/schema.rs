@@ -364,6 +364,11 @@ pub fn scene_grammar() -> Value {
                 "note": "CPU PBF 粒子流体（M3 双向）：粒子被刚体推开并反推冲量；粒子自由表面给刚体浮力/阻尼；渲染为低模球粒子 + 屏幕空间水面（mask 折射/吸收/菲涅耳/边缘泡沫，不是物理光线折射）。不写 = 没有粒子，物理结果与以前逐位相同",
             }],
             "materials": "名字 → 材质对象",
+            "particles": [
+                "CPU 公告板粒子发射器数组（纯视觉，不参与物理）",
+                "每项字段：count（1~4096，缺省 64）、position（缺省 [0,1,0]）、radius（初始球形半径，缺省 0.1）、velocity（缺省 [0,1.2,0]）、spread（速度扰动，缺省 0.4）、lifetime（秒，必须 >0，缺省 2）、size（四边形边长米，必须 >0，缺省 0.12）、gravity（缺省 [0,-1,0]）、color（线性 RGBA，alpha 0~1，缺省 [1,0.65,0.2,0.8]）",
+                "粒子是面向相机的四边形；按寿命淡出后回到发射器重生。没有贴图、没有排序粒子间遮挡、没有 GPU 粒子",
+            ],
             "include": [
                 "被包含的外部场景片段路径数组（跨文件复用：把一份场景拆成多个文件）",
                 "相对路径以**写这一行的文件**所在目录为基准；片段可以再 include（最多 16 层，同一个文件只并入一次，成环报 include_cycle）",
@@ -756,6 +761,29 @@ pub fn json_schema() -> Value {
         d["required"] = json!(["size"]);
         d
     });
+    defs.insert("particle".into(), {
+        let mut d = def(&[
+            "count", "position", "radius", "velocity", "spread", "lifetime", "size", "gravity",
+            "color",
+        ]);
+        d["description"] =
+            json!("一个 CPU 公告板粒子发射器（纯视觉，不参与物理）：粒子面向相机、按寿命淡出");
+        d["properties"]["count"] = json!({ "type": "integer", "minimum": 1, "maximum": 4096 });
+        for name in ["position", "velocity", "gravity"] {
+            d["properties"][name] = json!({ "$ref": "#/$defs/vec3" });
+        }
+        for name in ["radius", "spread"] {
+            d["properties"][name] = json!({ "type": "number", "minimum": 0 });
+        }
+        for name in ["lifetime", "size"] {
+            d["properties"][name] = json!({ "type": "number", "exclusiveMinimum": 0 });
+        }
+        d["properties"]["color"] = json!({
+            "type": "array", "items": { "type": "number", "minimum": 0, "maximum": 1 },
+            "minItems": 4, "maxItems": 4
+        });
+        d
+    });
     defs.insert("model".into(), {
         let mut d = def(&[
             "path",
@@ -1053,6 +1081,8 @@ pub fn json_schema() -> Value {
                             "description": "水域（浮力环境）：只影响动态刚体的浮力/阻尼，不参与碰撞；不写 = 没有水" },
                 "fluids": { "type": "array", "items": { "$ref": "#/$defs/fluid" },
                             "description": "CPU PBF 粒子流体：粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；不写 = 没有粒子" },
+                "particles": { "type": "array", "items": { "$ref": "#/$defs/particle" },
+                               "description": "CPU 公告板粒子：面向相机、按寿命淡出；纯视觉，不参与物理；不写 = 没有粒子" },
                 "water": { "$ref": "#/$defs/waterStyle",
                            "description": "屏幕空间水外观（颜色/清澈度/波浪/泡沫/折射）；只影响画面，不影响物理；根独有段" },
                 "materials": { "type": "object",
@@ -1113,6 +1143,12 @@ pub fn system_prompt() -> String {
             max_particles: 4000 }]
   // CPU PBF 粒子流体（M3 双向）：长方体发射器 + 粒子参数。粒子被刚体推开并反推冲量；
   // 没有表面张力/涡量；渲染为低模球 + 屏幕空间水面（M4.2）。不写 = 没有粒子。
+- particles: [{ count: 64, position: [0, 1, 0], radius: 0.1,
+                velocity: [0, 1.2, 0], spread: 0.4, lifetime: 2.0,
+                size: 0.12, gravity: [0, -1, 0],
+                color: [1.0, 0.65, 0.2, 0.8] }]
+  // CPU 公告板粒子（纯视觉）：每颗粒子是一个面向相机的四边形，按寿命淡出后
+  // 回到发射器重生；没有贴图、没有粒子间排序遮挡、没有 GPU 粒子。不写 = 没有粒子。
 - water: { color: [r, g, b]（线性 0~1）, clarity: 0~1, wave_strength: 0~4,
            foam: 0~2, refraction: 0~2 }
   // 屏幕空间水外观（M4.2）：所有 waters/fluids 共用一份风格；只影响画面，不影响物理。
@@ -1126,7 +1162,7 @@ pub fn system_prompt() -> String {
   物体写 "template": "名字" 引用；物体自己写的字段覆盖模板
   （模板里写 name/parent/position/rotation_deg 没有意义，会被忽略并警告）
 - include: ["parts/wall.json", "../shared/common.json"]   // 跨文件复用（可选）
-  被包含的片段只贡献可合并的段（materials/templates/cameras + waters/fluids/objects/models/
+  被包含的片段只贡献可合并的段（materials/templates/cameras + waters/fluids/particles/objects/models/
   joints/actions/probes/animations）：具名表重名 = duplicate_name 错误（不静默覆盖），
   数组按声明顺序追加（**本文件自己的内容在前**，被包含的在后）。
   根独有的段（ground/camera/lighting/simulate/render/gravity/physics/name/assets）
@@ -1662,6 +1698,7 @@ mod tests {
             "ground",
             "waters",
             "fluids",
+            "particles",
             "materials",
             "templates",
             "instances",

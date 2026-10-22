@@ -557,6 +557,9 @@ impl Engine {
         // 手工 LOD：相机移动（即使暂停）也要切层级；相机位置在切之前取。
         let camera_position = self.camera().position;
         self.scene.update_lods(camera_position);
+        // 粒子是视觉量：暂停时不再老化/飞行，但仍要面向当前相机。
+        let particle_dt = if self.paused { 0.0 } else { dt };
+        self.scene.update_particles(camera_position, particle_dt);
 
         self.renderer.begin_frame();
         self.scene.submit(&mut self.renderer);

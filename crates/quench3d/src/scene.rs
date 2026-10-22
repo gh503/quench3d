@@ -96,6 +96,102 @@ pub struct FluidSurfaceSpec {
     pub level: f32,
 }
 
+/// 一个 CPU 粒子发射器的参数。
+///
+/// 粒子是**公告板**：每个粒子是一个面向相机的四边形（`MeshData::quad`），
+/// 颜色/透明度按寿命淡出。它们不是刚体，也不参与物理；这里只做视觉。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParticleDesc {
+    /// 粒子数（会 clamp 到 `1..=4096`，避免误写成十万个物体）。
+    pub count: usize,
+    /// 发射器中心（世界坐标）。
+    pub position: Vec3,
+    /// 初始位置在中心周围的球形半径（米）。
+    pub radius: f32,
+    /// 粒子初速度（米/秒）。
+    pub velocity: Vec3,
+    /// 初速度的随机扰动幅度（米/秒）。
+    pub spread: f32,
+    /// 寿命（秒，必须 > 0）。
+    pub lifetime: f32,
+    /// 四边形边长（米，必须 > 0）。
+    pub size: f32,
+    /// 重力加速度（米/秒²）。
+    pub gravity: Vec3,
+    /// 颜色（线性 RGBA；alpha 再乘寿命淡出）。
+    pub color: Vec4,
+}
+
+impl Default for ParticleDesc {
+    fn default() -> Self {
+        Self {
+            count: 64,
+            position: Vec3::new(0.0, 1.0, 0.0),
+            radius: 0.1,
+            velocity: Vec3::new(0.0, 1.2, 0.0),
+            spread: 0.4,
+            lifetime: 2.0,
+            size: 0.12,
+            gravity: Vec3::new(0.0, -1.0, 0.0),
+            color: Vec4::new(1.0, 0.65, 0.2, 0.8),
+        }
+    }
+}
+
+/// 一个 CPU 粒子发射器的运行时状态。
+pub struct ParticleSystem {
+    /// 每个粒子对应的场景物体下标。
+    pub objects: Vec<usize>,
+    /// 发射器中心。
+    pub position: Vec3,
+    /// 初始位置球形半径。
+    pub radius: f32,
+    /// 初速度。
+    pub velocity: Vec3,
+    /// 速度扰动。
+    pub spread: f32,
+    /// 寿命（秒）。
+    pub lifetime: f32,
+    /// 四边形边长。
+    pub size: f32,
+    /// 重力。
+    pub gravity: Vec3,
+    /// 基础颜色（alpha 在运行时乘淡出）。
+    pub color: Vec4,
+    /// 每颗粒子的年龄与速度。
+    state: Vec<ParticleState>,
+    /// 确定性伪随机种子。
+    seed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ParticleState {
+    age: f32,
+    velocity: Vec3,
+}
+
+/// 线性同余随机数（只用于视觉扰动；不需要密码学质量）。
+fn particle_rand(seed: &mut u64) -> f32 {
+    *seed = seed
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    ((*seed >> 40) as f32) / ((1u32 << 24) as f32)
+}
+
+/// 半径 `radius` 球内的均匀随机点。
+fn particle_point(seed: &mut u64, radius: f32) -> Vec3 {
+    let mut p = Vec3::new(
+        particle_rand(seed) * 2.0 - 1.0,
+        particle_rand(seed) * 2.0 - 1.0,
+        particle_rand(seed) * 2.0 - 1.0,
+    );
+    let len = p.length();
+    if len > 1.0 {
+        p /= len;
+    }
+    p * (radius * particle_rand(seed).cbrt())
+}
+
 /// 一个粒子可视绑定：第 `fluid` 个流体的第 `particle` 颗粒子。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FluidParticleVisual {
@@ -712,6 +808,8 @@ pub struct Scene {
     pub gpu_skinning: bool,
     /// 手工 LOD 组；每帧按相机距离切可见层级。
     pub lods: Vec<ModelLodGroup>,
+    /// CPU 粒子发射器（视觉层；不是刚体，也不参与物理）。
+    pub particles: Vec<ParticleSystem>,
 }
 
 impl Default for Scene {
@@ -730,6 +828,7 @@ impl Scene {
             animations: Vec::new(),
             gpu_skinning: true,
             lods: Vec::new(),
+            particles: Vec::new(),
         }
     }
 
@@ -764,6 +863,133 @@ impl Scene {
             fluid_surface: None,
         });
         index
+    }
+
+    /// 添加一个 CPU 粒子发射器；每个粒子是一个独立的公告板场景物体。
+    ///
+    /// 返回发射器下标（不是物体下标）。粒子物体不会出现在场景树/导出里
+    /// （见 [`Scene::is_particle_object`]），由 [`Scene::update_particles`] 每帧驱动。
+    pub fn add_particle_system(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        desc: ParticleDesc,
+    ) -> usize {
+        let count = desc.count.clamp(1, 4096);
+        let lifetime = if desc.lifetime.is_finite() && desc.lifetime > 0.0 {
+            desc.lifetime
+        } else {
+            1.0
+        };
+        let size = if desc.size.is_finite() && desc.size > 0.0 {
+            desc.size
+        } else {
+            0.1
+        };
+        let radius = if desc.radius.is_finite() {
+            desc.radius.max(0.0)
+        } else {
+            0.0
+        };
+        let spread = if desc.spread.is_finite() {
+            desc.spread.max(0.0)
+        } else {
+            0.0
+        };
+        let system = self.particles.len();
+        let seed = 0x9E37_79B9_7F4A_7C15u64 ^ (system as u64 + 1);
+        let mut system_state = ParticleSystem {
+            objects: Vec::with_capacity(count),
+            position: desc.position,
+            radius,
+            velocity: desc.velocity,
+            spread,
+            lifetime,
+            size,
+            gravity: desc.gravity,
+            color: desc.color,
+            state: Vec::with_capacity(count),
+            seed,
+        };
+        for i in 0..count {
+            let mut offset = particle_point(&mut system_state.seed, radius);
+            offset += desc.position;
+            let index = self.add_named(
+                mesh,
+                material,
+                Transform::new(offset, Quat::IDENTITY, Vec3::splat(size)),
+                &format!("$particles/{system}/{i}"),
+            );
+            self.objects[index].color = desc.color;
+            self.objects[index].visible = true;
+            system_state.objects.push(index);
+            system_state.state.push(ParticleState {
+                age: particle_rand(&mut system_state.seed) * lifetime,
+                velocity: desc.velocity + particle_point(&mut system_state.seed, spread),
+            });
+        }
+        self.particles.push(system_state);
+        system
+    }
+
+    /// 这个物体是不是粒子发射器生成的公告板（决定场景树/拾取/导出是否忽略它）。
+    pub fn is_particle_object(&self, index: usize) -> bool {
+        // 代理下标按加入顺序递增（删除只会保持相对顺序），所以能二分；
+        // 场景树/拾取每帧对每个物体都要问一次，4096 个粒子时线性扫会明显卡。
+        self.particles
+            .iter()
+            .any(|system| system.objects.binary_search(&index).is_ok())
+    }
+
+    /// 按帧推进粒子：老化/重生、重力、速度积分、面向相机、寿命淡出。
+    ///
+    /// `dt = 0` 时只做朝向/颜色同步（暂停时粒子不继续飞，但相机绕过去仍然面向相机）。
+    pub fn update_particles(&mut self, camera: Vec3, dt: f32) {
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        for system in &mut self.particles {
+            for i in 0..system.objects.len() {
+                let object_index = system.objects[i];
+                let Some(state) = system.state.get_mut(i) else {
+                    continue;
+                };
+                let mut respawned = false;
+                if dt > 0.0 {
+                    state.age += dt;
+                    if state.age >= system.lifetime {
+                        state.age = 0.0;
+                        state.velocity =
+                            system.velocity + particle_point(&mut system.seed, system.spread);
+                        if let Some(object) = self.objects.get_mut(object_index) {
+                            object.transform.position =
+                                system.position + particle_point(&mut system.seed, system.radius);
+                        }
+                        // 重生的这一帧不再积分：否则新粒子会凭空多飞一帧的 dt。
+                        respawned = true;
+                    }
+                }
+                let Some(object) = self.objects.get_mut(object_index) else {
+                    continue;
+                };
+                if dt > 0.0 && !respawned {
+                    object.transform.position += state.velocity * dt;
+                    state.velocity += system.gravity * dt;
+                }
+                let to_camera = camera - object.transform.position;
+                if to_camera.length_squared() > 1e-8 {
+                    object.transform.rotation =
+                        Quat::from_rotation_arc(Vec3::Z, to_camera.normalize());
+                }
+                object.transform.scale = Vec3::splat(system.size);
+                let fade = (1.0 - (state.age / system.lifetime).clamp(0.0, 1.0)).powi(2);
+                object.color = Vec4::new(
+                    system.color.x,
+                    system.color.y,
+                    system.color.z,
+                    system.color.w * fade,
+                );
+                object.visible = fade > 0.001;
+            }
+        }
     }
 
     /// 添加并绑定物理刚体。
@@ -843,6 +1069,7 @@ impl Scene {
     pub fn clear(&mut self) {
         self.objects.clear();
         self.animations.clear();
+        self.particles.clear();
     }
 
     /// 物体数量。
@@ -1655,6 +1882,25 @@ impl Scene {
             let shifted = if child > index { child - 1 } else { child };
             self.set_world_transform(shifted, world);
         }
+        // 粒子代理是普通场景物体，删掉前面的物体同样会让它们整体前移；
+        // 不修就会把粒子系统指到别人的物体上（甚至越界）。
+        for system in &mut self.particles {
+            let mut i = 0;
+            while i < system.objects.len() {
+                if system.objects[i] == index {
+                    system.objects.remove(i);
+                    if i < system.state.len() {
+                        system.state.remove(i);
+                    }
+                } else {
+                    if system.objects[i] > index {
+                        system.objects[i] -= 1;
+                    }
+                    i += 1;
+                }
+            }
+        }
+        self.particles.retain(|system| !system.objects.is_empty());
         Some(removed)
     }
 
@@ -2860,6 +3106,105 @@ mod anim_tests {
                 ])
                 .is_none(),
             "距离不递增"
+        );
+    }
+}
+
+#[cfg(test)]
+mod particle_tests {
+    use super::*;
+
+    fn emitter() -> ParticleDesc {
+        ParticleDesc {
+            count: 8,
+            position: Vec3::new(1.0, 2.0, 3.0),
+            radius: 0.0,
+            velocity: Vec3::new(0.0, 1.0, 0.0),
+            spread: 0.0,
+            lifetime: 1.0,
+            size: 0.25,
+            gravity: Vec3::new(0.0, -2.0, 0.0),
+            color: Vec4::new(0.2, 0.4, 0.8, 0.6),
+        }
+    }
+
+    #[test]
+    fn particle_system_creates_hidden_from_outliner_proxy_objects() {
+        let mut scene = Scene::new();
+        assert_eq!(scene.add_particle_system(0, 0, emitter()), 0);
+        assert_eq!(scene.particles[0].objects.len(), 8);
+        for &index in &scene.particles[0].objects {
+            assert!(scene.is_particle_object(index));
+            assert_eq!(scene.objects[index].transform.scale, Vec3::splat(0.25));
+        }
+        assert!(!scene.is_particle_object(0) || scene.particles[0].objects.contains(&0));
+    }
+
+    #[test]
+    fn particles_move_fly_toward_camera_fade_and_respawn_on_the_clock() {
+        let mut scene = Scene::new();
+        scene.add_particle_system(0, 0, emitter());
+        let index = scene.particles[0].objects[0];
+        let base = scene.objects[index].transform.position;
+        // 初生年龄是随机的；这条测试要从 0 岁开始看淡出，先钉住年龄。
+        scene.particles[0].state[0].age = 0.0;
+
+        // 相机在 -Z 方向：粒子四边形（局部 +Z）应当转向相机。
+        let camera = Vec3::new(1.0, 2.0, -5.0);
+        scene.update_particles(camera, 0.25);
+        let object = &scene.objects[index];
+        assert!(
+            (object.transform.position - base).length() > 0.1,
+            "有初速度的粒子必须移动"
+        );
+        let normal = object.transform.rotation * Vec3::Z;
+        let expected = (camera - object.transform.position).normalize();
+        assert!(normal.dot(expected) > 0.99, "公告板必须面向相机");
+        assert!(
+            object.color.w < 0.6 && object.color.w > 0.0,
+            "寿命淡出必须降低 alpha：{}",
+            object.color.w
+        );
+
+        // 跑过整个寿命：位置回到发射器附近，alpha 重新回到接近基础值。
+        scene.update_particles(camera, 1.0);
+        let object = &scene.objects[index];
+        assert!(
+            (object.transform.position - base).length() < 0.75,
+            "过寿命后必须重生在发射器附近：{:?}",
+            object.transform.position
+        );
+        assert!(object.color.w > 0.4, "重生后 alpha 应当恢复");
+    }
+
+    #[test]
+    fn particle_count_and_invalid_fields_are_clamped() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 0;
+        desc.lifetime = -3.0;
+        desc.size = 0.0;
+        scene.add_particle_system(0, 0, desc);
+        assert_eq!(scene.particles[0].objects.len(), 1, "count 至少为 1");
+        assert_eq!(scene.particles[0].lifetime, 1.0, "非法寿命回退");
+        assert_eq!(scene.particles[0].size, 0.1, "非法尺寸回退");
+    }
+    #[test]
+    fn removing_an_object_before_the_proxies_keeps_their_indices_valid() {
+        let mut scene = Scene::new();
+        scene.add_named(0, 0, Transform::IDENTITY, "先放的物体");
+        scene.add_particle_system(0, 0, emitter());
+        let old_first = scene.particles[0].objects[0];
+        assert_eq!(old_first, 1, "代理应当排在已有物体后面");
+        scene.remove(0);
+        assert_eq!(
+            scene.particles[0].objects[0], 0,
+            "删除前面的物体后代理下标必须前移"
+        );
+        scene.update_particles(Vec3::new(0.0, 0.0, 5.0), 0.1);
+        assert!(
+            scene.objects[0].visible,
+            "仍然能正常驱动，不能指到越界/错物体"
         );
     }
 }

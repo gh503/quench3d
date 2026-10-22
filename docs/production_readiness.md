@@ -2235,7 +2235,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 阻尼 | 🟡 简化 | 浸没部分按 `drag × submerged` 的比例缩速度（1/s），不是粘性应力；缺省 6 是"辐射阻尼"的替身 |
 | 睡眠 | ✅ 可睡 | 浮力直接累加 `force/torque`、**不调 `wake_up`**，睡眠体连采样都跳过（`submerged` 停在最后醒着的值）；水面变化后要显式唤醒 |
 | 多重水域 | ⚠️ 叠加 | 重叠水域会叠加浮力（不做优先级/去重）；文档建议不要重叠 |
-| 粒子/流动/波浪/折射 | 🟡 | PBF 粒子流体（M2/M3）与可配置屏幕空间水面后处理（M4.2：mask.g 水面高度 + 波面法线/高光）已做；真实波浪/流动/光线折射/焦散仍无 |
+| 粒子/流动/波浪/折射 | 🟡 | PBF 粒子流体（M2/M3）、CPU 公告板粒子（第 102 轮）与可配置屏幕空间水面后处理（M4.2：mask.g 水面高度 + 波面法线/高光）已做；真实波浪/流动/光线折射/焦散、GPU/软粒子仍无 |
 | 格式校验 | ✅ | 尺寸/密度/阻尼非法在 `validate` 报 `waters[i].*`；`build_world` 再挡一次（不静默忽略） |
 
 ### 20.3 测试与证据
@@ -2442,7 +2442,28 @@ bind group；纹理固定 64px/7 mip，换图只 `write_texture` 覆写内容，
 * 预滤波是锥形平均，不是精确 GGX/PMREM，没有 BRDF LUT；没有从环境图提取太阳/局部光。
 * 反射里不会出现场景物体（没有 SSR/平面反射）。
 
-### 23.6 编辑器多选 + 成组变换（第 101 轮）
+### 23.6 CPU 公告板粒子（第 102 轮）
+
+**做了什么**：顶层 `particles[]`（`count`/`position`/`radius`/`velocity`/`spread`/
+`lifetime`/`size`/`gravity`/`color`）在装载时创建 N 个隐藏代理物体，每个用一个面向
+相机的 `MeshData::quad`（白色 unlit + alpha 混合 + 双面共享材质，颜色来自实例色）。
+`Scene::update_particles(camera, dt)` 每帧推进年龄、重力与速度，重生时回到发射器并
+**跳过该帧积分**（否则新粒子会凭空多飞一帧）；公告板用
+`Quat::from_rotation_arc(Vec3::Z, dir)` 转向相机，alpha 按 `(1-age/lifetime)^2` 淡出。
+粒子物体由 `Scene::is_particle_object` 标识，场景树/拾取/场景导出都跳过它们；编辑器
+保存时 `particles` 段从底稿原样带出，重新载入会重新建发射器。暂停时 `dt=0`，只更新
+朝向，不继续飞。
+
+**验证**：`cargo test -p quench3d --lib particle`（4 条：代理/隐藏、运动+朝向+淡出+重生、count/寿命/尺寸 clamp、删除前方物体后代理下标前移）；`cargo test -p quench3d-cli --lib particles_parse`
+（缺省/往返/8 条非法路径）；`cargo test -p quench3d-cli --test cli_e2e
+particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红色分量 +40 以上）；
+`cargo test -p quench3d-editor --test history particles_survive_editor_roundtrip_and_reload`
+（存盘保留 + 重载建 3 个代理）。
+
+**边界**：没有贴图/软粒子/粒子间深度排序（按物体距离排序，不按粒子深度）、GPU 粒子、
+发射器形状/曲线；编辑器没有粒子创建/参数面板，只显示并原样保存 JSON 里的段。
+
+### 23.7 编辑器多选 + 成组变换（第 101 轮）
 
 **做了什么**：`Doc.extra_selected` 保存主选中之外的物体；场景树与视口都支持
 `Shift`/`Ctrl` 点选加减选，场景树标题显示「已选 N 个」。多选时 gizmo 的轴心是
@@ -2519,7 +2540,7 @@ bind group；纹理固定 64px/7 mip，换图只 `write_texture` 覆写内容，
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**744** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**751** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
