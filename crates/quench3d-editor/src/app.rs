@@ -17,6 +17,8 @@ use egui_wgpu::ScreenDescriptor;
 use quench3d::prelude::*;
 use quench3d::render::wgpu;
 use quench3d::winit::application::ApplicationHandler;
+#[cfg(not(target_arch = "wasm32"))]
+use quench3d::winit::dpi::LogicalPosition;
 use quench3d::winit::dpi::LogicalSize;
 use quench3d::winit::event::{
     ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent,
@@ -150,6 +152,12 @@ struct Inner {
     autosave: crate::autosave::AutoSave,
     last_time: f64,
     first_frame_done: bool,
+    /// 窗口移动过、但还没写进 layout.json。
+    #[cfg(not(target_arch = "wasm32"))]
+    window_pos_dirty: bool,
+    /// 上次写布局文件的时间（移动窗口时节流，避免每个像素都写盘）。
+    #[cfg(not(target_arch = "wasm32"))]
+    last_layout_save: std::time::Instant,
 }
 
 impl Inner {
@@ -242,7 +250,21 @@ impl Inner {
             autosave,
             last_time: quench3d::clock::now_seconds(),
             first_frame_done: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            window_pos_dirty: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_layout_save: std::time::Instant::now(),
         }
+    }
+
+    /// 把当前窗口位置写进布局文件；失败只记日志（布局是偏好，不该阻止编辑）。
+    #[cfg(not(target_arch = "wasm32"))]
+    fn persist_layout(&mut self) {
+        if let Err(e) = self.doc.layout.save() {
+            log::warn!("写布局失败（窗口位置不会记住）：{e}");
+        }
+        self.last_layout_save = std::time::Instant::now();
+        self.window_pos_dirty = false;
     }
 
     /// 渲染一帧（含 UI）。
@@ -896,6 +918,8 @@ impl EditorApp {
         let attrs = Window::default_attributes()
             .with_title(self.config.title.clone())
             .with_inner_size(LogicalSize::new(self.config.width, self.config.height));
+        #[cfg(not(target_arch = "wasm32"))]
+        let attrs = apply_window_position(attrs, &crate::layout::Layout::load());
         #[cfg(target_arch = "wasm32")]
         let attrs = {
             use wasm_bindgen::JsCast;
@@ -931,8 +955,21 @@ impl EditorApp {
 
         match &event {
             WindowEvent::CloseRequested => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if inner.window_pos_dirty {
+                    inner.persist_layout();
+                }
                 event_loop.exit();
                 return;
+            }
+            WindowEvent::Moved(position) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    inner.doc.layout.set_window_position(position.x, position.y);
+                    inner.window_pos_dirty = true;
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = position;
             }
             WindowEvent::Resized(size) => {
                 inner.engine.gpu.resize(size.width, size.height);
@@ -1109,6 +1146,21 @@ impl EditorApp {
     }
 }
 
+/// 把 `layout.json` 里的窗口坐标装进 winit 的窗口属性（桌面）。
+///
+/// 单独抽出来是为了在不创建窗口、不碰显示服务器的前提下测试「文件 → 窗口属性」
+/// 这一段；真正的窗口放置仍由窗口系统决定。
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_window_position(
+    attrs: quench3d::winit::window::WindowAttributes,
+    layout: &crate::layout::Layout,
+) -> quench3d::winit::window::WindowAttributes {
+    match (layout.window_x, layout.window_y) {
+        (Some(x), Some(y)) => attrs.with_position(LogicalPosition::new(f64::from(x), f64::from(y))),
+        _ => attrs,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl ApplicationHandler for EditorApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1155,8 +1207,14 @@ impl ApplicationHandler for EditorApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(inner) = self.inner.as_ref() {
+        if let Some(inner) = self.inner.as_mut() {
             inner.window.request_redraw();
+            // 拖动窗口时 `Moved` 可能每帧都来；节流到最多 1 秒写一次布局。
+            if inner.window_pos_dirty
+                && inner.last_layout_save.elapsed() >= std::time::Duration::from_secs(1)
+            {
+                inner.persist_layout();
+            }
         }
         self.poll_exit_hook(_event_loop);
     }
@@ -1372,4 +1430,30 @@ pub fn run(config: EditorConfig) -> Result<(), Box<dyn std::error::Error>> {
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.spawn_app(EditorApp::new(config));
     Ok(())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_position_reaches_window_attributes() {
+        let layout = crate::layout::Layout {
+            window_x: Some(120),
+            window_y: Some(-40),
+            ..crate::layout::Layout::default()
+        };
+        let attrs = apply_window_position(Window::default_attributes(), &layout);
+        assert_eq!(
+            attrs.position,
+            Some(quench3d::winit::dpi::Position::Logical(
+                LogicalPosition::new(120.0, -40.0)
+            ))
+        );
+        let none = apply_window_position(
+            Window::default_attributes(),
+            &crate::layout::Layout::default(),
+        );
+        assert_eq!(none.position, None, "没有记录位置时不要硬塞 (0,0)");
+    }
 }

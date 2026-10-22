@@ -2509,7 +2509,7 @@ particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红
 `PASS 自动保存写入：... 字节` 与 `PASS 自动保存 F9`。
 
 **边界**：Web 没有"正常退出"钩子，所以恢复点只会在手动保存/下载或用户丢弃时清；
-窗口位置仍不持久化；面板宽度已持久化（`layout.json` / `localStorage["quench3d.editor.layout.v1"]`）。localStorage 约 5MB，场景过大时写失败只记日志。
+桌面窗口位置现在也持久化（第 118 轮，物理坐标写进 `layout.json`；Wayland 协议不提供位置，只在 X11/Windows/macOS 生效）；Web 端窗口由浏览器管，不写位置（只写面板宽度到 `localStorage["quench3d.editor.layout.v1"]`）。localStorage 约 5MB，场景过大时写失败只记日志。
 
 ### 23.9 编辑器框选（第 104 轮）
 
@@ -2711,7 +2711,7 @@ Web 端 localStorage 被禁时保存失败只写状态栏。
 
 **验证**：`cargo check/clippy -p quench3d-editor --target wasm32-unknown-unknown`；
 `tools/probe_web_camera.sh` 用 Chrome `--use-fake-device-for-media-stream` +
-`?camera=1` 自动开窗，4 秒后隔 1.2 秒截两张图，预览区域运动像素 **9346–15181/116000**
+`?camera=1` 自动开窗，4 秒后隔 1.2 秒截两张图，预览区域运动像素 **2234–15181/116000**
 （阈值 500），证明 getUserMedia → video → canvas → egui 纹理链路真的在动；
 `tools/probe_web_ui.sh` 的 9 项按键/框选/剪贴板/自动保存仍全绿。
 边界：没有真实摄像头/多浏览器矩阵。
@@ -2728,6 +2728,23 @@ Web 端 localStorage 被禁时保存失败只写状态栏。
 outliner_drop_request_reparents_a_static_object`：静态父/子两个物体，塞入
 `reparent_request` 跑一整帧面板，断言 `parent` 变成父物体且世界 X 仍为正（没有被
 吸到父原点）。手势坐标本身没有自动化点击（egui 行位置随字体/缩放变化），这是测试边界。
+
+### 23.22 桌面窗口位置持久化（第 118 轮）
+
+**做了什么**：`layout.json` 增加 `window_x/window_y`（物理像素，两个必须同时存在）；
+启动时 `WindowAttributes::with_position` 用它开窗；`WindowEvent::Moved` 记进布局，
+`about_to_wait` 节流到最多 1 秒写一次，关闭窗口时若仍 dirty 立即写。损坏/只有一半/
+离谱坐标（|值| > 100000）静默退回「窗口系统决定」，不会把窗口开到不可见的地方。
+Web 端不写窗口位置（浏览器管窗口）。
+
+**平台边界**：Wayland 协议不提供窗口位置，`with_position` 会被忽略、也没有 `Moved`；
+因此这条**只在 X11 / Windows / macOS 生效**（本机是 Wayland，只能验证读写与属性，
+无法验证真实放置）。Web 端窗口归浏览器管，同样不适用。
+
+**验证**：`cargo test -p quench3d-editor --lib` 的 `layout` 三个测试与 `layout_position_reaches_window_attributes`：JSON 往返保留
+`(80,-20)`；只有 `window_x` 的半截文件被清成 `None`；`-999999` 这类损坏值也被清；
+原子文件往返后位置仍在。**边界**：无显示器环境无法自动点住窗口拖动，所以
+"真的移动窗口后重启落在原处"是人工/有显示器的验证，单测只钉住读写与夹取规则。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

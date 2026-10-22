@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **桌面窗口位置持久化（第 118 轮）**：`layout.json` 增加 `window_x/window_y`，
+  启动 `with_position`、`Moved` 记录、最多 1 秒节流写盘、关闭时补写；半截/离谱坐标
+  静默回默认。新增 2 个测试（布局读写 + 窗口属性；总测试 770 → 772）。无显示器环境不自动验证真实拖动。
+
 - **场景树拖放改父子（第 117 轮）**：拖动静态物体到另一行松开 → `Doc::set_parent`
   保持世界位姿并写历史；拖到空白区解除父子。刚体/模型分组成员不参与；成环由
   `set_parent` 拒绝。新增 1 个 UI 测试（`outliner_drop_request...`，总测试
@@ -50,7 +54,7 @@
   `<video>` → 2D canvas → egui 纹理，约 30 fps；权限拒绝/非 https/无设备/
   `video.play` 失败都显示具体错误。桌面骨架管线不变。新增 7 个 web-sys feature
   与 wasm 约 +32 KB；只有预览，无骨架/轮廓/深度推理。验证：wasm check/clippy、`build_web.sh`、`probe_web_ui.sh`、新增
-  `probe_web_camera.sh`（Chrome 假摄像头两帧运动 9346–15181/116000 像素）。
+  `probe_web_camera.sh`（Chrome 假摄像头两帧运动 2234–15181/116000 像素）。
 
 - **`movie --encoder mp4`（第 115 轮）**：渲染帧通过 stdin rawvideo 流式喂给外部
   `ffmpeg`（libx264 / crf 18 / yuv420p / faststart），直接产出 MP4；不把
