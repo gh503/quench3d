@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **无**（无 gltf/obj 写出代码，0 命中）→ 在编辑器里改完只能存回自有 JSON | `quench3d export model.glb` 能被 Blender 打开 | **1–2 人月** | ❌ |
+| 模型**导出** | Blender / 引擎 | **部分**：`quench3d export` 写出 OBJ + MTL（图元物体、模板/实例展开、父级位姿；凸包与 `models[]` 跳过并报告）→ 能被 Blender/本引擎重新导入；贴图不嵌入、无 glTF | `quench3d export scene.json model.obj` 导出后 `info model.obj` 三角形的包围盒/数量对得上 | 已落地 OBJ；glTF/贴图嵌入另算 | ✅（OBJ） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -413,7 +413,7 @@
 | 校验口径 | 场景校验器要求被引用的贴图**文件存在**（`texture.rs` 校验路径），所以"应用"失败要给出可读原因，而不是静默保留旧贴图 |
 
 **其它两条已核过的落点**：glTF/OBJ 导入在 `assets.rs:261/465/500`（OBJ 不带材质）；
-模型**导出**目前 0 命中，是互操作里唯一的"只进不出"。
+模型**导出**已补 OBJ（图元 → OBJ/MTL，可被本引擎重新导入）；仍缺 glTF 与贴图嵌入，"只进不出"只算部分解除。
 版本检查（`scene_doc.rs` 的 `validate`）现在是**版本不符直接报错**，并且明确**不做**迁移器：
 这个格式还没有外部使用者，与其维护一条"读旧版"的路径，不如让旧文件拿到一条清楚的诊断。
 再加字段时请同步改 `VERSION`（当前 2）。
@@ -2492,7 +2492,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**707** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**712** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

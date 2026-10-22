@@ -26,6 +26,7 @@ pub mod bench;
 pub mod generate;
 pub mod llm;
 pub mod mcp;
+pub mod obj_export;
 pub mod report;
 pub mod runner;
 pub mod scene_doc;

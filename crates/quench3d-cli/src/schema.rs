@@ -134,6 +134,17 @@ pub fn schema() -> Value {
                 "examples": ["quench3d validate scene.json --json"]
             },
             {
+                "name": "export",
+                "summary": "把场景里的图元物体导出为 Wavefront OBJ + MTL；导入的 models[] 与凸包会列进 skipped",
+                "args": [
+                    { "name": "scene", "type": "path", "required": true, "description": "场景 JSON 路径" },
+                    { "name": "out", "type": "path", "required": false, "description": "输出 OBJ 路径；缺省与场景同名 .obj" }
+                ],
+                "output": "{ scene, out, mtl, objects, vertices, triangles, skipped[] }",
+                "notes": "只导出 objects/templates/instances 展开后的图元几何；贴图不嵌入 MTL，材质只写标量色/粗糙度/自发光/透明度；导出的是文档初始位姿，不是物理步进后的快照",
+                "examples": ["quench3d export scene.json model.obj --json"]
+            },
+            {
                 "name": "render",
                 "summary": "无窗口渲染场景为 PNG（可先步进物理）",
                 "args": [

@@ -60,7 +60,7 @@ fn version_and_help_are_friendly() {
     let h = run(&["--help"]);
     assert_eq!(h.code, 0);
     for cmd in [
-        "schema", "doctor", "info", "validate", "render", "simulate", "ask", "mcp",
+        "schema", "doctor", "info", "validate", "export", "render", "simulate", "ask", "mcp",
     ] {
         assert!(h.stdout.contains(cmd), "帮助里缺少命令 {cmd}");
     }
@@ -78,7 +78,7 @@ fn schema_json_describes_every_command() {
         .map(|c| c["name"].as_str().unwrap())
         .collect();
     for expected in [
-        "validate", "render", "simulate", "ask", "mcp", "doctor", "info",
+        "validate", "export", "render", "simulate", "ask", "mcp", "doctor", "info",
     ] {
         assert!(names.contains(&expected), "能力清单缺少 {expected}");
     }
@@ -7200,4 +7200,63 @@ fn model_animation_structure_is_validated() {
     let (code, paths) = diagnostics(&p);
     assert_eq!(code, 0, "名字不存在不该让场景非法：{paths:?}");
     assert!(paths.is_empty(), "{paths:?}");
+}
+
+#[test]
+fn export_writes_obj_and_mtl_that_info_can_read() {
+    let dir = temp_dir("export_obj");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "format":"quench3d.scene","version":2,"name":"export",
+          "objects":[
+            {"name":"box","shape":{"type":"box","size":[2,1,3]},"position":[0,1,0]},
+            {"name":"ball","shape":{"type":"sphere","radius":0.5},"position":[3,1,0],
+             "material":"red"}
+          ],
+          "materials":{"red":{"color":[1,0,0]}}
+        }"#,
+    )
+    .expect("写临时场景");
+    let obj = dir.join("model.obj");
+    let r = run(&[
+        "export",
+        scene.to_str().unwrap(),
+        obj.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stderr={}\nstdout={}", r.stderr, r.stdout);
+    let env = r.json();
+    assert_eq!(env["ok"], true);
+    assert_eq!(env["data"]["objects"], 2);
+    assert!(obj.exists(), "OBJ 没有落盘");
+    let mtl = dir.join("model.mtl");
+    assert!(mtl.exists(), "MTL 没有落盘");
+    let text = std::fs::read_to_string(&obj).unwrap();
+    assert!(text.contains("mtllib model.mtl"), "{text}");
+    assert!(text.contains("usemtl red"), "{text}");
+    assert_eq!(
+        env["data"]["triangles"].as_u64().unwrap(),
+        12 + 768,
+        "盒子 12 + 球 768"
+    );
+
+    // 真的能被本引擎的导入器读回来：三角形数与包围盒对得上。
+    let info = run(&["info", obj.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        info.code, 0,
+        "stderr={}\nstdout={}",
+        info.stderr, info.stdout
+    );
+    let info = info.json();
+    assert_eq!(
+        info["data"]["triangles"].as_u64().unwrap(),
+        env["data"]["triangles"].as_u64().unwrap()
+    );
+    assert_eq!(info["data"]["meshes"].as_u64().unwrap(), 2);
+    let size = info["data"]["bounds_size"].as_array().unwrap();
+    assert!((size[0].as_f64().unwrap() - 4.5).abs() < 1e-5, "{size:?}");
+    assert!((size[1].as_f64().unwrap() - 1.0).abs() < 1e-5, "{size:?}");
+    assert!((size[2].as_f64().unwrap() - 3.0).abs() < 1e-5, "{size:?}");
 }

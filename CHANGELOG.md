@@ -32,6 +32,15 @@
 
 ### 新增
 
+- **场景导出 OBJ（第 93 轮）**：新增 `quench3d export scene.json model.obj`，把 `objects`
+  （含模板/实例展开、父级位置与朝向、复合形状部件、材质标量色）写成 OBJ + 同名 MTL。
+  本仓库的 OBJ 导入器能把导出结果读回来，因此测试是真正的"导出 → 再导入"往返：
+  物体数、三角形数对得上。边界：凸包没有三角网格、`models[]` 外部模型不导出，二者都进
+  `skipped[]` 明说；贴图不嵌入 MTL；导出的是文档初始位姿，不是物理步进后的快照。
+  回归：`obj_export::tests::exports_vertices_faces_and_hierarchy` /
+  `export_round_trips_through_obj_parser` / `exports_template_instances_as_independent_objects` /
+  `convex_is_reported_not_silently_dropped`，另有 CLI e2e
+  `export_writes_obj_and_mtl_that_info_can_read`（总测试 707 → 712）。
 - **崩溃恢复自动保存（第 92 轮，桌面端）**：每 30 秒把可无损表达的场景写到
   `$XDG_STATE_HOME/quench3d/autosave.scene.json`（临时文件 + rename；场景里有导入模型等
   不可表达物体时跳过，避免恢复一份悄悄丢模型的场景）。正常退出删掉恢复文件，只有崩溃/
