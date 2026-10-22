@@ -56,6 +56,8 @@ pub struct Requests {
     pub save: bool,
     /// 把当前场景导出成单文件 glTF 2.0。
     pub export_gltf: bool,
+    /// 顶部「导出 GLB」：写/下载二进制 GLB。
+    pub export_glb: bool,
     /// 打开场景文件。
     pub load: bool,
     /// 截图（当前窗口内容 → PNG）。
@@ -408,10 +410,17 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
             }
             if ui
                 .button("导出 glTF")
-                .on_hover_text("把当前场景的图元导出成单文件 glTF 2.0（几何内嵌）")
+                .on_hover_text("把当前场景的图元导出成单文件 glTF 2.0（base64 几何/贴图）")
                 .clicked()
             {
                 req.export_gltf = true;
+            }
+            if ui
+                .button("导出 GLB")
+                .on_hover_text("把当前场景的图元导出成二进制 GLB（JSON + BIN chunk）")
+                .clicked()
+            {
+                req.export_glb = true;
             }
             if ui
                 .button("截图")

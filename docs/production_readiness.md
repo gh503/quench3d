@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图与节点树）；动画未导出 | ✅（OBJ/glTF 几何） |
+| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」「导出 GLB」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`/`.glb`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图与节点树）；动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -2646,8 +2646,22 @@ version、总长度、JSON/BIN chunk 类型与对齐、无 data URI、byteLength
 `export_writes_glb_that_info_can_read`（落盘 → `info model.glb` 读回三角形数与 mesh 数）。
 总测试 762 → 764。
 
-**边界**：GLB 仍只含几何/材质/贴图/节点树，不含动画；Web 编辑器按钮仍只写 `.gltf`
-（浏览器没有本地文件系统，导出走下载文本）。
+**边界**：GLB 仍只含几何/材质/贴图/节点树，不含动画。
+
+### 23.17 编辑器导出 GLB（第 112 轮）
+
+**做了什么**：顶部工具栏加「导出 GLB」。`scene_io::scene_to_glb` 复用
+`scene_to_gltf`（同一份场景语义）再走 `glb_from_json` 把 base64 buffer 换成 BIN
+chunk；桌面写当前场景同名 `.glb`，Web 新增 `download_bytes` 用 Blob 下载二进制。
+状态栏报告物体/三角形/字节数与跳过项。
+
+**验证**：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history
+editor_glb_export_has_valid_chunks`（magic/version/总长度、JSON chunk、无 data URI、
+节点数=物体数）；`ui_smoke` 断言工具栏同时画出「导出 glTF」「导出 GLB」。总测试
+764 → 765。
+
+**边界**：按钮仍不弹文件对话框（桌面按当前场景路径换扩展名）；Web 下载依赖浏览器
+Blob；GLB 不含动画。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

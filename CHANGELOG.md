@@ -41,6 +41,12 @@
 
 ### 新增
 
+- **编辑器导出 GLB（第 112 轮）**：顶部工具栏加「导出 GLB」，复用
+  `scene_to_gltf` 的场景语义后再转 BIN chunk（`glb_from_json`）；桌面写同名 `.glb`，
+  Web 新增 `download_bytes` 用 Blob 下载二进制。状态栏报告物体/三角形/字节数。
+  回归：编辑器 history 单测（chunk/无 data URI/节点数）+ UI 冒烟断言两个导出按钮
+  （总测试 764 → 765）。
+
 - **GLB 二进制导出（第 111 轮）**：`quench3d export scene.json model.glb` 复用 glTF 场景/
   贴图/节点树导出器，把 base64 buffer 解进 GLB 的 BIN chunk，JSON chunk 去掉
   `buffers[0].uri`，两个 chunk 4 字节对齐，文件头按 GLB 2.0 写；`.gltf` 路径不变。

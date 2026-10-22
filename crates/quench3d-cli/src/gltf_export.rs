@@ -597,8 +597,14 @@ fn base64(data: &[u8]) -> String {
 /// chunk，省掉 base64 的 33% 膨胀，加载器也不需要解码 data URI。JSON 里的
 /// `buffers[0].uri` 必须删掉，否则规范要求外部资源。
 pub fn to_glb(export: &GltfExport) -> Result<Vec<u8>, String> {
+    glb_from_json(&export.json)
+}
+
+/// 从已经序列化好的 `.gltf` JSON 转 GLB；编辑器拿到的是 `SavedGltf.json`，走这个入口，
+/// 不必再把整个 `GltfExport` 搬来搬去。
+pub fn glb_from_json(json: &str) -> Result<Vec<u8>, String> {
     let mut root: Value =
-        serde_json::from_str(&export.json).map_err(|e| format!("glTF JSON 解析失败：{e}"))?;
+        serde_json::from_str(json).map_err(|e| format!("glTF JSON 解析失败：{e}"))?;
     let bin = match root["buffers"].get(0) {
         Some(buffer) => {
             let uri = buffer["uri"]

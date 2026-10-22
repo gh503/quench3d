@@ -570,6 +570,34 @@ fn selected_parent_suppresses_child_in_the_transform_group() {
 
 /// 编辑器的"导出 glTF"和 CLI 用同一条场景语义：导出的 JSON 合法、节点数与场景图元对得上。
 #[test]
+fn editor_glb_export_has_valid_chunks() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    doc.reset_history(&engine);
+    let saved = scene_io::scene_to_glb(&engine, &doc).expect("GLB 导出必须成功");
+    assert_eq!(&saved.bytes[0..4], b"glTF");
+    assert_eq!(u32::from_le_bytes(saved.bytes[4..8].try_into().unwrap()), 2);
+    assert_eq!(
+        u32::from_le_bytes(saved.bytes[8..12].try_into().unwrap()) as usize,
+        saved.bytes.len()
+    );
+    let json_len = u32::from_le_bytes(saved.bytes[12..16].try_into().unwrap()) as usize;
+    let json: serde_json::Value =
+        serde_json::from_slice(&saved.bytes[20..20 + json_len]).expect("JSON chunk 必须合法");
+    assert_eq!(json["asset"]["version"], "2.0");
+    assert!(json["buffers"][0].get("uri").is_none());
+    assert_eq!(
+        json["nodes"].as_array().unwrap().len(),
+        saved.objects,
+        "每个导出物体一个节点"
+    );
+    assert!(saved.objects > 0 && saved.triangles > 0);
+}
+
+#[test]
 fn editor_gltf_export_is_valid_and_contains_the_scene() {
     let Some(mut engine) = headless_engine() else {
         return;

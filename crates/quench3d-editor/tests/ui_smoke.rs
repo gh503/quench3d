@@ -246,6 +246,10 @@ fn all_editor_panels_draw_in_one_frame() {
         "工具栏没有画出「导出 glTF」按钮"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "导出 GLB"),
+        "工具栏没有画出「导出 GLB」按钮"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "动画（2 个实例）"),
         "动画面板标题没有出现在绘制图元里"
     );

@@ -71,8 +71,36 @@ pub struct SavedGltf {
     pub objects: usize,
     /// 三角形数。
     pub triangles: usize,
-    /// 没法带进 glTF 的说明（贴图、导入模型、凸包…）。
+    /// 没法带进 glTF 的说明（缺贴图、导入模型、凸包…）。
     pub skipped: Vec<String>,
+}
+
+/// GLB 导出结果（单文件二进制，JSON + BIN chunk）。
+pub struct SavedGlb {
+    /// 二进制 GLB 字节。
+    pub bytes: Vec<u8>,
+    /// 写出的物体数。
+    pub objects: usize,
+    /// 三角形数。
+    pub triangles: usize,
+    /// 没法带进 GLB 的说明。
+    pub skipped: Vec<String>,
+}
+
+/// 把引擎当前场景导出成二进制 GLB。
+///
+/// 复用 [`scene_to_gltf`] 的路径（场景 JSON → CLI 导出器 → 合法 `.gltf` JSON），
+/// 再走 `glb_from_json` 把 base64 buffer 换成 BIN chunk；因此编辑器的 `.gltf` 与
+/// `.glb` 两条出口在场景语义上完全一致。
+pub fn scene_to_glb(engine: &Engine, doc: &Doc) -> Result<SavedGlb, String> {
+    let saved = scene_to_gltf(engine, doc)?;
+    let bytes = quench3d_cli::gltf_export::glb_from_json(&saved.json)?;
+    Ok(SavedGlb {
+        bytes,
+        objects: saved.objects,
+        triangles: saved.triangles,
+        skipped: saved.skipped,
+    })
 }
 
 /// 把引擎当前场景导出成单文件 glTF 2.0。
@@ -1158,6 +1186,32 @@ pub fn download_text(file_name: &str, text: &str) -> Result<(), String> {
     let array = js_sys::Array::new();
     array.push(&wasm_bindgen::JsValue::from_str(text));
     let blob = web_sys::Blob::new_with_str_sequence(&array).map_err(|e| format!("{e:?}"))?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(|e| format!("{e:?}"))?;
+    let anchor = document
+        .create_element("a")
+        .map_err(|e| format!("{e:?}"))?
+        .dyn_into::<web_sys::HtmlAnchorElement>()
+        .map_err(|_| "创建 a 元素失败")?;
+    anchor.set_href(&url);
+    anchor.set_download(file_name);
+    let body = document.body().ok_or("没有 body")?;
+    body.append_child(&anchor).map_err(|e| format!("{e:?}"))?;
+    anchor.click();
+    body.remove_child(&anchor).map_err(|e| format!("{e:?}"))?;
+    web_sys::Url::revoke_object_url(&url).map_err(|e| format!("{e:?}"))?;
+    Ok(())
+}
+
+/// Web 端：把字节当文件下载（GLB 等二进制）。
+#[cfg(target_arch = "wasm32")]
+pub fn download_bytes(file_name: &str, bytes: &[u8]) -> Result<(), String> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window().ok_or("没有 window")?;
+    let document = window.document().ok_or("没有 document")?;
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts).map_err(|e| format!("{e:?}"))?;
     let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(|e| format!("{e:?}"))?;
     let anchor = document
         .create_element("a")
