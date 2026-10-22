@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **751** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **752** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -128,6 +128,7 @@ tools/verify_all.sh
 | Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/P 前后 UI 状态与中央视口截图都必须变；F5/F8 只断言状态（默认场景可能没有接触/动画），Tab 断言相机模式（Orbit→Fly） |
 | 模型骨骼叠加 | `cargo test -p quench3d --lib model_skeleton` | 三关节链（中间夹一个非关节节点）只产出 root→mid、mid→tip 两条边；叠加层再乘模型世界变换（+10,+2） |
 | 公告板粒子 | `cargo test -p quench3d --lib particle` / `cargo test -p quench3d-cli --lib particles_parse` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-cli --test cli_e2e particle_billboards` / `cargo test -p quench3d-editor --test history particles_survive` | 生成 N 个隐藏代理物体、初速度/重力积分、面向相机、按寿命淡出、到寿命重生（不额外多飞一帧）、非法参数回退；CLI 同相机下中心红色分量比无粒子高 40；编辑器存盘保留 `particles` 且重新载入建出发射器 |
+| 框选 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history box_select` / `tools/probe_web_ui.sh` | 只按屏幕中心命中、Shift 追加、空框清空；浏览器 Shift+拖动后 `selected` 从 1 变 7，截图出现选框/选中轮廓 |
 | 多选 + 成组变换 | `cargo test -p quench3d-editor --lib multi_selection` / `--lib group_member` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history` | Shift/Ctrl 加减选、主选中提级、去重；组轴心=选中中心；平移/绕中心旋转/缩放三种增量都作用到附加物体；批量删除/复制后下标与选中正确 |
 | IBL/HDRI 环境光照 | `cargo test -p quench3d-render --lib environment` / `cargo test -p quench3d-cli --test cli_e2e environment_map` | Radiance 平铺/新 RLE/旧 RLE 解码；cubemap 6 面/递减 mip；CLI 有 HDR 时黑球中心亮度和 > 无图 +60（无太阳/环境光，只有 IBL）；缺文件/负强度被 `validate` 拒绝 |
 | 手工 LOD 距离切换 | `cargo test -p quench3d --lib lods_` | 3 级 LOD：5m 细模、15m 中模、25m 粗模；19m 仍在 20m 阈值的 10% 滞回带内保持粗模，17m 回到中模；注册后只有基础层可见；空/不递增层级被拒绝 |

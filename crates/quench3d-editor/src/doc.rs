@@ -1278,6 +1278,71 @@ impl Doc {
         best.map(|(index, _)| index)
     }
 
+    /// 框选：把**屏幕中心点**落在 `min..max` 矩形里的可见物体选进来。
+    ///
+    /// `min/max` 是相对视口左上角的像素坐标，`viewport` 是视口像素尺寸。只按物体
+    /// **中心**判断（不做逐三角形/包围盒嵌套），所以大物体的边缘可能落在框内但中心
+    /// 在框外——这是有意的便宜实现，和 Blender 的"框选中心"口径一致。
+    ///
+    /// `additive` 为真时保留已有选择、把新命中追加进去（Shift/Ctrl 拖动）；为假时
+    /// 只选命中项，空框会清空选择。返回命中数。
+    pub fn select_in_rect(
+        &mut self,
+        engine: &Engine,
+        viewport: Vec2,
+        min: Vec2,
+        max: Vec2,
+        additive: bool,
+    ) -> usize {
+        let lo = Vec2::new(min.x.min(max.x), min.y.min(max.y));
+        let hi = Vec2::new(min.x.max(max.x), min.y.max(max.y));
+        let camera = engine.camera();
+        let mut hits = Vec::new();
+        for (index, object) in engine.scene.objects.iter().enumerate() {
+            if !object.visible
+                || engine.scene.is_particle_object(index)
+                || object.fluid_particle.is_some()
+                || object.fluid_surface.is_some()
+            {
+                continue;
+            }
+            let world = engine.scene.world_transform(index).position;
+            let Some(p) = camera.world_to_screen(world, viewport) else {
+                continue;
+            };
+            if p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y {
+                hits.push(index);
+            }
+        }
+        if !additive {
+            self.selected = hits.first().copied();
+            self.extra_selected = hits.iter().skip(1).copied().collect();
+        } else {
+            if self.selected.is_none() {
+                self.selected = hits.first().copied();
+            }
+            for &index in &hits {
+                if !self.is_selected(index) {
+                    self.extra_selected.push(index);
+                }
+            }
+        }
+        if !hits.is_empty() {
+            self.status = if additive {
+                format!(
+                    "框选追加 {} 个物体（共 {} 个）",
+                    hits.len(),
+                    self.selection().len()
+                )
+            } else {
+                format!("框选 {} 个物体", hits.len())
+            };
+        } else if !additive {
+            self.status = "框选：没有命中物体".to_string();
+        }
+        hits.len()
+    }
+
     /// 生成不重名的对象名（`球`、`球 2`、`球 3`…）。
     fn unique_name(&mut self, engine: &Engine, base: &str) -> String {
         // 先试原名，再试 `base N`；同时用自增计数兜底，避免反复扫场景。

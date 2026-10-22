@@ -343,6 +343,80 @@ async function main() {
   }
   console.log("PASS 自动保存丢弃 F10");
 
+  // ---- 框选：Shift+左键拖动 → 选中数 >0、画面出现选中轮廓 ----
+  const selectedOf = (s) => Number(/selected=(\d+)/.exec(s)?.[1] ?? -1);
+  // 载入默认场景后可能已经选中 1 个（例如地面），框选是**追加**：只要变多即可。
+  const beforeBoxSelected = selectedOf(await uiState());
+  const beforeBox = await snap("box-before");
+  await send("Input.dispatchKeyEvent", {
+    type: "rawKeyDown",
+    key: "Shift",
+    code: "ShiftLeft",
+    windowsVirtualKeyCode: 16,
+    nativeVirtualKeyCode: 16,
+    modifiers: 8,
+  });
+  await send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: 380,
+    y: 220,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    modifiers: 8,
+  });
+  for (const [x, y] of [
+    [430, 270],
+    [520, 360],
+    [650, 470],
+    [820, 610],
+  ]) {
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+      button: "left",
+      buttons: 1,
+      modifiers: 8,
+    });
+    await sleep(80);
+  }
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: 820,
+    y: 610,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    modifiers: 8,
+  });
+  await send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Shift",
+    code: "ShiftLeft",
+    windowsVirtualKeyCode: 16,
+    nativeVirtualKeyCode: 16,
+    modifiers: 0,
+  });
+  await sleep(500);
+  const boxed = await uiState();
+  if (!(selectedOf(boxed) > beforeBoxSelected)) {
+    die(`Shift 框选没有追加选中（之前 ${beforeBoxSelected}，之后 ${selectedOf(boxed)}）：${boxed}`);
+  }
+  const afterBox = await snap("box-after");
+  if (beforeBox === afterBox) {
+    die("框选选中了物体但画面没有出现选中轮廓");
+  }
+  results.push({
+    feature: "框选 Shift+拖动",
+    before: beforeBox,
+    after: afterBox,
+    changed: true,
+  });
+  console.log(
+    `PASS 框选：selected ${beforeBoxSelected} → ${selectedOf(boxed)}`,
+  );
+
   // 运行时错误/panic/GL 能力日志都要当失败（与 probe_webgl2 的判据一致）。
   const logs = events
     .filter((e) => e.method === "Log.entryAdded" || e.method === "Runtime.exceptionThrown")

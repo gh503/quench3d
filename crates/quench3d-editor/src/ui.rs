@@ -24,6 +24,8 @@ pub struct Viewport {
     pub gizmo_active: bool,
     /// 这次点击是否按着 Shift/Ctrl（多选）。
     pub additive: bool,
+    /// 框选起点（Shift/Ctrl + 左键拖动）；`None` = 没在框选。
+    pub box_select_start: Option<egui::Pos2>,
 }
 
 impl Default for Viewport {
@@ -35,6 +37,7 @@ impl Default for Viewport {
             dragging: false,
             gizmo_active: false,
             additive: false,
+            box_select_start: None,
         }
     }
 }
@@ -2714,11 +2717,49 @@ fn viewport(
                         ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl);
                 }
             }
+            // Shift/Ctrl + 左键拖动 = 框选（不转视角；app 层在按下时已经让路）。
+            let additive_drag = ui.input(|i| {
+                i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl
+            });
+            if response.drag_started() && additive_drag && !gizmo_took {
+                view.box_select_start = response.interact_pointer_pos();
+            }
+            if let Some(start) = view.box_select_start {
+                let current = ui
+                    .input(|i| i.pointer.interact_pos())
+                    .unwrap_or(start);
+                let rect_select = egui::Rect::from_two_pos(start, current);
+                ui.painter().rect_filled(
+                    rect_select,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(80, 160, 255, 40),
+                );
+                ui.painter().rect_stroke(
+                    rect_select,
+                    0.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 160, 255)),
+                    egui::StrokeKind::Inside,
+                );
+                let released = response.drag_stopped()
+                    || !ui.input(|i| i.pointer.primary_down());
+                if released {
+                    if rect_select.width() >= 3.0 || rect_select.height() >= 3.0 {
+                        doc.select_in_rect(
+                            engine,
+                            Vec2::new(rect.width().max(1.0), rect.height().max(1.0)),
+                            Vec2::new(rect_select.min.x - rect.left(), rect_select.min.y - rect.top()),
+                            Vec2::new(rect_select.max.x - rect.left(), rect_select.max.y - rect.top()),
+                            true,
+                        );
+                    }
+                    view.box_select_start = None;
+                }
+            }
 
             // 左上角提示：当前相机模式与操作。
             let hint = match engine.camera_mode {
                 CameraMode::Orbit => {
-                    "轨道相机：左键拖动 / 中键拖动 / Alt+左键 旋转，滚轮缩放，右键拖动平移"
+                    "轨道相机：左键拖动 / 中键拖动 / Alt+左键 旋转，滚轮缩放，右键拖动平移；Shift+左键拖动框选"
                 }
                 CameraMode::Fly => "飞行相机：右键拖动看向，WASD 移动，Q/E 升降",
             };
@@ -2759,7 +2800,7 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.label("R：聚焦到整个场景");
             ui.add_space(6.0);
             ui.label(RichText::new("编辑").strong());
-            ui.label("左键点击：选中物体");
+            ui.label("左键点击：选中物体；Shift/Ctrl+左键拖动：框选");
             ui.label("场景树里的 ⌖ / F：把相机对准这个物体");
             ui.label("属性面板：改名称 / 变换 / 颜色 / 材质 / 物理参数");
             ui.add_space(6.0);

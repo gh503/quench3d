@@ -350,6 +350,7 @@ impl Inner {
             bones: self.engine.debug.bones,
             recovery: self.doc.recovery.is_some(),
             objects: self.engine.scene.len(),
+            selected: self.doc.selection().len(),
         });
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
@@ -696,6 +697,8 @@ struct UiDebugState {
     recovery: bool,
     /// 当前场景里的物体数（含粒子/水面代理；用于恢复测试对账）。
     objects: usize,
+    /// 当前选中数（含主选与附加）。
+    selected: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -716,6 +719,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         bones,
         recovery,
         objects,
+        selected,
     } = state;
     let Some(window) = web_sys::window() else {
         return;
@@ -729,7 +733,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};recovery={recovery};objects={objects}"
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};recovery={recovery};objects={objects};selected={selected}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
@@ -943,6 +947,8 @@ impl EditorApp {
                             if b == MouseButton::Left
                                 && pointer_in_viewport
                                 && !inner.viewport.gizmo_active
+                                && !engine.input.shift
+                                && !engine.input.ctrl
                             {
                                 inner.game.orbit_with_left = true;
                             }

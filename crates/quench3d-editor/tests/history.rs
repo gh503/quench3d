@@ -389,3 +389,70 @@ fn particles_survive_editor_roundtrip_and_reload() {
         assert!(engine.scene.is_particle_object(index));
     }
 }
+
+/// 框选只按屏幕中心命中；Shift/Ctrl 追加、空框清空。
+#[test]
+fn box_select_uses_screen_centers_and_adds_or_clears() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    engine.scene.clear();
+    engine.world.clear();
+    let mesh = engine.assets.mesh(
+        &mut engine.renderer,
+        &engine.gpu,
+        "框选测试盒",
+        &MeshData::box_sized(Vec3::ONE),
+    );
+    let mat = engine.assets.solid_material(
+        &mut engine.renderer,
+        &engine.gpu,
+        Vec4::new(0.8, 0.3, 0.2, 1.0),
+        0.0,
+        0.8,
+    );
+    for (x, name) in [(-1.2, "左"), (1.2, "右")] {
+        engine.scene.add_named(
+            mesh,
+            mat,
+            Transform::new(Vec3::new(x, 1.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+            name,
+        );
+    }
+    engine.orbit.focus = Vec3::new(0.0, 1.0, 0.0);
+    engine.orbit.distance = 8.0;
+    engine.orbit.yaw = 0.0;
+    engine.orbit.pitch = 0.0;
+
+    let mut doc = Doc::new();
+    let vp = Vec2::splat(64.0);
+    let left = engine
+        .camera()
+        .world_to_screen(Vec3::new(-1.2, 1.0, 0.0), vp)
+        .expect("左物体在视口里");
+    let right = engine
+        .camera()
+        .world_to_screen(Vec3::new(1.2, 1.0, 0.0), vp)
+        .expect("右物体在视口里");
+    assert!(
+        left.x < right.x,
+        "屏幕 X 应保持左右次序：{left:?} {right:?}"
+    );
+    let rect = |p: Vec2| (p - Vec2::splat(6.0), p + Vec2::splat(6.0));
+
+    let (min, max) = rect(left);
+    assert_eq!(doc.select_in_rect(&engine, vp, min, max, false), 1);
+    assert_eq!(doc.selected_object(&engine).unwrap().name, "左");
+
+    let (min, max) = rect(right);
+    assert_eq!(doc.select_in_rect(&engine, vp, min, max, true), 1);
+    assert_eq!(doc.selection().len(), 2, "Shift 框选应追加而不是替换");
+    assert!(doc.is_selected(0) && doc.is_selected(1));
+
+    let empty = Vec2::new(1.0, 1.0);
+    assert_eq!(
+        doc.select_in_rect(&engine, vp, empty, empty + Vec2::splat(2.0), false),
+        0
+    );
+    assert!(doc.selection().is_empty(), "空框（非追加）要清空选择");
+}

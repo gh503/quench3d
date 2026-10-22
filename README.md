@@ -109,8 +109,9 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
 
 * **多选**：场景树或视口里 `Shift`/`Ctrl` 点选加选/减选；多选时 gizmo 轴心是选中物体
   世界位置的平均值，拖动手柄对**整组**做平移/绕中心旋转/绕中心缩放，一次拖拽仍只算
-  一步历史；「复制」「删除」也按整组执行。边界：还不支持框选；父物体与子物体同时
-  选中时两者都会各自参与变换（不做"只动父"的层级抑制）。
+  一步历史；「复制」「删除」也按整组执行。`Shift`/`Ctrl` + 左键拖动可**框选**（按物体
+  屏幕中心命中，追加到现有选择）。边界：不做逐三角形/包围盒相交，也不做"框内可见"
+  的遮挡判断；父物体与子物体同时选中时两者都会各自参与变换（不做"只动父"的层级抑制）。
 * **变换手柄（gizmo）**：`W`/`E`/`R` 切移动/旋转/缩放，`L` 切世界/局部坐标系；
   手柄**屏幕定长 88 px**（贴脸和远处一样大），抓取容差 10 px 且**命中优先于物体拾取**
   （被墙挡住的手柄也能抓）；`Ctrl` 吸附（平移 0.25 / 旋转 15° / 缩放 0.1，作用在整段拖拽的累计增量上）、
@@ -259,7 +260,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12563983 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12567536 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -1309,7 +1310,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 751 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 752 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

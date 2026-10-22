@@ -95,7 +95,7 @@
 | 变换 gizmo（移动/旋转/缩放） | 全部 | **本轮补上**（世界/局部、Ctrl 吸附、Shift 精细、Esc 取消、屏幕定长、10 px 抓取、命中优先于拾取） | ✅（本轮） |
 | 撤销 / 重做 | 全部 | **本轮补上**（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y，工具栏带可用态） | ✅（本轮） |
 | 数值输入（拖拽改值的输入框） | 全部 | 有（egui `DragValue` + 滑杆） | ✅ |
-| 多选 / 框选 | 全部 | **Shift/Ctrl 点选 + 组变换**（平移/绕中心旋转/缩放、批量复制/删除）；**框选未做** | 🟡 |
+| 多选 / 框选 | 全部 | **Shift/Ctrl 点选 + 组变换**（平移/绕中心旋转/缩放、批量复制/删除）+ **Shift/Ctrl 拖动框选**（按屏幕中心、追加、空框清空） | ✅（框选按中心，不做遮挡判断） |
 | 复制粘贴（Ctrl+C/V） | 全部 | 只有"复制"按钮（偏移复制 + 自动重名）；无剪贴板 | 🟠 |
 | 视口导航（轨道/平移/缩放 + 聚焦） | 全部 | 有（左键/中键/Alt 旋转、右键平移、滚轮缩放），**本轮补 `F` 聚焦选中** | ✅ |
 | 网格与吸附 | 全部 | 1 单位网格 + gizmo 吸附；**网格不随尺度自适应** | 🟠 |
@@ -2463,7 +2463,7 @@ particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红
 **边界**：没有贴图/软粒子/粒子间深度排序（按物体距离排序，不按粒子深度）、GPU 粒子、
 发射器形状/曲线；编辑器没有粒子创建/参数面板，只显示并原样保存 JSON 里的段。
 
-### 23.7 编辑器多选 + 成组变换（第 101 轮）
+### 23.7 编辑器多选 + 成组变换（第 101 轮，框选第 104 轮）
 
 **做了什么**：`Doc.extra_selected` 保存主选中之外的物体；场景树与视口都支持
 `Shift`/`Ctrl` 点选加减选，场景树标题显示「已选 N 个」。多选时 gizmo 的轴心是
@@ -2510,6 +2510,22 @@ particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红
 
 **边界**：Web 没有"正常退出"钩子，所以恢复点只会在手动保存/下载或用户丢弃时清；
 布局（面板宽度/窗口位置）仍不持久化；localStorage 约 5MB，场景过大时写失败只记日志。
+
+### 23.9 编辑器框选（第 104 轮）
+
+**做了什么**：`Doc::select_in_rect(engine, viewport, min, max, additive)` 把可见物体的
+**世界位置投影到屏幕**，中心点落在矩形内就命中；跳过粒子/流体代理。UI 在
+`Shift`/`Ctrl` + 左键拖动时画半透明选框（`Viewport.box_select_start`），松开后追加选择；
+空框在非追加模式下清空。app 层在按下时检查 `Shift/Ctrl`，有修饰键就不把左键拖动当转视角，
+框选因此不会顺手把相机转走。
+
+**验证**：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history
+box_select_uses_screen_centers_and_adds_or_clears`（左/右两个箱子、只框左、Shift 追加、
+空框清空）；`tools/probe_web_ui.sh` 用 CDP 发 Shift+拖动，断言 `data-quench3d-ui` 的
+`selected` 从 1 变 7、中央视口截图哈希变化。
+
+**边界**：按中心点命中（大物体边缘在框内但中心在外不算）；不做深度遮挡/透视裁剪；
+框选只处理场景物体，不处理粒子/流体代理；没有"框选减选"。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
@@ -2564,7 +2580,7 @@ particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**751** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**752** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
