@@ -193,6 +193,7 @@ fn all_editor_panels_draw_in_one_frame() {
         .push(fake_plain_animation_instance());
     doc.selected = Some(1);
     doc.show_help = true;
+    doc.recovery = Some("{\"format\":\"quench3d.scene\",\"version\":2}".to_string());
 
     let mut view = Viewport::default();
     let mut gizmo = Gizmo::default();
@@ -263,6 +264,14 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "正交"),
         "相机投影开关没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "发现自动保存"),
+        "崩溃恢复提示没有出现在工具栏里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "丢弃"),
+        "崩溃恢复的丢弃按钮没有绘制"
     );
     assert!(
         shapes_contain_text(&output.shapes, "初始（立即切换）"),

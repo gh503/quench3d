@@ -32,6 +32,13 @@
 
 ### 新增
 
+- **崩溃恢复自动保存（第 92 轮，桌面端）**：每 30 秒把可无损表达的场景写到
+  `$XDG_STATE_HOME/quench3d/autosave.scene.json`（临时文件 + rename；场景里有导入模型等
+  不可表达物体时跳过，避免恢复一份悄悄丢模型的场景）。正常退出删掉恢复文件，只有崩溃/
+  强杀才留下；下次启动工具栏显示「发现自动保存 / 恢复 / 丢弃」，恢复只装进引擎、不覆盖
+  磁盘文件。Web 端没有本地文件系统，仍不支持；布局持久化也未做。回归：
+  `autosave_writes_only_on_change_and_clears`、`interval_gates_writes` +
+  `ui_smoke` 的「发现自动保存 / 丢弃」绘制断言。
 - **相机投影控件与裁剪面存盘（第 91 轮）**：编辑器顶栏新增「正交」开关、视场角、近/远
   裁剪面与正交高度；`scene_to_json` 现在写回 `camera.near/far/orthographic_height`
   （以前被 `..Default::default()` 丢掉，调过裁剪面存一次就还原）。回归：

@@ -101,7 +101,7 @@
 | 网格与吸附 | 全部 | 1 单位网格 + gizmo 吸附；**网格不随尺度自适应** | 🟠 |
 | 场景树 / 属性面板 / 状态栏 | 全部 | 有 | ✅ |
 | 文件对话框 | 全部 | 无（桌面用路径文本，Web 用上传/下载） | 🟠 |
-| 崩溃恢复 / 自动保存 / 布局持久化 | 全部 | 无 | ❌ |
+| 崩溃恢复 / 自动保存 / 布局持久化 | 全部 | **自动保存 + 崩溃恢复 ✅ 第 92 轮**（桌面端 30s、原子写、正常退出清理、恢复不覆盖磁盘）；Web 无；布局持久化仍无 | 🟡 |
 | 历史面板 / 快捷键自定义 / 命令搜索 | Blender / Godot | 无 | ❌ |
 | 编辑模式（顶点/边/面） | Blender / Unity | 无 | ❌ |
 
@@ -2492,7 +2492,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**705** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**707** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/P，UI 状态与截图都必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、

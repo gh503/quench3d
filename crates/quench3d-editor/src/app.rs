@@ -146,6 +146,9 @@ struct Inner {
     gizmo: Gizmo,
     /// 摄像头动捕读端（桌面端轮询 latest.*；Web 端空实现）。
     camera: CameraFeed,
+    /// 崩溃恢复自动保存（桌面端；Web 端没有本地文件系统）。
+    #[cfg(not(target_arch = "wasm32"))]
+    autosave: crate::autosave::AutoSave,
     last_time: f64,
     first_frame_done: bool,
 }
@@ -189,6 +192,17 @@ impl Inner {
             doc.build_default_scene(&mut engine);
         }
         doc.reset_history(&engine);
+        // 上次崩溃留下的自动保存：先挂出来，等用户点「恢复 / 丢弃」。
+        #[cfg(not(target_arch = "wasm32"))]
+        let autosave = crate::autosave::AutoSave::new(
+            crate::autosave::AutoSave::default_path(),
+            crate::autosave::DEFAULT_INTERVAL,
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(text) = crate::autosave::AutoSave::read_recovery() {
+            doc.recovery = Some(text);
+            doc.status = "发现上次崩溃前的自动保存，可点「恢复」或「丢弃」".to_string();
+        }
 
         let egui_ctx = egui::Context::default();
         install_fonts(&egui_ctx);
@@ -226,6 +240,8 @@ impl Inner {
             viewport: Viewport::default(),
             gizmo: Gizmo::default(),
             camera: CameraFeed::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            autosave,
             last_time: quench3d::clock::now_seconds(),
             first_frame_done: false,
         }
@@ -263,6 +279,14 @@ impl Inner {
             if requests.load {
                 self.load_scene();
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if requests.restore_recovery {
+                self.restore_recovery();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if requests.discard_recovery {
+                self.discard_recovery();
+            }
         });
         let keys_enabled = !self.egui_ctx.egui_wants_keyboard_input();
         self.egui_state
@@ -289,6 +313,8 @@ impl Inner {
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
         // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
         self.camera.add_lines(&mut self.engine.renderer.lines);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.autosave_tick();
         #[cfg(target_arch = "wasm32")]
         publish_ui_debug_state(UiDebugState {
             keys_enabled: self.game.keys_enabled,
@@ -456,6 +482,8 @@ impl Inner {
                 Ok(()) => {
                     self.doc.status =
                         format!("已保存 {}（{} 字节）{note}", path.display(), json.len());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.autosave.clear();
                 }
                 Err(e) => self.doc.status = format!("保存失败：{e}"),
             }
@@ -483,6 +511,8 @@ impl Inner {
                     self.doc.capture_baseline(&self.engine);
                     self.doc.reset_history(&self.engine);
                     self.doc.status = format!("已载入 {}（{objects} 个物体）", path.display());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.autosave.clear();
                 }
                 Err(e) => self.doc.status = format!("载入失败：{e}"),
             }
@@ -491,6 +521,58 @@ impl Inner {
         {
             self.doc.status = "选择文件…".to_string();
             crate::scene_io::pick_file_and_load(self.doc.file_path.clone());
+        }
+    }
+
+    /// 把自动保存的内容装进引擎（不写磁盘上的场景文件）。
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restore_recovery(&mut self) {
+        let Some(text) = self.doc.recovery.clone() else {
+            return;
+        };
+        match crate::scene_io::load_text_into_doc(&mut self.engine, &mut self.doc, &text) {
+            Ok((objects, _)) => {
+                self.doc.recovery = None;
+                self.doc.selected = if objects > 0 { Some(0) } else { None };
+                self.doc.capture_baseline(&self.engine);
+                self.doc.reset_history(&self.engine);
+                self.autosave.clear();
+                self.doc.status = format!("已恢复自动保存（{objects} 个物体；尚未写回磁盘）");
+            }
+            Err(e) => {
+                // 恢复失败时保留内容，用户还能再试或改完手动处理。
+                self.doc.status = format!("恢复自动保存失败：{e}");
+            }
+        }
+    }
+
+    /// 丢弃自动保存。
+    #[cfg(not(target_arch = "wasm32"))]
+    fn discard_recovery(&mut self) {
+        self.doc.recovery = None;
+        self.autosave.clear();
+        self.doc.status = "已丢弃自动保存".to_string();
+    }
+
+    /// 每帧调一次；内部先判时间，只有到点才序列化整个场景。
+    #[cfg(not(target_arch = "wasm32"))]
+    fn autosave_tick(&mut self) {
+        if !self.autosave.due() {
+            return;
+        }
+        let Ok(saved) = crate::scene_io::scene_to_json(&self.engine, &self.doc) else {
+            self.autosave.defer();
+            return;
+        };
+        // 有无法用场景格式表达的物体时宁可不写：恢复一份"悄悄丢了模型"的场景，
+        // 比没有自动保存更危险。`defer` 保证不会因此每帧都重试。
+        if !saved.skipped.is_empty() {
+            self.autosave.defer();
+            return;
+        }
+        if let Err(e) = self.autosave.tick(&saved.json) {
+            self.autosave.defer();
+            log::warn!("自动保存失败：{e}");
         }
     }
 
@@ -929,6 +1011,12 @@ impl ApplicationHandler for EditorApp {
     ///   还得多一层 `#[cfg]` 门控。既然 winit 给了一个正确的钩子，就用这个。
     /// * 捕获 / 忽略 SIGSEGV —— 明令禁止的掩盖手段：真出了别的越界就再也看不见了。
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // 正常关闭 = 用户知情地离开；删掉恢复文件，下次启动才不会再问。
+        // 崩溃/强杀不会走到这里，恢复文件因此只会在真正需要时出现。
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(inner) = self.inner.as_mut() {
+            inner.autosave.clear();
+        }
         if !self.needs_early_release() {
             return;
         }

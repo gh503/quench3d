@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **705** 个测试、0 失败、3 ignored；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **707** 个测试、0 失败、3 ignored；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -89,6 +89,8 @@ tools/verify_all.sh
 | 整场景重载释放显存 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test scene_roundtrip reloading_scene_reclaims_renderer_assets` | 连开同一份场景 4 次，网格/材质/贴图数量与场景物体数每次回到同一规模，不累加 |
 | 相机裁剪面/正交往返 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test scene_roundtrip camera_clipping_and_ortho_round_trip` | 编辑器设 `near=0.2`/`far=2500`/正交高度 13.5，存盘 JSON 三个字段都在，二次载入数值一致 |
 | 相机投影控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「正交」；顶栏可见 |
+| 自动保存读写/清理 | `cargo test -p quench3d-editor --lib autosave` | 首次写入、同内容不重写、内容变化重写、`clear` 真删；间隔未到不写 |
+| 崩溃恢复提示绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | `doc.recovery=Some(..)` 时绘制图元里出现「发现自动保存」与「丢弃」按钮 |
 | 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |

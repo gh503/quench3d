@@ -52,6 +52,10 @@ pub struct Requests {
     pub load: bool,
     /// 截图（当前窗口内容 → PNG）。
     pub screenshot: bool,
+    /// 把崩溃恢复文件装回引擎。
+    pub restore_recovery: bool,
+    /// 丢弃崩溃恢复文件。
+    pub discard_recovery: bool,
 }
 
 /// 画整个界面。
@@ -370,6 +374,23 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
 
             ui.separator();
 
+            if doc.recovery.is_some() {
+                ui.label("发现自动保存");
+                if ui
+                    .button("恢复")
+                    .on_hover_text("把上次崩溃前的自动保存装回引擎（不覆盖磁盘上的场景文件）")
+                    .clicked()
+                {
+                    req.restore_recovery = true;
+                }
+                if ui
+                    .button("丢弃")
+                    .on_hover_text("删掉自动保存，保持当前场景")
+                    .clicked()
+                {
+                    req.discard_recovery = true;
+                }
+            }
             if ui.button("打开").on_hover_text("读入 scene.json").clicked() {
                 req.load = true;
             }

@@ -171,6 +171,8 @@ pub struct Doc {
     pub status: String,
     /// 是否显示帮助窗口。
     pub show_help: bool,
+    /// 崩溃恢复文件的内容（`Some` = 工具栏显示"恢复 / 丢弃"）。
+    pub recovery: Option<String>,
     /// 撤销 / 重做历史（整场景快照，见 [`crate::history`]）。
     pub history: crate::history::History,
     /// 用户显式设置的材质贴图/开关（空 = 沿用原文档的继承规则）。
@@ -628,6 +630,7 @@ impl Doc {
             file_path: "scene.json".to_string(),
             status: "就绪".to_string(),
             show_help: false,
+            recovery: None,
             history: crate::history::History::default(),
             textures: std::collections::HashMap::new(),
             model_instances: Vec::new(),
