@@ -71,7 +71,8 @@ pub use point_shadow::{
 };
 pub use renderer::{
     BloomOptions, DofOptions, FxaaOptions, InstanceDesc, MaterialTextureSlot, RenderStats,
-    Renderer, RendererOptions, SsaoOptions, WaterOptions, DEPTH_FORMAT, HDR_FORMAT, SHADOW_FORMAT,
+    Renderer, RendererOptions, SsaoOptions, WaterOptions, DEPTH_FORMAT, HDR_FORMAT,
+    MAX_SKIN_JOINTS, SHADOW_FORMAT,
 };
 pub use spot_shadow::{
     pick_spot_shadow, plan_spot_shadow, spot_shadow_camera, SpotShadowCamera, SpotShadowPlan,

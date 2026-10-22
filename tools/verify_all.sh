@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # 一条命令跑完**当前可自动化**的正向验证：
-#   1. 全量门禁（fmt / clippy 原生+wasm / doc / 712 个测试 / wasm 构建 / 产物检查）
+#   1. 全量门禁（fmt / clippy 原生+wasm / doc / 714 个测试 / wasm 构建 / 产物检查）
 #   2. 真实 WebGL2 启动探针（headless Chrome + SwiftShader）
 #   3. Web UI 按键探针（F3/F4/R：状态 + 中央视口截图都必须变）
 #   4. 摄像头采集端纯函数测试（有 venv 时用 venv）
 #   5. 真正部署出去的 GitHub Pages（网络不通自动跳过）
 #
-# 它**不**证明：真机 GPU/浏览器矩阵、GPU 蒙皮、IBL、LOD/遮挡剔除、音频/脚本层。
+# 它**不**证明：真机 GPU/浏览器矩阵、IBL、LOD/遮挡剔除、音频/脚本层。
 # 这些没有自动化证据，别把"verify_all 绿"当成"引擎完整"。
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

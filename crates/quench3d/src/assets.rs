@@ -703,6 +703,28 @@ impl LoadedModel {
         }
     }
 
+    /// 某个蒙皮片段当前的关节矩阵（`world(joint) × inverseBind × bindInverse`）。
+    ///
+    /// GPU 蒙皮直接用这份数组；`skinned_mesh` 也走它，保证 CPU / GPU 两条路
+    /// 算的是同一组矩阵。非蒙皮片段返回 `None`。
+    pub fn skin_matrices(&self, mesh_index: usize, node_worlds: &[Mat4]) -> Option<Vec<Mat4>> {
+        let mesh = self.meshes.get(mesh_index)?;
+        mesh.skin?;
+        self.skin_matrices_for(mesh, node_worlds)
+    }
+
+    fn skin_matrices_for(&self, mesh: &LoadedMesh, node_worlds: &[Mat4]) -> Option<Vec<Mat4>> {
+        let skin_index = mesh.skin?;
+        let skin = self.skins.get(skin_index)?;
+        let mut joint_mats = Vec::with_capacity(skin.joints.len());
+        for (j, &node) in skin.joints.iter().enumerate() {
+            let world = node_worlds.get(node).copied().unwrap_or(Mat4::IDENTITY);
+            let inverse_bind = skin.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY);
+            joint_mats.push(world * inverse_bind * mesh.bind_inverse);
+        }
+        Some(joint_mats)
+    }
+
     /// 按当前节点世界矩阵计算某个蒙皮片段的**变形后**网格。
     ///
     /// 返回 `None` 表示这个片段不是蒙皮网格（调用方继续走刚性矩阵路径）。
@@ -726,18 +748,12 @@ impl LoadedModel {
         base: &MeshData,
         node_worlds: &[Mat4],
     ) -> Option<MeshData> {
-        let skin_index = mesh.skin?;
-        let skin = self.skins.get(skin_index)?;
+        mesh.skin?;
         if mesh.joints.len() != base.vertices.len() || mesh.weights.len() != base.vertices.len() {
             return None;
         }
-        // 每个关节的 `world × inverseBind × bindInverse` 只算一次。
-        let mut joint_mats = Vec::with_capacity(skin.joints.len());
-        for (j, &node) in skin.joints.iter().enumerate() {
-            let world = node_worlds.get(node).copied().unwrap_or(Mat4::IDENTITY);
-            let inverse_bind = skin.inverse_bind.get(j).copied().unwrap_or(Mat4::IDENTITY);
-            joint_mats.push(world * inverse_bind * mesh.bind_inverse);
-        }
+        // 每个关节的 `world × inverseBind × bindInverse` 只算一次（与 GPU 共用）。
+        let joint_mats = self.skin_matrices_for(mesh, node_worlds)?;
         let mut out = base.clone();
         for (vi, vertex) in out.vertices.iter_mut().enumerate() {
             let p = vertex.pos();
@@ -839,7 +855,17 @@ impl LoadedModel {
             let data = self
                 .morphed_mesh(i, None)
                 .unwrap_or_else(|| mesh.data.clone());
-            let mesh_id = renderer.add_mesh_named(ctx, &data, &mesh.name);
+            // 纯蒙皮片段把 JOINTS_0 / WEIGHTS_0 放进顶点，交给 GPU；
+            // 同时带 morph 的片段仍走 CPU（morph 位移在绑定姿态里，顺序不能反）。
+            let mesh_id = if mesh.skin.is_some()
+                && mesh.morph_targets.is_empty()
+                && mesh.joints.len() == data.vertices.len()
+                && mesh.weights.len() == data.vertices.len()
+            {
+                renderer.add_mesh_skinned_named(ctx, &data, &mesh.joints, &mesh.weights, &mesh.name)
+            } else {
+                renderer.add_mesh_named(ctx, &data, &mesh.name)
+            };
             let material_id = mesh
                 .material
                 .and_then(|i| material_ids.get(i).copied())

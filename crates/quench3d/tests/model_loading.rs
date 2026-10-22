@@ -3,6 +3,7 @@
 //! 这里手搓一个最小 GLB（一个三角形）而不是塞二进制固件进仓库：
 //! 格式的每个字节都在测试里看得见，改了格式也知道哪里断了。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use quench3d::assets::{load_model, load_model_from_bytes, AssetError, Interpolation};
@@ -553,6 +554,149 @@ fn skinned_mesh_changes_rendered_pixels() {
         changed > 20,
         "蒙皮后画面至少要有几十个像素变化，实际 {changed}（顶点没有写回 GPU？）"
     );
+}
+
+#[test]
+fn gpu_skinning_fills_the_joint_palette() {
+    let palette = std::sync::Arc::new(AtomicUsize::new(0));
+    let probe = std::sync::Arc::clone(&palette);
+    let rendered = with_gpu_tests(
+        "GPU 蒙皮调色板（真的创建 wgpu 上下文）",
+        move || {
+            let model = Arc::new(
+                load_model_from_bytes("skinned.glb", &skinned_glb()).expect("蒙皮 GLB 应当能解析"),
+            );
+            let config = EngineConfig {
+                width: 32,
+                height: 32,
+                msaa_samples: 1,
+                ..Default::default()
+            };
+            quench3d::render_offscreen(32, 32, &config, move |engine| {
+                let spawned = model.spawn(
+                    &mut engine.renderer,
+                    &engine.gpu,
+                    &mut engine.scene,
+                    Transform::default(),
+                );
+                let mut player = model.player("lift").expect("动画存在");
+                player.time = 0.5;
+                engine.scene.play_model_animation(
+                    Arc::clone(&model),
+                    spawned.objects,
+                    spawned.base,
+                    player,
+                );
+                engine
+                    .scene
+                    .refresh_animations_with_renderer(&mut engine.renderer, &engine.gpu);
+                engine.scene.submit(&mut engine.renderer);
+                probe.store(engine.renderer.skin_palette_len(), Ordering::SeqCst);
+            })
+        },
+    );
+    let Some(result) = rendered else {
+        return;
+    };
+    match result {
+        Ok(_) => {}
+        Err(e) if e.contains("GPU 适配器") || e.contains("GPU adapter") => return,
+        Err(e) => panic!("蒙皮渲染失败：{e}"),
+    }
+    assert!(
+        palette.load(Ordering::SeqCst) > 0,
+        "纯蒙皮片段应当在提交时把关节矩阵放进 GPU 调色板"
+    );
+}
+
+#[test]
+fn gpu_skinning_matches_cpu_skinning_pixels() {
+    let rendered = with_gpu_tests(
+        "GPU/CPU 蒙皮像素对照（真的创建 wgpu 上下文）",
+        || {
+            let model = Arc::new(
+                load_model_from_bytes("skinned.glb", &skinned_glb()).expect("蒙皮 GLB 应当能解析"),
+            );
+            let config = EngineConfig {
+                width: 64,
+                height: 64,
+                msaa_samples: 1,
+                ..Default::default()
+            };
+            let render_at = |time: f32, gpu: bool| {
+                let model = Arc::clone(&model);
+                quench3d::render_offscreen(64, 64, &config, move |engine| {
+                    let spawned = model.spawn(
+                        &mut engine.renderer,
+                        &engine.gpu,
+                        &mut engine.scene,
+                        Transform::default(),
+                    );
+                    let mut player = model.player("lift").expect("动画存在");
+                    player.time = time;
+                    engine.scene.gpu_skinning = gpu;
+                    engine.scene.play_model_animation(
+                        Arc::clone(&model),
+                        spawned.objects,
+                        spawned.base,
+                        player,
+                    );
+                    engine.scene.lighting.sun = None;
+                    engine.scene.lighting.ambient_color = Vec3::ONE;
+                    engine.scene.lighting.ambient_intensity = 2.0;
+                    engine.orbit.focus = Vec3::new(0.5, 0.75, 0.0);
+                    engine.orbit.distance = 3.0;
+                    engine.orbit.yaw = 0.0;
+                    engine.orbit.pitch = 0.0;
+                    engine
+                        .scene
+                        .refresh_animations_with_renderer(&mut engine.renderer, &engine.gpu);
+                })
+            };
+            (render_at(0.25, false), render_at(0.25, true))
+        },
+    );
+    let Some((cpu, gpu)) = rendered else {
+        return;
+    };
+    let (cpu, gpu) = match (cpu, gpu) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => {
+            if e.contains("GPU 适配器") || e.contains("GPU adapter") {
+                return;
+            }
+            panic!("蒙皮对照渲染失败：{e}");
+        }
+    };
+    let mut differing = 0usize;
+    let mut max_diff = 0i32;
+    let mut total = 0i64;
+    for (a, b) in cpu
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(gpu.rgba.as_chunks::<4>().0)
+    {
+        let mut pixel_diff = 0i32;
+        for k in 0..3 {
+            let d = (a[k] as i32 - b[k] as i32).abs();
+            total += d as i64;
+            pixel_diff = pixel_diff.max(d);
+        }
+        max_diff = max_diff.max(pixel_diff);
+        if pixel_diff > 3 {
+            differing += 1;
+        }
+    }
+    let pixels = (cpu.width * cpu.height) as usize;
+    let mean = total as f64 / (pixels * 3) as f64;
+    eprintln!("GPU/CPU 蒙皮像素：{differing}/{pixels} 差>3，最大差 {max_diff}，平均 {mean:.4}");
+    assert!(
+        differing * 100 <= pixels,
+        "GPU 与 CPU 蒙皮差得太多：{differing}/{pixels}（最大 {max_diff}）"
+    );
+    assert!(mean < 1.0, "GPU 与 CPU 蒙皮平均像素差 {mean:.4}");
 }
 
 #[test]

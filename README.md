@@ -125,10 +125,12 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   右侧"模型"面板改位置/旋转/缩放同样**当场生效**（不再是"重开后生效"）。
   边界：一个模型只有一个变换，不能单独挪某个子网格；缩放对模型强制等比
   （场景格式里 `models[i].scale` 是一个数）。
-* **骨骼蒙皮（CPU）**：带 glTF `skins` / `JOINTS_0` / `WEIGHTS_0` 的角色会按关节矩阵
-  逐帧变形，再写回同一个 GPU 顶点缓冲；场景里用 `models[].animation` 选一条 clip。
-  边界：每顶点最多 4 关节，没有 GPU 蒙皮、IK（状态机见下）；`info` 会列出
-  `skins` / `skinned_meshes`，方便先确认资产真的带蒙皮。
+* **骨骼蒙皮（GPU，纯蒙皮）**：带 glTF `skins` / `JOINTS_0` / `WEIGHTS_0` 的角色把
+  关节下标/权重放进顶点，顶点着色器按关节矩阵变形；场景每帧只上传关节调色板
+  （最多 128 个矩阵），不再重算/重传整张顶点缓冲。场景里用 `models[].animation`
+  选一条 clip；`Scene::gpu_skinning = false` 可退回 CPU 对照。
+  边界：每顶点最多 4 关节；带 morph 的蒙皮网格仍走 CPU（先 morph 再蒙皮）；
+  没有 IK（状态机见下）；`info` 会列出 `skins` / `skinned_meshes`。
 * **morph target（静态权重 + 权重动画）**：带 glTF `targets` 的网格解析逐顶点
   `POSITION/NORMAL/TANGENT` 位移；场景里用 `models[].morph_weights` 覆盖权重
   （0~1，缺项按 0）。glTF 的 `weights` 动画轨道会随 `models[].animation` 自动采样，
@@ -223,7 +225,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12393031 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12406235 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -1242,7 +1244,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 712 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 714 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

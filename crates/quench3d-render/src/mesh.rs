@@ -20,6 +20,10 @@ pub struct Vertex {
     pub uv: [f32; 2],
     /// 切线（`w` 为副切线手性符号）。
     pub tangent: [f32; 4],
+    /// 关节下标（GPU 蒙皮；非蒙皮网格全 0）。
+    pub joints: [u16; 4],
+    /// 关节权重（GPU 蒙皮；全 0 = 保持原顶点）。
+    pub weights: [f32; 4],
 }
 
 impl Vertex {
@@ -30,6 +34,8 @@ impl Vertex {
             normal: normal.to_array(),
             uv: uv.to_array(),
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joints: [0; 4],
+            weights: [0.0; 4],
         }
     }
 

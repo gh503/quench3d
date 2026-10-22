@@ -10,6 +10,10 @@
 
 ### 修复
 
+- **Web UI 探针的默认端口被占用时假红**。`tools/probe_web_ui.sh` 固定用 8140，别的会话/
+  残留服务占着时本地静态服务起不来，浏览器加载不到页面，探针就报"30 秒内遮罩没有收起"，
+  看起来像渲染回归。现在启动前先探测端口，占用则自动换 8141~8199；本次实测在 8140
+  被占的情况下 6 项按键全部通过。
 - **CI 的 ubuntu runner 没有 GPU 适配器时，蒙皮像素回归直接 panic**。新加的
   `skinned_mesh_changes_rendered_pixels` 在 `QUENCH3D_GPU_TESTS=1` 下创建上下文失败
   就 `.expect("t=0 渲染")`，把"找不到 GPU"报成像素回归失败。现在只有适配器缺失
@@ -32,6 +36,14 @@
 
 ### 新增
 
+- **GPU 蒙皮（第 94 轮）**：顶点格式加入 `JOINTS_0/WEIGHTS_0`（`Vertex.joints/weights`），
+  PBR 与阴影着色器都按关节矩阵变形。场景每帧把所有**纯蒙皮**实例的关节矩阵拼进
+  128 关节的 uniform 调色板（8 KB；只满足 WebGL2 最低 4 KB uniform 的设备可退回 CPU），实例只带
+  `(base, count)`；不再每帧重算并回传整张顶点缓冲。带 morph 的蒙皮仍走 CPU（先 morph
+  再蒙皮），调色板放不下的模型也自动退回 CPU；`Scene::gpu_skinning = false` 可整体回退。
+  回归：`gpu_skinning_fills_the_joint_palette`（调色板真的被填）、
+  `gpu_skinning_matches_cpu_skinning_pixels`（同一 t 下 GPU/CPU 4096 像素全等，差>3 为 0）
+  + 原有 `skinned_mesh_changes_rendered_pixels`（总测试 712 → 714）。
 - **场景导出 OBJ（第 93 轮）**：新增 `quench3d export scene.json model.obj`，把 `objects`
   （含模板/实例展开、父级位置与朝向、复合形状部件、材质标量色）写成 OBJ + 同名 MTL。
   本仓库的 OBJ 导入器能把导出结果读回来，因此测试是真正的"导出 → 再导入"往返：

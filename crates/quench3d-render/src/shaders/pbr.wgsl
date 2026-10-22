@@ -18,6 +18,35 @@
 @group(2) @binding(5) var emissive_tex: texture_2d<f32>;
 @group(2) @binding(6) var linear_sampler: sampler;
 
+// GPU 蒙皮调色板：场景把本帧所有蒙皮物体的关节矩阵拼进同一块 uniform，
+// 每个实例只带 (起始下标, 关节数)。128 个关节 = 8 KB；只满足 WebGL2
+// 最低 4 KB uniform 块的设备需退回 CPU 蒙皮，超出的物体也自动退回。
+const MAX_SKIN_JOINTS: u32 = 128u;
+struct SkinPalette {
+    joints: array<mat4x4<f32>, 128>,
+};
+@group(3) @binding(0) var<uniform> skin_palette: SkinPalette;
+
+fn skin_matrix(base: u32, joint_ids: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
+    let total = weights.x + weights.y + weights.z + weights.w;
+    if total <= 1e-8 {
+        return mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    }
+    var result = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let w = weights[k];
+        if w <= 0.0 {
+            continue;
+        }
+        let index = base + joint_ids[k];
+        if index >= MAX_SKIN_JOINTS {
+            continue;
+        }
+        result = result + skin_palette.joints[index] * w;
+    }
+    return result * (1.0 / total);
+}
+
 struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -31,6 +60,11 @@ struct VertexIn {
     @location(8) albedo: vec4<f32>,
     // x = 金属度覆盖, y = 粗糙度覆盖, z = 自发光强度, w = 标志位(bit0: 覆盖材质)
     @location(9) params: vec4<f32>,
+    // 顶点关节下标 / 权重（非蒙皮网格全 0）
+    @location(10) joints: vec4<u32>,
+    @location(11) weights: vec4<f32>,
+    // 每实例的蒙皮范围：x = 调色板起始下标，y = 关节数（0 = 不做蒙皮）
+    @location(12) skin: vec4<f32>,
 };
 
 struct VertexOut {
@@ -66,8 +100,14 @@ fn normal_matrix(m: mat3x3<f32>) -> mat3x3<f32> {
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
-    let world = model * vec4<f32>(in.position, 1.0);
-    let nm = normal_matrix(mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz));
+    var skin = mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0), vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    if in.skin.y > 0.5 {
+        skin = skin_matrix(u32(in.skin.x), in.joints, in.weights);
+    }
+    let world = model * skin * vec4<f32>(in.position, 1.0);
+    let linear = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz)
+        * mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
+    let nm = normal_matrix(linear);
 
     var out: VertexOut;
     out.clip_position = frame.view_proj * world;

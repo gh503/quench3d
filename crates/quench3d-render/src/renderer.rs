@@ -20,6 +20,12 @@ use crate::point_shadow::{plan_point_shadow, PointShadowPlan, POINT_SHADOW_FACES
 use crate::spot_shadow::{plan_spot_shadow, SpotShadowPlan};
 use crate::texture::{default_texture, GpuTexture, ImageData};
 
+/// GPU 蒙皮调色板容量（关节矩阵数）。与 `pbr.wgsl` / `shadow.wgsl` 的数组长度一致；
+/// 128 × 64 B = 8 KB。绝大多数 WebGL2 实现的顶点 uniform 块 ≥ 16 KB；只满足
+/// 规范最低值（4 KB）的设备请用 `Scene::gpu_skinning=false` 退回 CPU。
+pub const MAX_SKIN_JOINTS: u32 = 128;
+const SKIN_PALETTE_BYTES: u64 = MAX_SKIN_JOINTS as u64 * 64;
+
 /// 主 pass 的两个颜色目标：HDR + 水面 mask。
 ///
 /// 两个目标的 blend 必须**相同**：WebGL2 的 downlevel 设备没有
@@ -265,6 +271,8 @@ pub struct InstanceRaw {
     pub color: [f32; 4],
     /// x = 金属度，y = 粗糙度，z = 自发光强度，w = 是否覆盖材质参数。
     pub params: [f32; 4],
+    /// x = 蒙皮调色板起始下标，y = 关节数（0 = 不做 GPU 蒙皮）。
+    pub skin: [f32; 4],
 }
 
 /// 一次绘制请求（面向使用者的实例描述）。
@@ -280,6 +288,10 @@ pub struct InstanceDesc {
     pub roughness: Option<f32>,
     /// 自发光强度倍乘。
     pub emissive_strength: f32,
+    /// GPU 蒙皮：调色板起始下标（0 = 不做蒙皮）。
+    pub skin_base: u32,
+    /// GPU 蒙皮：关节数（0 = 不做蒙皮）。
+    pub skin_count: u32,
 }
 
 impl Default for InstanceDesc {
@@ -290,6 +302,8 @@ impl Default for InstanceDesc {
             metallic: None,
             roughness: None,
             emissive_strength: 1.0,
+            skin_base: 0,
+            skin_count: 0,
         }
     }
 }
@@ -331,6 +345,13 @@ impl InstanceDesc {
         self
     }
 
+    /// GPU 蒙皮：本实例用调色板里的 `[base, base+count)` 段关节矩阵。
+    pub fn with_skin(mut self, base: u32, count: u32) -> Self {
+        self.skin_base = base;
+        self.skin_count = count;
+        self
+    }
+
     fn to_raw(self) -> InstanceRaw {
         let m = self.transform.matrix();
         let override_material = self.metallic.is_some() || self.roughness.is_some();
@@ -343,6 +364,7 @@ impl InstanceDesc {
                 self.emissive_strength,
                 if override_material { 1.0 } else { 0.0 },
             ],
+            skin: [self.skin_base as f32, self.skin_count as f32, 0.0, 0.0],
         }
     }
 }
@@ -677,6 +699,9 @@ pub struct Renderer {
     frame_layout: wgpu::BindGroupLayout,
     shadow_bind_layout: wgpu::BindGroupLayout,
     material_layout: wgpu::BindGroupLayout,
+    /// GPU 蒙皮调色板的 buffer / 绑定组（所有 PBR 与阴影管线共用 group 3 / 1）。
+    skin_buffer: wgpu::Buffer,
+    skin_bind_group: wgpu::BindGroup,
     opaque_pipeline: wgpu::RenderPipeline,
     alpha_pipeline: wgpu::RenderPipeline,
     /// 不剔除背面（材质的 `double_sided` 为真时使用）。
@@ -775,6 +800,8 @@ pub struct Renderer {
     black_texture: GpuTexture,
 
     // 每帧状态
+    /// 本帧的关节矩阵（列主序）；场景每帧通过 [`Renderer::set_skin_palette`] 写入。
+    skin_palette: Vec<[[f32; 4]; 4]>,
     staging: Vec<(InstanceRaw, Aabb)>,
     visible: Vec<InstanceRaw>,
     /// 每个批次在可见实例缓冲中的 `(起始, 数量)`。
@@ -1044,13 +1071,47 @@ impl Renderer {
             ],
         });
 
+        let skin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-skin-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(SKIN_PALETTE_BYTES),
+                },
+                count: None,
+            }],
+        });
+        let skin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-skin-palette"),
+            size: SKIN_PALETTE_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let skin_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-skin-bind-group"),
+            layout: &skin_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: skin_buffer.as_entire_binding(),
+            }],
+        });
+
         let pbr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("quench3d-pbr-layout"),
             bind_group_layouts: &[
                 Some(&frame_layout),
                 Some(&shadow_bind_layout),
                 Some(&material_layout),
+                Some(&skin_layout),
             ],
+            immediate_size: 0,
+        });
+        let shadow_pass_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quench3d-shadow-pass-layout"),
+            bind_group_layouts: &[Some(&frame_layout), Some(&skin_layout)],
             immediate_size: 0,
         });
         let frame_pipeline_layout =
@@ -1469,7 +1530,7 @@ impl Renderer {
             device,
             PipelineSpec {
                 label: "quench3d-shadow",
-                layout: &frame_pipeline_layout,
+                layout: &shadow_pass_layout,
                 module: &shadow_module,
                 vs_entry: "vs_main",
                 fs_entry: None,
@@ -1727,6 +1788,8 @@ impl Renderer {
             frame_layout,
             shadow_bind_layout,
             material_layout,
+            skin_buffer,
+            skin_bind_group,
             opaque_pipeline,
             alpha_pipeline,
             opaque_double_pipeline,
@@ -1760,6 +1823,7 @@ impl Renderer {
             white_texture,
             flat_normal_texture,
             black_texture,
+            skin_palette: Vec::new(),
             staging: Vec::new(),
             visible: Vec::new(),
             visible_ranges: Vec::new(),
@@ -1840,13 +1904,14 @@ impl Renderer {
     }
 
     fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
             4 => Float32x4,
             5 => Float32x4,
             6 => Float32x4,
             7 => Float32x4,
             8 => Float32x4,
-            9 => Float32x4
+            9 => Float32x4,
+            12 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<InstanceRaw>() as u64,
@@ -1919,6 +1984,46 @@ impl Renderer {
             name: name.to_string(),
         });
         id
+    }
+
+    /// 上传一个带 GPU 蒙皮数据的网格。
+    ///
+    /// `joints` / `weights` 与顶点一一对应（glTF 的 `JOINTS_0` / `WEIGHTS_0`）。
+    /// 长度不匹配时退化为普通网格，而不是悄悄错位蒙皮。
+    pub fn add_mesh_skinned_named(
+        &mut self,
+        ctx: &GpuContext,
+        mesh: &MeshData,
+        joints: &[[u16; 4]],
+        weights: &[[f32; 4]],
+        name: &str,
+    ) -> MeshId {
+        if joints.len() != mesh.vertices.len() || weights.len() != mesh.vertices.len() {
+            return self.add_mesh_named(ctx, mesh, name);
+        }
+        let mut data = mesh.clone();
+        for (i, v) in data.vertices.iter_mut().enumerate() {
+            v.joints = joints[i];
+            v.weights = weights[i];
+        }
+        self.add_mesh_named(ctx, &data, name)
+    }
+
+    /// 设置本帧的 GPU 蒙皮调色板（列主序矩阵，最多 [`MAX_SKIN_JOINTS`] 个）。
+    ///
+    /// 场景每帧把所有蒙皮实例的关节矩阵拼进来；实例只带 `(base, count)`。
+    /// 超过容量的部分应被调用方提前退回 CPU 蒙皮（这里截断，避免越界）。
+    pub fn set_skin_palette(&mut self, matrices: &[Mat4]) {
+        self.skin_palette = matrices
+            .iter()
+            .take(MAX_SKIN_JOINTS as usize)
+            .map(|m| m.to_cols_arrays())
+            .collect();
+    }
+
+    /// 当前调色板里的关节矩阵数量（诊断/测试用）。
+    pub fn skin_palette_len(&self) -> usize {
+        self.skin_palette.len()
     }
 
     /// 上传纹理，返回句柄。
@@ -2959,6 +3064,13 @@ impl Renderer {
                 .then_with(|| a.3.cmp(&b.3))
         });
 
+        if !self.skin_palette.is_empty() {
+            ctx.queue.write_buffer(
+                &self.skin_buffer,
+                0,
+                bytemuck::cast_slice(&self.skin_palette),
+            );
+        }
         if !self.visible.is_empty() {
             ctx.queue.write_buffer(
                 &self.instance_buffer,
@@ -3016,6 +3128,7 @@ impl Renderer {
                 });
                 pass.set_pipeline(&self.shadow_pipeline);
                 pass.set_bind_group(0, &self.shadow_frame_bind_groups[ci], &[]);
+                pass.set_bind_group(1, &self.skin_bind_group, &[]);
                 pass.set_viewport(vx, vy, vs, vs, 0.0, 1.0);
                 pass.set_scissor_rect(vx as u32, vy as u32, vs as u32, vs as u32);
                 let mut current_mesh = u32::MAX;
@@ -3059,6 +3172,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &self.spot_shadow_frame_bind_group, &[]);
+            pass.set_bind_group(1, &self.skin_bind_group, &[]);
             pass.set_viewport(0.0, 0.0, size, size, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, self.spot_shadow_map_size, self.spot_shadow_map_size);
             let mut current_mesh = u32::MAX;
@@ -3099,6 +3213,7 @@ impl Renderer {
                 });
                 pass.set_pipeline(&self.shadow_pipeline);
                 pass.set_bind_group(0, &self.point_shadow_frame_bind_groups[face], &[]);
+                pass.set_bind_group(1, &self.skin_bind_group, &[]);
                 pass.set_viewport(0.0, 0.0, size, size, 0.0, 1.0);
                 pass.set_scissor_rect(0, 0, self.point_shadow_map_size, self.point_shadow_map_size);
                 let mut current_mesh = u32::MAX;
@@ -3202,6 +3317,7 @@ impl Renderer {
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 pass.set_bind_group(1, &self.shadow_bind_group, &[]);
                 pass.set_bind_group(2, &gmat.bind_group, &[]);
+                pass.set_bind_group(3, &self.skin_bind_group, &[]);
                 pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
                 pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
                 pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -3223,6 +3339,7 @@ impl Renderer {
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 pass.set_bind_group(1, &self.shadow_bind_group, &[]);
                 pass.set_bind_group(2, &gmat.bind_group, &[]);
+                pass.set_bind_group(3, &self.skin_bind_group, &[]);
                 pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
                 pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
                 pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -3733,7 +3850,10 @@ mod tests {
 
     #[test]
     fn instance_raw_layout_is_tight() {
-        assert_eq!(std::mem::size_of::<InstanceRaw>(), 96);
+        // 64 B 模型矩阵 + 16 B 颜色 + 16 B 参数 + 16 B 蒙皮范围。
+        assert_eq!(std::mem::size_of::<InstanceRaw>(), 112);
+        // 48 B 基础顶点 + 8 B 关节下标 + 16 B 权重。
+        assert_eq!(std::mem::size_of::<crate::mesh::Vertex>(), 72);
         assert_eq!(std::mem::size_of::<crate::mesh::Vertex>() % 4, 0);
     }
 

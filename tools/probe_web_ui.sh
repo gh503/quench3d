@@ -21,6 +21,15 @@ fi
 
 PORT="${PORT:-8140}"
 CDP_PORT="${CDP_PORT:-9223}"
+# 默认端口可能被别的会话/残留服务占着：换一个空闲端口，别让探针假红。
+if ! python3 -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1])))' "$PORT" 2>/dev/null; then
+  for candidate in $(seq 8141 8199); do
+    if python3 -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1])))' "$candidate" 2>/dev/null; then
+      PORT="$candidate"
+      break
+    fi
+  done
+fi
 OUT_DIR="${OUT_DIR:-target/tmp/ui-probe}"
 mkdir -p target/tmp
 rm -rf "$OUT_DIR"

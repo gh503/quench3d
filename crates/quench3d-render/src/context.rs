@@ -769,11 +769,13 @@ pub fn with_gpu_tests<T>(reason: &str, f: impl FnOnce() -> T) -> Option<T> {
 
 /// 顶点缓冲布局（位置 / 法线 / UV / 切线）。
 pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x2,
-        3 => Float32x4
+        3 => Float32x4,
+        10 => Uint16x4,
+        11 => Float32x4
     ];
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,

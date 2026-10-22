@@ -245,6 +245,51 @@ fn animation_matrices(a: &ModelAnimationInstance) -> Vec<Mat4> {
     }
 }
 
+/// 本帧可以走 GPU 蒙皮的实例规划。
+///
+/// 返回 `(调色板, 物体下标 → (起始, 数量))`。只收**纯蒙皮**片段：带 morph 的片段
+/// 必须先做绑定姿态位移、再乘关节矩阵，仍由 CPU 路径处理；调色板超过 128 个关节的
+/// 模型也退回 CPU，避免越界。
+fn gpu_skin_plan(
+    animations: &[ModelAnimationInstance],
+    enabled: bool,
+) -> (Vec<Mat4>, HashMap<usize, (u32, u32)>) {
+    let limit = quench3d_render::MAX_SKIN_JOINTS as usize;
+    if !enabled {
+        return (Vec::new(), HashMap::new());
+    }
+    let mut palette = Vec::new();
+    let mut plan = HashMap::new();
+    for a in animations {
+        let Some(worlds) = animation_worlds(a) else {
+            continue;
+        };
+        for (mesh_index, &object_index) in a.objects.iter().enumerate() {
+            let Some(mesh) = a.model.meshes.get(mesh_index) else {
+                continue;
+            };
+            if mesh.skin.is_none()
+                || !mesh.morph_targets.is_empty()
+                || mesh.joints.len() != mesh.data.vertices.len()
+                || mesh.weights.len() != mesh.data.vertices.len()
+            {
+                continue;
+            }
+            let Some(joints) = a.model.skin_matrices(mesh_index, &worlds) else {
+                continue;
+            };
+            if joints.is_empty() || palette.len() + joints.len() > limit {
+                continue;
+            }
+            let base = palette.len() as u32;
+            let count = joints.len() as u32;
+            palette.extend(joints);
+            plan.insert(object_index, (base, count));
+        }
+    }
+    (palette, plan)
+}
+
 /// 状态机的一步：推进当前状态计时，命中过渡就建立淡入（或立即切换）。
 ///
 /// `dt` 非法时按 0 处理；`fade` 非法时按 0；过渡按场景中的顺序取第一条命中的。
@@ -357,6 +402,10 @@ pub struct Scene {
     ///
     /// 空 = 静态场景：`advance_animations` 一次循环都不进，逐字节零开销。
     pub animations: Vec<ModelAnimationInstance>,
+    /// 是否用顶点着色器做蒙皮（缺省开）。关掉退回 CPU 蒙皮，用于对照/排障。
+    ///
+    /// 只有**纯蒙皮**片段走 GPU；带 morph 的片段仍走 CPU。
+    pub gpu_skinning: bool,
 }
 
 impl Default for Scene {
@@ -373,6 +422,7 @@ impl Scene {
             lighting: Lighting::default(),
             auto_sync_physics: true,
             animations: Vec::new(),
+            gpu_skinning: true,
         }
     }
 
@@ -784,6 +834,7 @@ impl Scene {
             animations,
             ..
         } = self;
+        let (_, gpu_skinned) = gpu_skin_plan(animations, self.gpu_skinning);
         for a in animations.iter() {
             let Some(worlds) = animation_worlds(a) else {
                 continue;
@@ -824,6 +875,10 @@ impl Scene {
                 let Some(data) = a.model.deformed_mesh(mesh_index, &worlds, weights) else {
                     continue;
                 };
+                // 纯蒙皮片段已经交给 GPU：不再每帧回写整张顶点缓冲。
+                if gpu_skinned.contains_key(&object_index) {
+                    continue;
+                }
                 let Some(object) = objects.get_mut(object_index) else {
                     continue;
                 };
@@ -911,13 +966,15 @@ impl Scene {
 
     /// 提交全部可见物体到渲染器。
     pub fn submit(&self, renderer: &mut Renderer) {
+        let (palette, skin_plan) = gpu_skin_plan(&self.animations, self.gpu_skinning);
+        renderer.set_skin_palette(&palette);
         for (i, obj) in self.objects.iter().enumerate() {
             if obj.visible {
-                renderer.draw(
-                    obj.mesh,
-                    obj.material,
-                    obj.instance(self.world_transform(i)),
-                );
+                let mut instance = obj.instance(self.world_transform(i));
+                if let Some(&(base, count)) = skin_plan.get(&i) {
+                    instance = instance.with_skin(base, count);
+                }
+                renderer.draw(obj.mesh, obj.material, instance);
             }
         }
     }
