@@ -261,6 +261,10 @@ fn all_editor_panels_draw_in_one_frame() {
         "景深开关没有出现在面板内容里"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "正交"),
+        "相机投影开关没有出现在面板内容里"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "初始（立即切换）"),
         "初始状态控件没有出现在面板内容里"
     );

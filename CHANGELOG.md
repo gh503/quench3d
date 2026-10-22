@@ -32,6 +32,11 @@
 
 ### 新增
 
+- **相机投影控件与裁剪面存盘（第 91 轮）**：编辑器顶栏新增「正交」开关、视场角、近/远
+  裁剪面与正交高度；`scene_to_json` 现在写回 `camera.near/far/orthographic_height`
+  （以前被 `..Default::default()` 丢掉，调过裁剪面存一次就还原）。回归：
+  `camera_clipping_and_ortho_round_trip`（设 0.2 / 2500 / 13.5，存读一致）+
+  `ui_smoke` 的「正交」绘制断言。
 - **整场景重载释放显存（第 90 轮）**：`Renderer::clear_scene_assets()` 丢弃旧网格/材质/贴图
   并重置句柄空间，编辑器 `install_doc` 在清 `Scene` 后调用它、重建 `AssetCache`；反复
   "打开"同一份场景不再累加显存，旧批次也不会指向同号新资源。仍**没有**按句柄的

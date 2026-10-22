@@ -107,6 +107,9 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         yaw_deg: Some(engine.orbit.yaw.to_degrees()),
         pitch_deg: Some(engine.orbit.pitch.to_degrees()),
         fov_deg: Some(engine.orbit.fov_y.to_degrees()),
+        near: Some(engine.orbit.near),
+        far: Some(engine.orbit.far),
+        orthographic_height: engine.orbit.orthographic_height,
         ..Default::default()
     };
     // 相机位置只在"用 position/look_at 描述"时才写，否则让 yaw/pitch/distance 说话。

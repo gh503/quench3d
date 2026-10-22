@@ -317,6 +317,58 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                 });
 
             ui.separator();
+            // 相机投影：视场角 / 裁剪面 / 正交高度。后两项以前只在场景文件里能调，
+            // 而且存盘时会被 `..Default::default()` 悄悄丢掉。
+            let mut ortho = engine.orbit.orthographic_height.is_some();
+            if ui
+                .checkbox(&mut ortho, "正交")
+                .on_hover_text("关 = 透视（近大远小）；开 = 工程制图式正交投影")
+                .changed()
+            {
+                engine.orbit.orthographic_height = if ortho {
+                    Some(engine.orbit.orthographic_height.unwrap_or(12.0))
+                } else {
+                    None
+                };
+            }
+            let mut fov_deg = engine.orbit.fov_y.to_degrees();
+            if ui
+                .add_enabled_ui(!ortho, |ui| {
+                    ui.label("视场角");
+                    ui.add(
+                        egui::DragValue::new(&mut fov_deg)
+                            .speed(0.5)
+                            .range(10.0..=170.0)
+                            .suffix("°"),
+                    )
+                })
+                .inner
+                .changed()
+            {
+                engine.orbit.fov_y = fov_deg.to_radians();
+            }
+            ui.label("近/远");
+            ui.add(
+                egui::DragValue::new(&mut engine.orbit.near)
+                    .speed(0.005)
+                    .range(0.001..=10.0),
+            );
+            ui.add(
+                egui::DragValue::new(&mut engine.orbit.far)
+                    .speed(5.0)
+                    .range(10.0..=100000.0),
+            );
+            if let Some(height) = engine.orbit.orthographic_height.as_mut() {
+                ui.label("高度");
+                ui.add(
+                    egui::DragValue::new(height)
+                        .speed(0.1)
+                        .range(0.1..=5000.0)
+                        .suffix("m"),
+                );
+            }
+
+            ui.separator();
 
             if ui.button("打开").on_hover_text("读入 scene.json").clicked() {
                 req.load = true;

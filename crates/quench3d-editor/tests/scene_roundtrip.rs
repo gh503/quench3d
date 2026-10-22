@@ -1111,3 +1111,46 @@ fn reloading_scene_reclaims_renderer_assets() {
         );
     }
 }
+
+/// 相机的近/远裁剪面与正交高度要能存盘再读回。
+///
+/// 以前导出相机只写 fov/yaw/pitch/distance，`near/far/orthographic_height` 被
+/// `..Default::default()` 留空——在编辑器里调过裁剪面，存一次就丢。
+#[test]
+fn camera_clipping_and_ortho_round_trip() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = r#"{
+      "format": "quench3d.scene",
+      "version": 2,
+      "name": "camera",
+      "objects": [
+        { "name": "box", "shape": { "type": "box", "size": [1, 1, 1] },
+          "position": [0, 1, 0], "body": "dynamic" }
+      ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).expect("载入必须成功");
+    engine.orbit.fov_y = 42f32.to_radians();
+    engine.orbit.near = 0.2;
+    engine.orbit.far = 2500.0;
+    engine.orbit.orthographic_height = Some(13.5);
+
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    let parsed = SceneDoc::from_json(&saved.json).expect("导出的必须是合法 JSON");
+    assert_eq!(parsed.camera.fov_deg, Some(42.0));
+    assert_eq!(parsed.camera.near, Some(0.2));
+    assert_eq!(parsed.camera.far, Some(2500.0));
+    assert_eq!(parsed.camera.orthographic_height, Some(13.5));
+
+    let Some(mut engine2) = headless_engine() else {
+        return;
+    };
+    let mut doc2 = Doc::new();
+    scene_io::load_text_into_doc(&mut engine2, &mut doc2, &saved.json).expect("二次载入必须成功");
+    assert!((engine2.orbit.fov_y.to_degrees() - 42.0).abs() < 1e-4);
+    assert!((engine2.orbit.near - 0.2).abs() < 1e-6);
+    assert!((engine2.orbit.far - 2500.0).abs() < 1e-3);
+    assert_eq!(engine2.orbit.orthographic_height, Some(13.5));
+}
