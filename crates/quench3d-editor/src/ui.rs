@@ -1517,6 +1517,80 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     }
 }
 
+/// 把时间轴上的像素 X 映射成 clip 时间；范围外夹到 `[0, duration]`。
+fn timeline_time_at(rect: egui::Rect, x: f32, duration: f32) -> f32 {
+    if !duration.is_finite() || duration <= 0.0 || rect.width() <= 0.0 {
+        return 0.0;
+    }
+    let t = (x - rect.left()) / rect.width();
+    t.clamp(0.0, 1.0) * duration
+}
+
+/// 单 clip 的可视化时间轴：点击/拖动定位，返回新的时间（没变返回 `None`）。
+fn timeline_bar(ui: &mut Ui, time: f32, duration: f32, id: usize) -> Option<f32> {
+    if !duration.is_finite() || duration <= 0.0 {
+        return None;
+    }
+    let width = ui.available_width().max(120.0);
+    let (rect, response) = ui
+        .push_id(("quench3d-timeline", id), |ui| {
+            ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::click_and_drag())
+        })
+        .inner;
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    let fraction = (time / duration).clamp(0.0, 1.0);
+    let mut progress = rect;
+    progress.set_width(rect.width() * fraction);
+    painter.rect_filled(progress, 3.0, ui.visuals().selection.bg_fill);
+    // 0 / 25 / 50 / 75 / 100% 刻度：没有文字也能看出这是时间，不是进度条。
+    for i in 0..=4 {
+        let x = rect.left() + rect.width() * (i as f32 / 4.0);
+        let color = if i == 0 || i == 4 {
+            ui.visuals().weak_text_color()
+        } else {
+            ui.visuals().weak_text_color().gamma_multiply(0.5)
+        };
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.top() + 4.0),
+                egui::pos2(x, rect.bottom() - 4.0),
+            ],
+            egui::Stroke::new(1.0, color),
+        );
+    }
+    let playhead = rect.left() + rect.width() * fraction;
+    painter.line_segment(
+        [
+            egui::pos2(playhead, rect.top()),
+            egui::pos2(playhead, rect.bottom()),
+        ],
+        egui::Stroke::new(2.0, ui.visuals().strong_text_color()),
+    );
+    let label = format!("{time:.3}s / {duration:.3}s");
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::monospace(11.0),
+        ui.visuals().text_color(),
+    );
+    let response = response.on_hover_text("点击或拖动定位动画时间");
+    let mut changed = None;
+    if response.clicked() || response.dragged() {
+        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+            let next = timeline_time_at(rect, pos.x, duration);
+            if (next - time).abs() > 1e-6 {
+                changed = Some(next);
+            }
+        }
+    }
+    if response.double_clicked() && time.abs() > 1e-6 {
+        changed = Some(0.0);
+    }
+    changed
+}
+
 /// 动画面板：拖动当前 clip 的时间，暂停时也能看到蒙皮/morph 当场变化。
 ///
 /// 这里**不**改场景文件里的速度/循环/状态机；那些由 `models[].animation` /
@@ -1800,6 +1874,15 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .changed()
                     {
                         animation.player.time = time;
+                        animation.player.finished = false;
+                        refresh = true;
+                    }
+                    // 可视化时间轴：和滑杆共享同一个 `player.time`，点/拖都能定位。
+                    // 这是单 clip 的检查器，不是多轨混合器（混合仍靠 secondary + weight）。
+                    ui.label(RichText::new("时间轴").small().strong());
+                    if let Some(scrubbed) = timeline_bar(ui, animation.player.time, duration, index)
+                    {
+                        animation.player.time = scrubbed;
                         animation.player.finished = false;
                         refresh = true;
                     }
@@ -2949,4 +3032,21 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.label("Esc：退出");
         });
     doc.show_help = open;
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn timeline_scrub_maps_and_clamps() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 20.0));
+        assert_eq!(timeline_time_at(rect, 0.0, 2.0), 0.0);
+        assert_eq!(timeline_time_at(rect, 50.0, 2.0), 1.0);
+        assert_eq!(timeline_time_at(rect, 100.0, 2.0), 2.0);
+        assert_eq!(timeline_time_at(rect, -30.0, 2.0), 0.0);
+        assert_eq!(timeline_time_at(rect, 230.0, 2.0), 2.0);
+        assert_eq!(timeline_time_at(rect, 50.0, 0.0), 0.0);
+        assert_eq!(timeline_time_at(rect, 50.0, f32::NAN), 0.0);
+    }
 }

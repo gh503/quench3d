@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **772** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **773** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -111,6 +111,7 @@ tools/verify_all.sh
 | 功能 | 正向证据 | 判据 |
 | --- | --- | --- |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
+| 单 clip 时间轴 | `cargo test -p quench3d-editor --lib timeline` + `ui_smoke` | 像素→时间夹取；UI 同帧画出「时间轴」和 `0.250s / 1.000s` 读数 |
 | 桌面窗口位置 | `cargo test -p quench3d-editor --lib layout` | `layout.json` 往返保留窗口坐标；半截/离谱坐标退回默认；Wayland 不生效（协议无窗口位置） |
 | 场景树拖放改父 | `cargo test -p quench3d-editor --test ui_smoke outliner_drop_request` | 静态子物体拖到父行后 `parent=Some`，且世界位置不被吸到父原点 |
 | 增删 / 复制 / 重置 | `cargo test -p quench3d-editor --test history` | 撤销重做、拖拽合并、快照逐字节 |

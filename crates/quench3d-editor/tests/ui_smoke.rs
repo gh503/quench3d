@@ -317,6 +317,14 @@ fn all_editor_panels_draw_in_one_frame() {
         shapes_contain_text(&output.shapes, "布局"),
         "工具栏没有画出「布局」菜单"
     );
+    assert!(
+        shapes_contain_text(&output.shapes, "时间轴"),
+        "动画面板没有画出时间轴"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "0.250s / 1.000s"),
+        "时间轴的读数没有跟着 player.time 显示（预期 0.250s / 1.000s）"
+    );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(
         (first_requests.outliner_width - 300.0).abs() < 1.0,
