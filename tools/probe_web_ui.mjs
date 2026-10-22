@@ -145,6 +145,14 @@ async function main() {
   if (!String(await state()).includes("paused=true")) {
     die("编辑器启动后不是暂停状态，无法用截图差异判断按键");
   }
+  // 没有编辑过的默认场景不该写恢复点（否则每次刷新都会弹"发现自动保存"）。
+  const untouched = await evaluate(
+    send,
+    `localStorage.getItem("quench3d.autosave.scene.v1")`,
+  );
+  if (untouched !== null) {
+    die(`未编辑的默认场景就写了自动保存（${String(untouched).length} 字节）`);
+  }
 
   const clip = { x: 300, y: 60, width: 680, height: 600, scale: 1 };
   const snap = async (name) => {
@@ -200,6 +208,140 @@ async function main() {
   // 浏览器/egui 的 Tab 焦点遍历会把键盘交给控件（`keys_enabled=false`），
   // 这是 egui 的正常焦点行为；探针到此结束，不再用 Tab 还原（会被焦点吃掉）。
   // 关键是上面已经断言：Tab 事件确实到达了 winit，并把 Orbit 切成了 Fly。
+
+  // ---- 自动保存恢复：localStorage 读回 → F9 恢复 → 物体数/恢复点同步变化 ----
+  // Web 端没有文件系统，自动保存写到这个版本化键（见 autosave.rs::WEB_KEY）。
+  const savedScene = JSON.stringify({
+    camera: { position: [4, 3, 7], look_at: [0, 1, 0] },
+    objects: [
+      {
+        name: "自动恢复箱",
+        shape: { type: "box", size: [1, 1, 1] },
+        position: [0, 1, 0],
+        body: "static",
+        material: "recovered",
+      },
+    ],
+    materials: { recovered: { color: [0.9, 0.2, 0.1], roughness: 0.5 } },
+  });
+  await evaluate(
+    send,
+    `localStorage.setItem("quench3d.autosave.scene.v1", ${JSON.stringify(savedScene)})`,
+  );
+  await send("Page.reload");
+  let reloaded = false;
+  for (let i = 0; i < 120; i++) {
+    reloaded = await evaluate(
+      send,
+      `document.getElementById("overlay")?.classList.contains("hidden") === true`,
+    );
+    if (reloaded) break;
+    await sleep(250);
+  }
+  if (!reloaded) die("刷新后 30 秒内遮罩没有收起（自动保存恢复页没画出来）");
+  await send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: 640,
+    y: 400,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: 640,
+    y: 400,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await sleep(300);
+  const recoveryState = await uiState();
+  if (!recoveryState.includes("recovery=true")) {
+    die(`刷新后没有读出 localStorage 里的自动保存：${recoveryState}`);
+  }
+  const objectsOf = (s) => Number(/objects=(\d+)/.exec(s)?.[1] ?? -1);
+  const beforeCount = objectsOf(recoveryState);
+  if (!(beforeCount > 1)) {
+    die(`恢复前的默认场景物体数异常（应当 >1）：${recoveryState}`);
+  }
+  const beforeRestore = await snap("autosave-before");
+  await key(send, "F9", "F9", 120);
+  await sleep(1000);
+  const restoredState = await uiState();
+  if (restoredState.includes("recovery=true")) {
+    die(`F9 没有清掉恢复点：${restoredState}`);
+  }
+  if (objectsOf(restoredState) !== 1) {
+    die(`F9 恢复后物体数应变成 1（场景里只有 1 个箱）：${restoredState}`);
+  }
+  const afterRestore = await snap("autosave-after");
+  if (beforeRestore === afterRestore) {
+    die("F9 恢复后画面没有变化（恢复可能只改了状态没装场景）");
+  }
+  results.push({
+    feature: "自动保存 F9",
+    before: beforeRestore,
+    after: afterRestore,
+    changed: true,
+  });
+  // 恢复后 `clear()` 把计时重置，下一帧应立刻写出新的恢复点（写路径也要测）。
+  const written = await evaluate(
+    send,
+    `localStorage.getItem("quench3d.autosave.scene.v1")`,
+  );
+  if (!written || !written.includes("自动恢复箱")) {
+    die(`恢复后没有重新写出 localStorage 自动保存：${String(written).slice(0, 200)}`);
+  }
+  console.log(`PASS 自动保存写入：${written.length} 字节`);
+
+  // 再刷新一次：恢复点应该重新出现；F10 丢弃后 localStorage 与状态都要清。
+  await send("Page.reload");
+  let reloadedAgain = false;
+  for (let i = 0; i < 120; i++) {
+    reloadedAgain = await evaluate(
+      send,
+      `document.getElementById("overlay")?.classList.contains("hidden") === true`,
+    );
+    if (reloadedAgain) break;
+    await sleep(250);
+  }
+  if (!reloadedAgain) die("第二次刷新后遮罩没有收起");
+  await send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: 640,
+    y: 400,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: 640,
+    y: 400,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await sleep(300);
+  const secondRecovery = await uiState();
+  if (!secondRecovery.includes("recovery=true")) {
+    die(`重新写出的恢复点在刷新后没有出现：${secondRecovery}`);
+  }
+  await key(send, "F10", "F10", 121);
+  await sleep(500);
+  const discarded = await uiState();
+  if (discarded.includes("recovery=true")) {
+    die(`F10 没有清掉恢复点：${discarded}`);
+  }
+  const afterDiscard = await evaluate(
+    send,
+    `localStorage.getItem("quench3d.autosave.scene.v1")`,
+  );
+  if (afterDiscard !== null) {
+    die(`F10 没有删掉 localStorage 恢复点（${String(afterDiscard).length} 字节）`);
+  }
+  console.log("PASS 自动保存丢弃 F10");
 
   // 运行时错误/panic/GL 能力日志都要当失败（与 probe_webgl2 的判据一致）。
   const logs = events

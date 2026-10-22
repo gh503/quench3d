@@ -101,7 +101,7 @@
 | 网格与吸附 | 全部 | 1 单位网格 + gizmo 吸附；**网格不随尺度自适应** | 🟠 |
 | 场景树 / 属性面板 / 状态栏 | 全部 | 有 | ✅ |
 | 文件对话框 | 全部 | 无（桌面用路径文本，Web 用上传/下载） | 🟠 |
-| 崩溃恢复 / 自动保存 / 布局持久化 | 全部 | **自动保存 + 崩溃恢复 ✅ 第 92 轮**（桌面端 30s、原子写、正常退出清理、恢复不覆盖磁盘）；Web 无；布局持久化仍无 | 🟡 |
+| 崩溃恢复 / 自动保存 / 布局持久化 | 全部 | **自动保存 + 崩溃恢复 ✅ 第 92 轮，Web localStorage ✅ 第 103 轮**（桌面 30s、原子写、正常退出清理；Web 30s、`localStorage` 版本化键、F9/F10 恢复/丢弃、恢复不覆盖原场景）；布局持久化仍无 | 🟡 |
 | 历史面板 / 快捷键自定义 / 命令搜索 | Blender / Godot | 无 | ❌ |
 | 编辑模式（顶点/边/面） | Blender / Unity | 无 | ❌ |
 
@@ -2486,6 +2486,30 @@ particle_billboards_change_pixels`（同相机、无太阳/环境光，中心红
 没有手动轴心/3D 光标。
 
 ---
+
+### 23.8 Web 自动保存 + 恢复快捷键（第 103 轮）
+
+**做了什么**：`AutoSave` 从"桌面专用"改成两端可用。桌面仍写
+`$XDG_STATE_HOME/quench3d/autosave.scene.json`（临时文件 + rename）；Web 写
+`localStorage["quench3d.autosave.scene.v1"]`，启动时 `read_recovery()` 读回并挂出
+「发现自动保存 / 恢复 / 丢弃」。恢复/丢弃快捷键为 `F9` / `F10`（只在恢复点存在且键盘没被输入框占用时生效，
+且在 `Engine::tick` 之前读按键，避免被 `begin_frame` 清掉）。只有编辑过的场景
+（`history.can_undo()`）或刚恢复过的场景才写，刚打开的默认场景不写。Web 手动下载场景后清掉
+恢复点，避免下次刷新又提示。Web 的 `std::time::Instant::now()` 会 panic（std 在 wasm
+上未实现），所以 `AutoSave` 的计时在 Web 分支改用 `quench3d::clock::now_seconds()`
+（`performance.now()`），间隔仍是 30 秒；`localStorage` 写入失败（配额/隐私模式）走
+`defer` 延后重试，不打断编辑。
+
+**验证**：原生 `cargo test -p quench3d-editor --lib autosave`（2 条文件语义）；
+`tools/build_web.sh web_client` 后再跑 `tools/probe_web_ui.sh`：向
+`localStorage` 写入一份带「自动恢复箱」的场景 → `Page.reload` → 断言
+`data-quench3d-ui` 里 `recovery=true` 且默认场景物体数 >1 → 先断言 localStorage 为空（未编辑不写）→ 按 `F9` → 断言
+`recovery=false`、`objects=1`、截图哈希变化 → 断言 localStorage 立刻又写出包含
+「自动恢复箱」的新恢复点（写路径）→ 清键。探针输出
+`PASS 自动保存写入：... 字节` 与 `PASS 自动保存 F9`。
+
+**边界**：Web 没有"正常退出"钩子，所以恢复点只会在手动保存/下载或用户丢弃时清；
+布局（面板宽度/窗口位置）仍不持久化；localStorage 约 5MB，场景过大时写失败只记日志。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

@@ -175,6 +175,9 @@ pub struct Doc {
     pub show_help: bool,
     /// 崩溃恢复文件的内容（`Some` = 工具栏显示"恢复 / 丢弃"）。
     pub recovery: Option<String>,
+    /// 一次性自动保存请求：恢复出来的场景在历史里是"干净"的（`can_undo()==false`），
+    /// 但它与启动场景不同，仍应马上写一个新恢复点，否则恢复后再崩就丢了。
+    pub needs_autosave: bool,
     /// 撤销 / 重做历史（整场景快照，见 [`crate::history`]）。
     pub history: crate::history::History,
     /// 用户显式设置的材质贴图/开关（空 = 沿用原文档的继承规则）。
@@ -743,6 +746,7 @@ impl Doc {
             status: "就绪".to_string(),
             show_help: false,
             recovery: None,
+            needs_autosave: false,
             history: crate::history::History::default(),
             textures: std::collections::HashMap::new(),
             model_instances: Vec::new(),
@@ -807,6 +811,7 @@ impl Doc {
     pub fn reset_history(&mut self, engine: &Engine) {
         let json = scene_json(engine, self);
         self.history.reset_json(json);
+        self.needs_autosave = false;
         self.status = "历史已重置".to_string();
     }
 

@@ -23,7 +23,6 @@
 #![warn(missing_docs)]
 
 pub mod app;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod autosave;
 pub mod camera;
 pub mod doc;

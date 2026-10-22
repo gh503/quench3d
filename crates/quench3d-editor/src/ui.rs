@@ -382,14 +382,14 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                 ui.label("发现自动保存");
                 if ui
                     .button("恢复")
-                    .on_hover_text("把上次崩溃前的自动保存装回引擎（不覆盖磁盘上的场景文件）")
+                    .on_hover_text("把上次崩溃前的自动保存装回引擎（不覆盖原场景文件）；快捷键 F9")
                     .clicked()
                 {
                     req.restore_recovery = true;
                 }
                 if ui
                     .button("丢弃")
-                    .on_hover_text("删掉自动保存，保持当前场景")
+                    .on_hover_text("删掉自动保存，保持当前场景；快捷键 F10")
                     .clicked()
                 {
                     req.discard_recovery = true;

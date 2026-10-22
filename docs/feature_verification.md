@@ -92,6 +92,7 @@ tools/verify_all.sh
 | 相机裁剪面/正交往返 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test scene_roundtrip camera_clipping_and_ortho_round_trip` | 编辑器设 `near=0.2`/`far=2500`/正交高度 13.5，存盘 JSON 三个字段都在，二次载入数值一致 |
 | 相机投影控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「正交」；顶栏可见 |
 | 自动保存读写/清理 | `cargo test -p quench3d-editor --lib autosave` | 首次写入、同内容不重写、内容变化重写、`clear` 真删；间隔未到不写 |
+| Web 自动保存读/写/恢复 | `tools/probe_web_ui.sh` | 写入 localStorage → reload → `recovery=true`；F9 后 `recovery=false`、`objects` 从默认场景变成 1、截图变化；随后 localStorage 立刻写出 2987 字节的新恢复点；再刷新出现恢复点，F10 丢弃后状态与键都清 |
 | 崩溃恢复提示绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | `doc.recovery=Some(..)` 时绘制图元里出现「发现自动保存」与「丢弃」按钮 |
 | 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |

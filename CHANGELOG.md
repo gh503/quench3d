@@ -41,6 +41,13 @@
 
 ### 新增
 
+- **Web 自动保存 + 恢复快捷键（第 103 轮）**：`AutoSave` 两端可用；桌面仍写原子
+  文件，Web 写 `localStorage["quench3d.autosave.scene.v1"]`，刷新/崩溃后启动挂出
+  「发现自动保存 / 恢复 / 丢弃」，`F9`/`F10` 可直接恢复/丢弃。Web 的计时改用
+  `performance.now()`（`std::time::Instant` 在 wasm 上会 panic），配额满只延后重试。
+  浏览器探针新增「未编辑不写→reload→读→F9 恢复→再写出→reload→F10 丢弃」全链路
+  （`PASS 自动保存写入`）。
+  边界：Web 没有退出钩子，手动下载/丢弃才清恢复点；布局持久化仍无。
 - **CPU 公告板粒子（第 102 轮）**：顶层 `particles[]`（`count`/`position`/`radius`/
   `velocity`/`spread`/`lifetime`/`size`/`gravity`/`color`）→ N 个面向相机的四边形代理；
   `Scene::update_particles` 做老化、重力、速度积分、按寿命重生与二次 alpha 淡出，

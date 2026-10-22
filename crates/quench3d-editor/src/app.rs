@@ -146,8 +146,7 @@ struct Inner {
     gizmo: Gizmo,
     /// 摄像头动捕读端（桌面端轮询 latest.*；Web 端空实现）。
     camera: CameraFeed,
-    /// 崩溃恢复自动保存（桌面端；Web 端没有本地文件系统）。
-    #[cfg(not(target_arch = "wasm32"))]
+    /// 崩溃恢复自动保存（桌面写文件，Web 写 localStorage）。
     autosave: crate::autosave::AutoSave,
     last_time: f64,
     first_frame_done: bool,
@@ -193,12 +192,11 @@ impl Inner {
         }
         doc.reset_history(&engine);
         // 上次崩溃留下的自动保存：先挂出来，等用户点「恢复 / 丢弃」。
-        #[cfg(not(target_arch = "wasm32"))]
+        // 桌面读文件，Web 读 localStorage（同一个版本化的键）。
         let autosave = crate::autosave::AutoSave::new(
             crate::autosave::AutoSave::default_path(),
             crate::autosave::DEFAULT_INTERVAL,
         );
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(text) = crate::autosave::AutoSave::read_recovery() {
             doc.recovery = Some(text);
             doc.status = "发现上次崩溃前的自动保存，可点「恢复」或「丢弃」".to_string();
@@ -240,7 +238,6 @@ impl Inner {
             viewport: Viewport::default(),
             gizmo: Gizmo::default(),
             camera: CameraFeed::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             autosave,
             last_time: quench3d::clock::now_seconds(),
             first_frame_done: false,
@@ -257,6 +254,24 @@ impl Inner {
         let now = quench3d::clock::now_seconds();
         let dt = ((now - self.last_time) as f32).clamp(0.0, 0.1);
         self.last_time = now;
+
+        // 恢复点存在时，F9/F10 等价于点「恢复 / 丢弃」。放在 tick 之前：`tick` 会
+        // `begin_frame` 清掉本帧按键，这里读到的才是刚按下的。
+        if self.doc.recovery.is_some() && !self.egui_ctx.egui_wants_keyboard_input() {
+            if self
+                .engine
+                .input
+                .key_pressed(quench3d::winit::keyboard::KeyCode::F9)
+            {
+                self.restore_recovery();
+            } else if self
+                .engine
+                .input
+                .key_pressed(quench3d::winit::keyboard::KeyCode::F10)
+            {
+                self.discard_recovery();
+            }
+        }
 
         // ---- 1. 界面：先跑 UI，让它有机会改场景 ----
         let raw_input = self.egui_state.take_egui_input(&self.window);
@@ -279,11 +294,9 @@ impl Inner {
             if requests.load {
                 self.load_scene();
             }
-            #[cfg(not(target_arch = "wasm32"))]
             if requests.restore_recovery {
                 self.restore_recovery();
             }
-            #[cfg(not(target_arch = "wasm32"))]
             if requests.discard_recovery {
                 self.discard_recovery();
             }
@@ -313,7 +326,6 @@ impl Inner {
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
         // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
         self.camera.add_lines(&mut self.engine.renderer.lines);
-        #[cfg(not(target_arch = "wasm32"))]
         self.autosave_tick();
         #[cfg(target_arch = "wasm32")]
         publish_ui_debug_state(UiDebugState {
@@ -336,6 +348,8 @@ impl Inner {
             bounds: self.engine.debug.body_bounds,
             query: self.engine.debug.query_probe,
             bones: self.engine.debug.bones,
+            recovery: self.doc.recovery.is_some(),
+            objects: self.engine.scene.len(),
         });
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
@@ -490,8 +504,8 @@ impl Inner {
                 Ok(()) => {
                     self.doc.status =
                         format!("已保存 {}（{} 字节）{note}", path.display(), json.len());
-                    #[cfg(not(target_arch = "wasm32"))]
                     self.autosave.clear();
+                    self.doc.needs_autosave = false;
                 }
                 Err(e) => self.doc.status = format!("保存失败：{e}"),
             }
@@ -502,6 +516,9 @@ impl Inner {
                 Ok(()) => {
                     self.doc.status =
                         format!("已下载 {}（{} 字节）{note}", self.doc.file_path, json.len());
+                    // 已经拿到一份用户主动下载的场景，恢复点没必要再出现。
+                    self.autosave.clear();
+                    self.doc.needs_autosave = false;
                 }
                 Err(e) => self.doc.status = format!("下载失败：{e}"),
             }
@@ -519,9 +536,11 @@ impl Inner {
                         .select_only(if objects > 0 { Some(0) } else { None });
                     self.doc.capture_baseline(&self.engine);
                     self.doc.reset_history(&self.engine);
-                    self.doc.status = format!("已载入 {}（{objects} 个物体）", path.display());
-                    #[cfg(not(target_arch = "wasm32"))]
+                    // 用户主动打开了别的场景：旧恢复点不再代表当前编辑，提示也收起。
+                    self.doc.recovery = None;
+                    self.doc.needs_autosave = false;
                     self.autosave.clear();
+                    self.doc.status = format!("已载入 {}（{objects} 个物体）", path.display());
                 }
                 Err(e) => self.doc.status = format!("载入失败：{e}"),
             }
@@ -533,8 +552,7 @@ impl Inner {
         }
     }
 
-    /// 把自动保存的内容装进引擎（不写磁盘上的场景文件）。
-    #[cfg(not(target_arch = "wasm32"))]
+    /// 把自动保存的内容装进引擎（不覆盖原场景文件/不自动下载）。
     fn restore_recovery(&mut self) {
         let Some(text) = self.doc.recovery.clone() else {
             return;
@@ -546,6 +564,8 @@ impl Inner {
                     .select_only(if objects > 0 { Some(0) } else { None });
                 self.doc.capture_baseline(&self.engine);
                 self.doc.reset_history(&self.engine);
+                // 恢复出来的场景与启动场景不同：允许下一帧写一个新恢复点。
+                self.doc.needs_autosave = true;
                 self.autosave.clear();
                 self.doc.status = format!("已恢复自动保存（{objects} 个物体；尚未写回磁盘）");
             }
@@ -557,7 +577,6 @@ impl Inner {
     }
 
     /// 丢弃自动保存。
-    #[cfg(not(target_arch = "wasm32"))]
     fn discard_recovery(&mut self) {
         self.doc.recovery = None;
         self.autosave.clear();
@@ -565,8 +584,12 @@ impl Inner {
     }
 
     /// 每帧调一次；内部先判时间，只有到点才序列化整个场景。
-    #[cfg(not(target_arch = "wasm32"))]
     fn autosave_tick(&mut self) {
+        // 刚打开、没有任何编辑的默认场景不写恢复点：否则 Web 每次刷新都会
+        // 弹一次"发现自动保存"。有撤销栈或刚恢复过才值得写。
+        if !self.doc.history.can_undo() && !self.doc.needs_autosave {
+            return;
+        }
         if !self.autosave.due() {
             return;
         }
@@ -580,9 +603,13 @@ impl Inner {
             self.autosave.defer();
             return;
         }
-        if let Err(e) = self.autosave.tick(&saved.json) {
-            self.autosave.defer();
-            log::warn!("自动保存失败：{e}");
+        match self.autosave.tick(&saved.json) {
+            Ok(true) => self.doc.needs_autosave = false,
+            Ok(false) => {}
+            Err(e) => {
+                self.autosave.defer();
+                log::warn!("自动保存失败：{e}");
+            }
         }
     }
 
@@ -596,6 +623,9 @@ impl Inner {
                 self.doc.file_path = path;
                 self.doc.capture_baseline(&self.engine);
                 self.doc.reset_history(&self.engine);
+                self.doc.recovery = None;
+                self.doc.needs_autosave = false;
+                self.autosave.clear();
                 self.doc.status = format!("已载入场景（{objects} 个物体）");
             }
             Err(e) => self.doc.status = format!("载入失败：{e}"),
@@ -662,6 +692,10 @@ struct UiDebugState {
     bounds: bool,
     query: bool,
     bones: bool,
+    /// 是否挂着自动保存恢复点（Web 端 localStorage / 桌面文件）。
+    recovery: bool,
+    /// 当前场景里的物体数（含粒子/水面代理；用于恢复测试对账）。
+    objects: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -680,6 +714,8 @@ fn publish_ui_debug_state(state: UiDebugState) {
         bounds,
         query,
         bones,
+        recovery,
+        objects,
     } = state;
     let Some(window) = web_sys::window() else {
         return;
@@ -693,7 +729,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones}"
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};recovery={recovery};objects={objects}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
