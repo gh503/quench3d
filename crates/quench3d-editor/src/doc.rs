@@ -229,6 +229,12 @@ pub struct Doc {
     /// 会把光照与渲染设置**静默清零**（这曾经是真事）。
     pub(crate) base_doc: Option<quench3d_cli::scene_doc::SceneDoc>,
     baseline: Vec<Baseline>,
+    /// 场景树里正在拖动的物体（拖到另一行上改父子）。
+    ///
+    /// 只是 UI 的瞬时状态，不写进场景文件；松开指针后必须清掉。
+    pub drag_source: Option<usize>,
+    /// 场景树拖放产生的改父请求；由 `outliner` 在只读遍历结束后统一执行。
+    pub reparent_request: Option<(usize, Option<usize>)>,
     /// 名字自增计数，保证不重名。
     spawn_counter: u32,
 }
@@ -817,6 +823,8 @@ impl Doc {
             model_instances: Vec::new(),
             base_doc: None,
             baseline: Vec::new(),
+            drag_source: None,
+            reparent_request: None,
             spawn_counter: 0,
         }
     }

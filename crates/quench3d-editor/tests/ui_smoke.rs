@@ -200,6 +200,68 @@ fn shapes_contain_text(shapes: &[egui::epaint::ClippedShape], needle: &str) -> b
 }
 
 #[test]
+fn outliner_drop_request_reparents_a_static_object() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    let material = engine.assets.solid_material(
+        &mut engine.renderer,
+        &engine.gpu,
+        Vec4::new(0.8, 0.8, 0.2, 1.0),
+        0.0,
+        0.5,
+    );
+    let parent = engine.scene.add_named(
+        engine.assets.unit_cube,
+        material,
+        Transform::new(Vec3::new(-3.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+        "静态父",
+    );
+    let child = engine.scene.add_named(
+        engine.assets.unit_cube,
+        material,
+        Transform::new(Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+        "静态子",
+    );
+
+    doc.reparent_request = Some((child, Some(parent)));
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    // 测试没有真正的 egui 渲染器；不清理纹理增量会在 Drop 时 panic。
+    output.textures_delta.clear();
+    assert_eq!(
+        engine.scene.objects[child].parent,
+        Some(parent),
+        "场景树拖放的 reparent_request 没有被执行"
+    );
+    assert!(
+        engine.scene.objects[child].transform.position.x > 0.0,
+        "改父后应保持世界位姿，不能把子物体吸到父原点"
+    );
+}
+
+#[test]
 fn all_editor_panels_draw_in_one_frame() {
     let Some(mut engine) = headless_engine() else {
         return;

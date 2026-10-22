@@ -358,6 +358,13 @@ impl Inner {
             recovery: self.doc.recovery.is_some(),
             objects: self.engine.scene.len(),
             selected: self.doc.selection().len(),
+            parents: self
+                .engine
+                .scene
+                .objects
+                .iter()
+                .filter(|o| o.parent.is_some())
+                .count(),
         });
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
@@ -808,6 +815,8 @@ struct UiDebugState {
     objects: usize,
     /// 当前选中数（含主选与附加）。
     selected: usize,
+    /// 有父物体的场景物体数（场景树拖放改父的观测孔）。
+    parents: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -829,6 +838,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         recovery,
         objects,
         selected,
+        parents,
     } = state;
     let Some(window) = web_sys::window() else {
         return;
@@ -842,7 +852,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};recovery={recovery};objects={objects};selected={selected}"
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};recovery={recovery};objects={objects};selected={selected};parents={parents}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }

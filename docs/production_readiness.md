@@ -2711,10 +2711,23 @@ Web 端 localStorage 被禁时保存失败只写状态栏。
 
 **验证**：`cargo check/clippy -p quench3d-editor --target wasm32-unknown-unknown`；
 `tools/probe_web_camera.sh` 用 Chrome `--use-fake-device-for-media-stream` +
-`?camera=1` 自动开窗，4 秒后隔 1.2 秒截两张图，预览区域运动像素 **15004/116000**
+`?camera=1` 自动开窗，4 秒后隔 1.2 秒截两张图，预览区域运动像素 **9346–15181/116000**
 （阈值 500），证明 getUserMedia → video → canvas → egui 纹理链路真的在动；
 `tools/probe_web_ui.sh` 的 9 项按键/框选/剪贴板/自动保存仍全绿。
 边界：没有真实摄像头/多浏览器矩阵。
+
+### 23.21 场景树拖放改父子（第 117 轮）
+
+**做了什么**：`object_row` 的标签现在是 `click_and_drag`；拖动静态物体到另一行松开，
+`outliner` 在遍历结束后执行 `Doc::set_parent`，保持世界位姿并写历史。拖到列表空白处
+（拖动时才出现的「拖到这里解除父子」区域）恢复根物体。带刚体的物体、模型分组成员
+不参与拖放（它们的位姿/整组变换由物理与模型实例管理）；成环/越界仍由 `set_parent`
+拒绝并显示状态。
+
+**验证**：`QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke
+outliner_drop_request_reparents_a_static_object`：静态父/子两个物体，塞入
+`reparent_request` 跑一整帧面板，断言 `parent` 变成父物体且世界 X 仍为正（没有被
+吸到父原点）。手势坐标本身没有自动化点击（egui 行位置随字体/缩放变化），这是测试边界。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

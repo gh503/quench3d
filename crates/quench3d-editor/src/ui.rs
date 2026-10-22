@@ -574,7 +574,9 @@ fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Opti
     }
     let mut focus = None;
     ui.horizontal(|ui| {
-        let response = ui.selectable_label(doc.is_selected(index), label);
+        let response = ui
+            .selectable_label(doc.is_selected(index), label)
+            .interact(egui::Sense::click_and_drag());
         if response.clicked() {
             let additive =
                 ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl);
@@ -582,6 +584,22 @@ fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Opti
                 doc.toggle_selected(index);
             } else {
                 doc.select_only(Some(index));
+            }
+        }
+        // 拖动行改父子：模型分组成员不参与（改一半会破坏模型实例的整组变换）。
+        if response.drag_started() && doc.model_of_object(index).is_none() {
+            doc.drag_source = Some(index);
+        }
+        if let Some(source) = doc.drag_source {
+            if source != index
+                && doc.model_of_object(index).is_none()
+                && ui.input(|i| i.pointer.any_released())
+                && response
+                    .rect
+                    .contains(ui.input(|i| i.pointer.interact_pos()).unwrap_or_default())
+            {
+                doc.reparent_request = Some((source, Some(index)));
+                doc.drag_source = None;
             }
         }
         if ui.small_button("⌖").on_hover_text("聚焦").clicked() {
@@ -693,6 +711,34 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
                     doc.select_only(indices.first().copied());
                 }
             });
+            // 拖到列表空白处 = 解除父子（回到根）。只在正在拖动时占位，平时不挡点击。
+            if doc.drag_source.is_some() {
+                let (rect, drop) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 24.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "拖到这里解除父子",
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(180, 180, 180),
+                );
+                if drop.hovered() && ui.input(|i| i.pointer.any_released()) {
+                    if let Some(source) = doc.drag_source.take() {
+                        doc.reparent_request = Some((source, None));
+                    }
+                }
+            }
+            // 拖放只发请求：等遍历结束（只读借用结束）再改两个物体并写历史。
+            if let Some((source, parent)) = doc.reparent_request.take() {
+                if doc.set_parent(engine, source, parent) {
+                    doc.record_edit(engine);
+                }
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                doc.drag_source = None;
+            }
         });
     req.outliner_width = response.response.rect.width();
 }

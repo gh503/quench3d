@@ -41,11 +41,16 @@
 
 ### 新增
 
+- **场景树拖放改父子（第 117 轮）**：拖动静态物体到另一行松开 → `Doc::set_parent`
+  保持世界位姿并写历史；拖到空白区解除父子。刚体/模型分组成员不参与；成环由
+  `set_parent` 拒绝。新增 1 个 UI 测试（`outliner_drop_request...`，总测试
+  769 → 770），验证请求真的被面板执行且世界位置不变。手势坐标未做自动化点击。
+
 - **Web 摄像头预览（第 116 轮）**：Web 顶部「摄像头」→ `getUserMedia` →
   `<video>` → 2D canvas → egui 纹理，约 30 fps；权限拒绝/非 https/无设备/
   `video.play` 失败都显示具体错误。桌面骨架管线不变。新增 7 个 web-sys feature
   与 wasm 约 +32 KB；只有预览，无骨架/轮廓/深度推理。验证：wasm check/clippy、`build_web.sh`、`probe_web_ui.sh`、新增
-  `probe_web_camera.sh`（Chrome 假摄像头两帧运动 15004/116000 像素）。
+  `probe_web_camera.sh`（Chrome 假摄像头两帧运动 9346–15181/116000 像素）。
 
 - **`movie --encoder mp4`（第 115 轮）**：渲染帧通过 stdin rawvideo 流式喂给外部
   `ffmpeg`（libx264 / crf 18 / yuv420p / faststart），直接产出 MP4；不把

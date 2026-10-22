@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **769** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **770** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -111,12 +111,13 @@ tools/verify_all.sh
 | 功能 | 正向证据 | 判据 |
 | --- | --- | --- |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
+| 场景树拖放改父 | `cargo test -p quench3d-editor --test ui_smoke outliner_drop_request` | 静态子物体拖到父行后 `parent=Some`，且世界位置不被吸到父原点 |
 | 增删 / 复制 / 重置 | `cargo test -p quench3d-editor --test history` | 撤销重做、拖拽合并、快照逐字节 |
 | 层级 / 改父 / 环拒绝 | `cargo test -p quench3d-editor --test hierarchy` | 世界位姿保持、导出 parent |
 | 存读无损 / 模板实例 / 水 / 流体 | `cargo test -p quench3d-editor --test scene_roundtrip` | 存→读→再存字节一致 |
 | 历史 / 模型实例变换 | `cargo test -p quench3d-editor` | 模型组变换写回 |
 | 摄像头协议 / 3D 骨架 | `cargo test -p quench3d-editor --lib camera` | 解析/长度/坐标/线段数量/低可见度 |
-| Web 摄像头预览 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动像素 >500（本次 15004/116000）；权限/非 https/无设备/play 被拒时窗口显示具体错误；不做骨架 |
+| Web 摄像头预览 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动像素 >500（本次 9346–15181/116000）；权限/非 https/无设备/play 被拒时窗口显示具体错误；不做骨架 |
 | 深度点云反投影 | `python -m unittest test_camera_mocap.PointCloudTests -v` | 中心像素落主轴、y 向上翻转、近深度 z=-0.3、步长下采样 |
 | 点云读入/绘制 | `cargo test -p quench3d-editor --lib camera` | `latest.points` 长度/布局校验；每点画 3 条十字线段 |
 
