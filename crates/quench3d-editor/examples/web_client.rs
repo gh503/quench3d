@@ -22,6 +22,23 @@ pub fn on_scene_file(name: String, text: String) {
     quench3d_editor::scene_io::on_scene_file(name, text);
 }
 
+/// 外部姿态注入入口：页面脚本（例如 MediaPipe Tasks Vision）把 2D 骨架交给编辑器。
+///
+/// JSON 形如 `{"present":true,"confidence":0.9,"landmarks":[{"x":0.5,"y":0.5},…]}`；
+/// 归一化图像坐标，至少 2 个点。内置推理仍不在浏览器里。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_camera_pose(json: String) {
+    quench3d_editor::camera::set_web_pose(&json);
+}
+
+/// 清空外部姿态。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn clear_camera_pose() {
+    quench3d_editor::camera::clear_web_pose();
+}
+
 /// 时钟探针：读一次引擎时钟（秒）。
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]

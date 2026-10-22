@@ -57,5 +57,12 @@ changed = int((crop > 24).sum())
 print(f"摄像头预览区域运动像素：{changed} / {crop.size}")
 if changed < 500:
     raise SystemExit("FAIL probe-web-camera：预览区域两帧没有足够运动（可能没拿到摄像头流）")
-print("PASS probe-web-camera：摄像头预览两帧有运动")
+# 骨架用洋红画；假摄像头是绿色测试图，洋红只可能来自注入的骨架。
+rgb = np.asarray(b).astype(np.int16)
+magenta = (rgb[:, :, 0] > 180) & (rgb[:, :, 2] > 180) & (rgb[:, :, 1] < 130)
+pose_pixels = int(magenta.sum())
+print(f"外部姿态洋红像素：{pose_pixels}")
+if pose_pixels < 200:
+    raise SystemExit("FAIL probe-web-camera：camera_pose=true 但画面里找不到骨架颜色")
+print("PASS probe-web-camera：摄像头预览两帧有运动 + 外部姿态真的画出来了")
 PY

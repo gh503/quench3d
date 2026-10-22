@@ -16,8 +16,10 @@
 //!
 //! 读端对文件是**只读**的；不修改、不删除任何摄像头数据。
 //!
-//! **Web 端**另走一条只读预览：顶部「摄像头」→ `getUserMedia` → `<video>` →
-//! 2D canvas 采样 → egui 纹理；不做骨架/轮廓/深度推理（那仍是桌面 Python 管线）。
+//! **Web 端**另走一条预览：顶部「摄像头」→ `getUserMedia` → `<video>` →
+//! 2D canvas 采样 → egui 纹理。浏览器里不跑推理；外部 JS（例如 MediaPipe Tasks
+//! Vision 的页面脚本）可以调用 `set_camera_pose(json)` 注入 33 点骨架，读端在
+//! 预览图上画线。**内置推理仍不在浏览器里**。
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
@@ -827,6 +829,116 @@ use web_sys::{
     MediaStreamConstraints,
 };
 
+/// 把归一化姿态点映射到预览图矩形（越界夹到图像内）。
+///
+/// 抽成平台无关函数：桌面/原生测试也能验证这条映射，不必起浏览器。
+pub fn pose_screen_pos(rect: egui::Rect, x: f32, y: f32) -> egui::Pos2 {
+    let x = if x.is_finite() { x } else { 0.5 };
+    let y = if y.is_finite() { y } else { 0.5 };
+    egui::pos2(
+        rect.left() + rect.width() * x.clamp(0.0, 1.0),
+        rect.top() + rect.height() * y.clamp(0.0, 1.0),
+    )
+}
+
+/// 外部注入的一帧 2D 姿态（归一化图像坐标）。
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct WebPoseJson {
+    #[serde(default)]
+    present: bool,
+    #[serde(default)]
+    confidence: f32,
+    #[serde(default)]
+    landmarks: Vec<WebLandmarkJson>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+struct WebLandmarkJson {
+    #[serde(default)]
+    x: f32,
+    #[serde(default)]
+    y: f32,
+    #[serde(default = "default_pose_visibility")]
+    visibility: f32,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_pose_visibility() -> f32 {
+    1.0
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WEB_POSE: RefCell<Option<WebPoseJson>> = const { RefCell::new(None) };
+}
+
+/// 接收外部 JS 注入的姿态 JSON（MediaPipe 33 点的子集即可）。
+///
+/// 缺字段/坏 JSON 只记日志并清空，不会让页面崩；`present:false` 或点数不足 2
+/// 视为"没有骨架"。调用方（页面）负责把 `window.quench3dCameraPose` 接到推理结果。
+#[cfg(target_arch = "wasm32")]
+pub fn set_web_pose(json: &str) {
+    let parsed: Option<WebPoseJson> = serde_json::from_str(json)
+        .ok()
+        .and_then(|pose: WebPoseJson| (pose.present && pose.landmarks.len() >= 2).then_some(pose));
+    if parsed.is_none() {
+        web_sys::console::warn_1(
+            &"quench3d camera: 忽略无效姿态 JSON（需要 present + >=2 landmarks）".into(),
+        );
+    }
+    WEB_POSE.with(|slot| *slot.borrow_mut() = parsed);
+}
+
+/// 清掉外部姿态（页面切换/推理停止时调用）。
+#[cfg(target_arch = "wasm32")]
+pub fn clear_web_pose() {
+    WEB_POSE.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// 当前是否有可用姿态。
+#[cfg(target_arch = "wasm32")]
+pub fn has_web_pose() -> bool {
+    WEB_POSE.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_pose() -> Option<WebPoseJson> {
+    WEB_POSE.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn draw_web_pose(ui: &egui::Ui, rect: egui::Rect, pose: &WebPoseJson) {
+    let painter = ui.painter_at(rect);
+    let map = |lm: &WebLandmarkJson| pose_screen_pos(rect, lm.x, lm.y);
+    for &(a, b) in POSE_CONNECTIONS.iter() {
+        let (Some(a), Some(b)) = (pose.landmarks.get(a), pose.landmarks.get(b)) else {
+            continue;
+        };
+        if a.visibility < 0.05 || b.visibility < 0.05 {
+            continue;
+        }
+        painter.line_segment(
+            [map(a), map(b)],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 40, 255)),
+        );
+    }
+    for lm in &pose.landmarks {
+        if lm.visibility < 0.05 {
+            continue;
+        }
+        painter.circle_filled(map(lm), 2.5, egui::Color32::from_rgb(255, 230, 80));
+    }
+    painter.text(
+        rect.left_top() + egui::vec2(6.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        format!("外部骨架 {:.2}", pose.confidence),
+        egui::FontId::monospace(11.0),
+        egui::Color32::from_rgb(255, 230, 80),
+    );
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
 struct WebCameraState {
@@ -877,15 +989,20 @@ impl CameraFeed {
     pub fn toolbar(&mut self, ui: &mut egui::Ui) {
         if ui
             .button("摄像头")
-            .on_hover_text("浏览器摄像头预览（getUserMedia；骨架/轮廓需桌面 Python 管线）")
+            .on_hover_text("浏览器摄像头预览（getUserMedia；外部 JS 可注入 2D 骨架）")
             .clicked()
         {
             self.show = true;
         }
     }
 
-    /// 无 3D 骨架可叠；Web 端只做预览。
+    /// 无 3D 骨架可叠；Web 端只画预览图上的外部注入 2D 骨架。
     pub fn add_lines(&self, _lines: &mut quench3d_render::DebugLines) {}
+
+    /// 当前是否有外部 JS 注入的姿态。
+    pub fn has_pose(&self) -> bool {
+        has_web_pose()
+    }
 
     fn start(&mut self, ctx: &egui::Context) {
         if self.state.borrow().starting {
@@ -1008,7 +1125,7 @@ impl CameraFeed {
                     }
                     ui.label(
                         egui::RichText::new(
-                            "需要 https 或 localhost；骨架/轮廓/深度不在此预览里，用桌面 Python 管线。",
+                            "需要 https 或 localhost；内置推理不在浏览器里，外部 JS 可用 window.quench3dCameraPose(json) 注入 2D 骨架。",
                         )
                         .small()
                         .weak(),
@@ -1025,10 +1142,13 @@ impl CameraFeed {
                     if let Some(texture) = &self.texture {
                         let size = texture.size_vec2();
                         let scale = (400.0 / size.x).min(1.0);
-                        ui.image((texture.id(), size * scale));
+                        let image = ui.image((texture.id(), size * scale));
+                        if let Some(pose) = web_pose() {
+                            draw_web_pose(ui, image.rect, &pose);
+                        }
                     }
                     ui.label(
-                        egui::RichText::new("仅预览；骨架/轮廓/深度需桌面 Python 管线")
+                        egui::RichText::new("预览 + 外部 JS 注入的 2D 骨架；深度/轮廓仍用桌面 Python 管线")
                             .small()
                             .weak(),
                     );
@@ -1078,6 +1198,19 @@ async fn open_camera() -> Result<HtmlVideoElement, String> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pose_screen_pos_maps_and_clamps() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::new(10.0, 20.0), egui::vec2(200.0, 100.0));
+        assert_eq!(pose_screen_pos(rect, 0.0, 0.0), egui::pos2(10.0, 20.0));
+        assert_eq!(pose_screen_pos(rect, 1.0, 1.0), egui::pos2(210.0, 120.0));
+        assert_eq!(pose_screen_pos(rect, 0.5, 0.5), egui::pos2(110.0, 70.0));
+        assert_eq!(pose_screen_pos(rect, -1.0, 2.0), egui::pos2(10.0, 120.0));
+        assert_eq!(
+            pose_screen_pos(rect, f32::NAN, 0.5),
+            egui::pos2(110.0, 70.0)
+        );
+    }
 
     #[test]
     fn pose_connections_are_in_range() {

@@ -68,11 +68,51 @@ async function main() {
   await sleep(4000);
   const a = await send("Page.captureScreenshot", { format: "png" });
   writeFileSync(`${outDir}/camera-a.png`, Buffer.from(a.data, "base64"));
-  await sleep(1200);
+
+  // 外部姿态注入：33 点画成一条竖直/交错骨架，颜色选洋红以区别于假摄像头的绿。
+  const injected = await send("Runtime.evaluate", {
+    expression: `(() => {
+      if (typeof window.quench3dCameraPose !== "function") return "missing";
+      const landmarks = Array.from({ length: 33 }, (_, i) => ({
+        x: 0.15 + 0.7 * (i % 2),
+        y: 0.08 + 0.84 * (i / 32),
+        visibility: 1.0,
+      }));
+      window.quench3dCameraPose(JSON.stringify({ present: true, confidence: 0.9, landmarks }));
+      return "ok";
+    })()`,
+    returnByValue: true,
+  });
+  if (injected.result?.value !== "ok") {
+    die(`页面没有暴露 window.quench3dCameraPose（得到 ${JSON.stringify(injected.result)}）`);
+  }
+  await sleep(400);
+  const poseState = await send("Runtime.evaluate", {
+    expression: `document.body.dataset.quench3dUi || ""`,
+    returnByValue: true,
+  });
+  const stateText = poseState.result?.value || "";
+  if (!/camera_pose=true/.test(stateText)) {
+    die(`注入姿态后 data-quench3d-ui 没有 camera_pose=true：${stateText}`);
+  }
   const b = await send("Page.captureScreenshot", { format: "png" });
   writeFileSync(`${outDir}/camera-b.png`, Buffer.from(b.data, "base64"));
+
+  // 清空后再确认状态落回 false —— 反向也走同一条 API。
+  await send("Runtime.evaluate", {
+    expression: `window.quench3dCameraPoseClear()`,
+    returnByValue: true,
+  });
+  await sleep(200);
+  const cleared = await send("Runtime.evaluate", {
+    expression: `document.body.dataset.quench3dUi || ""`,
+    returnByValue: true,
+  });
+  if (/camera_pose=true/.test(cleared.result?.value || "")) {
+    die(`清空姿态后 camera_pose 仍为 true：${cleared.result?.value}`);
+  }
   ws.close();
-  console.log("PASS 摄像头截图：camera-a.png / camera-b.png");
+  console.log("PASS 摄像头截图与外部姿态注入：camera-a.png / camera-b.png");
 }
 
 main().catch((e) => die(e.stack || String(e)));

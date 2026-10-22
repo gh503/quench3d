@@ -387,6 +387,7 @@ impl Inner {
                 .iter()
                 .filter(|o| o.parent.is_some())
                 .count(),
+            camera_pose: self.camera.has_pose(),
         });
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
@@ -839,6 +840,8 @@ struct UiDebugState {
     selected: usize,
     /// 有父物体的场景物体数（场景树拖放改父的观测孔）。
     parents: usize,
+    /// Web 摄像头是否已有外部 JS 注入的 2D 骨架。
+    camera_pose: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -861,6 +864,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         objects,
         selected,
         parents,
+        camera_pose,
     } = state;
     let Some(window) = web_sys::window() else {
         return;
@@ -874,7 +878,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};recovery={recovery};objects={objects};selected={selected};parents={parents}"
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }

@@ -261,7 +261,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12799634 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12811696 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -698,10 +698,21 @@ cargo run -p quench3d-editor
 没有摄像头时用 `--source synthetic` 验证协议；深度模型需要显式下载一次，详见
 [`tools/camera_mocap/README.md`](tools/camera_mocap/README.md)。
 
-**Web 端只有预览**：顶部「摄像头」按钮 → `getUserMedia` → `<video>` → canvas →
-egui 纹理，用于确认浏览器能拿到画面/权限错误；骨架/轮廓/深度仍走桌面 Python 管线
-（浏览器里没有 MediaPipe 模型与文件协议）。需要 https 或 `localhost`。
-`tools/probe_web_camera.sh` 用 Chrome 假摄像头 + `?camera=1` 做端到端截图探针。
+**Web 端是预览 + 外部姿态注入**：顶部「摄像头」按钮 → `getUserMedia` → `<video>` →
+canvas → egui 纹理；页面脚本（例如 MediaPipe Tasks Vision）可调用
+
+```js
+window.quench3dCameraPose(JSON.stringify({
+  present: true, confidence: 0.9,
+  landmarks: [{ x: 0.5, y: 0.2 }, /* … 归一化图像坐标，至少 2 点 */],
+}));
+window.quench3dCameraPoseClear();
+```
+
+读端会把 33 点连接画成洋红骨架。**浏览器里不内置推理**（没有 MediaPipe 模型与
+文件协议），骨架/轮廓/深度仍走桌面 Python 管线。需要 https 或 `localhost`。
+`tools/probe_web_camera.sh` 用 Chrome 假摄像头 + `?camera=1` 做端到端截图探针，
+并注入 33 点姿态、断言 `camera_pose=true` 且截图里真的有洋红像素。
 
 **边界（诚实）**：没有 SMPL/SMPL-X 体型拟合、没有多人体、没有米制深度、没有
 TSDF 网格重建（只有相对尺度点云）、没有时间同步/IMU 融合；3D 骨骼是 MediaPipe 的 33 点近似，
@@ -1322,7 +1333,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 773 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 774 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

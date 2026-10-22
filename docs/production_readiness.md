@@ -2762,6 +2762,26 @@ Web 端不写窗口位置（浏览器管窗口）。
 断言「时间轴」和读数 `0.250s / 1.000s` 真的画出来（假动画实例的 `player.time=0.25`、
 duration=1.0）——数据改了画面会跟着红。
 
+### 23.24 Web 摄像头外部 2D 骨架注入（第 120 轮）
+
+**做了什么**：Web 预览窗口仍用 `getUserMedia`，但页面现在暴露：
+
+* `window.quench3dCameraPose(json)` → wasm `set_camera_pose` → `camera::set_web_pose`；
+* `window.quench3dCameraPoseClear()` → 清空；
+* JSON 只要求 `{present, landmarks:[{x,y,visibility?}]}`（归一化图像坐标，至少 2 点），
+  坏 JSON / 点数不足只 console warn 并清空；
+* 预览图上按 `POSE_CONNECTIONS`（35 根骨）画洋红线段 + 黄点，右上角标
+  `外部骨架 <confidence>`；`data-quench3d-ui` 增加 `camera_pose`。
+
+**边界**：浏览器里**没有内置 MediaPipe/模型**；这只是"外部推理 → 编辑器"的接线口，
+需要页面自己加载 MediaPipe Tasks Vision 或别的姿态模型。桌面 Python 管线仍是完整
+轮廓/深度/3D 骨骼的路径。
+
+**验证**：`tools/probe_web_camera.sh` 用假摄像头，注入 33 点后断言
+`camera_pose=true`、截图里洋红像素 3918（假摄像头是绿色，洋红只可能来自骨架），
+再调 `quench3dCameraPoseClear()` 断言回 `false`。`pose_screen_pos_maps_and_clamps`
+（原生单测）钉住归一化坐标 → 预览图矩形、越界夹取与 NaN 回中心。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -2824,7 +2844,7 @@ duration=1.0）——数据改了画面会跟着红。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
 **仍未做**：morph+skin 的 GPU 路径（纯蒙皮已 GPU 化）、离散事件驱动的动画状态机、
-自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头骨骼（仅预览已做）、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
+自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头**内置**骨骼推理（外部 JS 注入 2D 骨架已做，见 §23.24）、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---
 
