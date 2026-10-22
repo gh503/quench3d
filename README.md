@@ -261,7 +261,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12753964 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12788584 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -697,6 +697,11 @@ cargo run -p quench3d-editor
 
 没有摄像头时用 `--source synthetic` 验证协议；深度模型需要显式下载一次，详见
 [`tools/camera_mocap/README.md`](tools/camera_mocap/README.md)。
+
+**Web 端只有预览**：顶部「摄像头」按钮 → `getUserMedia` → `<video>` → canvas →
+egui 纹理，用于确认浏览器能拿到画面/权限错误；骨架/轮廓/深度仍走桌面 Python 管线
+（浏览器里没有 MediaPipe 模型与文件协议）。需要 https 或 `localhost`。
+`tools/probe_web_camera.sh` 用 Chrome 假摄像头 + `?camera=1` 做端到端截图探针。
 
 **边界（诚实）**：没有 SMPL/SMPL-X 体型拟合、没有多人体、没有米制深度、没有
 TSDF 网格重建（只有相对尺度点云）、没有时间同步/IMU 融合；3D 骨骼是 MediaPipe 的 33 点近似，

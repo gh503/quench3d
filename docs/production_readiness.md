@@ -2697,6 +2697,25 @@ Web 端 localStorage 被禁时保存失败只写状态栏。
 **边界**：骨骼/morph 动画仍不导出；`loop`/`weight`/`speed` 的运行时行为不写进 glTF
 （speed 只烘时间轴）；动画目标必须是场景物体名，`models[]` 内部节点不能单独选。
 
+### 23.20 Web 摄像头预览（第 116 轮）
+
+**做了什么**：Web 顶部工具栏加「摄像头」按钮，打开预览窗口后点「开启摄像头」走
+`navigator.mediaDevices.getUserMedia({video:true})` → `<video>` → 2D canvas
+`getImageData` → `egui::ColorImage`/`TextureHandle`，约 30 fps 刷新。权限被拒、
+非安全上下文、没有设备、`video.play` 被拒都写进窗口错误文本，不 panic。桌面端行为
+不变，仍读 `target/camera/latest.*` 并叠 3D 骨架。
+
+**边界**：**只有预览，没有骨架/轮廓/深度**——浏览器里没有 MediaPipe 模型与文件
+协议；需要 desktop Python 管线。每帧 canvas 采样是 CPU 读回，长时间预览会占 CPU；
+没有录像/截图到磁盘的按钮。
+
+**验证**：`cargo check/clippy -p quench3d-editor --target wasm32-unknown-unknown`；
+`tools/probe_web_camera.sh` 用 Chrome `--use-fake-device-for-media-stream` +
+`?camera=1` 自动开窗，4 秒后隔 1.2 秒截两张图，预览区域运动像素 **15004/116000**
+（阈值 500），证明 getUserMedia → video → canvas → egui 纹理链路真的在动；
+`tools/probe_web_ui.sh` 的 9 项按键/框选/剪贴板/自动保存仍全绿。
+边界：没有真实摄像头/多浏览器矩阵。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -2721,7 +2740,7 @@ Web 端 localStorage 被禁时保存失败只写状态栏。
 * 单目深度是**相对逆深度**，每帧归一化，不是米制；不能直接用于物理/碰撞。
 * 固定放在 `(2.2, 1.0, 0.0)`，没有放置/缩放 UI；没有时间同步/IMU/多相机。
 * 没有点云/TSDF/网格重建；下一步才是深度抬升与融合。
-* 只能桌面 Linux 采集；Web 端是空实现，浏览器摄像头需要另做 getUserMedia 管线。
+* 骨架/轮廓/深度只能桌面 Linux 采集；Web 端第 116 轮补了 `getUserMedia` **预览**（顶部「摄像头」），但浏览器里没有 MediaPipe 推理。
 
 **验证**：
 
@@ -2759,7 +2778,7 @@ Web 端 localStorage 被禁时保存失败只写状态栏。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
 **仍未做**：morph+skin 的 GPU 路径（纯蒙皮已 GPU 化）、离散事件驱动的动画状态机、
-自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
+自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头骨骼（仅预览已做）、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---
 

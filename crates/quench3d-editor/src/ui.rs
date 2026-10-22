@@ -84,7 +84,7 @@ pub fn panels(
     let mut req = Requests::default();
     view.click = None;
     view.additive = false;
-    top_bar(ui, engine, doc, gizmo, &mut req);
+    top_bar(ui, engine, doc, gizmo, &mut req, camera);
     status_bar(ui, engine, doc, gizmo);
     outliner(ui, engine, doc, &mut req);
     inspector(ui, engine, doc, &mut req);
@@ -123,7 +123,14 @@ fn combine_rule_combo(ui: &mut Ui, label: &str, value: &mut Option<CombineRule>)
 }
 
 /// 顶部工具栏。
-fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, req: &mut Requests) {
+fn top_bar(
+    ui: &mut Ui,
+    engine: &mut Engine,
+    doc: &mut Doc,
+    gizmo: &mut Gizmo,
+    req: &mut Requests,
+    camera: &mut CameraFeed,
+) {
     // `horizontal_wrapped` 的 min-size 只报一行；如果面板按这个最小高度布局，
     // 换行后的控件会被整块裁掉（DoF/SSAO/水的开关曾因此看不见）。显式给一个
     // 足够容纳多行的最小高度。
@@ -406,6 +413,7 @@ fn top_bar(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo, r
                     req.discard_recovery = true;
                 }
             }
+            camera.toolbar(ui);
             if ui.button("打开").on_hover_text("读入 scene.json").clicked() {
                 req.load = true;
             }

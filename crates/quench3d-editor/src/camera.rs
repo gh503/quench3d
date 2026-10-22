@@ -15,6 +15,9 @@
 //! 也方便把一帧目录直接拷走做回归。代价是最多约一帧的文件轮询延迟。
 //!
 //! 读端对文件是**只读**的；不修改、不删除任何摄像头数据。
+//!
+//! **Web 端**另走一条只读预览：顶部「摄像头」→ `getUserMedia` → `<video>` →
+//! 2D canvas 采样 → egui 纹理；不做骨架/轮廓/深度推理（那仍是桌面 Python 管线）。
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
@@ -231,8 +234,7 @@ impl Shared {
 
 /// 摄像头动捕读端。
 ///
-/// 桌面端会启一个后台线程轮询输出目录；Web 端是空实现（浏览器没有本地文件
-/// 轮询这条路，摄像头接入属于另一条 Web 管线）。
+/// 桌面端启后台线程轮询输出目录；Web 端用 `getUserMedia` 预览（见下方 wasm 实现）。
 #[cfg(not(target_arch = "wasm32"))]
 pub struct CameraFeed {
     dir: PathBuf,
@@ -315,6 +317,9 @@ impl CameraFeed {
         }
         add_pose_lines(lines, &pose.world);
     }
+
+    /// 桌面端摄像头窗口由文件数据自动出现，工具栏不加按钮。
+    pub fn toolbar(&mut self, _ui: &mut egui::Ui) {}
 
     /// 画浮动窗口：摄像头画面 + 2D 骨架/轮廓 + 深度开关。
     pub fn window(&mut self, ctx: &egui::Context) {
@@ -808,8 +813,43 @@ fn world_to_scene(lm: Landmark) -> Vec3 {
 }
 
 #[cfg(target_arch = "wasm32")]
-/// Web 端的空实现：桌面文件协议不适用于浏览器。
-pub struct CameraFeed;
+use std::{cell::RefCell, rc::Rc, time::Duration};
+
+#[cfg(target_arch = "wasm32")]
+use egui::{ColorImage, TextureHandle, TextureOptions};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, JsValue};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::{spawn_local, JsFuture};
+#[cfg(target_arch = "wasm32")]
+use web_sys::{
+    CanvasRenderingContext2d, HtmlCanvasElement, HtmlMediaElement, HtmlVideoElement, MediaStream,
+    MediaStreamConstraints,
+};
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct WebCameraState {
+    video: Option<HtmlVideoElement>,
+    canvas: Option<HtmlCanvasElement>,
+    context: Option<CanvasRenderingContext2d>,
+    error: Option<String>,
+    starting: bool,
+}
+
+/// Web 端摄像头**预览**：`getUserMedia` → `<video>` → 2D canvas 采样 → egui 纹理。
+///
+/// 浏览器里不读桌面文件协议，也不跑 MediaPipe；骨架/轮廓/深度仍由桌面 Python
+/// 管线负责。权限被拒、非安全上下文（非 https/localhost）或缺摄像头时把原因
+/// 显示在窗口里，不 panic。
+#[cfg(target_arch = "wasm32")]
+pub struct CameraFeed {
+    state: Rc<RefCell<WebCameraState>>,
+    texture: Option<TextureHandle>,
+    show: bool,
+    /// `?camera=1` 调试入口：加载后自动开窗并申请权限（配合无头 Chrome 假摄像头）。
+    autostart: bool,
+}
 
 #[cfg(target_arch = "wasm32")]
 impl Default for CameraFeed {
@@ -820,16 +860,219 @@ impl Default for CameraFeed {
 
 #[cfg(target_arch = "wasm32")]
 impl CameraFeed {
-    /// 新建空实现。
+    /// 新建空预览。
     pub fn new() -> Self {
-        Self
+        let autostart = web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .is_some_and(|search| search.split('&').any(|part| part == "camera=1"));
+        Self {
+            state: Rc::new(RefCell::new(WebCameraState::default())),
+            texture: None,
+            show: autostart,
+            autostart,
+        }
     }
 
-    /// 无操作。
+    /// 顶部工具栏入口：打开预览窗口（真正申请权限在窗口里的按钮）。
+    pub fn toolbar(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .button("摄像头")
+            .on_hover_text("浏览器摄像头预览（getUserMedia；骨架/轮廓需桌面 Python 管线）")
+            .clicked()
+        {
+            self.show = true;
+        }
+    }
+
+    /// 无 3D 骨架可叠；Web 端只做预览。
     pub fn add_lines(&self, _lines: &mut quench3d_render::DebugLines) {}
 
-    /// 无操作。
-    pub fn window(&mut self, _ctx: &egui::Context) {}
+    fn start(&mut self, ctx: &egui::Context) {
+        if self.state.borrow().starting {
+            return;
+        }
+        self.state.borrow_mut().starting = true;
+        self.state.borrow_mut().error = None;
+        let state = Rc::clone(&self.state);
+        let ctx = ctx.clone();
+        spawn_local(async move {
+            let result = open_camera().await;
+            let mut state = state.borrow_mut();
+            state.starting = false;
+            match result {
+                Ok(video) => state.video = Some(video),
+                Err(e) => {
+                    web_sys::console::error_1(&format!("quench3d camera: {e}").into());
+                    state.error = Some(e);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll(&mut self, ctx: &egui::Context) {
+        let (video, width, height) = {
+            let state = self.state.borrow();
+            let Some(video) = state.video.clone() else {
+                return;
+            };
+            let width = video.video_width();
+            let height = video.video_height();
+            (video, width, height)
+        };
+        if width == 0 || height == 0 {
+            ctx.request_repaint_after(Duration::from_millis(50));
+            return;
+        }
+
+        let (canvas, context) = {
+            let mut state = self.state.borrow_mut();
+            if state.canvas.is_none() {
+                let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+                    state.error = Some("没有 document".to_string());
+                    return;
+                };
+                let Ok(canvas) = document.create_element("canvas") else {
+                    state.error = Some("创建 canvas 失败".to_string());
+                    return;
+                };
+                let Ok(canvas) = canvas.dyn_into::<HtmlCanvasElement>() else {
+                    state.error = Some("canvas 类型不对".to_string());
+                    return;
+                };
+                let Some(context) = canvas
+                    .get_context("2d")
+                    .ok()
+                    .flatten()
+                    .and_then(|c| c.dyn_into::<CanvasRenderingContext2d>().ok())
+                else {
+                    state.error = Some("浏览器不支持 2D canvas".to_string());
+                    return;
+                };
+                state.canvas = Some(canvas);
+                state.context = Some(context);
+            }
+            let Some(canvas) = state.canvas.clone() else {
+                return;
+            };
+            let Some(context) = state.context.clone() else {
+                return;
+            };
+            (canvas, context)
+        };
+
+        canvas.set_width(width);
+        canvas.set_height(height);
+        let draw = context.draw_image_with_html_video_element(&video, 0.0, 0.0);
+        let image =
+            draw.and_then(|()| context.get_image_data(0.0, 0.0, width as f64, height as f64));
+        let Ok(image_data) = image else {
+            self.state.borrow_mut().error = Some("读取摄像头画面失败".to_string());
+            return;
+        };
+        let pixels = image_data.data();
+        let color =
+            ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &pixels[..]);
+        match self.texture.as_mut() {
+            Some(texture) => texture.set(color, TextureOptions::LINEAR),
+            None => {
+                self.texture = Some(ctx.load_texture("web-camera", color, TextureOptions::LINEAR));
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(33));
+    }
+
+    /// 预览窗口；默认关闭，从顶部「摄像头」按钮打开。
+    pub fn window(&mut self, ctx: &egui::Context) {
+        if self.autostart {
+            self.autostart = false;
+            self.start(ctx);
+        }
+        if !self.show {
+            return;
+        }
+        let mut open = self.show;
+        egui::Window::new("摄像头（Web 预览）")
+            .open(&mut open)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                let error = self.state.borrow().error.clone();
+                let starting = self.state.borrow().starting;
+                let has_video = self.state.borrow().video.is_some();
+                if let Some(error) = error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+                if !has_video && !starting {
+                    if ui.button("开启摄像头").clicked() {
+                        self.start(ctx);
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "需要 https 或 localhost；骨架/轮廓/深度不在此预览里，用桌面 Python 管线。",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
+                if starting {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("等待浏览器授权…");
+                    });
+                }
+                if has_video {
+                    self.poll(ctx);
+                    if let Some(texture) = &self.texture {
+                        let size = texture.size_vec2();
+                        let scale = (400.0 / size.x).min(1.0);
+                        ui.image((texture.id(), size * scale));
+                    }
+                    ui.label(
+                        egui::RichText::new("仅预览；骨架/轮廓/深度需桌面 Python 管线")
+                            .small()
+                            .weak(),
+                    );
+                }
+            });
+        self.show = open;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn open_camera() -> Result<HtmlVideoElement, String> {
+    let window = web_sys::window().ok_or("没有 window")?;
+    let devices = window
+        .navigator()
+        .media_devices()
+        .map_err(|e| format!("浏览器没有 getUserMedia（非安全上下文？）：{e:?}"))?;
+    let constraints = MediaStreamConstraints::new();
+    constraints.set_video(&JsValue::TRUE);
+    let promise = devices
+        .get_user_media_with_constraints(&constraints)
+        .map_err(|e| format!("调用 getUserMedia 失败：{e:?}"))?;
+    let stream = JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("摄像头权限被拒或没有设备：{e:?}"))?;
+    let stream = stream
+        .dyn_into::<MediaStream>()
+        .map_err(|_| "getUserMedia 没有返回 MediaStream".to_string())?;
+    let document = window.document().ok_or("没有 document")?;
+    let video = document
+        .create_element("video")
+        .map_err(|e| format!("创建 video 失败：{e:?}"))?
+        .dyn_into::<HtmlVideoElement>()
+        .map_err(|_| "video 类型不对".to_string())?;
+    let media: &HtmlMediaElement = video.unchecked_ref();
+    media.set_autoplay(true);
+    media.set_muted(true);
+    media.set_src_object(Some(&stream));
+    let play = media
+        .play()
+        .map_err(|e| format!("启动 video 失败：{e:?}"))?;
+    JsFuture::from(play)
+        .await
+        .map_err(|e| format!("video.play 被拒：{e:?}"))?;
+    Ok(video)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -116,6 +116,7 @@ tools/verify_all.sh
 | 存读无损 / 模板实例 / 水 / 流体 | `cargo test -p quench3d-editor --test scene_roundtrip` | 存→读→再存字节一致 |
 | 历史 / 模型实例变换 | `cargo test -p quench3d-editor` | 模型组变换写回 |
 | 摄像头协议 / 3D 骨架 | `cargo test -p quench3d-editor --lib camera` | 解析/长度/坐标/线段数量/低可见度 |
+| Web 摄像头预览 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动像素 >500（本次 15004/116000）；权限/非 https/无设备/play 被拒时窗口显示具体错误；不做骨架 |
 | 深度点云反投影 | `python -m unittest test_camera_mocap.PointCloudTests -v` | 中心像素落主轴、y 向上翻转、近深度 z=-0.3、步长下采样 |
 | 点云读入/绘制 | `cargo test -p quench3d-editor --lib camera` | `latest.points` 长度/布局校验；每点画 3 条十字线段 |
 
@@ -153,6 +154,7 @@ tools/verify_all.sh
 ```bash
 target/tmp/camvenv/bin/python tools/camera_mocap/camera_mocap.py --source synthetic
 python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
+tools/probe_web_camera.sh   # Chrome 假摄像头 + ?camera=1，两帧预览必须有运动
 ```
 
 | 功能 | 判据 |
@@ -171,7 +173,7 @@ python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 * **编辑器多选**：Shift/Ctrl 点选 + 组变换已做；框选、层级抑制（父子同选）、成组复制后的模型引用重建仍未做。
 * **音频、脚本层、贴花、地形、多视口**：没有。
 * **粒子**：CPU 公告板发射器（CLI/场景 JSON）已做；没有 GPU 粒子、软粒子、粒子间排序遮挡、编辑器发射器面板。
-* **Web 摄像头**：只有桌面文件协议；浏览器 `getUserMedia` 未接。
+* **Web 摄像头**：桌面文件协议 + 3D 骨架；Web 端第 116 轮补了 `getUserMedia` 预览，但**没有**骨架/轮廓/深度推理。
 * **真机 GPU/浏览器矩阵**：只有 headless Chrome + SwiftShader（软件光栅）；真机 WebGPU 未验证。
 * **跨机器的 golden 基线**：`--golden` 已能逐像素比对，但仓库**没有**提交一份
   "官方参考图"给所有平台；不同 GPU/驱动/抗锯齿下的基线仍要各自生成。
