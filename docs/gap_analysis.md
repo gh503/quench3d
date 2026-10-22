@@ -20,7 +20,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 | 物理仿真 / 参数扫描 / 教学演示 / CI 里出图 | ✅ 能，而且比多数自研引擎扎实（确定性 + 零依赖） |
 | 静态模型展示、截图、关卡白模 | ✅ 能 |
 | 小游戏原型（方块/球、刚体玩法） | 🟡 能，但要自己写引擎缺的那层（UI、音效、存档） |
-| 带角色/骨骼动画的游戏 | 🟡 能显示 GPU 蒙皮 + 双 clip 混合 + 时间驱动状态机 + morph 权重动画 + 两骨 IK 的角色；但没有输入参数/事件状态机 |
+| 带角色/骨骼动画的游戏 | 🟡 能显示 GPU 蒙皮 + 双 clip 混合 + 参数驱动状态机 + morph 权重动画 + 两骨 IK 的角色；但还没有离散事件/触发器 |
 | 有贴图材质的场景（哪怕只是"木纹箱子"） | 🟡 引擎能，但 `scene.json` 表达不了（见 §3），只能靠 glTF 带进来 |
 | 大场景（数千物体、LOD、剔除之外的优化） | 🟡 有实例化与视锥剔除，缺 LOD / 遮挡剔除 / 合批策略 |
 | 商业化发布（桌面三平台 + Web 商店） | ❌ 还不能（打包、音频、UI、存档、崩溃上报都缺） |
@@ -318,7 +318,7 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 
 | 层 | 缺什么（**本轮 grep 的命中数**） | 对标物 | 挡住了什么 |
 | --- | --- | --- | --- |
-| 内容层 | 粒子（0）、贴花（0） | GPU 蒙皮/双 clip/时间状态机/morph/两骨 IK 已补；GPU 蒙皮只覆盖纯蒙皮，morph+skin 仍 CPU | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 单/双 clip 角色能显示；参数/事件状态机仍要宿主自绘 |
+| 内容层 | 粒子（0）、贴花（0） | GPU 蒙皮/双 clip/时间状态机/morph/两骨 IK 已补；GPU 蒙皮只覆盖纯蒙皮，morph+skin 仍 CPU | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 单/双 clip 角色能显示；参数状态机已有，离散事件仍要宿主自绘 |
 | 手工界面 | ✅ **已有**（2026-10-16）：`quench3d-editor` 用 egui 做了工具栏/场景树/属性面板/视口拾取，桌面与 Web 共用（§2.5）。**引擎本体仍不带** UI/文字系统（`font\|glyph\|sdf` 在 `quench3d-render` 里仍是 0）——GUI 由宿主（编辑器就是这样一个宿主）自己选库 | Unity/Godot 的 UI 是引擎内建；Bevy 走 `bevy_ui` + 第三方编辑器 | 想在自己游戏里画 HUD，得自己接一个 UI 库（本仓库演示了怎么和 wgpu 渲染器共存） |
 | 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM ✅（1~4）、聚光灯/点光阴影 ✅（各一盏）、透明距离排序 ✅、解析式环境高光 ✅、IBL/环境贴图（0）、景深 ✅（深度后处理）/TAA（0）、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属只有天空/地面反射，没有环境贴图里的具体物体；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
 | 玩法层（物理） | 碰撞过滤 layer/mask ✅、传感器/触发事件 ✅（轮询式，无回调总线）、CCD 🟡（中心射线式）、复合形状（1 刚体 1 形状）、关节限位/马达补全、持久流形/特征 ID、物理材质与 combine（0）、快照回放、渲染插值（`interpolat` = 0）、地形高度场（0） | PhysX 5 / Jolt / Rapier / Box2D 的标配 | 队友互不碰撞、拾取/伤害区、子弹穿墙、载具悬挂、存档与回滚、高刷平滑 |
@@ -348,7 +348,7 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 2. ~~**碰撞过滤 layer/mask + 传感器与 begin/end 事件**~~ ✅ 2026-10-16（还差事件总线/回调：现在是每步轮询 `sensor_events()`）；
 3. ~~**父层级**~~ ✅（第 16 轮）**+ 复合形状 + 关节锚点/限位/马达补全**：
    组合体（车 / 机械臂 / 布娃娃）的地基，父层级这块已经落地；
-4. ~~**GPU 蒙皮 + 动画混合 + glTF `animations()` 导入**~~ ✅ 第 94 轮（纯蒙皮 GPU；混合/状态机已有）；~~**两骨 IK**~~ ✅ 第 96 轮；下一步动画输入参数/事件状态机；
+4. ~~**GPU 蒙皮 + 动画混合 + glTF `animations()` 导入**~~ ✅ 第 94 轮（纯蒙皮 GPU；混合/状态机已有）；~~**两骨 IK**~~ ✅ 第 96 轮；下一步离散动画事件/触发器；
 5. ~~**HDR 中间目标 + 后处理链骨架**~~ ✅：bloom 已挂上（`post.wgsl` + `bloom.wgsl`），
    TAA/景深/CSM 可以直接往同一条链上加（SSAO 与 FXAA 已经加上去了）。
 
@@ -641,7 +641,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 | 20 | 🟡 部分（第 28/30 轮）：**接触特征 ID 已落地**（`ContactPoint.feature_id`：两端局部坐标按 0.5 mm 量化哈希，宽相/窄相与求解器共用同一函数；热启动缓存优先按 ID 精确匹配，2 cm 坐标容差退化为兜底）；**接触余量已落地**（`physics.speculative_margin`，缺省 0 = 历史结果逐位不变；膨胀窄相 + 负穿透 + `separation/dt` 速度目标；digest 测试证明缺省路径没漂）。2026-10-19 第 61 轮：~~余量只作用于单形状刚体~~ ✅（复合刚体逐部件膨胀）、~~余量的数值范围校验~~ ✅（负数/非有限/> 1 m → `out_of_range`，0.25~1 m → 告警）、~~专门 e2e~~ ✅（`speculative_margin_reduces_penetration_on_impact`：开余量的轨迹低点更高）；**顺带修掉一个静默 bug**——`physics.speculative_margin` 从来没被读到，而 `static_friction_speed` 会顺手把它设成同一个值（详见 CHANGELOG「修复」与 `production_readiness` §18）。**没做**：流形本身跨帧复用（跨帧只有身份与冲量） | 物理 |
 | 21 | ~~查询补全 + 查询加速结构~~ ✅ 2026-10-17：`raycast_all` / 任意形状 `overlap_shape` / 单向 `QueryFilter`（mask + 传感器开关）/ `distance_to` + `QueryIndex` 快照网格（射线 3D DDA）；CLI `query`、MCP `quench3d_query`、编辑器 F7 查询探针。**没做**：`shape_cast` 仍线性、CLI 不做批量查询、索引是快照（世界一动就回退线性） | 引擎 |
 | 22 | ~~物理材质与 combine mode、静/动摩擦分离~~ ✅ 2026-10-17：`CombineRule`（5 条：几何平均/平均/取小/取大/相乘，摩擦缺省几何平均、恢复缺省取大 = 老行为）、`static_friction`（缺省跟随动摩擦）、世界级 `physics.{friction_combine,restitution_combine,static_friction_speed}` + 物体级覆盖、编辑器滑块与下拉。判定用**施力前**速度（否则静摩擦永远不生效）。**没做**：材质的各向异性/滚动摩擦、`friction_combine` 在两端都显式且不同时只有一条确定性优先级（取 slot 靠前者） | 引擎 |
-| 23 | 🟡 部分（第 61~77 轮）：**①节点层级/变换**（`35d48a6`）；**②节点级动画 + CPU 采样**（STEP/LINEAR/CUBICSPLINE Hermite，旋转 slerp/分量归一化）；**③场景格式 + 帧循环**（`models[].animation`，三处消费，编辑器存读）；**④蒙皮**：`skins`/`JOINTS_0`/`WEIGHTS_0` + `skinned_mesh` + `update_mesh_vertices`；第 94 轮把纯蒙皮搬到 GPU（顶点属性 + 128 关节调色板），CPU 可回退，CPU/GPU 像素对照 0 差异；**⑤双 clip 混合**：`animation.blend` + 局部 TRS 插值 + `Scene::play_model_animation_blend`，报告 `models[].blend`；**⑥一次性淡入**：`blend.fade` 从 0 smoothstep 到目标权重；**⑦静态 morph target**：`targets` 解析 + `models[].morph_weights` + 先 morph 后蒙皮 + `info` 报告；**⑧morph 权重动画**：glTF `weights` 轨道 + 场景逐节点采样；**⑨时间驱动状态机**：`models[].animator` + `states/transitions` + 淡入；**⑩CUBICSPLINE 真值**（TRS Hermite 切线）；**⑪双 clip morph 权重混合**：按 `blend_weight` 逐 target 插值。**仍缺**：morph+skin 的 GPU 路径、任意权重曲线、输入参数/事件状态机、morph 的 CUBICSPLINE 切线；`collide` 碰撞体仍是绑定姿态。顺序见 `production_readiness` §19.3 | 引擎（中） |
+| 23 | 🟡 部分（第 61~77 轮）：**①节点层级/变换**（`35d48a6`）；**②节点级动画 + CPU 采样**（STEP/LINEAR/CUBICSPLINE Hermite，旋转 slerp/分量归一化）；**③场景格式 + 帧循环**（`models[].animation`，三处消费，编辑器存读）；**④蒙皮**：`skins`/`JOINTS_0`/`WEIGHTS_0` + `skinned_mesh` + `update_mesh_vertices`；第 94 轮把纯蒙皮搬到 GPU（顶点属性 + 128 关节调色板），CPU 可回退，CPU/GPU 像素对照 0 差异；**⑤双 clip 混合**：`animation.blend` + 局部 TRS 插值 + `Scene::play_model_animation_blend`，报告 `models[].blend`；**⑥一次性淡入**：`blend.fade` 从 0 smoothstep 到目标权重；**⑦静态 morph target**：`targets` 解析 + `models[].morph_weights` + 先 morph 后蒙皮 + `info` 报告；**⑧morph 权重动画**：glTF `weights` 轨道 + 场景逐节点采样；**⑨时间驱动状态机**：`models[].animator` + `states/transitions` + 淡入；**⑩CUBICSPLINE 真值**（TRS Hermite 切线）；**⑪双 clip morph 权重混合**：按 `blend_weight` 逐 target 插值。**仍缺**：morph+skin 的 GPU 路径、任意权重曲线、离散事件/触发器、morph 的 CUBICSPLINE 切线；`collide` 碰撞体仍是绑定姿态。顺序见 `production_readiness` §19.3 | 引擎（中） |
 | 24c | ✅ 编辑器局部光编辑（第 53 轮）：点光/聚光的增删改 + 从引擎写回 + CPU 往返测试 | 视口 gizmo / 选中高亮（要靠坐标数字调） | 编辑器里能直接把灯摆明白，不用手改 JSON |
 | 24d | 🟡 部分（第 54~55 轮）：**聚光灯阴影**（第 54 轮，`SpotLight.cast_shadows`，一张 2D 图）+ **点光源立方体阴影**（第 55 轮，`PointLight.cast_shadows`，`texture_depth_2d_array` 6 层）；两者的缺点都是缺省 `false`（老场景像素逐位不变），各自整帧**只支持一盏**（第一盏要求投影的），但**两套图互相独立、可以同时各有一盏**；相机/bias 都是纯函数（无显卡可跑），uniform/WGSL/校验/编辑器勾选框全链路；本机 GPU 探针（聚光 14 条 + 点光 23 条断言）与 `point_shadow_diag` 逐面对账量化 | 多盏投影（阴影图数组 / 逐灯索引）、级联聚光阴影、半透明物体阴影、可单独调的阴影图分辨率；编辑器勾选框没有人在真窗口里点过；面接缝与 bias 没有扫参 | 局部光终于会被挡住（以前光穿透一切） |
 | 24b | ✅ 编辑器与 CLI 的后处理一致性（第 51–52 轮）：级联 UI + `bloom/fxaa/ssao` 载入应用与写回，共用同一份映射函数 | — | 编辑器预览与 `quench3d render` 在后处理上不再分叉 |

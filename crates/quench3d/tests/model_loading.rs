@@ -1263,6 +1263,7 @@ fn scene_animator_transitions_and_promotes() {
         after: 0.5,
         on_finished: false,
         fade: 0.5,
+        conditions: Vec::new(),
     }];
     let mut scene = Scene::new();
     let idx = scene
@@ -1348,6 +1349,7 @@ fn scene_animator_transitions_when_clip_finishes() {
         after: 0.0,
         on_finished: true,
         fade: 0.0,
+        conditions: Vec::new(),
     }];
     let mut scene = Scene::new();
     let idx = scene

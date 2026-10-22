@@ -334,6 +334,7 @@ impl Doc {
                 after,
                 on_finished,
                 fade: Some(fade),
+                conditions: Vec::new(),
             });
         Some(path)
     }

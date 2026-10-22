@@ -3305,6 +3305,34 @@ pub fn setup_visuals(
                     after: t.after,
                     on_finished: t.on_finished,
                     fade: t.fade.unwrap_or(0.0),
+                    conditions: t
+                        .conditions
+                        .iter()
+                        .map(|c| quench3d::scene::AnimatorCondition {
+                            parameter: c.parameter.clone(),
+                            op: match c.op {
+                                crate::scene_doc::AnimatorOpDoc::Greater => {
+                                    quench3d::scene::AnimatorOp::Greater
+                                }
+                                crate::scene_doc::AnimatorOpDoc::GreaterOrEqual => {
+                                    quench3d::scene::AnimatorOp::GreaterOrEqual
+                                }
+                                crate::scene_doc::AnimatorOpDoc::Less => {
+                                    quench3d::scene::AnimatorOp::Less
+                                }
+                                crate::scene_doc::AnimatorOpDoc::LessOrEqual => {
+                                    quench3d::scene::AnimatorOp::LessOrEqual
+                                }
+                                crate::scene_doc::AnimatorOpDoc::Equal => {
+                                    quench3d::scene::AnimatorOp::Equal
+                                }
+                                crate::scene_doc::AnimatorOpDoc::NotEqual => {
+                                    quench3d::scene::AnimatorOp::NotEqual
+                                }
+                            },
+                            value: c.value,
+                        })
+                        .collect(),
                 })
                 .collect();
             let initial = anim
@@ -3320,6 +3348,24 @@ pub fn setup_visuals(
                 transitions,
                 initial,
             );
+        }
+        if let (Some(index), Some(anim)) = (animation_index, &m.animator) {
+            if let Some(runtime) = engine
+                .scene
+                .animations
+                .get_mut(index)
+                .and_then(|a| a.animator.as_mut())
+            {
+                runtime.parameters = anim
+                    .parameters
+                    .iter()
+                    .map(|p| quench3d::scene::ModelAnimatorParameter {
+                        name: p.name.clone(),
+                        value: p.default,
+                        default: p.default,
+                    })
+                    .collect();
+            }
         }
         if let (Some(index), Some(chains)) = (animation_index, &m.ik) {
             let chains = chains

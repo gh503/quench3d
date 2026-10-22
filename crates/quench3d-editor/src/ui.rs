@@ -1392,6 +1392,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         })
         .collect();
     let mut refresh = false;
+    let mut step_animator = false;
     let mut changed_model: Option<String> = None;
     let mut begin_edit = false;
     let mut end_edit = false;
@@ -1649,6 +1650,37 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     );
                 }
                 if let Some(animator) = &mut animation.animator {
+                    if !animator.parameters.is_empty() {
+                        ui.label(RichText::new("参数（输入 → 过渡条件）").small().strong());
+                        let mut reset = false;
+                        for param in &mut animator.parameters {
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::DragValue::new(&mut param.value)
+                                        .range(-100.0..=100.0)
+                                        .speed(0.01)
+                                        .prefix(format!("{} ", param.name)),
+                                );
+                                if response.changed() {
+                                    step_animator = true;
+                                }
+                                ui.label(
+                                    RichText::new(format!("默认 {:.2}", param.default))
+                                        .small()
+                                        .weak(),
+                                );
+                            });
+                        }
+                        if ui.button("重置参数").clicked() {
+                            reset = true;
+                            step_animator = true;
+                        }
+                        if reset {
+                            for param in &mut animator.parameters {
+                                param.value = param.default;
+                            }
+                        }
+                    }
                     let current = animator
                         .states
                         .get(animator.current)
@@ -1912,6 +1944,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                             after: 0.5,
                                             on_finished: false,
                                             fade: 0.0,
+                                            conditions: Vec::new(),
                                         },
                                     );
                                     if models[index].is_some() {
@@ -2083,6 +2116,12 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .weak(),
             );
         });
+    if step_animator {
+        // dt=0：只按当前参数判一次过渡，不额外推进时间；暂停时也能当场看到状态切换。
+        let (scene, renderer, gpu) = (&mut engine.scene, &mut engine.renderer, &engine.gpu);
+        scene.advance_animations_with_renderer(0.0, renderer, gpu);
+        refresh = true;
+    }
     if refresh {
         let (scene, renderer, gpu) = (&mut engine.scene, &mut engine.renderer, &engine.gpu);
         let updated = scene.refresh_animations_with_renderer(renderer, gpu);

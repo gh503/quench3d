@@ -1581,7 +1581,50 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// 状态机参数（浮点；布尔/触发器用 0/1 表达）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAnimatorParameterDoc {
+    /// 参数名（过渡条件按它引用）。
+    pub name: String,
+    /// 初始值；缺省 0。
+    #[serde(default)]
+    pub default: f32,
+}
+
+/// 过渡条件的比较方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnimatorOpDoc {
+    /// `>`。
+    Greater,
+    /// `>=`。
+    GreaterOrEqual,
+    /// `<`。
+    Less,
+    /// `<=`。
+    LessOrEqual,
+    /// `==`（1e-6 容差）。
+    Equal,
+    /// `!=`。
+    NotEqual,
+}
+
+/// 状态机过渡的一个参数条件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnimatorConditionDoc {
+    /// 参数名，必须出现在 `parameters` 里。
+    pub parameter: String,
+    /// 比较方式。
+    pub op: AnimatorOpDoc,
+    /// 比较的右值。
+    pub value: f32,
+}
+
 /// 状态机的一条过渡：当前状态停留 `after` 秒、或当前 clip 播完后切到 `to`。
+///
+/// 有 `conditions` 时还必须全部满足；空数组保持旧的时间/播完语义。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelAnimatorTransitionDoc {
@@ -1598,12 +1641,16 @@ pub struct ModelAnimatorTransitionDoc {
     /// 淡入秒数，缺省 0 = 立即切换。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade: Option<f32>,
+    /// 参数条件；全部满足（且满足 `after` / `on_finished`）才过渡。空 = 旧行为。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<AnimatorConditionDoc>,
 }
 
-/// 一个按**停留时间**驱动的模型动画状态机。
+/// 一个按**停留时间 + 参数条件**驱动的模型动画状态机。
 ///
-/// 状态机只按时间过渡（没有游戏输入参数/事件）；适合待机→行走→待机这类演示。
-/// 它和 `animation` 互斥：写了 `animator` 就不要再写 `animation`。
+/// 过渡可以只按时间/播完（旧行为），也可以带 `conditions` 引用运行时参数；
+/// 参数由宿主每帧写（`Scene::set_animator_parameter`）。它和 `animation` 互斥：
+/// 写了 `animator` 就不要再写 `animation`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelAnimatorDoc {
@@ -1611,6 +1658,9 @@ pub struct ModelAnimatorDoc {
     pub initial: String,
     /// 至少一个状态。
     pub states: Vec<ModelAnimatorStateDoc>,
+    /// 运行时参数（浮点）；过渡条件按名字引用。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<ModelAnimatorParameterDoc>,
     /// 过渡列表；可以为空（永远停在初始状态）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transitions: Vec<ModelAnimatorTransitionDoc>,
@@ -5262,6 +5312,30 @@ impl SceneDoc {
                         "状态机至少需要一个状态",
                     ));
                 }
+                let mut param_names = std::collections::BTreeSet::new();
+                for (pi, param) in anim.parameters.iter().enumerate() {
+                    let pp = format!("{ap}.parameters[{pi}]");
+                    if param.name.trim().is_empty() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{pp}.name"),
+                            "参数名不能为空",
+                        ));
+                    } else if !param_names.insert(param.name.clone()) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{pp}.name"),
+                            format!("参数名 \"{}\" 重复", param.name),
+                        ));
+                    }
+                    if !param.default.is_finite() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{pp}.default"),
+                            "参数默认值必须是有限数",
+                        ));
+                    }
+                }
                 let mut names = std::collections::BTreeSet::new();
                 for (si, st) in anim.states.iter().enumerate() {
                     let sp = format!("{ap}.states[{si}]");
@@ -5340,6 +5414,23 @@ impl SceneDoc {
                                 ErrorCode::OutOfRange,
                                 format!("{tp}.fade"),
                                 "过渡淡入必须是非负有限值（0 = 立即切换）",
+                            ));
+                        }
+                    }
+                    for (ci, cond) in tr.conditions.iter().enumerate() {
+                        let cp = format!("{tp}.conditions[{ci}]");
+                        if !param_names.contains(&cond.parameter) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{cp}.parameter"),
+                                format!("条件参数 \"{}\" 不在 parameters 里", cond.parameter),
+                            ));
+                        }
+                        if !cond.value.is_finite() {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{cp}.value"),
+                                "条件比较值必须是有限数",
                             ));
                         }
                     }
@@ -6804,7 +6895,13 @@ mod tests {
         assert_eq!(b.enabled, None);
         assert_eq!(b.intensity, None);
         assert_eq!(b.threshold, None);
-        assert!(doc.validate().iter().all(|d| d.severity != Severity::Error));
+        let diags: Vec<_> = doc
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| (d.path, d.message))
+            .collect();
+        assert!(diags.is_empty(), "{diags:?}");
 
         // 负强度是错误；0 强度与过大阈值是警告——都指向具体字段
         let doc = SceneDoc::from_json(
@@ -7812,6 +7909,106 @@ mod tests {
             cleared.lighting.point_lights.as_ref().map(|v| v.len()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn animator_parameters_and_conditions_roundtrip_and_validate() {
+        let dir = std::env::temp_dir().join(format!("quench3d_anim_params_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let glb = dir.join("rig.glb");
+        std::fs::write(&glb, b"not-really-a-glb").unwrap();
+        let rig = glb.to_string_lossy().to_string();
+        let doc = SceneDoc::from_value(json!({
+            "models": [{
+                "path": rig.clone(),
+                "animator": {
+                    "initial": "idle",
+                    "parameters": [
+                        { "name": "speed", "default": 0.0 },
+                        { "name": "grounded", "default": 1.0 }
+                    ],
+                    "states": [
+                        { "name": "idle", "animation": "idle" },
+                        { "name": "run", "animation": "run" }
+                    ],
+                    "transitions": [{
+                        "from": "idle", "to": "run", "after": 0.0,
+                        "conditions": [
+                            { "parameter": "speed", "op": "greater", "value": 0.1 },
+                            { "parameter": "grounded", "op": "greater_or_equal", "value": 0.5 }
+                        ]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let anim = doc.models[0].animator.as_ref().expect("animator");
+        assert_eq!(anim.parameters[1].name, "grounded");
+        assert_eq!(anim.parameters[1].default, 1.0);
+        assert_eq!(anim.transitions[0].conditions.len(), 2);
+        assert_eq!(anim.transitions[0].conditions[0].value, 0.1);
+        let diags: Vec<_> = doc
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| (d.path, d.message))
+            .collect();
+        assert!(diags.is_empty(), "{diags:?}");
+
+        // 序列化再读回：条件和参数都不能丢。
+        let text = serde_json::to_string(&doc).unwrap();
+        let again = SceneDoc::from_value(serde_json::from_str(&text).unwrap()).unwrap();
+        assert_eq!(
+            again.models[0].animator.as_ref().unwrap().transitions[0].conditions[0].parameter,
+            "speed"
+        );
+
+        // 条件引用不存在的参数：必须是错误，不能静默永远不切。
+        let bad = SceneDoc::from_value(json!({
+            "models": [{
+                "path": rig.clone(),
+                "animator": {
+                    "initial": "idle",
+                    "parameters": [{ "name": "speed", "default": 0.0 }],
+                    "states": [{ "name": "idle", "animation": "idle" }],
+                    "transitions": [{
+                        "from": "idle", "to": "idle",
+                        "conditions": [{ "parameter": "typo", "op": "greater", "value": 1.0 }]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let errors: Vec<String> = bad
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.path)
+            .collect();
+        assert!(
+            errors
+                .iter()
+                .any(|p| p.ends_with("conditions[0].parameter")),
+            "{errors:?}"
+        );
+
+        // 重复参数名：错误。
+        let dup = SceneDoc::from_value(json!({
+            "models": [{
+                "path": rig.clone(),
+                "animator": {
+                    "initial": "idle",
+                    "parameters": [{ "name": "speed" }, { "name": "speed" }],
+                    "states": [{ "name": "idle", "animation": "idle" }]
+                }
+            }]
+        }))
+        .unwrap();
+        assert!(dup
+            .validate()
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.path.ends_with("parameters[1].name")));
     }
 
     #[test]

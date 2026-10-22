@@ -124,10 +124,20 @@ fn fake_animation_instance() -> ModelAnimationInstance {
                 after: 0.5,
                 on_finished: false,
                 fade: 0.0,
+                conditions: vec![quench3d::scene::AnimatorCondition {
+                    parameter: "速度".into(),
+                    op: quench3d::scene::AnimatorOp::Greater,
+                    value: 0.1,
+                }],
             }],
             current: 0,
             elapsed: 0.25,
             pending: None,
+            parameters: vec![quench3d::scene::ModelAnimatorParameter {
+                name: "速度".into(),
+                value: 0.5,
+                default: 0.0,
+            }],
         }),
     }
 }
@@ -210,7 +220,7 @@ fn all_editor_panels_draw_in_one_frame() {
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(1280.0, 800.0),
+            egui::vec2(1280.0, 1100.0),
         )),
         ..Default::default()
     };
@@ -296,6 +306,14 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "目标 #0"),
         "morph 目标滑杆没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "参数（输入 → 过渡条件）"),
+        "状态机参数区没有出现在面板内容里"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "重置参数"),
+        "参数重置按钮没有绘制"
     );
     assert!(
         shapes_contain_text(&output.shapes, "待机 → 走"),

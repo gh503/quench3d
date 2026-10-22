@@ -164,6 +164,59 @@ pub struct ModelAnimatorState {
     pub start: f32,
 }
 
+/// 状态机用来判断过渡的运行时参数（浮点；布尔/触发器用 0/1 表达）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelAnimatorParameter {
+    /// 参数名（场景文件里的 `parameters[].name`）。
+    pub name: String,
+    /// 当前值；由宿主每帧写（角色速度、是否着地……）。
+    pub value: f32,
+    /// 场景文件里的缺省值；「重置」用它。
+    pub default: f32,
+}
+
+/// 过渡条件的比较方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimatorOp {
+    /// `value > expected`。
+    Greater,
+    /// `value >= expected`。
+    GreaterOrEqual,
+    /// `value < expected`。
+    Less,
+    /// `value <= expected`。
+    LessOrEqual,
+    /// `|value - expected| < 1e-6`。
+    Equal,
+    /// 与 `Equal` 相反。
+    NotEqual,
+}
+
+impl AnimatorOp {
+    /// 这个比较是否成立。
+    pub fn matches(self, value: f32, expected: f32) -> bool {
+        match self {
+            Self::Greater => value > expected,
+            Self::GreaterOrEqual => value >= expected,
+            Self::Less => value < expected,
+            Self::LessOrEqual => value <= expected,
+            Self::Equal => (value - expected).abs() < 1e-6,
+            Self::NotEqual => (value - expected).abs() >= 1e-6,
+        }
+    }
+}
+
+/// 状态机过渡的一个参数条件。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimatorCondition {
+    /// 参数名；必须能在 `parameters` 里找到。
+    pub parameter: String,
+    /// 比较方式。
+    pub op: AnimatorOp,
+    /// 比较的右值。
+    pub value: f32,
+}
+
 /// 状态机的一条过渡。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelAnimatorTransition {
@@ -180,6 +233,8 @@ pub struct ModelAnimatorTransition {
     pub on_finished: bool,
     /// 淡入秒数；0 = 立即切换。
     pub fade: f32,
+    /// 参数条件；全部满足才允许过渡。空 = 只按时间/播完判断（旧行为）。
+    pub conditions: Vec<AnimatorCondition>,
 }
 
 /// 运行中的状态机：当前状态、已停留时间、正在淡入的目标状态。
@@ -195,6 +250,8 @@ pub struct ModelAnimatorRuntime {
     pub elapsed: f32,
     /// 正在淡入的目标状态下标；`None` = 不在过渡中。
     pub pending: Option<usize>,
+    /// 运行时参数（按场景顺序；没有参数时为空）。
+    pub parameters: Vec<ModelAnimatorParameter>,
 }
 
 /// 一条两骨 IK 链（模型局部空间）。
@@ -485,6 +542,18 @@ fn skeleton_edges(model: &crate::assets::LoadedModel, worlds: &[Mat4]) -> Vec<(V
 /// 状态机的一步：推进当前状态计时，命中过渡就建立淡入（或立即切换）。
 ///
 /// `dt` 非法时按 0 处理；`fade` 非法时按 0；过渡按场景中的顺序取第一条命中的。
+/// 条件是否全部成立；缺参数/非有限值一律不成立（宁可不切，也不乱切）。
+fn conditions_hold(anim: &ModelAnimatorRuntime, conditions: &[AnimatorCondition]) -> bool {
+    conditions.iter().all(|c| {
+        anim.parameters
+            .iter()
+            .find(|p| p.name == c.parameter)
+            .is_some_and(|p| {
+                p.value.is_finite() && c.value.is_finite() && c.op.matches(p.value, c.value)
+            })
+    })
+}
+
 fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
     // 过渡中不再启动下一条过渡；等 promotion 把新 clip 提为主 clip。
     if a.secondary.is_some() {
@@ -504,6 +573,13 @@ fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
     // 不会被多推进一整帧——它本帧只从 0 开始走这一帧的时间。
     let transition = anim.transitions.iter().find(|t| {
         if t.from != current_name {
+            return false;
+        }
+        // 条件驱动的自环会在条件持续满足时每帧重启；只允许时间/播完自环（旧行为）。
+        if !t.conditions.is_empty() && t.to == current_name {
+            return false;
+        }
+        if !conditions_hold(anim, &t.conditions) {
             return false;
         }
         if t.on_finished {
@@ -898,6 +974,7 @@ impl Scene {
                 current: initial,
                 elapsed: 0.0,
                 pending: None,
+                parameters: Vec::new(),
             }),
         });
         Some(index)
@@ -917,6 +994,48 @@ impl Scene {
         };
         a.morph_weights = weights;
         true
+    }
+
+    /// 设置状态机参数；参数不存在或值非有限时返回 `false`。
+    ///
+    /// 这是"输入"入口：宿主每帧把角色速度、是否着地等写进来，过渡条件在帧首判定。
+    /// 只改运行时值，不写场景文件（场景里的 `default` 不会变）。
+    pub fn set_animator_parameter(
+        &mut self,
+        animation_index: usize,
+        name: &str,
+        value: f32,
+    ) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        let Some(anim) = self
+            .animations
+            .get_mut(animation_index)
+            .and_then(|a| a.animator.as_mut())
+        else {
+            return false;
+        };
+        let Some(param) = anim.parameters.iter_mut().find(|p| p.name == name) else {
+            return false;
+        };
+        param.value = value;
+        true
+    }
+
+    /// 把某个状态机的全部参数重置为场景里的 `default`；返回重置个数。
+    pub fn reset_animator_parameters(&mut self, animation_index: usize) -> usize {
+        let Some(anim) = self
+            .animations
+            .get_mut(animation_index)
+            .and_then(|a| a.animator.as_mut())
+        else {
+            return 0;
+        };
+        for p in &mut anim.parameters {
+            p.value = p.default;
+        }
+        anim.parameters.len()
     }
 
     /// 覆盖某个动画实例的两骨 IK 链（空 = 关闭）。
@@ -2164,6 +2283,162 @@ mod anim_tests {
         assert!(
             (lines[1].1 - Vec3::new(0.0, 1.5, 0.5)).length() < 1e-3,
             "骨骼叠加层看到的末端应已 IK 到目标"
+        );
+    }
+
+    fn condition_model() -> Arc<LoadedModel> {
+        Arc::new(LoadedModel {
+            name: "animator-params".into(),
+            meshes: Vec::new(),
+            materials: Vec::new(),
+            images: Vec::new(),
+            nodes: Vec::new(),
+            animations: vec![
+                LoadedAnimation {
+                    name: "idle".into(),
+                    duration: 1.0,
+                    ..Default::default()
+                },
+                LoadedAnimation {
+                    name: "run".into(),
+                    duration: 1.0,
+                    ..Default::default()
+                },
+            ],
+            skins: Vec::new(),
+        })
+    }
+
+    fn condition_state(name: &str, animation: &str) -> ModelAnimatorState {
+        ModelAnimatorState {
+            name: name.into(),
+            animation: animation.into(),
+            speed: 1.0,
+            looping: true,
+            start: 0.0,
+        }
+    }
+
+    fn condition_transition(
+        from: &str,
+        to: &str,
+        after: f32,
+        parameter: &str,
+        op: AnimatorOp,
+        value: f32,
+    ) -> ModelAnimatorTransition {
+        ModelAnimatorTransition {
+            from: from.into(),
+            to: to.into(),
+            after,
+            on_finished: false,
+            fade: 0.0,
+            conditions: vec![AnimatorCondition {
+                parameter: parameter.into(),
+                op,
+                value,
+            }],
+        }
+    }
+
+    #[test]
+    fn animator_conditions_switch_state_and_respect_the_delay() {
+        let model = condition_model();
+        let states = vec![
+            condition_state("idle", "idle"),
+            condition_state("run", "run"),
+        ];
+        let transitions = vec![
+            condition_transition("idle", "run", 0.0, "speed", AnimatorOp::Greater, 0.1),
+            condition_transition("run", "idle", 0.0, "speed", AnimatorOp::Less, 0.1),
+        ];
+        let mut scene = Scene::new();
+        let idx = scene
+            .play_model_animator(model, Vec::new(), Vec::new(), states, transitions, 0)
+            .expect("两个 clip 都在");
+        scene.animations[idx].animator.as_mut().unwrap().parameters =
+            vec![ModelAnimatorParameter {
+                name: "speed".into(),
+                value: 0.0,
+                default: 0.0,
+            }];
+
+        // 条件不满足：不切。
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "idle");
+        assert_eq!(scene.animations[idx].animator.as_ref().unwrap().current, 0);
+
+        // 写入输入参数：下一次 advance（dt=0）立即切到 run。
+        assert!(scene.set_animator_parameter(idx, "speed", 1.0));
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "run");
+        assert_eq!(scene.animations[idx].animator.as_ref().unwrap().current, 1);
+
+        // 反向条件：回到 idle；重置参数也回到默认值 0。
+        assert!(scene.set_animator_parameter(idx, "speed", 0.0));
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "idle");
+        assert_eq!(scene.reset_animator_parameters(idx), 1);
+        let p = &scene.animations[idx].animator.as_ref().unwrap().parameters[0];
+        assert_eq!(p.value, p.default);
+    }
+
+    #[test]
+    fn animator_conditions_wait_for_the_transition_delay() {
+        let model = condition_model();
+        let states = vec![
+            condition_state("idle", "idle"),
+            condition_state("run", "run"),
+        ];
+        let transitions = vec![condition_transition(
+            "idle",
+            "run",
+            2.0,
+            "speed",
+            AnimatorOp::Greater,
+            0.1,
+        )];
+        let mut scene = Scene::new();
+        let idx = scene
+            .play_model_animator(model, Vec::new(), Vec::new(), states, transitions, 0)
+            .expect("两个 clip 都在");
+        scene.animations[idx].animator.as_mut().unwrap().parameters =
+            vec![ModelAnimatorParameter {
+                name: "speed".into(),
+                value: 1.0,
+                default: 0.0,
+            }];
+        scene.advance_animations(1.0);
+        assert_eq!(scene.animations[idx].player.animation, "idle", "还差 1 秒");
+        scene.advance_animations(1.0);
+        assert_eq!(
+            scene.animations[idx].player.animation, "idle",
+            "帧首判定：到点后下一帧才切"
+        );
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "run", "满 2 秒后切");
+    }
+
+    #[test]
+    fn animator_parameter_setter_rejects_unknown_and_nonfinite() {
+        let model = condition_model();
+        let states = vec![condition_state("idle", "idle")];
+        let mut scene = Scene::new();
+        let idx = scene
+            .play_model_animator(model, Vec::new(), Vec::new(), states, Vec::new(), 0)
+            .expect("clip 在");
+        scene.animations[idx].animator.as_mut().unwrap().parameters =
+            vec![ModelAnimatorParameter {
+                name: "speed".into(),
+                value: 0.0,
+                default: 0.0,
+            }];
+        assert!(!scene.set_animator_parameter(idx, "missing", 1.0));
+        assert!(!scene.set_animator_parameter(idx, "speed", f32::NAN));
+        assert!(scene.set_animator_parameter(idx, "speed", 2.5));
+        assert_eq!(
+            scene.animations[idx].animator.as_ref().unwrap().parameters[0].value,
+            2.5
         );
     }
 

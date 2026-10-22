@@ -41,6 +41,17 @@
 
 ### 新增
 
+- **参数驱动的动画状态机（第 97 轮）**：`models[].animator` 新增 `parameters`
+  （`[{ "name":"speed", "default":0.0 }]`）和过渡的 `conditions`
+  （`[{ "parameter":"speed", "op":"greater", "value":0.1 }]`，6 种比较）。条件与
+  `after`/`on_finished` 是**与**关系；条件缺失/参数非有限一律不切。宿主用
+  `Scene::set_animator_parameter(index,name,value)` 写输入，`reset_animator_parameters`
+  回默认值。编辑器「动画」面板列出参数滑杆，拖动后以 `dt=0` 立即判一次过渡（暂停也生效），
+  只改当前会话、不写场景 `default`。`validate` 检查参数重名/空名/非有限默认值/条件引用
+  不存在的参数。回归：`animator_conditions_switch_state_and_respect_the_delay`、
+  `animator_conditions_wait_for_the_transition_delay`、
+  `animator_parameter_setter_rejects_unknown_and_nonfinite`、
+  `animator_parameters_and_conditions_roundtrip_and_validate`（总测试 722 → 726）。
 - **两骨 IK（第 96 轮）**：场景格式新增 `models[].ik`：
   `{ "root": "LeftUpLeg", "mid": "LeftLeg", "tip": "LeftFoot", "target": [x,y,z],
   "pole": [0,0,1] }`。按 glTF 节点名引用，目标/极向量在模型局部空间；每帧采样后解

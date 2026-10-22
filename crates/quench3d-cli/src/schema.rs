@@ -807,11 +807,15 @@ pub fn json_schema() -> Value {
         d
     });
     defs.insert("modelAnimator".into(), {
-        let mut d = def(&["initial", "states", "transitions"]);
+        let mut d = def(&["initial", "states", "parameters", "transitions"]);
         d["properties"]["states"] = json!({
             "type": "array",
             "minItems": 1,
             "items": { "$ref": "#/$defs/modelAnimatorState" }
+        });
+        d["properties"]["parameters"] = json!({
+            "type": "array",
+            "items": { "$ref": "#/$defs/modelAnimatorParameter" }
         });
         d["properties"]["transitions"] = json!({
             "type": "array",
@@ -825,10 +829,28 @@ pub fn json_schema() -> Value {
         d["required"] = json!(["name", "animation"]);
         d
     });
+    defs.insert("modelAnimatorParameter".into(), {
+        let mut d = def(&["name", "default"]);
+        d["required"] = json!(["name"]);
+        d
+    });
+    defs.insert("modelAnimatorCondition".into(), {
+        let mut d = def(&["parameter", "op", "value"]);
+        d["properties"]["op"] = json!({
+            "type": "string",
+            "enum": ["greater", "greater_or_equal", "less", "less_or_equal", "equal", "not_equal"]
+        });
+        d["required"] = json!(["parameter", "op", "value"]);
+        d
+    });
     defs.insert("modelAnimatorTransition".into(), {
-        let mut d = def(&["from", "to", "after", "on_finished", "fade"]);
+        let mut d = def(&["from", "to", "after", "on_finished", "fade", "conditions"]);
         d["properties"]["after"] = json!({ "type": "number", "minimum": 0.0 });
         d["properties"]["on_finished"] = json!({ "type": "boolean", "default": false });
+        d["properties"]["conditions"] = json!({
+            "type": "array",
+            "items": { "$ref": "#/$defs/modelAnimatorCondition" }
+        });
         d["required"] = json!(["from", "to"]);
         d
     });
@@ -1464,6 +1486,8 @@ mod tests {
             ("FluidDoc", "fluid"),
             ("ModelDoc", "model"),
             ("ModelIkDoc", "modelIk"),
+            ("ModelAnimatorParameterDoc", "modelAnimatorParameter"),
+            ("AnimatorConditionDoc", "modelAnimatorCondition"),
             ("ModelAnimationDoc", "modelAnimation"),
             ("ModelAnimationBlendDoc", "modelAnimationBlend"),
             ("ModelAnimatorDoc", "modelAnimator"),
