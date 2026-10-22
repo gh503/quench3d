@@ -151,6 +151,11 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   条件不满足则事件被丢弃。事件只保留一个、消费一次，没有队列/输入缓冲。仍没有参数
   曲线。和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
+* **手工 LOD（远处换粗模）**：`models[].lods` 给静态模型挂替换层：
+  `[{ "path": "tree_low.glb", "min_distance": 25 }]`。基础模型用到第一个距离，之后每层
+  用到下一层距离；所有层共用同一个位置/朝向/缩放。引擎每帧按相机距离切可见层级，
+  阈值旁有 **10% 滞回**，不会在边界来回弹。边界：只支持**静态模型**（不能同时写
+  `animation` / `animator` / `ik`），碰撞仍用基础模型；没有自动减面/自动生成 LOD。
 * **两骨 IK（脚/手目标）**：场景里用 `models[].ik` 给角色加链：
   `{ "root": "LeftUpLeg", "mid": "LeftLeg", "tip": "LeftFoot", "target": [x,y,z], "pole": [0,0,1] }`。
   按 glTF 节点名引用，目标与极向量都在**模型局部空间**；每帧采样动画后解两骨三角形，
@@ -241,7 +246,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12474495 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12493299 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -932,6 +937,11 @@ NaN 刚体  : 0
   事件过渡优先于同状态的时间过渡。参数由宿主写（编辑器面板/`Scene::set_animator_parameter`），
   场景里的 `default` 只是初值；`validate` 会查参数重名、名字为空、条件引用不存在的参数、
   空事件名。
+  `models[].lods` 是**手工 LOD**（只支持静态模型）：`[{ "path": "tree_low.glb",
+  "min_distance": 25 }]`；基础模型从距离 0 显示到第一个 `min_distance`，第 j 个替换层
+  显示到 `lods[j+1].min_distance`，最后一层到无穷远。距离必须 > 0 且严格递增；
+  所有层共用基础模型的位姿/缩放，碰撞仍用基础模型。每帧由 `Scene::update_lods`
+  按相机距离切可见层级（10% 滞回）；编辑器的「模型」面板会显示每层距离。
   `models[].ik` 是**两骨 IK**（需要同时有 `animation` 或 `animator`）：数组里每条链写
   `root/mid/tip` 三个 glTF 节点名、`target` 三维目标、可选 `pole` 方向；名字不存在或
   父子关系不成立时整条跳过，几何保持原姿态。`validate` 只查结构（名字非空、三者不同、
@@ -1272,7 +1282,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 728 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 732 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

@@ -676,6 +676,24 @@ fn promote_animator(a: &mut ModelAnimationInstance) {
     }
 }
 
+/// 一个手工 LOD 层级：用哪些物体、相机距离到多远时用这一级。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelLodLevel {
+    /// 这一级显示的场景物体下标（同一模型的全部节点）。
+    pub objects: Vec<usize>,
+    /// 相机距离 `<= max_distance` 时使用这一级；越远越粗。
+    pub max_distance: f32,
+}
+
+/// 一个手工 LOD 组：第 0 级是基础模型，之后是按距离替换的粗模。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelLodGroup {
+    /// 从细到粗的层级；至少 2 级，`max_distance` 递增。
+    pub levels: Vec<ModelLodLevel>,
+    /// 当前显示的层级下标。
+    pub active: usize,
+}
+
 /// 场景。
 pub struct Scene {
     /// 全部物体。
@@ -692,6 +710,8 @@ pub struct Scene {
     ///
     /// 只有**纯蒙皮**片段走 GPU；带 morph 的片段仍走 CPU。
     pub gpu_skinning: bool,
+    /// 手工 LOD 组；每帧按相机距离切可见层级。
+    pub lods: Vec<ModelLodGroup>,
 }
 
 impl Default for Scene {
@@ -709,6 +729,7 @@ impl Scene {
             auto_sync_physics: true,
             animations: Vec::new(),
             gpu_skinning: true,
+            lods: Vec::new(),
         }
     }
 
@@ -1040,6 +1061,100 @@ impl Scene {
         };
         param.value = value;
         true
+    }
+
+    /// 注册一个手工 LOD 组：`levels[0]` 是基础模型，之后是按距离替换的粗模。
+    ///
+    /// 返回组下标；层级少于 2、空物体列表、阈值非有限/负值/不递增时返回 `None`。
+    /// 注册后只有第 0 级可见，其余层级隐藏；后续由 [`Scene::update_lods`] 按相机距离切。
+    pub fn add_model_lod(&mut self, levels: Vec<ModelLodLevel>) -> Option<usize> {
+        if levels.len() < 2 {
+            return None;
+        }
+        let mut prev = f32::NEG_INFINITY;
+        for level in &levels {
+            let finite_or_inf =
+                level.max_distance.is_finite() || level.max_distance == f32::INFINITY;
+            if level.objects.is_empty()
+                || !finite_or_inf
+                || level.max_distance < 0.0
+                || level.max_distance <= prev
+            {
+                return None;
+            }
+            prev = level.max_distance;
+        }
+        for (li, level) in levels.iter().enumerate() {
+            for &object in &level.objects {
+                if let Some(obj) = self.objects.get_mut(object) {
+                    obj.visible = li == 0;
+                }
+            }
+        }
+        let group = ModelLodGroup { levels, active: 0 };
+        self.lods.push(group);
+        Some(self.lods.len() - 1)
+    }
+
+    /// 按相机位置更新所有 LOD 组；返回发生切换的组数。
+    ///
+    /// 选择规则：距离落在当前层级的 `[上一层阈值, 本层阈值]` 内就保持；离开这个
+    /// 区间 **10% 的滞回带**才切，避免相机在阈值附近抖动导致来回弹。
+    /// 组内物体的 `visible` 由 LOD 接管（会覆盖用户之前的隐藏状态）。
+    pub fn update_lods(&mut self, camera_position: Vec3) -> usize {
+        if self.lods.is_empty() {
+            return 0;
+        }
+        let origins: Vec<Option<Vec3>> = self
+            .lods
+            .iter()
+            .map(|group| {
+                let mut sum = Vec3::ZERO;
+                let mut count = 0usize;
+                for object in group.levels.first()?.objects.iter() {
+                    if self.objects.get(*object).is_some() {
+                        sum += self.world_transform(*object).position;
+                        count += 1;
+                    }
+                }
+                (count > 0).then_some(sum / count as f32)
+            })
+            .collect();
+        let mut changed = 0;
+        for (group, origin) in self.lods.iter_mut().zip(origins) {
+            let Some(origin) = origin else {
+                continue;
+            };
+            let distance = (camera_position - origin).length();
+            let active = group.active.min(group.levels.len() - 1);
+            let upper = group.levels[active].max_distance;
+            let lower = if active > 0 {
+                group.levels[active - 1].max_distance
+            } else {
+                0.0
+            };
+            let next = if distance <= upper * 1.1 && distance >= lower * 0.9 {
+                active
+            } else {
+                group
+                    .levels
+                    .iter()
+                    .position(|l| distance <= l.max_distance)
+                    .unwrap_or(group.levels.len() - 1)
+            };
+            if next != group.active {
+                group.active = next;
+                changed += 1;
+            }
+            for (li, level) in group.levels.iter().enumerate() {
+                for object in &level.objects {
+                    if let Some(obj) = self.objects.get_mut(*object) {
+                        obj.visible = li == group.active;
+                    }
+                }
+            }
+        }
+        changed
     }
 
     /// 发一个离散事件：当前状态有匹配的 `on_event` 过渡时排队，下一帧帧首切换。
@@ -2653,5 +2768,98 @@ mod anim_tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].0, Vec3::new(10.0, 2.0, 0.0));
         assert_eq!(lines[0].1, Vec3::new(11.0, 2.0, 0.0));
+    }
+
+    #[test]
+    fn lods_switch_visibility_by_camera_distance_with_hysteresis() {
+        let mut scene = Scene::new();
+        let near = scene.add_named(0, 0, Transform::IDENTITY, "near");
+        let mid = scene.add_named(1, 0, Transform::IDENTITY, "mid");
+        let far = scene.add_named(2, 0, Transform::IDENTITY, "far");
+        let group = scene
+            .add_model_lod(vec![
+                ModelLodLevel {
+                    objects: vec![near],
+                    max_distance: 10.0,
+                },
+                ModelLodLevel {
+                    objects: vec![mid],
+                    max_distance: 20.0,
+                },
+                ModelLodLevel {
+                    objects: vec![far],
+                    max_distance: f32::INFINITY,
+                },
+            ])
+            .expect("三级 LOD");
+        assert_eq!(group, 0);
+        // 注册后只有基础层可见。
+        assert!(scene.objects[near].visible);
+        assert!(!scene.objects[mid].visible);
+        assert!(!scene.objects[far].visible);
+
+        // 5m：仍是最细。
+        assert_eq!(scene.update_lods(Vec3::new(5.0, 0.0, 0.0)), 0);
+        assert_eq!(scene.lods[0].active, 0);
+        // 15m：中模；25m：粗模。
+        assert_eq!(scene.update_lods(Vec3::new(15.0, 0.0, 0.0)), 1);
+        assert_eq!(scene.lods[0].active, 1);
+        assert!(scene.objects[mid].visible && !scene.objects[near].visible);
+        assert_eq!(scene.update_lods(Vec3::new(25.0, 0.0, 0.0)), 1);
+        assert_eq!(scene.lods[0].active, 2);
+        assert!(scene.objects[far].visible && !scene.objects[mid].visible);
+
+        // 19m 落进 20m 的 10% 滞回带：保持粗模，避免阈值附近抖动。
+        scene.update_lods(Vec3::new(19.0, 0.0, 0.0));
+        assert_eq!(scene.lods[0].active, 2, "滞回带内不切");
+        // 17m 离开滞回带：回到中模。
+        scene.update_lods(Vec3::new(17.0, 0.0, 0.0));
+        assert_eq!(scene.lods[0].active, 1);
+        assert!(scene.objects[mid].visible);
+    }
+
+    #[test]
+    fn lods_reject_invalid_levels_and_noop_without_groups() {
+        let mut scene = Scene::new();
+        assert_eq!(scene.update_lods(Vec3::ZERO), 0);
+        assert!(
+            scene
+                .add_model_lod(vec![ModelLodLevel {
+                    objects: vec![0],
+                    max_distance: 10.0,
+                }])
+                .is_none(),
+            "至少两级"
+        );
+        assert!(
+            scene
+                .add_model_lod(vec![
+                    ModelLodLevel {
+                        objects: vec![0],
+                        max_distance: 10.0,
+                    },
+                    ModelLodLevel {
+                        objects: Vec::new(),
+                        max_distance: 20.0,
+                    },
+                ])
+                .is_none(),
+            "空物体列表"
+        );
+        assert!(
+            scene
+                .add_model_lod(vec![
+                    ModelLodLevel {
+                        objects: vec![0],
+                        max_distance: 10.0,
+                    },
+                    ModelLodLevel {
+                        objects: vec![1],
+                        max_distance: 10.0,
+                    },
+                ])
+                .is_none(),
+            "距离不递增"
+        );
     }
 }

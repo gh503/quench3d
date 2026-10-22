@@ -44,7 +44,7 @@
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent + **GPU 蒙皮**（glTF `JOINTS_0/WEIGHTS_0` 顶点属性，≤4 关节/顶点，128 关节 uniform 调色板，8 KB；只满足 WebGL2 最低 4 KB uniform 的设备需 CPU 回退；纯蒙皮走 GPU，带 morph 仍走 CPU）+ **morph target**（静态 `models[].morph_weights` + glTF `weights` 动画轨道；双 clip 只取主 clip）；**无顶点色** | 🟡 |
 | 实例化 | 全部 | 不透明有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
 | 透明排序 | 全部 | 半透明按实例 AABB 中心到相机的距离**全局由远到近**逐实例绘制，不同材质/网格之间也正确；代价是透明物体不合批 | ✅ |
-| LOD | 引擎级 | 无 | ❌ |
+| LOD | 引擎级 | 手工 LOD：`models[].lods` 按相机距离换静态粗模，10% 滞回；无自动减面/自动生成、动画模型不支持、无遮挡剔除 | 🟡 |
 | 相机 | 全部 | 透视 + 正交（`camera.rs:7`）；**一次 render 只吃一个相机**，无多视口 | 🟡 |
 | 天空 / 环境反射 | 全部 | 程序化天空 + 常量环境项（`light.rs:107`）+ **解析式环境高光**（反射方向取同一套天空，`RendererOptions.environment`）；**仍无 HDRI/IBL/cubemap 预滤波、无 SSR** | 🟠 |
 | 调试叠加层 | 全部 | 网格 / 坐标轴 / 接触点 / 包围盒线框；**动捕 3D 骨骼**也走调试线段 | 🟡 |
@@ -237,7 +237,7 @@
 | 场景 | 结论 | 决定性阻断项 | 可以替换的子集 |
 |---|---|---|---|
 | S1 查看/检查模型 | **不能替代** | H1 色彩管理未声明、H2 导入单位/up-axis 未处理（贴图导出静默丢失**本轮已修**，见 §5.3） | 无头批量体检 + 缩略图 |
-| S2 场景可视化 | **不能替代** | 无 HDRI/IBL（只有解析式环境高光）/ LOD；输出色彩管线单一不可选、无 EXR | three.js 应用里的白模/静态演示 + 批量出图 + 回归门禁 |
+| S2 场景可视化 | **不能替代** | 无 HDRI/IBL（只有解析式环境高光）；LOD 只有静态手工层级；输出色彩管线单一不可选、无 EXR | three.js 应用里的白模/静态演示 + 批量出图 + 回归门禁 |
 | S3 物理仿真 | **有条件替代（窄）** | 无行业基准 V&V；确定性未划跨平台边界；无接触力导出/接触 ID | 确定性刚体参数扫描 / CI 回归 / 教学 |
 | S4 游戏 | **不能替代** | 动画、音频、UI、输入映射、存档四件全无；无存档迁移 | 刚体玩法原型的物理核心 |
 | S5 Web 分发 | **不能替代** | wasm 11 MB；真机 WebGPU 未验证（只有 SwiftShader）；H1 色彩；无无障碍 | 内部演示嵌入 |
@@ -2494,7 +2494,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 
 **验证**：
 
-* `CARGO_NET_OFFLINE=true tools/gate.sh`：**728** 个测试，0 失败；clippy 原生/wasm、doc、
+* `CARGO_NET_OFFLINE=true tools/gate.sh`：**732** 个测试，0 失败；clippy 原生/wasm、doc、
   wasm 构建、`check_web.mjs` 全绿。
 * `tools/probe_web_ui.sh`：暂停态按 F3/F4/R/F6/F7/F8/P，UI 状态必须变化；有几何的项截图也必须变化
   （F3=`grid`、F4=`shadows` 且 `shadow_instances` 7→0、R=`gizmo` Translate→Scale、
@@ -2503,7 +2503,7 @@ quench3d-render --lib gl_pipelines` 保证新 WGSL 仍能翻译到 GLSL。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
 **仍未做**：morph+skin 的 GPU 路径（纯蒙皮已 GPU 化）、离散事件驱动的动画状态机、
-IBL/HDRI、LOD/遮挡剔除、音频/脚本层、Web 摄像头、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
+IBL/HDRI、自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---
 

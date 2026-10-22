@@ -3241,6 +3241,47 @@ pub fn setup_visuals(
             }
         };
         let objects = engine.add_model(&model, transform);
+        // 手工 LOD：基础模型是第 0 级，之后每个 `lods[j]` 是更粗的替换层。
+        // 只支持静态模型（validate 已挡住 animation/animator/ik）；碰撞仍用基础模型。
+        if let Some(lods) = &m.lods {
+            let mut levels = vec![quench3d::scene::ModelLodLevel {
+                objects: objects.clone(),
+                max_distance: lods
+                    .first()
+                    .map(|l| l.min_distance)
+                    .unwrap_or(f32::INFINITY),
+            }];
+            for (j, lod) in lods.iter().enumerate() {
+                let lp = format!("models[{i}].lods[{j}].path");
+                let resolved = resolve_model_path(doc, &lp, &lod.path)?;
+                let lod_model = match load_model_cached(&resolved) {
+                    Ok(model) => model,
+                    Err(e) => {
+                        let mut err = RunError::io(format!(
+                            "加载 LOD 模型 {} 失败: {e}（确认文件是完好的 glTF/GLB/OBJ）",
+                            lod.path.display()
+                        ));
+                        err.path = Some(format!("models[{i}].lods[{j}]"));
+                        return Err(err);
+                    }
+                };
+                let lod_objects = engine.add_model(&lod_model, transform);
+                levels.push(quench3d::scene::ModelLodLevel {
+                    objects: lod_objects,
+                    max_distance: lods
+                        .get(j + 1)
+                        .map(|next| next.min_distance)
+                        .unwrap_or(f32::INFINITY),
+                });
+            }
+            if engine.scene.add_model_lod(levels).is_none() {
+                let mut err = RunError::io(format!(
+                    "models[{i}].lods 的层级无效（距离必须严格递增且非空）"
+                ));
+                err.path = Some(format!("models[{i}].lods"));
+                return Err(err);
+            }
+        }
         // 模型动画：名字不存在时**不登记**（报告里给 found=false），几何保持绑定姿态。
         // 登记之后由引擎帧循环每帧推进（单帧渲染用 dt = 0 摆一次起始姿态）。
         let mut animation_index = None;

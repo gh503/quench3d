@@ -41,6 +41,15 @@
 
 ### 新增
 
+- **静态模型手工 LOD（第 99 轮）**：`models[].lods` 给静态模型挂粗模替换层
+  `[{ "path":"tree_low.glb", "min_distance":25 }]`。基础模型显示到第一个距离，之后每层
+  显示到下一层距离、最后一层到无穷远；所有层共用基础模型的位姿/缩放，碰撞仍用基础模型。
+  `Scene::add_model_lod` 校验层级非空/距离递增，`Scene::update_lods` 每帧按相机距离切
+  `visible`，阈值旁有 **10% 滞回**；`Engine::tick` 在提交前调用。编辑器「模型」面板显示
+  `LOD N 级（... 起切换）`。`validate` 检查路径存在、距离 >0 且严格递增、动画/IK 模型不能
+  同时用 LOD；schema 增加 `modelLod`。回归：`lods_switch_visibility_by_camera_distance_with_hysteresis`、
+  `lods_reject_invalid_levels_and_noop_without_groups`、`model_lods_validate_distances_and_static_only`、
+  `scene_model_lods_load_replacements_without_breaking_simulate`（总测试 728 → 732）。
 - **动画状态机离散事件（第 98 轮）**：`transitions[].on_event` 声明事件名，宿主用
   `Scene::fire_animator_event(index,name)` 发事件，下一帧帧首**立即**过渡（忽略
   `after`/`on_finished`，但 `conditions` 仍要满足）。事件过渡**优先于**同状态到期的时间

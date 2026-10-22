@@ -762,6 +762,7 @@ pub fn json_schema() -> Value {
             "collide",
             "friction",
             "morph_weights",
+            "lods",
             "ik",
             "animator",
             "animation",
@@ -770,12 +771,22 @@ pub fn json_schema() -> Value {
             "type": "array",
             "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
         });
+        d["properties"]["lods"] = json!({
+            "type": "array",
+            "items": { "$ref": "#/$defs/modelLod" }
+        });
         d["properties"]["ik"] = json!({
             "type": "array",
             "items": { "$ref": "#/$defs/modelIk" }
         });
         d["properties"]["animator"] = json!({ "$ref": "#/$defs/modelAnimator" });
         d["properties"]["animation"] = json!({ "$ref": "#/$defs/modelAnimation" });
+        d
+    });
+    defs.insert("modelLod".into(), {
+        let mut d = def(&["path", "min_distance"]);
+        d["properties"]["min_distance"] = json!({ "type": "number", "exclusiveMinimum": 0.0 });
+        d["required"] = json!(["path", "min_distance"]);
         d
     });
     defs.insert("modelIk".into(), {
@@ -1495,6 +1506,7 @@ mod tests {
             ("FluidDoc", "fluid"),
             ("ModelDoc", "model"),
             ("ModelIkDoc", "modelIk"),
+            ("ModelLodDoc", "modelLod"),
             ("ModelAnimatorParameterDoc", "modelAnimatorParameter"),
             ("AnimatorConditionDoc", "modelAnimatorCondition"),
             ("ModelAnimationDoc", "modelAnimation"),

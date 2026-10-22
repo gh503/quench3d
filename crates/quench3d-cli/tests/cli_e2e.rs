@@ -6470,6 +6470,37 @@ fn scene_morph_animation_changes_cli_render() {
     );
 }
 
+/// 手工 LOD：场景格式 → runner 真的装载替换层并注册 LOD 组；
+/// 距离切换本身由引擎侧 `lods_switch_visibility_by_camera_distance_with_hysteresis` 钉住。
+#[test]
+fn scene_model_lods_load_replacements_without_breaking_simulate() {
+    let dir = temp_dir("model_lods");
+    std::fs::write(dir.join("base.glb"), morph_glb_bytes()).expect("写基础模型");
+    std::fs::write(dir.join("mid.glb"), morph_glb_bytes()).expect("写中模");
+    std::fs::write(dir.join("low.glb"), morph_glb_bytes()).expect("写粗模");
+    let scene = write_scene(
+        &dir,
+        "lods.json",
+        serde_json::json!({
+            "format": "quench3d.scene", "version": 2,
+            "models": [{
+                "path": "base.glb",
+                "lods": [
+                    { "path": "mid.glb", "min_distance": 10.0 },
+                    { "path": "low.glb", "min_distance": 25.0 }
+                ]
+            }],
+            "camera": { "position": [0.5, 0.75, 4.0], "look_at": [0.5, 0.75, 0.0] },
+            "simulate": { "steps": 0 },
+            "render": { "output": "ignored.png", "width": 160, "height": 120, "msaa": 1 }
+        }),
+    );
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    assert_eq!(d["ok"], true, "LOD 场景应当成功装载：{d}");
+}
+
 /// 状态机：报告字段 + 立即过渡（after=0, fade=0）必须改变首帧画面。
 #[test]
 fn scene_animator_is_reported_and_changes_cli_render() {

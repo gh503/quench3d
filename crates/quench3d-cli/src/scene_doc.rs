@@ -1686,6 +1686,19 @@ pub struct ModelIkDoc {
     pub pole: Option<[f32; 3]>,
 }
 
+/// 一个手工 LOD 替换层级。
+///
+/// 基础模型从距离 0 显示到 `lods[0].min_distance`；第 j 个替换层显示到
+/// `lods[j+1].min_distance`，最后一个显示到无穷远。所有层级共用模型的位置/朝向/缩放。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLodDoc {
+    /// 粗模路径（`.gltf` / `.glb` / `.obj`）。
+    pub path: PathBuf,
+    /// 这一层开始接管的相机距离（米，必须 > 0 且严格递增）。
+    pub min_distance: f32,
+}
+
 /// 一个外部模型文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1716,6 +1729,10 @@ pub struct ModelDoc {
     /// 可选的时间驱动状态机；与 `animation` 互斥。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animator: Option<ModelAnimatorDoc>,
+    /// 手工 LOD：基础模型按距离换成更粗的模型。只支持**静态模型**（不能同时写
+    /// `animation` / `animator` / `ik`）；每层共用位置/朝向/缩放。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lods: Option<Vec<ModelLodDoc>>,
     /// 两骨 IK 链（需要模型同时有 `animation` 或 `animator` 才会求解）。
     ///
     /// 每条链按 glTF **节点名字**引用 `root → mid → tip`，目标/极向量都在模型
@@ -5145,6 +5162,79 @@ impl SceneDoc {
                     }
                 }
             }
+            if let Some(lods) = &m.lods {
+                if lods.is_empty() {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        format!("{p}.lods"),
+                        "LOD 数组是空的",
+                    ));
+                }
+                if m.animation.is_some() || m.animator.is_some() || m.ik.is_some() {
+                    out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{p}.lods"),
+                            "手工 LOD 目前只支持静态模型，不能同时写 animation / animator / ik",
+                        )
+                        .with_hint("要么删掉 lods 保留动画，要么把动画模型拆成单独的 models 条目"),
+                    );
+                }
+                let mut prev = 0.0f32;
+                for (j, lod) in lods.iter().enumerate() {
+                    let lp = format!("{p}.lods[{j}]");
+                    if lod.path.as_os_str().is_empty() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{lp}.path"),
+                            "LOD 模型路径不能为空",
+                        ));
+                    } else {
+                        let ext = lod
+                            .path
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                            .unwrap_or_default();
+                        if !matches!(ext.as_str(), "gltf" | "glb" | "obj") {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{lp}.path"),
+                                format!("不支持的模型格式 \".{ext}\""),
+                            ));
+                        }
+                        if let Some(found) = self.resolve_model(&lod.path) {
+                            if found != lod.path {
+                                out.push(Diagnostic::warn_code(
+                                    ErrorCode::SuspiciousValue,
+                                    format!("{lp}.path"),
+                                    format!("文件不在写的路径上，实际会用 {}", found.display()),
+                                ));
+                            }
+                        } else {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::AssetNotFound,
+                                format!("{lp}.path"),
+                                format!("找不到 LOD 模型文件 \"{}\"", lod.path.display()),
+                            ));
+                        }
+                    }
+                    if !lod.min_distance.is_finite() || lod.min_distance <= 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{lp}.min_distance"),
+                            "LOD 切换距离必须是正的有限值",
+                        ));
+                    } else if lod.min_distance <= prev {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{lp}.min_distance"),
+                            format!("LOD 距离必须严格递增（上一级 {prev}）"),
+                        ));
+                    } else {
+                        prev = lod.min_distance;
+                    }
+                }
+            }
             if let Some(s) = m.scale {
                 if !s.is_finite() || s <= 0.0 {
                     out.push(Diagnostic::error_code(
@@ -8028,6 +8118,66 @@ mod tests {
             .validate()
             .iter()
             .any(|d| d.severity == Severity::Error && d.path.ends_with("parameters[1].name")));
+    }
+
+    #[test]
+    fn model_lods_validate_distances_and_static_only() {
+        let dir = std::env::temp_dir().join(format!("quench3d_lods_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["base.glb", "mid.glb", "low.glb"] {
+            std::fs::write(dir.join(name), b"not-really-a-glb").unwrap();
+        }
+        let base = dir.join("base.glb").to_string_lossy().to_string();
+        let mid = dir.join("mid.glb").to_string_lossy().to_string();
+        let low = dir.join("low.glb").to_string_lossy().to_string();
+        let doc = SceneDoc::from_value(json!({
+            "models": [{
+                "path": base,
+                "lods": [
+                    { "path": mid, "min_distance": 10.0 },
+                    { "path": low, "min_distance": 25.0 }
+                ]
+            }]
+        }))
+        .unwrap();
+        let errors: Vec<_> = doc
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(doc.models[0].lods.as_ref().unwrap()[1].min_distance, 25.0);
+
+        // 距离必须严格递增。
+        let bad = SceneDoc::from_value(json!({
+            "models": [{
+                "path": dir.join("base.glb").to_string_lossy(),
+                "lods": [
+                    { "path": dir.join("mid.glb").to_string_lossy(), "min_distance": 25.0 },
+                    { "path": dir.join("low.glb").to_string_lossy(), "min_distance": 10.0 }
+                ]
+            }]
+        }))
+        .unwrap();
+        assert!(bad
+            .validate()
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.path == "models[0].lods[1].min_distance"));
+
+        // 动画模型不能同时用 LOD（运行时不支持给不同模型采样同一套骨骼）。
+        let animated = SceneDoc::from_value(json!({
+            "models": [{
+                "path": dir.join("base.glb").to_string_lossy(),
+                "animation": { "name": "idle" },
+                "lods": [{ "path": dir.join("mid.glb").to_string_lossy(), "min_distance": 10.0 }]
+            }]
+        }))
+        .unwrap();
+        assert!(animated
+            .validate()
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.path == "models[0].lods"));
     }
 
     #[test]

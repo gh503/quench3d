@@ -2198,6 +2198,20 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             )
         })
         .collect();
+    let lod_rows: Vec<Option<String>> = base
+        .models
+        .iter()
+        .map(|m| {
+            m.lods.as_ref().map(|lods| {
+                let distances = lods
+                    .iter()
+                    .map(|l| format!("{:.1}m", l.min_distance))
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                format!("LOD {} 级（{} 起切换）", lods.len() + 1, distances)
+            })
+        })
+        .collect();
     let mut changed = false;
     egui::CollapsingHeader::new(format!("模型（{} 个引用）", rows.len()))
         .default_open(false)
@@ -2210,6 +2224,13 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         RichText::new(format!("视口里 {count} 个物体（整组一起动）"))
                             .small()
                             .weak(),
+                    );
+                }
+                if let Some(lod) = lod_rows.get(index).and_then(|l| l.as_ref()) {
+                    ui.label(
+                        RichText::new(lod)
+                            .small()
+                            .color(egui::Color32::from_rgb(150, 210, 240)),
                     );
                 }
                 ui.horizontal(|ui| {

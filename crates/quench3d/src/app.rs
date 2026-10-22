@@ -554,6 +554,10 @@ impl Engine {
                 .advance_animations_with_renderer(dt, &mut self.renderer, &self.gpu);
         }
 
+        // 手工 LOD：相机移动（即使暂停）也要切层级；相机位置在切之前取。
+        let camera_position = self.camera().position;
+        self.scene.update_lods(camera_position);
+
         self.renderer.begin_frame();
         self.scene.submit(&mut self.renderer);
         self.draw_debug();
