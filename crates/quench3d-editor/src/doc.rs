@@ -201,6 +201,10 @@ pub struct Doc {
     pub file_path: String,
     /// 桌面端打开的文件选择器（Web 用浏览器原生文件输入，不用它）。
     pub picker: Option<crate::picker::FilePicker>,
+    /// 选择器选完后要执行的动作。
+    pub picker_action: crate::picker::PickAction,
+    /// 桌面端「导出 glTF/GLB」在文件选择器里指定的一次性目标路径。
+    pub export_path: Option<std::path::PathBuf>,
     /// 最近一条给用户看的状态提示。
     pub status: String,
     /// 是否显示帮助窗口。
@@ -815,6 +819,8 @@ impl Doc {
             extra_selected: Vec::new(),
             file_path: "scene.json".to_string(),
             picker: None,
+            picker_action: crate::picker::PickAction::OpenScene,
+            export_path: None,
             status: "就绪".to_string(),
             show_help: false,
             layout: crate::layout::Layout::default(),

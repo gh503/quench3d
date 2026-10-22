@@ -2661,8 +2661,8 @@ editor_glb_export_has_valid_chunks`（magic/version/总长度、JSON chunk、无
 764 → 765。
 
 **边界**：第 121 轮起桌面「打开」会弹内置文件选择器、「保存」右键可「另存为…」；
-导出 glTF/GLB 仍按当前场景路径换扩展名（不弹导出路径选择器）；Web 下载依赖浏览器
-Blob；GLB 不含骨骼/morph 动画。
+第 122 轮起桌面「导出 glTF/GLB」也会先选导出路径（默认场景同名换扩展名）；Web 仍
+直接下载；GLB 不含骨骼/morph 动画。
 
 ### 23.18 面板布局持久化（第 113 轮）
 
@@ -2779,7 +2779,7 @@ duration=1.0）——数据改了画面会跟着红。
 轮廓/深度/3D 骨骼的路径。
 
 **验证**：`tools/probe_web_camera.sh` 用假摄像头，注入 33 点后断言
-`camera_pose=true`、截图里洋红像素 3934（假摄像头是绿色，洋红只可能来自骨架），
+`camera_pose=true`、截图里洋红像素 3921（假摄像头是绿色，洋红只可能来自骨架），
 再调 `quench3dCameraPoseClear()` 断言回 `false`。`pose_screen_pos_maps_and_clamps`
 （原生单测）钉住归一化坐标 → 预览图矩形、越界夹取与 NaN 回中心。
 
@@ -2801,7 +2801,22 @@ duration=1.0）——数据改了画面会跟着红。
 `Requests::load/save` 同步变化。`ui_smoke` 仍全绿（工具栏没有因为新按钮挤掉「导出 GLB」）。
 
 **边界**：文件列表是同步 `read_dir`，超大目录会卡一帧；没有书签/最近目录；
-导出路径仍不弹选择器；`picker` 是会话状态，不进撤销/场景文件。
+`picker` 是会话状态，不进撤销/场景文件。
+
+### 23.26 导出路径选择器（第 122 轮）
+
+**做了什么**：桌面「导出 glTF」「导出 GLB」现在先弹同一个文件选择器：
+
+* 默认文件名是当前场景同名换扩展名（`scene.json` → `scene.gltf` / `scene.glb`）；
+* 只列 `.gltf` / `.glb`；缺扩展名自动补；已存在要二次确认；
+* 选择结果写进 `Doc::export_path`，`apply_pick` 只置 `export_gltf/export_glb` 请求，
+  **不改** `doc.file_path`（避免下一次保存把场景写成 glTF）；
+* `export_gltf`/`export_glb` 优先消费 `export_path.take()`，没有时仍回退到“场景同名
+  换扩展名”。Web 仍走浏览器下载，不经过选择器。
+
+**验证**：`picker_result_updates_path_and_request` 追加导出分支：选 `/tmp/c.gltf`
+后 `doc.export_path` 正确、`req.export_gltf=true`，而 `doc.file_path` 保持
+`/tmp/b.json` 不变。原生+wasm clippy 均过。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

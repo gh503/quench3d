@@ -139,10 +139,23 @@ fn combine_rule_combo(ui: &mut Ui, label: &str, value: &mut Option<CombineRule>)
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_pick(doc: &mut Doc, req: &mut Requests, picked: crate::picker::PickResult) {
     doc.picker = None;
-    doc.file_path = picked.path.display().to_string();
-    match picked.mode {
-        crate::picker::PickMode::Open => req.load = true,
-        crate::picker::PickMode::Save => req.save = true,
+    match (picked.mode, doc.picker_action) {
+        (crate::picker::PickMode::Open, _) => {
+            doc.file_path = picked.path.display().to_string();
+            req.load = true;
+        }
+        (crate::picker::PickMode::Save, crate::picker::PickAction::ExportGltf) => {
+            doc.export_path = Some(picked.path);
+            req.export_gltf = true;
+        }
+        (crate::picker::PickMode::Save, crate::picker::PickAction::ExportGlb) => {
+            doc.export_path = Some(picked.path);
+            req.export_glb = true;
+        }
+        (crate::picker::PickMode::Save, _) => {
+            doc.file_path = picked.path.display().to_string();
+            req.save = true;
+        }
     }
 }
 
@@ -441,6 +454,7 @@ fn top_bar(
             if ui.button("打开").on_hover_text("选择并读入 scene.json").clicked() {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
+                    doc.picker_action = crate::picker::PickAction::OpenScene;
                     doc.picker = Some(crate::picker::FilePicker::for_open(
                         std::path::Path::new(&doc.file_path),
                         &["json"],
@@ -468,6 +482,7 @@ fn top_bar(
                         .and_then(|n| n.to_str())
                         .unwrap_or("scene.json")
                         .to_string();
+                    doc.picker_action = crate::picker::PickAction::SaveScene;
                     doc.picker = Some(crate::picker::FilePicker::for_save(
                         std::path::Path::new(&doc.file_path),
                         &default,
@@ -482,14 +497,40 @@ fn top_bar(
                 .on_hover_text("把当前场景的图元导出成单文件 glTF 2.0（base64 几何/贴图）")
                 .clicked()
             {
-                req.export_gltf = true;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    doc.picker_action = crate::picker::PickAction::ExportGltf;
+                    doc.picker = Some(crate::picker::FilePicker::for_save(
+                        &std::path::Path::new(&doc.file_path).with_extension("gltf"),
+                        "scene.gltf",
+                        &["gltf"],
+                        "导出 glTF",
+                    ));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    req.export_gltf = true;
+                }
             }
             if ui
                 .button("导出 GLB")
                 .on_hover_text("把当前场景的图元导出成二进制 GLB（JSON + BIN chunk）")
                 .clicked()
             {
-                req.export_glb = true;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    doc.picker_action = crate::picker::PickAction::ExportGlb;
+                    doc.picker = Some(crate::picker::FilePicker::for_save(
+                        &std::path::Path::new(&doc.file_path).with_extension("glb"),
+                        "scene.glb",
+                        &["glb"],
+                        "导出 GLB",
+                    ));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    req.export_glb = true;
+                }
             }
             if ui
                 .button("截图")
@@ -3123,6 +3164,23 @@ mod timeline_tests {
         );
         assert_eq!(doc.file_path, "/tmp/b.json");
         assert!(req.save && !req.load);
+
+        doc.picker_action = crate::picker::PickAction::ExportGltf;
+        let mut req = Requests::default();
+        apply_pick(
+            &mut doc,
+            &mut req,
+            crate::picker::PickResult {
+                mode: crate::picker::PickMode::Save,
+                path: std::path::PathBuf::from("/tmp/c.gltf"),
+            },
+        );
+        assert_eq!(doc.file_path, "/tmp/b.json", "导出不能改场景路径");
+        assert_eq!(
+            doc.export_path.as_deref(),
+            Some(std::path::Path::new("/tmp/c.gltf"))
+        );
+        assert!(req.export_gltf && !req.export_glb && !req.save && !req.load);
     }
 
     #[test]

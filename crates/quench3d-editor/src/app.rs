@@ -576,7 +576,7 @@ impl Inner {
         if !saved.skipped.is_empty() {
             note = format!("（跳过：{}）", saved.skipped.join("、"));
         }
-        let path = std::path::Path::new(&self.doc.file_path).with_extension("gltf");
+        let path = export_path_for(&self.doc.file_path, &mut self.doc.export_path, "gltf");
         #[cfg(not(target_arch = "wasm32"))]
         {
             match std::fs::write(&path, saved.json.as_bytes()) {
@@ -627,7 +627,7 @@ impl Inner {
         if !saved.skipped.is_empty() {
             note = format!("（跳过：{}）", saved.skipped.join("、"));
         }
-        let path = std::path::Path::new(&self.doc.file_path).with_extension("glb");
+        let path = export_path_for(&self.doc.file_path, &mut self.doc.export_path, "glb");
         #[cfg(not(target_arch = "wasm32"))]
         {
             match std::fs::write(&path, &saved.bytes) {
@@ -901,6 +901,16 @@ fn publish_last_key(event: &winit::event::KeyEvent) {
         event.physical_key, event.logical_key, event.state, event.repeat
     );
     let _ = body.set_attribute("data-quench3d-last-key", &state);
+}
+
+/// 导出目标：优先用选择器给的一次性路径；否则场景同名换扩展名。
+fn export_path_for(
+    file_path: &str,
+    once: &mut Option<std::path::PathBuf>,
+    extension: &str,
+) -> std::path::PathBuf {
+    once.take()
+        .unwrap_or_else(|| std::path::Path::new(file_path).with_extension(extension))
 }
 
 impl EditorApp {
@@ -1459,5 +1469,29 @@ mod tests {
             &crate::layout::Layout::default(),
         );
         assert_eq!(none.position, None, "没有记录位置时不要硬塞 (0,0)");
+    }
+}
+
+#[cfg(test)]
+mod export_path_tests {
+    use super::*;
+
+    #[test]
+    fn export_path_uses_picker_once_then_falls_back() {
+        let mut once = None;
+        assert_eq!(
+            export_path_for("scene.json", &mut once, "glb"),
+            std::path::PathBuf::from("scene.glb")
+        );
+        let mut once = Some(std::path::PathBuf::from("/tmp/custom.glb"));
+        assert_eq!(
+            export_path_for("scene.json", &mut once, "glb"),
+            std::path::PathBuf::from("/tmp/custom.glb")
+        );
+        assert!(once.is_none(), "一次性路径必须被消费，不能影响下一次导出");
+        assert_eq!(
+            export_path_for("scene.json", &mut once, "gltf"),
+            std::path::PathBuf::from("scene.gltf")
+        );
     }
 }

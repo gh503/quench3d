@@ -261,7 +261,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12812425 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12812769 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -709,6 +709,7 @@ window.quench3dCameraPose(JSON.stringify({
 window.quench3dCameraPoseClear();
 ```
 
+桌面「打开」与「导出 glTF/GLB」都会先弹内置文件选择器（导出可改路径/文件名）。
 读端会把 33 点连接画成洋红骨架。**浏览器里不内置推理**（没有 MediaPipe 模型与
 文件协议），骨架/轮廓/深度仍走桌面 Python 管线。需要 https 或 `localhost`。
 `tools/probe_web_camera.sh` 用 Chrome 假摄像头 + `?camera=1` 做端到端截图探针，
@@ -1333,7 +1334,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 779 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 780 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

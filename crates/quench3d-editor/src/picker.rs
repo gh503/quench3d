@@ -17,6 +17,20 @@ pub enum PickMode {
     Save,
 }
 
+/// 选择器这次是替哪个动作选路径。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PickAction {
+    /// 打开场景。
+    #[default]
+    OpenScene,
+    /// 场景另存为。
+    SaveScene,
+    /// 导出 glTF。
+    ExportGltf,
+    /// 导出 GLB。
+    ExportGlb,
+}
+
 /// 选择结果。
 #[derive(Clone, Debug)]
 pub struct PickResult {
