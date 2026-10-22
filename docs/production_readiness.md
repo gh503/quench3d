@@ -222,7 +222,7 @@
 |---|---|---|---|---|---|
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
-| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光；base64 内嵌；凸包、`models[]`、贴图跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF（CLI + 编辑器）；贴图嵌入/节点层级/动画未导出 | ✅（OBJ/glTF 几何） |
+| 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf` 写**单文件 glTF 2.0**；编辑器顶部「导出 glTF」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF（CLI + 编辑器）；贴图嵌入/节点层级/动画未导出 | ✅（OBJ/glTF 几何） |
 | 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；**不调用 ffmpeg**，只给建议命令（`runner.rs:2326`） | 直接产出 MP4/H.265 | **1 人月**（纯 Rust 编码器或 ffmpeg 调用） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
@@ -413,7 +413,7 @@
 | 校验口径 | 场景校验器要求被引用的贴图**文件存在**（`texture.rs` 校验路径），所以"应用"失败要给出可读原因，而不是静默保留旧贴图 |
 
 **其它两条已核过的落点**：glTF/OBJ 导入在 `assets.rs:261/465/500`（OBJ 不带材质）；
-模型**导出**已补 OBJ（图元 → OBJ/MTL）与单文件 glTF 2.0（第 107 轮，几何/材质标量/内嵌 base64），都能被本引擎重新导入；仍缺贴图嵌入、节点层级/动画导出。
+模型**导出**已补 OBJ（图元 → OBJ/MTL）与单文件 glTF 2.0（第 107 轮，几何/材质标量/内嵌 base64；第 109 轮补 PNG/JPEG 贴图内嵌），都能被本引擎重新导入；仍缺节点层级/动画导出。
 版本检查（`scene_doc.rs` 的 `validate`）现在是**版本不符直接报错**，并且明确**不做**迁移器：
 这个格式还没有外部使用者，与其维护一条"读旧版"的路径，不如让旧文件拿到一条清楚的诊断。
 再加字段时请同步改 `VERSION`（当前 2）。
@@ -2569,15 +2569,15 @@ model.gltf` 按扩展名走 glTF 分支；复用 OBJ 导出的形状→网格与
 部件的顶点/法线/UV/索引烘进世界空间，写成一个 `data:application/octet-stream;base64,...`
 buffer（所以 `.gltf` 单文件、不额外落 `.bin`）。材质写 `pbrMetallicRoughness`
 （baseColor/metallic/roughness）、`emissiveFactor`、alpha<1 时 `alphaMode=BLEND`。
-贴图、`models[]` 外部资产、凸包按既有边界跳过并写进 `skipped`。
+`models[]` 外部资产、凸包按既有边界跳过并写进 `skipped`。
 
 **验证**：`cargo test -p quench3d-cli --lib gltf_export`（合法 JSON、2 节点/2 mesh、
 base64 buffer、父位移烘进子几何的包围盒、凸包跳过）；`cargo test -p quench3d-cli --test
 cli_e2e export_writes_single_file_gltf`（CLI 真的落盘 → `info model.gltf` 读回三角形数
 与包围盒一致）。
 
-**边界**：节点是扁平的（父子关系烘成世界坐标），不导出动画/骨骼/贴图/morph；四边形
-等非三角图元会三角化；这是"能在别的工具里看到同样几何/颜色"的导出，不是无损编辑往返。
+**边界**：节点是扁平的（父子关系烘成世界坐标），不导出动画/骨骼/morph；四边形
+等非三角图元会三角化；这是"能在别的工具里看到同样几何/颜色/贴图"的导出，不是无损编辑往返。
 
 ### 23.13 编辑器导出 glTF（第 108 轮）
 
@@ -2591,8 +2591,30 @@ cli_e2e export_writes_single_file_gltf`（CLI 真的落盘 → `info model.gltf`
 editor_gltf_export_is_valid_and_contains_the_scene`（合法 glTF、`nodes.len()==objects`、
 三角形 >0）；CLI 导出与 `info` 往返见 §23.12。
 
-**边界**：按钮不弹文件对话框（桌面用当前场景路径换扩展名，Web 下载）；贴图/外部模型/
+**边界**：按钮不弹文件对话框（桌面用当前场景路径换扩展名，Web 下载）；外部模型/
 凸包/层级/动画仍不导出；导出失败只改状态栏，不改场景、不进历史。
+
+### 23.14 glTF 贴图内嵌（第 109 轮）
+
+**做了什么**：`export_gltf_with_base(doc, base_dir)` 按场景文件目录解析
+`base_color_texture` / `normal_texture` / `metallic_roughness_texture` /
+`emissive_texture`，把 PNG/JPEG 原字节追加进同一个 buffer，登记 `images` +
+`textures` + 一个 REPEAT/LINEAR 采样器；材质写 `baseColorTexture` /
+`metallicRoughnessTexture` / `normalTexture`（含 `normal_scale`）/ `emissiveTexture`，
+并把 `alpha_cutoff` 映射成 `alphaMode=MASK` + `alphaCutoff`、`double_sided` 映射成
+`doubleSided`、`unlit` 映射成 `KHR_materials_unlit`。同一路径按内容去重；缺文件/
+非 PNG/JPEG 只进 `skipped`，几何照常导出。CLI 用场景所在目录，编辑器用
+`doc.file_path` 的目录；Web 无文件系统，贴图报告未嵌入。
+
+**验证**：`cargo test -p quench3d-cli --lib gltf_export` 新增
+`embeds_texture_bytes_and_maps_material_fields` / `missing_texture_is_reported_without_blocking_geometry`；
+CLI e2e `export_gltf_embeds_texture_from_scene_directory` 真的写 PNG 到场景目录、跑
+`quench3d export`，断言 `data.textures==1`、`images[0].mimeType=="image/png"`、
+材质挂到 `baseColorTexture`、`alphaMode=="MASK"`、图片字节进了 base64 buffer。
+总测试 758 → 761。
+
+**边界**：只支持 PNG/JPEG；不写 `uv_scale` 的平铺（core glTF 无此字段，会进 `skipped`）；
+Web 导出不带贴图；贴图不重编码、不压缩、不生成 mipmap。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

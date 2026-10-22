@@ -458,12 +458,21 @@ fn dispatch(args: &Args) -> i32 {
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("gltf"));
             if is_gltf {
-                let exported = match quench3d_cli::gltf_export::export_gltf(&doc) {
-                    Ok(exported) => exported,
-                    Err(e) => {
-                        return fail(args, "export", ErrorInfo::new("export_failed", e), started)
-                    }
-                };
+                let base = std::path::Path::new(scene_path)
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let exported =
+                    match quench3d_cli::gltf_export::export_gltf_with_base(&doc, Some(base)) {
+                        Ok(exported) => exported,
+                        Err(e) => {
+                            return fail(
+                                args,
+                                "export",
+                                ErrorInfo::new("export_failed", e),
+                                started,
+                            )
+                        }
+                    };
                 if let Err(e) = std::fs::write(&out_path, &exported.json) {
                     return fail(
                         args,
@@ -479,15 +488,17 @@ fn dispatch(args: &Args) -> i32 {
                     "objects": exported.objects,
                     "vertices": exported.vertices,
                     "triangles": exported.triangles,
+                    "textures": exported.textures,
                     "skipped": exported.skipped,
                 });
                 return finish(args, "export", Ok(value), started, |v| {
                     println!(
-                        "已导出 {}（glTF 2.0：{} 个物体 / {} 顶点 / {} 三角形）",
+                        "已导出 {}（glTF 2.0：{} 个物体 / {} 顶点 / {} 三角形 / {} 张贴图）",
                         v["out"].as_str().unwrap_or(""),
                         v["objects"].as_u64().unwrap_or(0),
                         v["vertices"].as_u64().unwrap_or(0),
                         v["triangles"].as_u64().unwrap_or(0),
+                        v["textures"].as_u64().unwrap_or(0),
                     );
                     if let Some(skipped) = v["skipped"].as_array() {
                         for s in skipped {

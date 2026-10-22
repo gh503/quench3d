@@ -7425,6 +7425,56 @@ fn export_writes_single_file_gltf_that_info_can_read() {
     assert!((size[0].as_f64().unwrap() - 4.5).abs() < 1e-5, "{size:?}");
 }
 
+/// glTF 导出要把相对场景目录的贴图真的内嵌进去，而不是只写个路径。
+#[test]
+fn export_gltf_embeds_texture_from_scene_directory() {
+    let dir = temp_dir("export_gltf_tex");
+    let png = dir.join("checker.png");
+    // 1x1 PNG；这里只验证按扩展名/魔数嵌入，不验证像素内容。
+    let bytes: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5,
+        0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc,
+        0xff, 0x1f, 0x00, 0x02, 0xeb, 0x01, 0xf5, 0x8f, 0x59, 0x97, 0x5b, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(&png, bytes).expect("写临时贴图");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "materials":{"tex":{"color":[1,1,1],"base_color_texture":"checker.png","alpha_cutoff":0.5}},
+          "objects":[{"name":"box","shape":{"type":"box","size":[1,1,1]},"material":"tex"}]
+        }"#,
+    )
+    .unwrap();
+    let gltf = dir.join("textured.gltf");
+    let r = run(&[
+        "export",
+        scene.to_str().unwrap(),
+        gltf.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stderr={}\nstdout={}", r.stderr, r.stdout);
+    let env = r.json();
+    assert_eq!(env["data"]["textures"], 1, "{}", env);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&gltf).unwrap()).unwrap();
+    assert_eq!(json["images"][0]["mimeType"], "image/png");
+    assert_eq!(json["textures"][0]["source"], 0);
+    assert_eq!(
+        json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"],
+        0
+    );
+    assert_eq!(json["materials"][0]["alphaMode"], "MASK");
+    // 图片字节和顶点共用一个 data URI buffer。
+    let uri = json["buffers"][0]["uri"].as_str().unwrap();
+    assert!(
+        uri.len() > bytes.len() * 4 / 3,
+        "图片没有被 base64 进 buffer"
+    );
+}
+
 /// 公告板粒子：同一相机/光照下，有粒子的画面中心必须比没粒子更红。
 #[test]
 fn particle_billboards_change_pixels() {

@@ -41,6 +41,14 @@
 
 ### 新增
 
+- **glTF 贴图内嵌（第 109 轮）**：`quench3d export scene.json model.gltf` 现在按场景目录
+  解析 `base_color_texture` / `normal_texture` / `metallic_roughness_texture` /
+  `emissive_texture`，把 PNG/JPEG 原字节内嵌进 `.gltf` 的同一个 base64 buffer，并写
+  `images` / `textures` / 采样器与材质的贴图槽；`alpha_cutoff`→`MASK`、
+  `double_sided`/`normal_scale`/`unlit` 也一并映射。缺文件或非 PNG/JPEG 只进 `skipped`，
+  几何照常导出。编辑器导出用当前场景目录；Web 无文件系统，贴图报告未嵌入。
+  回归：2 个 lib 单测 + 1 个 CLI e2e（总测试 758 → 761）。
+
 - **编辑器导出 glTF（第 108 轮）**：顶部「导出 glTF」按钮；`scene_to_gltf` 复用
   `scene_to_json` 再交给 CLI 导出器，桌面写同名 `.gltf`、Web 下载，状态栏报物体/三角形/
   跳过项。回归：原生编辑器导出单测（总测试 757 → 758）。

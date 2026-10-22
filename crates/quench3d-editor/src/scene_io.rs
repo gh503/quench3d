@@ -84,7 +84,12 @@ pub fn scene_to_gltf(engine: &Engine, doc: &Doc) -> Result<SavedGltf, String> {
     let saved = scene_to_json(engine, doc)?;
     let scene = SceneDoc::from_json(&saved.json)
         .map_err(|e| format!("导出的场景 JSON 不能重新解析：{e:?}"))?;
-    let out = quench3d_cli::gltf_export::export_gltf(&scene)?;
+    // 贴图相对场景文件解析；没保存过的新场景以当前目录为基准。
+    let base = std::path::Path::new(&doc.file_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let out = quench3d_cli::gltf_export::export_gltf_with_base(&scene, Some(base))?;
     let mut skipped = saved.skipped;
     skipped.extend(out.skipped);
     Ok(SavedGltf {

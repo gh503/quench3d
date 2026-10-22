@@ -261,7 +261,7 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12632825 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12653990 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
@@ -758,7 +758,7 @@ quench3d schema --json                   # 能力清单：命令、参数、场�
 | `doctor` | 环境自检 | 否 |
 | `info <模型>` | glTF/GLB/OBJ：网格、材质、贴图、顶点、三角形、包围盒 | 否 |
 | `validate <场景>` | 校验场景，返回全部诊断（带 JSON 路径） | 否 |
-| `export <场景> [模型.obj\|模型.gltf]` | 图元物体 → OBJ + MTL；扩展名 `.gltf` 时导出**单文件 glTF 2.0**（base64 内嵌几何，本引擎可重新导入） | 否 |
+| `export <场景> [模型.obj\|模型.gltf]` | 图元物体 → OBJ + MTL；扩展名 `.gltf` 时导出**单文件 glTF 2.0**（base64 内嵌几何/贴图，本引擎可重新导入） | 否 |
 | `simulate <场景>` | 只跑物理，报告每个刚体的位置 / 速度 / 位移 / 休眠 / 接触，可按 `--trace` 采集轨迹 | 否 |
 | `query <场景>` | 几何查询：`--ray` 射线（`--all` 给沿路全部命中）/ `--overlap` 任意形状重叠，可配层掩码与传感器开关 | 否 |
 | `render <场景>` | 无窗口渲染成 PNG（可先步进物理） | 是 |
@@ -1312,7 +1312,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 758 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 761 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）
