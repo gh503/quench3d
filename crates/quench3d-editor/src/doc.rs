@@ -199,6 +199,8 @@ pub struct Doc {
     pub extra_selected: Vec<usize>,
     /// 场景文件路径（桌面用真实路径；浏览器里当下载文件名）。
     pub file_path: String,
+    /// 桌面端打开的文件选择器（Web 用浏览器原生文件输入，不用它）。
+    pub picker: Option<crate::picker::FilePicker>,
     /// 最近一条给用户看的状态提示。
     pub status: String,
     /// 是否显示帮助窗口。
@@ -812,6 +814,7 @@ impl Doc {
             selected: None,
             extra_selected: Vec::new(),
             file_path: "scene.json".to_string(),
+            picker: None,
             status: "就绪".to_string(),
             show_help: false,
             layout: crate::layout::Layout::default(),

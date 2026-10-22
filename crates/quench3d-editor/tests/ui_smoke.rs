@@ -248,8 +248,6 @@ fn outliner_drop_request_reparents_a_static_object() {
             &mut camera,
         );
     });
-    // 测试没有真正的 egui 渲染器；不清理纹理增量会在 Drop 时 panic。
-    output.textures_delta.clear();
     assert_eq!(
         engine.scene.objects[child].parent,
         Some(parent),
@@ -259,6 +257,7 @@ fn outliner_drop_request_reparents_a_static_object() {
         engine.scene.objects[child].transform.position.x > 0.0,
         "改父后应保持世界位姿，不能把子物体吸到父原点"
     );
+    output.textures_delta.clear();
 }
 
 #[test]
@@ -424,12 +423,9 @@ fn all_editor_panels_draw_in_one_frame() {
         shapes_contain_text(&output.shapes, "播完触发"),
         "状态机过渡的结束触发控件没有出现在面板内容里"
     );
-    assert!(
-        output.textures_delta.set.len() + output.textures_delta.free.len() > 0,
-        "字体/图标纹理没有更新，egui 可能根本没跑"
-    );
     // `FullOutput` 的纹理增量必须显式消费，否则 epaint 在析构时会 panic；
-    // 真实渲染器会把它们上传/释放，测试里只需要认账。
+    // 真实渲染器会把它们上传/释放，测试里只需要认账。字体纹理是否在本帧新建
+    // 受测试执行顺序影响（egui 的字体纹理缓存是进程级的），所以不拿它当断言。
     output.textures_delta.clear();
 
     // 正向验证多选的 UI 反馈：第二帧把两个物体标成选中，场景树标题必须出现计数。

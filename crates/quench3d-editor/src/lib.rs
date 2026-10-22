@@ -29,6 +29,7 @@ pub mod doc;
 pub mod gizmo;
 pub mod history;
 pub mod layout;
+pub mod picker;
 pub mod scene_io;
 pub mod ui;
 

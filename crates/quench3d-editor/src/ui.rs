@@ -92,6 +92,18 @@ pub fn panels(
     let ctx = ui.ctx().clone();
     help_window(&ctx, doc);
     camera.window(&ctx);
+    // 桌面文件选择器：选完把路径交给 app，复用现有的 load/save 请求。
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let outcome = doc.picker.as_mut().map(|picker| picker.show(&ctx));
+        if let Some(outcome) = outcome {
+            match outcome {
+                crate::picker::Outcome::Picked(picked) => apply_pick(doc, &mut req, picked),
+                crate::picker::Outcome::Cancelled => doc.picker = None,
+                crate::picker::Outcome::Pending => {}
+            }
+        }
+    }
     req
 }
 
@@ -120,6 +132,18 @@ fn combine_rule_combo(ui: &mut Ui, label: &str, value: &mut Option<CombineRule>)
             }
         });
     changed
+}
+
+/// 把选择器结果落到文档路径，并转成原有的 load/save 请求。抽出来是为了能单测
+/// 「选完文件后路径和请求真的同步变化」，而不是只测窗口画没画出来。
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_pick(doc: &mut Doc, req: &mut Requests, picked: crate::picker::PickResult) {
+    doc.picker = None;
+    doc.file_path = picked.path.display().to_string();
+    match picked.mode {
+        crate::picker::PickMode::Open => req.load = true,
+        crate::picker::PickMode::Save => req.save = true,
+    }
 }
 
 /// 顶部工具栏。
@@ -414,12 +438,45 @@ fn top_bar(
                 }
             }
             camera.toolbar(ui);
-            if ui.button("打开").on_hover_text("读入 scene.json").clicked() {
-                req.load = true;
+            if ui.button("打开").on_hover_text("选择并读入 scene.json").clicked() {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    doc.picker = Some(crate::picker::FilePicker::for_open(
+                        std::path::Path::new(&doc.file_path),
+                        &["json"],
+                        "打开场景",
+                    ));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    req.load = true;
+                }
             }
-            if ui.button("保存").on_hover_text("写出 scene.json").clicked() {
+            let save = ui
+                .button("保存")
+                .on_hover_text("写出 scene.json（右键：另存为）");
+            if save.clicked() {
                 req.save = true;
             }
+            // 「另存为」放在保存按钮的右键菜单里：主工具栏已经排得很满，再加一个
+            // 按钮会把「导出 GLB」挤到 min_size 之外被裁掉（UI 冒烟测试抓过）。
+            #[cfg(not(target_arch = "wasm32"))]
+            save.context_menu(|ui| {
+                if ui.button("另存为…").clicked() {
+                    let default = std::path::Path::new(&doc.file_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("scene.json")
+                        .to_string();
+                    doc.picker = Some(crate::picker::FilePicker::for_save(
+                        std::path::Path::new(&doc.file_path),
+                        &default,
+                        &["json"],
+                        "场景另存为",
+                    ));
+                    ui.close();
+                }
+            });
             if ui
                 .button("导出 glTF")
                 .on_hover_text("把当前场景的图元导出成单文件 glTF 2.0（base64 几何/贴图）")
@@ -3037,6 +3094,36 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
 #[cfg(test)]
 mod timeline_tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn picker_result_updates_path_and_request() {
+        let mut doc = Doc::new();
+        let mut req = Requests::default();
+        apply_pick(
+            &mut doc,
+            &mut req,
+            crate::picker::PickResult {
+                mode: crate::picker::PickMode::Open,
+                path: std::path::PathBuf::from("/tmp/a.json"),
+            },
+        );
+        assert_eq!(doc.file_path, "/tmp/a.json");
+        assert!(req.load && !req.save);
+        assert!(doc.picker.is_none());
+
+        let mut req = Requests::default();
+        apply_pick(
+            &mut doc,
+            &mut req,
+            crate::picker::PickResult {
+                mode: crate::picker::PickMode::Save,
+                path: std::path::PathBuf::from("/tmp/b.json"),
+            },
+        );
+        assert_eq!(doc.file_path, "/tmp/b.json");
+        assert!(req.save && !req.load);
+    }
 
     #[test]
     fn timeline_scrub_maps_and_clamps() {
