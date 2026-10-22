@@ -92,6 +92,9 @@ async function main() {
   await send("Page.enable");
   await send("Log.enable");
   await send("Page.bringToFront");
+  // headless 在多次 reload 后偶尔会把键盘焦点丢给浏览器 UI；焦点模拟保证
+  // Shift/Ctrl/F9 这类没有鼠标坐标的键仍然送到页面。
+  await send("Emulation.setFocusEmulationEnabled", { enabled: true });
 
   // 等遮罩收起（第一帧真的画出来了），而不是死等一个固定秒数。
   let hidden = false;
@@ -348,59 +351,73 @@ async function main() {
   // 载入默认场景后可能已经选中 1 个（例如地面），框选是**追加**：只要变多即可。
   const beforeBoxSelected = selectedOf(await uiState());
   const beforeBox = await snap("box-before");
-  await send("Input.dispatchKeyEvent", {
-    type: "rawKeyDown",
-    key: "Shift",
-    code: "ShiftLeft",
-    windowsVirtualKeyCode: 16,
-    nativeVirtualKeyCode: 16,
-    modifiers: 8,
-  });
-  await sleep(150);
-  await send("Input.dispatchMouseEvent", {
-    type: "mousePressed",
-    x: 380,
-    y: 220,
-    button: "left",
-    buttons: 1,
-    clickCount: 1,
-    modifiers: 8,
-  });
-  for (const [x, y] of [
-    [430, 270],
-    [520, 360],
-    [650, 470],
-    [820, 610],
-  ]) {
-    await send("Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x,
-      y,
-      button: "left",
-      buttons: 1,
+  let boxed = await uiState();
+  // 无坐标的修饰键事件在 headless 里偶尔会晚一帧/丢一次；最多重试 3 次，
+  // 仍然失败才算 UI 回归。每次只在"选中数没变"时重试，不会重复追加。
+  for (let attempt = 0; attempt < 3 && !(selectedOf(boxed) > beforeBoxSelected); attempt++) {
+    await send("Input.dispatchKeyEvent", {
+      type: "rawKeyDown",
+      key: "Shift",
+      code: "ShiftLeft",
+      windowsVirtualKeyCode: 16,
+      nativeVirtualKeyCode: 16,
       modifiers: 8,
     });
-    await sleep(80);
+    await sleep(300);
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: 380,
+      y: 220,
+      button: "none",
+      buttons: 0,
+      modifiers: 8,
+    });
+    await sleep(120);
+    await send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: 380,
+      y: 220,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+      modifiers: 8,
+    });
+    for (const [x, y] of [
+      [430, 270],
+      [520, 360],
+      [650, 470],
+      [820, 610],
+    ]) {
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x,
+        y,
+        button: "left",
+        buttons: 1,
+        modifiers: 8,
+      });
+      await sleep(80);
+    }
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: 820,
+      y: 610,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+      modifiers: 8,
+    });
+    await send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Shift",
+      code: "ShiftLeft",
+      windowsVirtualKeyCode: 16,
+      nativeVirtualKeyCode: 16,
+      modifiers: 0,
+    });
+    await sleep(500);
+    boxed = await uiState();
   }
-  await send("Input.dispatchMouseEvent", {
-    type: "mouseReleased",
-    x: 820,
-    y: 610,
-    button: "left",
-    buttons: 0,
-    clickCount: 1,
-    modifiers: 8,
-  });
-  await send("Input.dispatchKeyEvent", {
-    type: "keyUp",
-    key: "Shift",
-    code: "ShiftLeft",
-    windowsVirtualKeyCode: 16,
-    nativeVirtualKeyCode: 16,
-    modifiers: 0,
-  });
-  await sleep(500);
-  const boxed = await uiState();
   const afterBoxFail = await snap("box-after-fail");
   if (!(selectedOf(boxed) > beforeBoxSelected)) {
     die(
@@ -432,22 +449,26 @@ async function main() {
       nativeVirtualKeyCode: vk,
       modifiers: 2,
     });
-  await ctrlKey("rawKeyDown", "Control", "ControlLeft", 17);
-  await sleep(100);
-  await ctrlKey("rawKeyDown", "c", "KeyC", 67);
-  await sleep(100);
-  await ctrlKey("keyUp", "c", "KeyC", 67);
-  await ctrlKey("keyUp", "Control", "ControlLeft", 17);
-  await sleep(300);
-  await ctrlKey("rawKeyDown", "Control", "ControlLeft", 17);
-  await sleep(100);
-  await ctrlKey("rawKeyDown", "v", "KeyV", 86);
-  await sleep(100);
-  await ctrlKey("keyUp", "v", "KeyV", 86);
-  await ctrlKey("keyUp", "Control", "ControlLeft", 17);
-  await sleep(700);
-  const pastedState = await uiState();
-  const afterPaste = objectsOf(pastedState);
+  let pastedState = await uiState();
+  let afterPaste = objectsOf(pastedState);
+  for (let attempt = 0; attempt < 3 && !(afterPaste > beforePaste); attempt++) {
+    await ctrlKey("rawKeyDown", "Control", "ControlLeft", 17);
+    await sleep(120);
+    await ctrlKey("rawKeyDown", "c", "KeyC", 67);
+    await sleep(120);
+    await ctrlKey("keyUp", "c", "KeyC", 67);
+    await ctrlKey("keyUp", "Control", "ControlLeft", 17);
+    await sleep(350);
+    await ctrlKey("rawKeyDown", "Control", "ControlLeft", 17);
+    await sleep(120);
+    await ctrlKey("rawKeyDown", "v", "KeyV", 86);
+    await sleep(120);
+    await ctrlKey("keyUp", "v", "KeyV", 86);
+    await ctrlKey("keyUp", "Control", "ControlLeft", 17);
+    await sleep(700);
+    pastedState = await uiState();
+    afterPaste = objectsOf(pastedState);
+  }
   if (!(afterPaste > beforePaste)) {
     die(`Ctrl+C/V 没有粘贴出新物体（${beforePaste} → ${afterPaste}）：${pastedState}`);
   }
