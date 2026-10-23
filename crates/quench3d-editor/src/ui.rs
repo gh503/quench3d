@@ -1842,8 +1842,9 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 };
                 ui.label(
                     RichText::new(format!(
-                        "时长 {duration:.2}s · 倍速 {:.2} · {state}",
-                        animation.player.speed
+                        "时长 {duration:.2}s · 倍速 {:.2} · {state} · 事件 {} 条",
+                        animation.player.speed,
+                        animation.events.len()
                     ))
                     .small()
                     .weak(),

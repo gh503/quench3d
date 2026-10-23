@@ -143,7 +143,7 @@ pub use winit;
 
 pub use app::{render_offscreen, run, App, CameraMode, DebugOptions, Engine, EngineConfig, Game};
 pub use input::{Input, MouseButton};
-pub use scene::{AssetCache, Scene, SceneObject};
+pub use scene::{AssetCache, FiredAnimationEvent, Scene, SceneAnimationEvent, SceneObject};
 
 pub use app::{
     render_offscreen_stats, render_sequence, render_sequence_with_game, write_png, SequenceFrame,
@@ -164,7 +164,9 @@ pub mod prelude {
     pub use crate::assets::{load_gltf, load_model, load_obj, AssetError, LoadedModel};
     pub use crate::clock::now_seconds;
     pub use crate::input::{Input, MouseButton};
-    pub use crate::scene::{AssetCache, Scene, SceneObject};
+    pub use crate::scene::{
+        AssetCache, FiredAnimationEvent, Scene, SceneAnimationEvent, SceneObject,
+    };
     pub use quench3d_math::{
         approx_eq, deg, lerp, rad, vec2, vec3, vec4, Aabb, Deg, Mat3, Mat4, Plane, Quat, Rad, Ray,
         Transform, Vec2, Vec3, Vec4,

@@ -587,6 +587,9 @@ impl Engine {
         if !self.paused {
             self.scene
                 .advance_animations_with_renderer(dt, &mut self.renderer, &self.gpu);
+            for event in self.scene.take_animation_events() {
+                game.on_animation_event(self, &event);
+            }
         }
 
         // 手工 LOD：相机移动（即使暂停）也要切层级；相机位置在切之前取。
@@ -696,6 +699,11 @@ pub trait Game {
     fn fixed_update(&mut self, _engine: &mut Engine, _dt: f32) {}
     /// 渲染阶段调用，可继续提交自定义绘制。
     fn draw(&mut self, _engine: &mut Engine) {}
+    /// 模型动画事件：播放头跨过场景里登记的事件标记时调用。
+    ///
+    /// 在动画推进**之后**、`draw` 之前触发；暂停时不触发。事件已从队列取走，
+    /// 同一帧里多个事件按播放头顺序回调。
+    fn on_animation_event(&mut self, _engine: &mut Engine, _event: &crate::FiredAnimationEvent) {}
     /// 原始窗口事件。
     fn on_window_event(&mut self, _engine: &mut Engine, _event: &WindowEvent) {}
 }
@@ -1469,6 +1477,9 @@ pub fn render_sequence_with_game<G: Game>(
                 &mut engine.renderer,
                 &engine.gpu,
             );
+            for event in engine.scene.take_animation_events() {
+                game.on_animation_event(&mut engine, &event);
+            }
         }
 
         let camera = engine.camera();

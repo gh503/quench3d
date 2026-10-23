@@ -158,7 +158,8 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   是否着地等输入。参数是浮点，布尔用 0/1 表达。过渡还可写 `on_event`：宿主调用
   `Scene::fire_animator_event(index, name)` 发离散事件（跳一下/攻击命中），下一帧帧首
   **立即**过渡，事件过渡优先于同状态到期的时间过渡；需要 `conditions` 时同样要满足，
-  条件不满足则事件被丢弃。事件只保留一个、消费一次，没有队列/输入缓冲。仍没有参数
+  条件不满足则事件被丢弃。状态机事件只保留一个、消费一次，没有输入缓冲；clip 的动画
+  事件标记另有队列（`models[].events` + `Game::on_animation_event`）。仍没有参数
   曲线。和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
 * **IBL / HDRI 环境光**：`lighting.environment_map` 指向等距柱状 `.hdr` / `.png` / `.jpg`，

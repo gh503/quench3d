@@ -3295,6 +3295,23 @@ pub fn setup_visuals(
                 // 起始时间按播放器自己的规则归一化（循环取模 / 不循环夹到时长），
                 // 不在格式层再抄一份时间语义。
                 player.advance(0.0);
+                // 事件标记：不写 clip 的归主 clip；写了名字的只归同名 clip（主/副都行）。
+                let primary_events = m
+                    .events
+                    .iter()
+                    .flatten()
+                    .filter(|event| {
+                        event
+                            .clip
+                            .as_deref()
+                            .is_none_or(|clip| clip == player.animation)
+                    })
+                    .map(|event| quench3d::scene::SceneAnimationEvent {
+                        name: event.name.clone(),
+                        time: event.time,
+                        clip: event.clip.clone(),
+                    })
+                    .collect::<Vec<_>>();
                 let base = vec![transform; objects.len()];
                 if let Some(b) = &a.blend {
                     // 第二条名字不存在就**不登记**（报告给 found=false，几何保持绑定姿态）；
@@ -3304,7 +3321,20 @@ pub fn setup_visuals(
                         secondary.looping = b.looping.unwrap_or(true);
                         secondary.time = b.start.unwrap_or(0.0);
                         secondary.advance(0.0);
-                        animation_index = Some(engine.scene.play_model_animation_blend_with_fade(
+                        let secondary_events = m
+                            .events
+                            .iter()
+                            .flatten()
+                            .filter(|event| {
+                                event.clip.as_deref() == Some(secondary.animation.as_str())
+                            })
+                            .map(|event| quench3d::scene::SceneAnimationEvent {
+                                name: event.name.clone(),
+                                time: event.time,
+                                clip: event.clip.clone(),
+                            })
+                            .collect::<Vec<_>>();
+                        let index = engine.scene.play_model_animation_blend_with_fade(
                             model.clone(),
                             objects.clone(),
                             base,
@@ -3314,15 +3344,21 @@ pub fn setup_visuals(
                                 b.weight.unwrap_or(0.5),
                                 b.fade.unwrap_or(0.0),
                             ),
-                        ));
+                        );
+                        let mut all_events = primary_events;
+                        all_events.extend(secondary_events);
+                        engine.scene.set_model_events(index, all_events);
+                        animation_index = Some(index);
                     }
                 } else {
-                    animation_index = Some(engine.scene.play_model_animation(
+                    let index = engine.scene.play_model_animation(
                         model.clone(),
                         objects.clone(),
                         base,
                         player,
-                    ));
+                    );
+                    engine.scene.set_model_events(index, primary_events);
+                    animation_index = Some(index);
                 }
             }
         } else if let Some(anim) = &m.animator {

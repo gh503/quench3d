@@ -101,6 +101,11 @@ fn fake_animation_instance() -> ModelAnimationInstance {
             target: Vec3::new(0.0, 0.2, 0.1),
             pole: Some(Vec3::Z),
         }],
+        events: vec![quench3d::scene::SceneAnimationEvent {
+            name: "footstep".into(),
+            time: 0.5,
+            clip: None,
+        }],
         animator: Some(ModelAnimatorRuntime {
             states: vec![
                 ModelAnimatorState {
@@ -182,6 +187,7 @@ fn fake_plain_animation_instance() -> ModelAnimationInstance {
         blend_elapsed: 0.0,
         morph_weights: None,
         ik: Vec::new(),
+        events: Vec::new(),
         animator: None,
     }
 }
@@ -335,6 +341,10 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "0.250s / 1.000s"),
         "时间轴的读数没有跟着 player.time 显示（预期 0.250s / 1.000s）"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "事件 1 条"),
+        "动画面板没有显示事件标记数"
     );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(

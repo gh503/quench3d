@@ -41,7 +41,12 @@
 
 ### 新增
 
-- **morph + skin 的 GPU 蒙皮（第 49 轮）**：带 morph 的蒙皮片段不再整网格 CPU 蒙皮；
+- **clip 动画事件标记与事件队列（第 136 轮）**：`models[].events`（`name/time/clip?`）+
+  `Scene::take_animation_events` + `Game::on_animation_event`；半开区间、循环/非循环、
+  clip 过滤、暂停不触发、状态机不支持（warning）。编辑器动画面板显示事件数。
+  测试总数 791 → 795。
+
+- **morph + skin 的 GPU 蒙皮（第 135 轮）**：带 morph 的蒙皮片段不再整网格 CPU 蒙皮；
   morph 位移 CPU 叠加后上传绑定姿态，关节矩阵在顶点着色器乘一次。
   新增 GLB fixture 与 GPU/CPU 像素对照（0/16384 差、覆盖 288 像素）。测试总数 790 → 791。
 

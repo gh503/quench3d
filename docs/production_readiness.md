@@ -83,7 +83,7 @@
 | 拖拽改父级 | 全部 | 属性面板里用"父物体"下拉改（**保世界位姿**）；场景树内拖放还没有 | 🟡 |
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
-| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、事件按钮和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、事件队列、多轨混合 UI | 🟡 |
+| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、事件按钮和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、多轨混合 UI、状态机输入缓冲；**clip 事件标记/队列第 136 轮已补** | 🟡 |
 | 骨骼 / 蒙皮 | 全部 | **GPU 蒙皮可用**（纯蒙皮：`JOINTS_0/WEIGHTS_0` 顶点属性 + 每帧关节调色板；`Scene::gpu_skinning=false` 退回 CPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**两骨 IK 可用**（`models[].ik`，每帧采样后解目标、CPU/GPU 蒙皮与 F8 骨架一致）；**morph+skin 已能走 GPU 蒙皮**（morph 位移仍 CPU 叠加后上传，关节只在 GPU 乘一次）；**全 GPU morph 仍无** | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
@@ -620,7 +620,8 @@ gap 表里与资产搜索路径（#11）同源，等那一项一起做；**编�
 | 编辑器 | 状态栏只读显示队列深度/丢弃数/最近一条 | 界面里看不见的东西等于不存在；但**不做**事件面板与"清空"（避免为了好看动 `&mut Engine` 的借用链） |
 
 **没做（诚实边界）**：没有**生命周期钩子**（`on_scene_loaded` / `on_destroy`）与用户回调——
-本引擎没有脚本层，宿主只能轮询事件队列，`Scene` 也没有自己的生命周期事件流；
+本引擎没有脚本层；动画事件由宿主通过 `Game::on_animation_event` 或
+`Scene::take_animation_events` 取走（第 136 轮），`Scene` 仍没有自己的生命周期事件流；
 没有事件过滤/订阅（要挑就自己遍历）；没有"每步清空"的开关（宿主自己 `clear_events()`）；
 没有接触**持续**事件（只有开始/结束；`steps_inside` 在传感器报告里）；
 没有事件优先级或背压（满了就丢新事件，不是丢最旧的）；编辑器不能清空队列、也没有时间线。
@@ -2185,7 +2186,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | glTF `animations` 解析 | ✅ 第 61 / 76 / 81 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 用 Hermite 入/出切线）；morph 权重轨道也解析并保留入/出切线 |
 | glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ✅ 第 70 轮（CPU） | `LoadedSkin` + `LoadedMesh.skin/joints/weights`；缺任何顶点数据时整体退回刚性路径（不撕裂网格） |
 | CPU 蒙皮变形 + 顶点回写 | ✅ 第 70 轮 | `LoadedModel::skinned_mesh` 算 `Σ w·world(joint)·IBM·bindInverse`；`Scene::advance_animations_with_renderer` 调 `Renderer::update_mesh_vertices` 原地更新同一个 `MeshId`。GPU 像素回归 t=0/t=0.25 |
-| GPU 蒙皮（顶点着色器关节矩阵） | ✅ 第 94 轮 / 第 49 轮补 morph+skin | `Vertex.joints/weights` + 128 关节 uniform 调色板；纯蒙皮每帧只传关节矩阵。**morph+skin**：morph 位移 CPU 叠加后上传绑定姿态顶点，关节矩阵仍在 GPU 乘一次，不再每帧做 CPU 蒙皮。像素对照：纯蒙皮 0/4096；morph+skin 0/16384（覆盖 288 像素）。调色板填充有独立断言 |
+| GPU 蒙皮（顶点着色器关节矩阵） | ✅ 第 94 轮 / 第 135 轮补 morph+skin | `Vertex.joints/weights` + 128 关节 uniform 调色板；纯蒙皮每帧只传关节矩阵。**morph+skin**：morph 位移 CPU 叠加后上传绑定姿态顶点，关节矩阵仍在 GPU 乘一次，不再每帧做 CPU 蒙皮。像素对照：纯蒙皮 0/4096；morph+skin 0/16384（覆盖 288 像素）。调色板填充有独立断言 |
 | 两骨 IK | ✅ 第 96 轮 | `models[].ik`（root/mid/tip 节点名 + 局部 target/pole）；每帧 CPU 采样后解三角形，只改 root/mid 朝向，长度不变；不可达夹取；`Scene::set_model_ik` 落在 `animation_worlds`，CPU/GPU 蒙皮、刚性片段、F8 骨架同源。**仍缺**：FK/IK 权重混合、多骨链、目标约束 |
 | CPU 侧**采样**（给定 t 求节点世界矩阵） | ✅ 第 61 轮 | `sample_animation(name, t)`；循环/时间推进仍由调用方做（`t.rem_euclid(duration)`） |
 | CPU 侧播放状态（循环/夹取/倍速） | ✅ 第 61 轮 | `ModelAnimationPlayer::advance(dt)` + `mesh_matrices(&model)`；**纯 CPU 可测**（循环用 `rem_euclid`、`duration <= 0` 不除零、非法 dt 不出 NaN） |
@@ -2194,7 +2195,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 与场景格式的接口 | ✅ 第 62 / 71 / 72 轮 | `models[].animation = { name, start?, speed?, loop?, blend? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`blend = { name, start?, speed?, loop?, weight?, fade? }`，`weight` 缺省 0.5、`fade` 缺省 0；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
 | 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）；第 86 轮可直接改状态 clip/起始时间并写回 `states[i]`；第 87 轮可增删状态和过渡（新状态自动选第一个 clip，新过渡从当前状态指向下一个状态，删除状态会连带删除引用它的过渡并改写 `initial`）；第 88 轮可改过渡的 `from/to` 与状态机初始状态；第 96 轮可直接改每条 IK 链的 target XYZ 并写回 `models[i].ik[j].target`；第 97 轮状态机参数有滑杆，拖动后 `dt=0` 立即判一次过渡（只改会话值，不写 default）；第 98 轮为 `on_event` 画「发送事件」按钮。第 119 轮把时间滑杆下方补成**可视化单 clip 时间轴**（刻度、播放头、点/拖定位，读数与 `player.time` 同步）。**仍不是**多轨混合器（不能加事件、改状态名或增删 IK 链） |
-| 参数/事件驱动状态机 | ✅ 第 75 / 80 / 97 / 98 轮 | `models[].animator`：`states` + `parameters` + `transitions`，按状态停留时间 `after`、`on_finished`、`conditions`（参数比较）或 `on_event`（离散事件，优先于时间过渡）切换；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；`Scene::set_animator_parameter` / `fire_animator_event` 是宿主输入入口；报告 `models[].animator`。**仍缺**：参数曲线、事件队列/输入缓冲 |
+| 参数/事件驱动状态机 | ✅ 第 75 / 80 / 97 / 98 轮 | `models[].animator`：`states` + `parameters` + `transitions`，按状态停留时间 `after`、`on_finished`、`conditions`（参数比较）或 `on_event`（离散事件，优先于时间过渡）切换；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；`Scene::set_animator_parameter` / `fire_animator_event` 是宿主输入入口；报告 `models[].animator`。**仍缺**：参数曲线、状态机输入缓冲；clip 动画事件标记 + 队列第 136 轮已补 |
 | 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
 | `skins` + GPU 蒙皮 | ✅ 第 94 轮 | `JOINTS_0/WEIGHTS_0` 顶点属性 + 128 关节 uniform 调色板（8 KB）+ `pbr.wgsl`/`shadow.wgsl` 分支；场景提交时按 `(base,count)` 绑定，纯蒙皮不再 CPU 重算。`gpu_skinning=false` 可退回 CPU；WebGL2 的最低 4 KB uniform 设备只能用 CPU |
@@ -2224,9 +2225,9 @@ if let Some(v) = doc.physics.static_friction_speed {
    （第 74 轮）：`weights` 轨道 + 场景逐帧采样；双 clip 的 morph 权重按 `blend_weight`
    逐 target 插值。✅ **时间驱动状态机**（第 75 轮）：
    `animator.states/transitions` + 淡入。**GPU 蒙皮第 94 轮已补**（纯蒙皮）；
-   **两骨 IK 第 96 轮已补**（`models[].ik`）；**morph+skin 的 GPU 蒙皮第 49 轮已补**
-   （morph 位移仍 CPU，全 GPU morph 仍缺）；仍缺任意权重曲线、事件队列/输入缓冲、
-   FK/IK 权重混合。
+   **两骨 IK 第 96 轮已补**（`models[].ik`）；**morph+skin 的 GPU 蒙皮第 135 轮已补**
+   （morph 位移仍 CPU，全 GPU morph 仍缺）；**clip 动画事件标记/队列第 136 轮已补**；
+   仍缺任意权重曲线、状态机输入缓冲、FK/IK 权重混合。
 5. ✅ **`skins` + GPU 蒙皮**（第 94 轮）：顶点属性扩展 + 128 关节 uniform 调色板 +
    `pbr.wgsl`/`shadow.wgsl` + 阴影管线绑定；morph+skin 也走 GPU 蒙皮（morph CPU 叠加），
    `gpu_skinning=false` 可整体退回。像素对照与调色板填充都有测试。
@@ -3040,7 +3041,7 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：没有动画/蒙皮 LOD、逐实例选档、屏幕空间误差或滞回；顶点聚类不保 UV 接缝，
 远处可能出现纹理拉伸；LOD 资源只随 `clear_scene_assets` 释放。
 
-### 23.36 morph + skin 的 GPU 蒙皮（第 49 轮）
+### 23.36 morph + skin 的 GPU 蒙皮（第 135 轮）
 
 **做了什么**：
 
@@ -3063,6 +3064,38 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 **边界**：morph 位移仍是 CPU 每帧叠加并上传顶点（不是 GPU morph target 存储）；
 没有 morph 法线/切线的 GPU 混合；全 GPU morph 仍未做。
+
+### 23.37 动画事件标记与事件队列（第 136 轮）
+
+**做了什么**：
+
+* 场景文档新增 `models[].events: [{ name, time, clip? }]`。`clip` 不写 = 主 clip；
+  写名字时只跟同名 clip（主/副 clip 都行）。
+* 运行时类型 `SceneAnimationEvent`（标记）与 `FiredAnimationEvent`（已触发）；
+  `Scene::set_model_events` / `model_events` / `take_animation_events` /
+  `clear_animation_events`。
+* 播放头跨过标记时入队（最多 1024 条，丢最旧的）；窗口帧循环与无头逐帧循环都会
+  在动画推进后通过新增的 `Game::on_animation_event` 回调交给宿主。
+* 语义：
+  * 区间 **半开** `[start, end)`：停在标记上不重复触发，下一帧从该点出发才触发；
+  * 循环 clip 按 `duration` 取模，回到开头会再触发；
+  * 非循环 clip 的 `time == duration` 标记在到达结尾时补触发一次；
+  * `dt = 0`（暂停）不触发；副 clip 权重为 0 时不触发；
+  * `animator` 状态机暂不支持（校验器给 warning，运行时忽略）。
+* 编辑器动画面板显示每个实例的 `事件 N 条`。
+
+**验证**：
+
+* `animation_events_fire_once_per_crossing_and_loop`：单圈、跨圈、一次跨两圈、
+  半开区间不重复。
+* `animation_events_respect_clip_and_end_marker`：`clip` 过滤、非循环结尾标记。
+* `scene_queues_animation_events_and_drains_them`：Scene 入队/取空/暂停/绕圈。
+* `model_events_validate_and_roundtrip`：字段解析/往返、空名/负时间/空 clip 报错、
+  无 animation 与 animator 组合给 warning。
+* 编辑器 UI 冒烟断言 `事件 1 条` 真的被排版。
+
+**边界**：这不是脚本层，也不是状态机输入缓冲；宿主只拿到事件名/时间/clip，
+没有参数载荷、没有回调排序之外的优先级；事件只按播放头跨过触发，seek 不补发。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

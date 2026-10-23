@@ -1598,6 +1598,19 @@ pub struct ModelAnimationDoc {
     pub blend: Option<ModelAnimationBlendDoc>,
 }
 
+/// 一条动画事件标记（模型播放头经过 `time` 时触发 `name`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEventDoc {
+    /// 事件名（给宿主逻辑用；不要求唯一）。
+    pub name: String,
+    /// 触发时间（秒，>= 0；循环时按 clip 时长取模）。
+    pub time: f32,
+    /// 可选的 clip 名；不写 = 主 clip。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<String>,
+}
+
 /// 模型动画的第二条 clip（交叉淡化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1811,6 +1824,12 @@ pub struct ModelDoc {
     /// 的 `models[].animation.found` 里报 `false`，几何保持绑定姿态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<ModelAnimationDoc>,
+    /// 动画事件标记（需要同时写 `animation`；`animator` 状态机暂不支持）。
+    ///
+    /// 播放头跨过 `time` 时由引擎排进事件队列，宿主可用
+    /// `Game::on_animation_event` 或 `Scene::take_animation_events` 取走。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<ModelEventDoc>>,
 }
 
 /// 关节类型。
@@ -5492,6 +5511,75 @@ impl SceneDoc {
                     }
                 }
             }
+            if let Some(events) = &m.events {
+                let ep = format!("{p}.events");
+                if events.is_empty() {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        &ep,
+                        "events 是空数组，不会触发任何事件",
+                    ));
+                }
+                if m.animation.is_none() && m.animator.is_none() {
+                    out.push(
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
+                            &ep,
+                            "没有写 animation，events 不会触发",
+                        )
+                        .with_hint("事件标记只跟 animation / blend 的播放头走"),
+                    );
+                }
+                if m.animator.is_some() {
+                    out.push(
+                        Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
+                            &ep,
+                            "animator 状态机暂不触发 events，事件标记会被忽略",
+                        )
+                        .with_hint("需要事件时改用 animation（可带 blend）"),
+                    );
+                }
+                for (j, event) in events.iter().enumerate() {
+                    let jp = format!("{ep}[{j}]");
+                    if event.name.trim().is_empty() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{jp}.name"),
+                            "事件名不能为空",
+                        ));
+                    }
+                    if !event.time.is_finite() || event.time < 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{jp}.time"),
+                            "事件时间必须是非负有限值（秒）",
+                        ));
+                    }
+                    if let Some(clip) = &event.clip {
+                        if clip.trim().is_empty() {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{jp}.clip"),
+                                "clip 不能为空字符串（不写 = 主 clip）",
+                            ));
+                        } else if let Some(animation) = &m.animation {
+                            let known = std::iter::once(&animation.name)
+                                .chain(animation.blend.as_ref().map(|b| &b.name));
+                            if !known.into_iter().any(|name| name == clip) {
+                                out.push(
+                                    Diagnostic::warn_code(
+                                        ErrorCode::Ineffective,
+                                        format!("{jp}.clip"),
+                                        format!("clip \"{clip}\" 不是这个模型正在播的主/副 clip，事件不会触发"),
+                                    )
+                                    .with_hint("写 animation.name 或 animation.blend.name"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(chains) = &m.ik {
                 if chains.is_empty() {
                     out.push(
@@ -8423,6 +8511,96 @@ mod tests {
             .validate()
             .iter()
             .any(|d| d.path == "lighting.environment_intensity" && d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn model_events_validate_and_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("quench3d_events_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("m.glb");
+        std::fs::write(&model, b"not-really-a-glb").unwrap();
+        let base = model.to_string_lossy().to_string();
+        let doc = SceneDoc::from_value(json!({
+            "models": [{
+                "path": base,
+                "animation": { "name": "walk", "blend": { "name": "run", "weight": 0.4 } },
+                "events": [
+                    { "name": "footstep", "time": 0.3 },
+                    { "name": "run-step", "time": 0.6, "clip": "run" }
+                ]
+            }]
+        }))
+        .unwrap();
+        let errors: Vec<_> = doc
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        let again = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
+        let events = again.models[0].events.as_ref().expect("事件要往返");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].name, "footstep");
+        assert_eq!(events[0].clip, None);
+        assert_eq!(events[1].clip.as_deref(), Some("run"));
+
+        for (events, path) in [
+            (
+                json!([{ "name": "", "time": 0.3 }]),
+                "models[0].events[0].name",
+            ),
+            (
+                json!([{ "name": "x", "time": -0.1 }]),
+                "models[0].events[0].time",
+            ),
+            (
+                json!([{ "name": "x", "time": 0.3, "clip": "" }]),
+                "models[0].events[0].clip",
+            ),
+        ] {
+            let bad = SceneDoc::from_value(json!({
+                "models": [{
+                    "path": doc.models[0].path.to_string_lossy(),
+                    "animation": { "name": "walk" },
+                    "events": events
+                }]
+            }))
+            .unwrap();
+            assert!(
+                bad.validate()
+                    .iter()
+                    .any(|d| d.severity == Severity::Error && d.path == path),
+                "要报 {path}: {:?}",
+                bad.validate()
+            );
+        }
+
+        // 没有动画（或只有 animator）时事件不会触发：给 warning，不是硬错误。
+        let no_animation = SceneDoc::from_value(json!({
+            "models": [{ "path": doc.models[0].path.to_string_lossy(),
+                         "events": [{ "name": "x", "time": 0.3 }] }]
+        }))
+        .unwrap();
+        assert!(no_animation
+            .validate()
+            .iter()
+            .any(|d| d.path == "models[0].events" && d.severity == Severity::Warning));
+        let animator = SceneDoc::from_value(json!({
+            "models": [{
+                "path": doc.models[0].path.to_string_lossy(),
+                "animator": {
+                    "initial": "idle",
+                    "states": [{ "name": "idle", "animation": "idle" }]
+                },
+                "events": [{ "name": "x", "time": 0.3 }]
+            }]
+        }))
+        .unwrap();
+        assert!(animator
+            .validate()
+            .iter()
+            .any(|d| d.path == "models[0].events" && d.severity == Severity::Warning));
     }
 
     #[test]

@@ -374,6 +374,31 @@ pub struct IkChain {
     pub pole: Option<Vec3>,
 }
 
+/// 一条**动画事件标记**：播放头经过 `time` 时触发 `name`。
+///
+/// `clip` 为空表示只对主 clip 生效；写名字时只对同名 clip 生效（主/副 clip 都行）。
+/// 时间是 clip 局部时间（秒），循环播放用 `rem_euclid(duration)` 归一化。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneAnimationEvent {
+    /// 事件名（给宿主逻辑用，不要求唯一）。
+    pub name: String,
+    /// 触发时间（秒，>= 0）。
+    pub time: f32,
+    /// 可选的 clip 名；`None` = 主 clip。
+    pub clip: Option<String>,
+}
+
+/// 已经触发的一条动画事件（由 [`Scene::take_animation_events`] 取走）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiredAnimationEvent {
+    /// 事件名。
+    pub name: String,
+    /// 触发时所在 clip 的名字。
+    pub clip: String,
+    /// 标记上写的时间（秒，未取模）。
+    pub time: f32,
+}
+
 /// 场景里一个"正在播放 glTF 动画"的模型实例。
 ///
 /// 一个模型会展开成多个场景物体（每个网格片段一个），动画要把每个片段自己的矩阵
@@ -404,6 +429,102 @@ pub struct ModelAnimationInstance {
     pub animator: Option<ModelAnimatorRuntime>,
     /// 两骨 IK 链；空 = 不做 IK。
     pub ik: Vec<IkChain>,
+    /// 动画事件标记（主/副 clip 用 `clip` 区分）；空 = 不触发。
+    pub events: Vec<SceneAnimationEvent>,
+}
+
+/// 与 `ModelAnimationPlayer::advance` 相同的倍速兜底：非正/非有限按 1 倍速。
+fn sanitize_animation_speed(speed: f32) -> f32 {
+    if speed.is_finite() && speed > 0.0 {
+        speed
+    } else {
+        1.0
+    }
+}
+
+/// 播放头从 `before` 前进 `delta` 秒，返回跨过的标记。
+///
+/// 区间取**半开** `[start, end)`：上一帧刚好停在标记上不算过，下一帧从该点出发才算；
+/// 循环时 `time == duration` 归一到 0，在下一圈开头触发。非循环 clip 的
+/// `time == duration` 标记会在到达结尾时补触发一次。
+fn animation_events_in_span(
+    before: f32,
+    delta: f32,
+    duration: f32,
+    looping: bool,
+    clip: &str,
+    allow_unscoped: bool,
+    markers: &[SceneAnimationEvent],
+) -> Vec<FiredAnimationEvent> {
+    if markers.is_empty()
+        || !delta.is_finite()
+        || delta <= 0.0
+        || !duration.is_finite()
+        || duration <= 0.0
+    {
+        return Vec::new();
+    }
+    if !looping && before >= duration {
+        // 非循环 clip 播完后播放头夹在结尾；继续推进不应把开头的事件再触发一遍。
+        return Vec::new();
+    }
+    let mut remaining = delta;
+    if !remaining.is_finite() || remaining <= 0.0 {
+        return Vec::new();
+    }
+    let mut start = if looping {
+        before.rem_euclid(duration)
+    } else {
+        before.clamp(0.0, duration)
+    };
+    if start >= duration {
+        start = 0.0;
+    }
+    let mut out = Vec::new();
+    // 标记按时间排序，输出才是时间顺序（声明顺序不要求有序）。
+    let mut list: Vec<(f32, &SceneAnimationEvent)> = markers
+        .iter()
+        .filter(|m| match m.clip.as_deref() {
+            // 不写 clip 的标记只跟主 clip，不能因为副 clip 也播放就重复触发。
+            None => allow_unscoped,
+            Some(c) => c == clip,
+        })
+        .filter(|m| m.time.is_finite() && m.time >= 0.0)
+        .map(|m| {
+            let t = if looping {
+                m.time.rem_euclid(duration)
+            } else {
+                m.time
+            };
+            (t, m)
+        })
+        .collect();
+    list.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for _ in 0..256 {
+        if remaining <= 0.0 || out.len() >= 256 {
+            break;
+        }
+        let end = (start + remaining).min(duration);
+        for &(t, marker) in &list {
+            let end_hit = !looping && end >= duration && (t - duration).abs() <= f32::EPSILON;
+            if t + f32::EPSILON >= start && (t < end || end_hit) {
+                out.push(FiredAnimationEvent {
+                    name: marker.name.clone(),
+                    clip: clip.to_string(),
+                    time: marker.time,
+                });
+                if out.len() >= 256 {
+                    break;
+                }
+            }
+        }
+        remaining -= (end - start).max(0.0);
+        if !looping || end < duration {
+            break;
+        }
+        start = 0.0;
+    }
+    out
 }
 
 /// 取一个动画实例当前该用的节点世界矩阵（单 clip 或双 clip 混合）。
@@ -810,6 +931,8 @@ pub struct Scene {
     pub lods: Vec<ModelLodGroup>,
     /// CPU 粒子发射器（视觉层；不是刚体，也不参与物理）。
     pub particles: Vec<ParticleSystem>,
+    /// 本帧触发、等待宿主导出的动画事件（`take_animation_events` 清空）。
+    fired_animation_events: Vec<FiredAnimationEvent>,
 }
 
 impl Default for Scene {
@@ -829,6 +952,7 @@ impl Scene {
             gpu_skinning: true,
             lods: Vec::new(),
             particles: Vec::new(),
+            fired_animation_events: Vec::new(),
         }
     }
 
@@ -1070,6 +1194,7 @@ impl Scene {
         self.objects.clear();
         self.animations.clear();
         self.particles.clear();
+        self.fired_animation_events.clear();
     }
 
     /// 物体数量。
@@ -1118,6 +1243,7 @@ impl Scene {
             blend_elapsed: 0.0,
             morph_weights: None,
             ik: Vec::new(),
+            events: Vec::new(),
             animator: None,
         });
         index
@@ -1188,6 +1314,7 @@ impl Scene {
             blend_elapsed: 0.0,
             morph_weights: None,
             ik: Vec::new(),
+            events: Vec::new(),
             animator: None,
         });
         index
@@ -1234,6 +1361,7 @@ impl Scene {
             blend_elapsed: 0.0,
             morph_weights: None,
             ik: Vec::new(),
+            events: Vec::new(),
             animator: Some(ModelAnimatorRuntime {
                 states,
                 transitions,
@@ -1467,6 +1595,34 @@ impl Scene {
             .map(|a| a.ik.as_slice())
     }
 
+    /// 给一个动画实例挂上事件标记（替换旧的）；下标不存在返回 false。
+    pub fn set_model_events(&mut self, index: usize, events: Vec<SceneAnimationEvent>) -> bool {
+        match self.animations.get_mut(index) {
+            Some(a) => {
+                a.events = events;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 某个动画实例的事件标记（编辑器展示用）。
+    pub fn model_events(&self, index: usize) -> Option<&[SceneAnimationEvent]> {
+        self.animations.get(index).map(|a| a.events.as_slice())
+    }
+
+    /// 取走本帧触发的事件（队列清空）。
+    ///
+    /// 宿主每帧调用一次；不取走会一直累积（最多 1024 条，超出丢最旧的）。
+    pub fn take_animation_events(&mut self) -> Vec<FiredAnimationEvent> {
+        std::mem::take(&mut self.fired_animation_events)
+    }
+
+    /// 丢弃尚未取走的动画事件（例如重新载入场景）。
+    pub fn clear_animation_events(&mut self) {
+        self.fired_animation_events.clear();
+    }
+
     /// 推进所有模型动画 `dt` 秒并把当前帧落到物体上；返回更新的物体数。
     ///
     /// * 调用点：窗口帧循环与无头逐帧循环都**每帧一次**（暂停时不调）；
@@ -1482,13 +1638,46 @@ impl Scene {
         let Scene {
             objects,
             animations,
+            fired_animation_events,
             ..
         } = self;
         let mut updated = 0;
         for a in animations.iter_mut() {
+            let primary_before = a.player.time;
+            let secondary_before = a.secondary.as_ref().map(|s| s.time);
             advance_animator(a, dt);
+            // 事件标记只对单/双 clip 播放生效；状态机切换 clip 的瞬间没有明确的
+            // "播放头跨过"语义，校验器会拒绝 animator + events 的组合。
+            let primary_events = if a.animator.is_none() {
+                animation_events_in_span(
+                    primary_before,
+                    dt * sanitize_animation_speed(a.player.speed),
+                    a.player.duration,
+                    a.player.looping,
+                    &a.player.animation,
+                    true,
+                    &a.events,
+                )
+            } else {
+                Vec::new()
+            };
             a.player.advance(dt);
+            let mut secondary_events = Vec::new();
             if let Some(secondary) = &mut a.secondary {
+                let before = secondary_before.unwrap_or(0.0);
+                let fired = if a.animator.is_none() {
+                    animation_events_in_span(
+                        before,
+                        dt * sanitize_animation_speed(secondary.speed),
+                        secondary.duration,
+                        secondary.looping,
+                        &secondary.animation,
+                        false,
+                        &a.events,
+                    )
+                } else {
+                    Vec::new()
+                };
                 secondary.advance(dt);
                 if a.blend_fade > 0.0 {
                     let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
@@ -1499,10 +1688,21 @@ impl Scene {
                 } else {
                     a.blend_weight = a.blend_target;
                 }
+                // 副 clip 完全被压到 0 时，它的标记不应触发。
+                if a.blend_weight > 0.0 {
+                    secondary_events = fired;
+                }
             }
             promote_animator(a);
+            fired_animation_events.extend(primary_events);
+            fired_animation_events.extend(secondary_events);
             let mats = animation_matrices(a);
             updated += apply_matrices(objects, &a.objects, &a.base, &mats);
+        }
+        // 极端 dt 下事件可能超过上限：保留最新的 1024 条，避免队列无限增长。
+        if fired_animation_events.len() > 1024 {
+            let excess = fired_animation_events.len() - 1024;
+            fired_animation_events.drain(..excess);
         }
         updated
     }
@@ -2412,6 +2612,131 @@ mod anim_tests {
             }],
             ..Default::default()
         }
+    }
+
+    fn marker(time: f32, name: &str) -> SceneAnimationEvent {
+        SceneAnimationEvent {
+            name: name.into(),
+            time,
+            clip: None,
+        }
+    }
+
+    /// 事件区间是半开 `[start, end)`：停在标记上不重复触发，循环回到开头会再触发。
+    #[test]
+    fn animation_events_fire_once_per_crossing_and_loop() {
+        let markers = vec![marker(0.25, "a"), marker(0.75, "b")];
+        let span = |before: f32, dt: f32| {
+            animation_events_in_span(before, dt, 1.0, true, "转", true, &markers)
+                .into_iter()
+                .map(|e| e.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(span(0.0, 0.3), vec!["a"]);
+        assert!(span(0.3, 0.2).is_empty(), "停在 0.5，不应再触发 a");
+        assert_eq!(span(0.5, 0.3), vec!["b"]);
+        assert!(span(0.8, 0.1).is_empty(), "到 0.9，未跨 1.0");
+        // 从 0.9 走 0.2 绕回 0.1：0.25 还没到；再走 0.2 才跨 0.25。
+        assert!(span(0.9, 0.2).is_empty());
+        assert_eq!(span(0.1, 0.2), vec!["a"]);
+        // 一帧跨两圈：每个标记各触发两次，顺序按时间。
+        assert_eq!(
+            span(0.0, 2.2),
+            vec!["a", "b", "a", "b"],
+            "两圈 + 0.2 应触发两轮"
+        );
+    }
+
+    #[test]
+    fn animation_events_respect_clip_and_end_marker() {
+        let markers = vec![
+            marker(0.5, "主"),
+            SceneAnimationEvent {
+                name: "副".into(),
+                time: 0.5,
+                clip: Some("转".into()),
+            },
+            SceneAnimationEvent {
+                name: "别的 clip".into(),
+                time: 0.5,
+                clip: Some("不存在的".into()),
+            },
+        ];
+        let fired = animation_events_in_span(0.0, 0.6, 1.0, true, "转", true, &markers);
+        assert_eq!(
+            fired.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["主", "副"],
+            "同名 clip 或无 clip 才触发"
+        );
+        // 非循环的 end 标记在到达结尾时补触发一次。
+        let end =
+            animation_events_in_span(0.0, 2.0, 1.0, false, "转", true, &[marker(1.0, "结束")]);
+        assert_eq!(end.len(), 1);
+        assert_eq!(end[0].name, "结束");
+        // 副 clip 不接收“不写 clip”的标记；只有显式写副 clip 名的才触发。
+        let secondary = animation_events_in_span(
+            0.0,
+            0.6,
+            1.0,
+            true,
+            "run",
+            false,
+            &[
+                marker(0.5, "主"),
+                SceneAnimationEvent {
+                    name: "跑步".into(),
+                    time: 0.5,
+                    clip: Some("run".into()),
+                },
+            ],
+        );
+        assert_eq!(
+            secondary
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["跑步"]
+        );
+    }
+
+    #[test]
+    fn scene_queues_animation_events_and_drains_them() {
+        let model = std::sync::Arc::new(pulley_model());
+        let mut scene = Scene::new();
+        let o = scene.add_named(1, 0, Transform::default(), "滑轮");
+        let player = model.player("转").expect("有动画");
+        let index = scene.play_model_animation(
+            Arc::clone(&model),
+            vec![o],
+            vec![Transform::default()],
+            player,
+        );
+        assert!(scene.set_model_events(index, vec![marker(0.25, "a")]));
+        assert_eq!(scene.model_events(index).map(|e| e.len()), Some(1));
+        assert!(!scene.set_model_events(99, Vec::new()));
+
+        // 0.3 秒跨过 0.25：触发一次，取走后队列为空。
+        scene.advance_animations(0.3);
+        let fired = scene.take_animation_events();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].name, "a");
+        assert_eq!(fired[0].clip, "转");
+        assert!(scene.take_animation_events().is_empty());
+
+        // 不跨标记的帧不触发；dt=0（暂停）不触发。
+        scene.advance_animations(0.3);
+        assert!(scene.take_animation_events().is_empty());
+        scene.advance_animations(0.0);
+        assert!(scene.take_animation_events().is_empty());
+
+        // 从 0.6 绕回 0.1（不跨 0.25），再走到 0.4 才跨。
+        scene.advance_animations(0.5);
+        assert!(
+            scene.take_animation_events().is_empty(),
+            "0.6 → 0.1，没跨 0.25"
+        );
+        scene.advance_animations(0.3);
+        assert_eq!(scene.take_animation_events().len(), 1);
     }
 
     /// 动画必须**只**动它覆盖的节点，而且以"基础变换"为基准（不累积漂移）。
