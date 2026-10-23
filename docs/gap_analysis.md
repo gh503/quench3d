@@ -107,10 +107,13 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 4. **GPU 资源生命周期**：`meshes/materials/textures` 没有按句柄的 `remove_*`/引用计数，资源表仍 append-only
    （`renderer.rs`）；第 90 轮补了 `Renderer::clear_scene_assets()`，**整场景重载**（编辑器打开/撤销/重做）会丢掉旧资源并重建
    `AssetCache`，不再累积；但**单次场景内**反复 `load_model`/`add_mesh` 仍会持续涨显存。
-5. **地面网格的 `frag_depth` 无效**：管线 `depth_write_enabled: false`（`renderer.rs:650-656`），
-   所以 `grid.wgsl:22,80` 的深度写入被忽略，而注释声称"写入真实深度" → 网格不遮挡其后绘制的调试线段。
-6. **阴影尺寸有两个来源**：`DirectionalLight.shadow_map_size`（`light.rs:19`，用于纹素吸附）与
-   `RendererOptions.shadow_map_size`（`renderer.rs:474`，实际纹理尺寸）不一致时会算错纹素吸附。
+5. ~~**地面网格的 `frag_depth` 无效**~~ ✅ **已修**：网格管线现在 `depth_write_enabled: true`
+   （`renderer.rs` 的 `quench3d-grid`），`grid.wgsl` 的 `frag_depth` 真的写入；网格在透明物体
+   之后、调试线段之前画，能遮挡它后面的线段。
+6. ~~**阴影尺寸有两个来源**~~ ✅ **已修**：单级用 `RendererOptions.shadow_map_size` 建纹理并算
+   纹素吸附；级联把实际分块尺寸作为 `tile_texels` 传进 `cascade::matrices`。
+   `DirectionalLight.shadow_map_size` 只保留在独立 `shadow_matrix` 辅助 API 里，渲染器不再用它
+   算吸附。
 
 **做得对、值得保留的取舍**：没有 shader 变体机制（所以不存在排列组合爆炸），代价是无条件采样 4 张贴图 + 8 光循环；
 `ShadowMap` 用 `Depth32Float`、mipmap 用 CPU 盒式滤波（`texture.rs:165-202`，仅在纹理上传期，渲染目标无 mip）——
