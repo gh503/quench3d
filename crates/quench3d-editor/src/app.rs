@@ -378,6 +378,7 @@ impl Inner {
             query: self.engine.debug.query_probe,
             bones: self.engine.debug.bones,
             joints: self.engine.debug.joints,
+            tonemap: self.engine.renderer.options.tonemap.label(),
             recovery: self.doc.recovery.is_some(),
             objects: self.engine.scene.len(),
             selected: self.doc.selection().len(),
@@ -835,6 +836,8 @@ struct UiDebugState {
     query: bool,
     bones: bool,
     joints: bool,
+    /// 当前色调映射算子的标签。
+    tonemap: &'static str,
     /// 是否挂着自动保存恢复点（Web 端 localStorage / 桌面文件）。
     recovery: bool,
     /// 当前场景里的物体数（含粒子/水面代理；用于恢复测试对账）。
@@ -866,6 +869,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         query,
         bones,
         joints,
+        tonemap,
         recovery,
         objects,
         selected,
@@ -885,7 +889,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }

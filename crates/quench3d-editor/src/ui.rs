@@ -1384,6 +1384,18 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             .prefix("曝光 "),
                     )
                     .changed();
+                let mut tonemap = engine.renderer.options.tonemap;
+                egui::ComboBox::from_id_salt("tonemap")
+                    .selected_text(tonemap.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in quench3d::prelude::Tonemap::ALL {
+                            ui.selectable_value(&mut tonemap, candidate, candidate.label());
+                        }
+                    });
+                if tonemap != engine.renderer.options.tonemap {
+                    engine.renderer.options.tonemap = tonemap;
+                    changed = true;
+                }
                 changed |= ui.checkbox(&mut light.sky.enabled, "天空").changed();
                 changed |= ui.checkbox(&mut light.sky.show_grid, "参考网格").changed();
                 if light.sky.enabled {

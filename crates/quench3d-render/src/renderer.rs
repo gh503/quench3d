@@ -645,6 +645,73 @@ impl Default for SsaoOptions {
     }
 }
 
+/// 色调映射算子。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tonemap {
+    /// Narkowicz 2015 ACES 近似（默认，旧行为）。
+    #[default]
+    Aces,
+    /// Reinhard（`x / (1 + x)`）。
+    Reinhard,
+    /// 直接夹到 0..1（线性），用于对照/调试，不适合作为成片默认。
+    Linear,
+}
+
+impl Tonemap {
+    /// 全部算子（UI 按这个顺序排）。
+    pub const ALL: [Tonemap; 3] = [Tonemap::Aces, Tonemap::Reinhard, Tonemap::Linear];
+
+    /// 界面标签。
+    pub fn label(self) -> &'static str {
+        match self {
+            Tonemap::Aces => "ACES",
+            Tonemap::Reinhard => "Reinhard",
+            Tonemap::Linear => "线性",
+        }
+    }
+
+    /// 下一档（`T` 键循环用）。
+    pub fn next(self) -> Self {
+        match self {
+            Tonemap::Aces => Tonemap::Reinhard,
+            Tonemap::Reinhard => Tonemap::Linear,
+            Tonemap::Linear => Tonemap::Aces,
+        }
+    }
+
+    /// 传给 `post.wgsl` 的 `params.w` 编码。
+    pub fn code(self) -> f32 {
+        match self {
+            Tonemap::Aces => 0.0,
+            Tonemap::Reinhard => 1.0,
+            Tonemap::Linear => 2.0,
+        }
+    }
+
+    /// CPU 参考实现（与 `post.wgsl` 的公式一致，用于单测与工具链对照）。
+    pub fn apply_rgb(self, rgb: [f32; 3]) -> [f32; 3] {
+        let map = |x: f32| {
+            if !x.is_finite() {
+                return 0.0;
+            }
+            let x = x.max(0.0);
+            match self {
+                Tonemap::Aces => {
+                    let a = 2.51;
+                    let b = 0.03;
+                    let c = 2.43;
+                    let d = 0.59;
+                    let e = 0.14;
+                    ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
+                }
+                Tonemap::Reinhard => x / (1.0 + x),
+                Tonemap::Linear => x.clamp(0.0, 1.0),
+            }
+        };
+        [map(rgb[0]), map(rgb[1]), map(rgb[2])]
+    }
+}
+
 /// 渲染器创建选项。
 #[derive(Clone, Copy, Debug)]
 pub struct RendererOptions {
@@ -679,6 +746,8 @@ pub struct RendererOptions {
     pub environment: bool,
     /// 深度景深（缺省关闭）。
     pub dof: DofOptions,
+    /// 色调映射算子（缺省 ACES，保持旧行为）。
+    pub tonemap: Tonemap,
 }
 
 impl Default for RendererOptions {
@@ -697,6 +766,7 @@ impl Default for RendererOptions {
             water: WaterOptions::default(),
             environment: true,
             dof: DofOptions::default(),
+            tonemap: Tonemap::default(),
         }
     }
 }
@@ -3093,7 +3163,7 @@ impl Renderer {
                 if bloom_on { 1.0 } else { 0.0 },
                 bloom.intensity.max(0.0),
                 bloom.threshold.max(0.0),
-                0.0,
+                self.options.tonemap.code(),
             ],
             bloom_texel: [
                 1.0 / self.bloom_size.0.max(1) as f32,
@@ -4059,6 +4129,42 @@ mod tests {
     /// `PostParams` 的 Rust/WGSL 布局必须一致：6 个 vec4 + 2 个 mat4 +
     /// water/water_color 2 个 vec4 + inv_view 1 个 mat4 + water_extra/water_sun
     /// 2 个 vec4 = 352 字节。
+    #[test]
+    fn tonemap_operators_have_distinct_stable_curves() {
+        assert_eq!(Tonemap::ALL.len(), 3);
+        assert_eq!(Tonemap::default(), Tonemap::Aces);
+        assert_eq!(Tonemap::Aces.code(), 0.0);
+        assert_eq!(Tonemap::Reinhard.code(), 1.0);
+        assert_eq!(Tonemap::Linear.code(), 2.0);
+        assert_eq!(Tonemap::Aces.label(), "ACES");
+        assert_eq!(Tonemap::Aces.next(), Tonemap::Reinhard);
+        assert_eq!(Tonemap::Reinhard.next(), Tonemap::Linear);
+        assert_eq!(Tonemap::Linear.next(), Tonemap::Aces);
+
+        let hdr = [2.0, 0.5, 0.0];
+        let aces = Tonemap::Aces.apply_rgb(hdr);
+        let reinhard = Tonemap::Reinhard.apply_rgb(hdr);
+        let linear = Tonemap::Linear.apply_rgb(hdr);
+        assert!(
+            (aces[0] - 0.915).abs() < 0.01,
+            "ACES 对 2.0 的近似输出应约为 0.915：{:?}",
+            aces
+        );
+        assert!((reinhard[0] - 2.0 / 3.0).abs() < 1e-6);
+        assert_eq!(linear, [1.0, 0.5, 0.0]);
+        assert!(
+            (aces[0] - reinhard[0]).abs() > 0.1,
+            "两个算子必须产生不同结果：{aces:?} vs {reinhard:?}"
+        );
+        for c in aces.into_iter().chain(reinhard).chain(linear) {
+            assert!((0.0..=1.0).contains(&c), "输出必须落在 0..1：{c}");
+        }
+        assert_eq!(
+            Tonemap::Aces.apply_rgb([f32::NAN, -1.0, f32::INFINITY]),
+            [0.0, 0.0, 0.0]
+        );
+    }
+
     #[test]
     fn post_uniforms_size_matches_wgsl_layout() {
         assert_eq!(std::mem::size_of::<PostUniforms>(), 368);

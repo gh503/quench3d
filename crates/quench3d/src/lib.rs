@@ -178,7 +178,7 @@ pub mod prelude {
         color, Camera, CameraInput, DebugLines, DirectionalLight, FlyCamera, FogParams, GpuContext,
         GpuOptions, ImageData, InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshData, MeshId,
         OrbitCamera, PointLight, RenderStats, Renderer, RendererOptions, SkyParams, SpotLight,
-        TextureId, WaterOptions,
+        TextureId, Tonemap, WaterOptions,
     };
     pub use winit::event::WindowEvent;
     pub use winit::keyboard::KeyCode;

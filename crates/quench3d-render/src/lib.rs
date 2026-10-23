@@ -72,7 +72,7 @@ pub use point_shadow::{
 };
 pub use renderer::{
     BloomOptions, DofOptions, FxaaOptions, InstanceDesc, MaterialTextureSlot, RenderStats,
-    Renderer, RendererOptions, SsaoOptions, WaterOptions, DEPTH_FORMAT, HDR_FORMAT,
+    Renderer, RendererOptions, SsaoOptions, Tonemap, WaterOptions, DEPTH_FORMAT, HDR_FORMAT,
     MAX_SKIN_JOINTS, SHADOW_FORMAT,
 };
 pub use spot_shadow::{
@@ -92,7 +92,7 @@ pub mod prelude {
     pub use crate::mesh::MeshData;
     pub use crate::renderer::{
         BloomOptions, DofOptions, FxaaOptions, InstanceDesc, RenderStats, Renderer,
-        RendererOptions, SsaoOptions, WaterOptions,
+        RendererOptions, SsaoOptions, Tonemap, WaterOptions,
     };
     pub use crate::texture::ImageData;
     pub use quench3d_math::{

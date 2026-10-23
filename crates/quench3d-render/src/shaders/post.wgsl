@@ -6,7 +6,7 @@
 //   * 曝光/雾/自发光都在线性空间算，但 tonemap 原先散落在三个着色器里（pbr/sky/grid），
 //     想加 bloom 就没有地方挂。
 // 现在物体只输出**线性 HDR**，场景先渲染到 `rgba16float` 中间目标，再由这一趟统一处理。
-// ACES 近似全项目**只此一份**。
+// 色调映射算子可切（ACES / Reinhard / 线性），见 `params.w`。
 //
 // SSAO 也挂在这一趟里（tonemap **之前**，因为它是线性光照上的一个乘子）：
 // 深度-only 实现——法线由视空间位置的屏幕导数重建，半球采样按黄金角螺旋分布、
@@ -17,6 +17,24 @@
 @group(0) @binding(1) var hdr_sampler: sampler;
 @group(0) @binding(2) var<uniform> post: PostParams;
 @group(0) @binding(3) var bloom_texture: texture_2d<f32>;
+/// Reinhard：x / (1 + x)。
+fn reinhard_tonemap(x: vec3<f32>) -> vec3<f32> {
+    return x / (vec3<f32>(1.0) + x);
+}
+
+/// 按 `params.w` 选算子：0 = ACES，1 = Reinhard，2 = 线性夹取。
+fn tonemap(x: vec3<f32>) -> vec3<f32> {
+    let c = max(x, vec3<f32>(0.0));
+    let mode = post.params.w;
+    if (mode < 0.5) {
+        return aces_tonemap(c);
+    }
+    if (mode < 1.5) {
+        return reinhard_tonemap(c);
+    }
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 //@gl-depth-begin
 // 深度（单采样；MSAA > 1 时是"解析"出来的那一张，见 `depth_resolve.wgsl`）。
 // 只用 `textureLoad` 按像素读，所以不需要采样器——深度也不该被双线性插值。
@@ -57,7 +75,7 @@ struct PostParams {
     dof: vec4<f32>,
 };
 
-/// Narkowicz 2015 的 ACES 近似（全项目唯一一份）。
+/// Narkowicz 2015 的 ACES 近似。
 fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     let a = 2.51;
     let b = 0.03;
@@ -300,5 +318,5 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
     }
     //@gl-depth-end
 
-    return vec4<f32>(aces_tonemap(hdr), 1.0);
+    return vec4<f32>(tonemap(hdr), 1.0);
 }

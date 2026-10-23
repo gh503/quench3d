@@ -148,6 +148,49 @@ fn hdr_post_pass_tonemaps_exactly_once() {
     }
 }
 
+/// 色调映射算子可选：同一 HDR 输入在 ACES / Reinhard / 线性下得到不同、且与
+/// CPU 参考公式一致的像素。
+#[test]
+fn tonemap_operator_selects_the_expected_curve() {
+    let Some((mut ctx, mut renderer)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.65, 0.75, 0.85, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 80.0),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let lighting = Lighting {
+        exposure: 4.0,
+        ..Default::default()
+    };
+    let hdr = lin([0.65, 0.75, 0.85]).map(|v| v * 4.0);
+    let mut seen = Vec::new();
+    for tonemap in Tonemap::ALL {
+        renderer.options.tonemap = tonemap;
+        let image = renderer
+            .capture(&mut ctx, W, H, &camera, &lighting)
+            .expect("离屏渲染");
+        let expected = srgb8(tonemap.apply_rgb(hdr.map(|v| v as f32)).map(f64::from));
+        let got = pixel(&image, W / 2, H / 2);
+        assert!(
+            near(got, expected, 2),
+            "{} 的像素与 CPU 参考不符：期望 {expected:?}，实际 {got:?}",
+            tonemap.label()
+        );
+        seen.push(got);
+    }
+    assert!(
+        seen[0] != seen[1] && seen[1] != seen[2],
+        "三种算子的像素必须能区分：{seen:?}"
+    );
+}
+
 /// **本轮的核心理由**：混合必须发生在 tonemap 之前。
 ///
 /// 50% 的亮色半透明块盖在暗色底板上：

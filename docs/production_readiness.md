@@ -36,7 +36,7 @@
 |---|---|---|---|
 | 前向 PBR | 全部 | 金属度/粗糙度工作流 + IBL 环境贴图（等距柱状 HDR/PNG/JPEG，手工预滤波 cubemap）；直接光照手感正确 | ✅ |
 | HDR 管线 | three.js / Unity | `rgba16float` 中间目标（`renderer.rs:41`）+ ACES 色调映射（`shaders/post.wgsl:26`，Narkowicz 近似）+ 可选半分辨率 bloom（`renderer.rs:253`、`shaders/bloom.wgsl`）+ 标量曝光（`light.rs:177`） | ✅ |
-| 色调映射可选性 | 全部 | 算子**不可选不可关**，只有一条 ACES 路径（→ H1） | 🟠 |
+| 色调映射可选性 | 全部 | 三档可选：ACES（默认）/ Reinhard / 线性，编辑器灯光面板即时切换；曝光仍可调（→ H1） | ✅ |
 | 阴影 | 全部 | 方向光 1~4 级 CSM（2×2 图集，视空间深度选级，`lighting.shadow_quality.cascades`）+ 3×3 PCF；聚光灯一张透视 2D 阴影图、点光源立方体阴影（各自整帧一盏，缺省关闭）。分辨率 512–4096（缺省 2048） | ✅ |
 | 阴影可调参数 | Blender / Unity | bias 是编译期常量（`renderer.rs:795`），**没有公开字段**；只有 `DirectionalLight.cast_shadows` + 全局开关 | 🟠 |
 | 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO 与深度解析两趟按能力整体关闭**（§12.7） | 🟡 |
@@ -279,7 +279,7 @@
 
 | ID | 硬指标 | 现状 | 关闭成本 | 具体动作 |
 |---|---|---|---|---|
-| **H1** | **色彩管理**：输入/输出色彩空间、色调映射算子、曝光是否可声明与可选 | 只有一条固定 ACES 路径，README 未声明色彩约定 | **低（文档）+ 中（可选算子）** | ① 在文档里写清：工作空间线性、base color sRGB、输出 ACES；② 增加"tonemap 算子可选 + 曝光"两个开关即可进入 H1 门槛 |
+| **H1** | **色彩管理**：输入/输出色彩空间、色调映射算子、曝光是否可声明与可选 | ACES / Reinhard / 线性三档可选（第 129 轮），曝光可调；README 新增色彩约定；**仍缺**可配置输出色彩空间/ICC 与输入贴图色彩空间元数据 | **低（文档）+ 中（可选算子）** | 已做：算子可选 + 曝光 + README 声明；待做：输出色彩空间与贴图元数据 |
 | **H2** | **无损往返**：存一次读一次之后场景不变 | **本轮已关闭编辑器侧的主要漏洞**：以前导出会把 `lighting`/`simulate`/`render`/`models`/`probes` 与材质 4 个贴图槽 + 7 个开关静默清零；现在以原文档为底稿，只覆盖编辑器管得着的字段，并有"存→读→再存字节相同"的固定点测试。**仍缺**：导入的 glTF 模型在编辑器里被移动后，位置改动写不回 `models` 引用 | **中** | 已做：固定点测试 + 底稿合并 + 悬空关节/动作清理。待做：模型实例的"位置回写引用"或"展开为 objects"二选一并测试 |
 | **H3** | **可复现构建**：别人拿到 commit 能构建出同样东西 | 无 `rust-toolchain.toml`、CI 未 `--locked`、无 `deny.toml`/SBOM | **低**（本轮做掉大半） | `rust-toolchain.toml` + CI `--locked`（本轮）→ 许可审计与 SBOM 留待下一轮 |
 | **H4** | **真机设备矩阵**：真浏览器/真 GPU 上跑过 | 只有 headless Chrome + SwiftShader（软件光栅）。**第 57 轮之前这一行其实是不成立的**：WebGL2 上编辑器**启动即 panic**（SSAO 读深度、MSAA 多采样纹理两条 GL 不支持的路），而门禁与 CI 都跑在 Vulkan 上 —— "矩阵里有一行"不等于"那一行绿"。现在有一条可复现的真 WebGL2 探针（`tools/probe_webgl2.sh`，判据 = 第一帧已渲染 + 遮罩收起 + 没有 `INDEPENDENT_BLEND`/Cube 启发式日志），且 GL 上会真正降级的能力都有关卡（§12.7）；**仍然全是软件光栅**（llvmpipe / SwiftShader），没有真 GPU 记录 | **中** | 至少一条"真机 WebGPU/真机 WebGL2"人工验证记录 + 一张矩阵表（Chrome/Firefox/Safari × 独显/核显），每行都要有一条能重跑的命令（`tools/probe_webgl2.sh` 是 WebGL2 那行的模板） |
@@ -2904,6 +2904,31 @@ duration=1.0）——数据改了画面会跟着红。
 
 **边界**：默认场景没有关节，所以 F11 探针只验状态不验像素；关节没有可拖 gizmo、
 没有锚点/轴编辑面板、没有角度限位弧线。
+
+### 23.30 色调映射算子可选（第 129 轮）
+
+**做了什么**：
+
+* `Tonemap`（`quench3d_render::Tonemap`）三档：`Aces`（默认，旧行为）、
+  `Reinhard`、`Linear`；`RendererOptions.tonemap` 选择。
+* `post.wgsl` 不再写死 `aces_tonemap(hdr)`，而是按 `params.w` 选
+  ACES / Reinhard / 线性夹取；输入先 `max(x, 0)`，负 HDR 不会翻成白色。
+* 编辑器灯光面板曝光旁边新增算子下拉框，切换立即影响画面；引擎快捷键 `T`
+  按 ACES → Reinhard → 线性 → ACES 循环。
+* README 补“色彩约定”一节：工作空间线性、材质颜色 sRGB→线性、灯光颜色线性、
+  HDR 中间目标、tonemap 后由 sRGB 目标硬件编码一次。
+
+**验证**：
+
+* CPU：`tonemap_operators_have_distinct_stable_curves` 断言三档编码、标签、
+  ACES 对 2.0≈0.915、Reinhard=2/3、线性夹取、NaN/∞→0、负值先夹到 0。
+* **GPU 像素**：`tonemap_operator_selects_the_expected_curve` 对同一 HDR 输入
+  分别渲染三档，中心像素与 CPU 参考公式误差 ≤2 个色阶，且三种结果互不相同。
+* Web 探针 `T`：状态 `tonemap=ACES → Reinhard`，中央视口截图哈希变化。
+* `ui_smoke` 仍通过全部面板与「导出 GLB」（算子下拉框不破坏布局）。
+
+**边界**：没有自定义 LUT/AgX/Filmic；没有输出色彩空间/ICC；贴图仍按 sRGB
+导入，没有 per-texture 色彩空间元数据。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **色调映射算子可选（第 129 轮）**：`Tonemap` 三档 ACES（默认）/Reinhard/线性，
+  编辑器灯光面板切换，`T` 键循环；`post.wgsl` 按 uniform 选曲线。新增 CPU 曲线测试与 GPU
+  像素对照（总测试 786 → 788）。README 补色彩约定。
+
 - **物理关节调试可视化（第 128 轮）**：F11 / 工具栏「关节」开关画锚点、连线与
   铰链/滑块轴；新增 `joint_visuals_report_world_anchors_and_axis` 与
   `joint_debug_lines_draw_anchors_connector_and_axis`（总测试 784 → 786）。
