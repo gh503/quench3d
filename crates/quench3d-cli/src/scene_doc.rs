@@ -2542,6 +2542,10 @@ pub struct RenderDoc {
     /// 是否渲染（false 时只做仿真，不出图）。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 自动 LOD：高面数、非蒙皮网格上传时生成 1/2、1/4 面数两档，按距离切换。
+    /// 缺省 false（保持旧画面/旧显存）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_lod: Option<bool>,
 }
 
 fn default_output() -> PathBuf {
@@ -2569,6 +2573,7 @@ impl Default for RenderDoc {
             msaa: default_msaa(),
             enabled: true,
             outputs: Vec::new(),
+            auto_lod: None,
         }
     }
 }
@@ -7535,7 +7540,7 @@ mod tests {
             "objects": [{"name":"b","shape":{"type":"sphere","radius":0.4},
                          "position":[1,2,3],"body":"dynamic","restitution":0.5}],
             "simulate": {"steps": 60},
-            "render": {"output":"x.png","width":320,"height":240}
+            "render": {"output":"x.png","width":320,"height":240,"auto_lod":true}
         }"#;
         let doc = SceneDoc::from_json(text).unwrap();
         assert!(doc.validate().iter().all(|d| d.severity != Severity::Error));
@@ -7544,6 +7549,7 @@ mod tests {
         assert_eq!(again.objects[0].primary_shape().kind, ShapeKind::Sphere);
         assert_eq!(again.simulate.steps, 60);
         assert_eq!(again.render.output, PathBuf::from("x.png"));
+        assert_eq!(again.render.auto_lod, Some(true), "自动 LOD 开关要往返");
     }
 
     #[test]

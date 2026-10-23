@@ -354,6 +354,8 @@ fn top_bar(
 
             ui.checkbox(&mut engine.renderer.options.grid, "网格");
             ui.checkbox(&mut engine.renderer.options.shadows, "阴影");
+            ui.checkbox(&mut engine.renderer.options.auto_lod, "自动 LOD")
+                .on_hover_text("高面数网格在载入时生成 1/2、1/4 两档；打开后需重新载入场景才作用于已有网格");
             ui.checkbox(&mut engine.debug.joints, "关节")
                 .on_hover_text("画出物理关节的锚点、连线与铰链/滑块轴");
             ui.horizontal(|ui| {

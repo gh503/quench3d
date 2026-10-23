@@ -4288,6 +4288,7 @@ fn run_render_single(
             dof: dof_options(doc),
             shadow_cascades: shadow_cascades(doc),
             shadow_split_lambda: shadow_split_lambda(doc),
+            auto_lod: doc.render.auto_lod.unwrap_or(false),
             ..Default::default()
         },
         ..Default::default()
@@ -4912,6 +4913,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             dof: dof_options(doc),
             shadow_cascades: shadow_cascades(doc),
             shadow_split_lambda: shadow_split_lambda(doc),
+            auto_lod: doc.render.auto_lod.unwrap_or(false),
             ..Default::default()
         },
         ..Default::default()

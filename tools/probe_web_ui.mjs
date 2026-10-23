@@ -211,6 +211,8 @@ async function main() {
   await toggle("色调 T", "t", "KeyT", 84);
   // K 只移动 3D 光标/切轴心；默认选中物可能正好在原点，所以只验状态。
   await toggle("3D 光标 K", "k", "KeyK", 75, false);
+  // O 只切自动 LOD 开关；默认场景都是低模，不会立刻改画面。
+  await toggle("自动 LOD O", "o", "KeyO", 79, false);
   await toggle("暂停 P", "p", "KeyP", 80);
   // Tab 只切相机模式：状态必须变，但不强制中央视口立刻不同。
   await toggle("相机模式 Tab", "Tab", "Tab", 9, false);

@@ -3012,6 +3012,33 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：光标只能手输/`K` 到选中中心，没有“点击放置”与吸附到网格；
 没有独立的光标撤销历史。
 
+### 23.35 自动 LOD（第 134 轮）
+
+**做了什么**：
+
+* `MeshData::simplified(ratio)`：顶点聚类减面。按包围盒切三维格子，同格顶点合并
+  （位置/法线/UV/切线取平均，法线重新归一化），退化/重复三角形丢弃，绕序保持。
+  有蒙皮权重、减面不足 5%、结果为空时返回 `None`。
+* `render.auto_lod`（缺省 false）：上传高面数非蒙皮网格时生成 **1/2、1/4** 两档，
+  存在渲染器私有 `lod_meshes` 里，不占用户网格句柄。
+* 绘制时按**批次合并包围盒**到相机的距离选档：`d > 6R` 用 1/2，`d > 12R` 用 1/4；
+  阴影 pass 仍用原网格。关掉开关立即回全量。
+* 场景格式新增 `render.auto_lod`，CLI `runner`、编辑器载入/写回、schema、
+  编辑器工具栏复选框与 `O` 快捷键同步；`ui_debug=1` 新增 `lod=`。
+* **只在上传时生成**：运行中从 false 切 true 不会给已上传网格补 LOD，需重新载入场景。
+
+**验证**：
+
+* `simplified_reduces_triangles_keeps_winding_and_bounds`：高面数球减面 >20%、
+  法线归一、包围盒不塌；立方体/蒙皮网格返回 `None`。
+* `auto_lod_draws_fewer_triangles_when_far_away`（GPU）：近景 4096 三角形、
+  远景 528，`auto_lod=false` 恢复 4096，远景中心像素非背景。
+* `roundtrip_keeps_meaningful_fields`：`render.auto_lod=true` 往返保留。
+* Web 探针 `O` 断言 `lod=false → true`（默认场景都是低模，不强制画面变化）。
+
+**边界**：没有动画/蒙皮 LOD、逐实例选档、屏幕空间误差或滞回；顶点聚类不保 UV 接缝，
+远处可能出现纹理拉伸；LOD 资源只随 `clear_scene_assets` 释放。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -3074,7 +3101,7 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
 **仍未做**：morph+skin 的 GPU 路径（纯蒙皮已 GPU 化）、离散事件驱动的动画状态机、
-自动 LOD/遮挡剔除、音频/脚本层、Web 摄像头**内置**骨骼推理（外部 JS 注入 2D 骨架已做，见 §23.24）、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
+遮挡剔除、音频/脚本层、Web 摄像头**内置**骨骼推理（外部 JS 注入 2D 骨架已做，见 §23.24）、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---
 

@@ -128,7 +128,7 @@ tools/verify_all.sh
 | 历史 / 模型实例变换 | `cargo test -p quench3d-editor` | 模型组变换写回 |
 | 摄像头协议 / 3D 骨架 | `cargo test -p quench3d-editor --lib camera` | 解析/长度/坐标/线段数量/低可见度 |
 | 多输出 render | `cargo test -p quench3d-cli --test cli_e2e multiple_render_outputs`（真渲染那条需 GPU） | 路径/尺寸/no-clobber/向后兼容 + 真渲染 64×32 / 32×16 两张 PNG 尺寸对得上 |
-| Web 摄像头预览 + 外部 2D/3D 姿态 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动 >500（本次 20323/116000）；2D 注入后 `camera_pose=true`、洋红像素 3932；3D 世界点注入后 `camera_world=true`、视口变化 177 像素；清空后都回 false；**内置推理不做** |
+| Web 摄像头预览 + 外部 2D/3D 姿态 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动 >500（本次 14711/116000）；2D 注入后 `camera_pose=true`、洋红像素 3921；3D 世界点注入后 `camera_world=true`、视口变化 177 像素；清空后都回 false；**内置推理不做** |
 | 深度点云反投影 | `python -m unittest test_camera_mocap.PointCloudTests -v` | 中心像素落主轴、y 向上翻转、近深度 z=-0.3、步长下采样 |
 | 点云读入/绘制 | `cargo test -p quench3d-editor --lib camera` | `latest.points` 长度/布局校验；每点画 3 条十字线段 |
 
@@ -139,7 +139,7 @@ tools/verify_all.sh
 | wasm 构建 + 产物自检 | `tools/build_web.sh web_client`；`node tools/check_web.mjs` | 符号/实例化/内存都在 |
 | WebGL2 启动 | `tools/probe_webgl2.sh` | 第一帧日志 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式 |
 | 线上 Pages 启动 | `tools/probe_deployed.sh [URL]` | HTTP 200 + 线上 wasm 第一帧 + 遮罩收起；网络不通跳过 |
-| Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/T/P 前后 UI 状态与中央视口截图都必须变；F5/F8/F11/K 只断言状态（默认场景可能没有接触/动画/关节），Tab 断言相机模式（Orbit→Fly） |
+| Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/T/P 前后 UI 状态与中央视口截图都必须变；F5/F8/F11/K/O 只断言状态（默认场景可能没有接触/动画/关节），Tab 断言相机模式（Orbit→Fly） |
 | 模型骨骼叠加 | `cargo test -p quench3d --lib model_skeleton` | 三关节链（中间夹一个非关节节点）只产出 root→mid、mid→tip 两条边；叠加层再乘模型世界变换（+10,+2） |
 | 公告板粒子 | `cargo test -p quench3d --lib particle` / `cargo test -p quench3d-cli --lib particles_parse` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-cli --test cli_e2e particle_billboards` / `cargo test -p quench3d-editor --test history particles_survive` | 生成 N 个隐藏代理物体、初速度/重力积分、面向相机、按寿命淡出、到寿命重生（不额外多飞一帧）、非法参数回退；CLI 同相机下中心红色分量比无粒子高 40；编辑器存盘保留 `particles` 且重新载入建出发射器 |
 | 父子同选 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history selected_parent` | 父+子同选时驱动者=父、子不进组；同层旁人仍进组；只选子时驱动者=子 |
@@ -151,6 +151,7 @@ tools/verify_all.sh
 | 框选 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history box_select` / `tools/probe_web_ui.sh` | 只按屏幕中心命中、Shift 追加、空框清空；浏览器 Shift+拖动后 `selected` 从 1 变 7，截图出现选框/选中轮廓 |
 | 多选 + 成组变换 | `cargo test -p quench3d-editor --lib multi_selection` / `--lib group_member` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history` | Shift/Ctrl 加减选、主选中提级、去重；组轴心=选中中心；平移/绕中心旋转/缩放三种增量都作用到附加物体；批量删除/复制后下标与选中正确 |
 | IBL/HDRI 环境光照 | `cargo test -p quench3d-render --lib environment` / `cargo test -p quench3d-cli --test cli_e2e environment_map` | Radiance 平铺/新 RLE/旧 RLE 解码；cubemap 6 面/递减 mip；CLI 有 HDR 时黑球中心亮度和 > 无图 +60（无太阳/环境光，只有 IBL）；缺文件/负强度被 `validate` 拒绝 |
+| 自动 LOD（渲染器） | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test auto_lod` + `cargo test -p quench3d-render --lib simplified` | 高面数球近景 4096 三角形、远景 528；`auto_lod=false` 恢复 4096；聚类网格法线归一、包围盒不塌、低模/蒙皮返回 None |
 | 手工 LOD 距离切换 | `cargo test -p quench3d --lib lods_` | 3 级 LOD：5m 细模、15m 中模、25m 粗模；19m 仍在 20m 阈值的 10% 滞回带内保持粗模，17m 回到中模；注册后只有基础层可见；空/不递增层级被拒绝 |
 | 手工 LOD 场景格式 | `cargo test -p quench3d-cli --lib model_lods_` / `--test cli_e2e scene_model_lods` | `lods[].min_distance` 严格递增校验、动画模型 + LOD 被拒绝、路径存在性检查；CLI 真的装载基础 + 中模 + 粗模并成功 `simulate` |
 | 状态机事件 | `cargo test -p quench3d --lib animator_event` | 事件过渡写在到期的时间过渡之后仍优先；同帧发事件→`dt=0` 切到 jump；事件只消费一次；条件不满足时不切且事件丢弃；未知事件/无监听返回 false |
@@ -181,7 +182,7 @@ tools/probe_web_camera.sh   # Chrome 假摄像头 + ?camera=1，两帧预览必�
 * **动画状态机**：时间/播完过渡之外，第 97 轮加了 `parameters` + `conditions`（浮点输入、6 种比较、与时间条件是“与”），第 98 轮加了 `on_event` 离散事件（优先于到期的时间过渡，事件只消费一次）；编辑器有参数滑杆和事件发送按钮；仍没有参数曲线、事件队列/输入缓冲。
 * **GPU 蒙皮 / 动画混合 / IK**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，**纯蒙皮**走顶点着色器（每顶点最多 4 关节、128 关节 uniform 调色板；`Scene::gpu_skinning=false` 可退回 CPU，带 morph 仍走 CPU）。双 clip 混合、参数/事件驱动状态机、morph target（静态 + `weights` 动画 + 双 clip 插值）、两骨 IK（`models[].ik`）、静态模型手工 LOD 已做；**morph+skin 的 GPU 路径、IK/FK 权重混合、事件队列/输入缓冲、自动 LOD/遮挡剔除**仍未做。
 * **IBL / HDRI**：`lighting.environment_map` 已接入（Radiance HDR / PNG / JPEG，等距柱状，64px 7 级预滤波 cubemap）；没有精确 PMREM/GGX、没有从环境图提取太阳、没有`.exr`。
-* **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除 + 静态模型手工 LOD（`models[].lods`，距离 + 10% 滞回）；没有自动减面、动画模型 LOD 或遮挡剔除。
+* **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除 + 静态模型手工 LOD（`models[].lods`，距离 + 10% 滞回）+ 渲染器自动 LOD（`render.auto_lod`，顶点聚类 1/2、1/4，非蒙皮网格）；没有动画/蒙皮自动 LOD，也没有遮挡剔除。
 * **编辑器多选**：Shift/Ctrl 点选 + 组变换已做；框选、层级抑制（父子同选）、成组复制后的模型引用重建仍未做。
 * **音频、脚本层、贴花、地形、多视口**：没有。
 * **粒子**：CPU 公告板发射器（CLI/场景 JSON）已做；没有 GPU 粒子、软粒子、粒子间排序遮挡、编辑器发射器面板。

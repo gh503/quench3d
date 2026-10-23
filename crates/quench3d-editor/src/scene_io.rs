@@ -222,6 +222,8 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     // 与"写了 []"（显式清空）是两种意思，UI 里删光几盏灯不该顺手把预设补光也清掉。
     lighting.point_lights = point_light_docs(&light.point_lights);
     lighting.spot_lights = spot_light_docs(&light.spot_lights);
+    // 自动 LOD 开关同上：写回 `render.auto_lod`，否则重开场景会退回缺省 false。
+    out.render.auto_lod = Some(engine.renderer.options.auto_lod);
     // 后处理：编辑器现在能改（UI 直接改 `engine.renderer.options`），所以从引擎写回。
     // 以前这三项是"沿用底稿"——在编辑器里勾掉 FXAA，存盘却还是开着的。
     let opts = &engine.renderer.options;
@@ -889,6 +891,8 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     // 场景的显存再占一遍，而新场景的句柄从 0 开始，旧批次还可能引用同号资源。
     // 先清渲染器资源，再用空的 AssetCache 重建内置图元。
     engine.renderer.clear_scene_assets();
+    // 自动 LOD 必须在上传模型**之前**定下来：LOD 是 `add_mesh*` 时生成的。
+    engine.renderer.options.auto_lod = doc.render.auto_lod.unwrap_or(false);
     engine.assets = quench3d::AssetCache::new(&mut engine.renderer, &engine.gpu);
     engine.world = build.world;
     let instances =

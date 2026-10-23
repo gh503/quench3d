@@ -381,6 +381,7 @@ impl Inner {
             paused: self.engine.paused,
             grid: self.engine.renderer.options.grid,
             shadows: self.engine.renderer.options.shadows,
+            lod: self.engine.renderer.options.auto_lod,
             shadow_instances: self.engine.renderer.stats().shadow_instances,
             shadow_strength: self.engine.scene.lighting.shadow_strength,
             sun_cast: self
@@ -847,6 +848,8 @@ struct UiDebugState {
     paused: bool,
     grid: bool,
     shadows: bool,
+    /// 自动 LOD 开关（只影响之后上传的网格；用于 UI 状态对账）。
+    lod: bool,
     shadow_instances: u32,
     shadow_strength: f32,
     sun_cast: bool,
@@ -882,6 +885,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         paused,
         grid,
         shadows,
+        lod,
         shadow_instances,
         shadow_strength,
         sun_cast,
@@ -914,7 +918,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }

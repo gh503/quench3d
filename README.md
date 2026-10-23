@@ -170,7 +170,9 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   `[{ "path": "tree_low.glb", "min_distance": 25 }]`。基础模型用到第一个距离，之后每层
   用到下一层距离；所有层共用同一个位置/朝向/缩放。引擎每帧按相机距离切可见层级，
   阈值旁有 **10% 滞回**，不会在边界来回弹。边界：只支持**静态模型**（不能同时写
-  `animation` / `animator` / `ik`），碰撞仍用基础模型；没有自动减面/自动生成 LOD。
+  `animation` / `animator` / `ik`），碰撞仍用基础模型。另有**渲染器级自动 LOD**
+  （`render.auto_lod`）：高面数、非蒙皮网格在上传时用顶点聚类生成 1/2、1/4 两档，
+  按批次包围盒到相机的距离切换；蒙皮/动画网格不自动生成。
 * **两骨 IK（脚/手目标）**：场景里用 `models[].ik` 给角色加链：
   `{ "root": "LeftUpLeg", "mid": "LeftLeg", "tip": "LeftFoot", "target": [x,y,z], "pole": [0,0,1] }`。
   按 glTF 节点名引用，目标与极向量都在**模型局部空间**；每帧采样动画后解两骨三角形，
@@ -198,7 +200,7 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   这个格式里 `scale` 就是图元尺寸（`shape.size` 折算而来），乘法继承会让"挂在大地板下的树"
   被压成一块饼；带刚体的物体不能有父物体（它的位姿由物理决定，校验器与引擎都会拒绝）。
 * **相机**：环绕相机由编辑器接管（`Engine::auto_camera = false`），`Tab` 仍可切到自由飞行；
-  其余引擎内置快捷键照旧（`R` 对准场景、`F3`/`F4` 网格/阴影、`F5`~`F8` 与 `F11` 调试、`T` 循环色调映射、`K` 3D 光标、`P` 暂停、`Esc` 退出）；
+  其余引擎内置快捷键照旧（`R` 对准场景、`F3`/`F4` 网格/阴影、`F5`~`F8` 与 `F11` 调试、`T` 循环色调映射、`K` 3D 光标、`O` 自动 LOD、`P` 暂停、`Esc` 退出）；
   **例外**：轨道相机下 `W`/`E`/`R`/`L` 归变换手柄（飞行相机下它们仍归相机与引擎）；
   在输入框里打字时这些快捷键自动让位（`egui_wants_keyboard_input`）。
 * **一帧是怎么拼出来的**：先跑界面（egui）→ 拿到这一帧的交互 → `Engine::tick` 推进物理与提交绘制 →
@@ -269,7 +271,7 @@ python3 -m http.server 8000 --directory web
 （自检探针要用）、egui 与内嵌的中文子集字体。
 比物理示例包（5.4 MB）大了一倍，多出来的主要就是 egui 这一套 + 字体 + 模型解析。
 真要压体积：加一步 `wasm-opt -Oz`、把自检探针从发布包里去掉，或者只保留必需特性。
-浏览器里 `Esc` 退出、`Tab` 切换相机、`F3`~`F8` 与 `F11` 是调试开关、`T` 循环色调映射、`K` 3D 光标，和桌面端完全一致。
+浏览器里 `Esc` 退出、`Tab` 切换相机、`F3`~`F8` 与 `F11` 是调试开关、`T` 循环色调映射、`K` 3D 光标、`O` 自动 LOD，和桌面端完全一致。
 
 #### 后端怎么选（WebGPU → WebGL2 回退）
 
@@ -638,7 +640,7 @@ if engine.input.mouse_button_pressed(MouseButton::Left) {
 ```
 
 内置快捷键：`Tab` 切相机、`R` 对准场景、`F3` 网格、`F4` 阴影、`F5` 接触点、
-`F6` 包围盒、`F7` 查询探针、`F8` 模型骨骼、`F11` 关节、`T` 循环色调映射、`K` 3D 光标到选中中心、`P` 暂停、`Esc` 退出。
+`F6` 包围盒、`F7` 查询探针、`F8` 模型骨骼、`F11` 关节、`T` 循环色调映射、`K` 3D 光标到选中中心、`O` 自动 LOD、`P` 暂停、`Esc` 退出。
 
 ### 3.5 截图 / 离屏渲染
 
@@ -656,6 +658,7 @@ quench3d::write_png(&image, "out.png")?;
 | --- | --- |
 | 着色 | 前向 Cook–Torrance PBR（金属度/粗糙度）、法线贴图、指数雾；物体写**线性 HDR** |
 | 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一色调映射（ACES / Reinhard / 线性三档，**只此一处**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`）。**GL/WebGL2 上 SSAO 与深度解析按能力整体关闭**（naga 的 GLSL 后端不支持读深度纹理，见 [production_readiness §12.7](docs/production_readiness.md)）；tonemap / bloom / FXAA 不受影响 |
+| LOD | 静态高模自动生成 1/2、1/4 两档（`render.auto_lod`，顶点聚类，非蒙皮），按批次包围盒距离切换；手工 `models[].lods` 仍可用；`O` 开关。蒙皮/动画网格不自动生成，无遮挡剔除 |
 | 阴影 | 太阳：单张（级联时 2×2 图集）`Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段，主 pass 按视空间深度选级。**局部光阴影**：`SpotLight.cast_shadows`（一张透视 2D 深度图，视锥 = 外锥角）与 `PointLight.cast_shadows`（**立方体阴影**：`texture_depth_2d_array` 6 层，每层 90°，面选择 + 面内 uv 是 CPU 纯函数、WGSL 逐字镜像，靠"公式 == 矩阵"的 CPU 测试保证两边一致）；两者**各自整帧只支持一盏**（第一盏要求投影的），缺点都是缺省 `false`（老场景像素逐位不变），两套图互相独立 |
 | 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **IBL 环境贴图**（`lighting.environment_map`，等距柱状 HDR/PNG/JPEG → 64px 7 级预滤波 cubemap，按粗糙度采样）或解析式环境高光（不写贴图时；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。IBL 没有精确 PMREM/GGX、没有屏幕空间反射 |
 | 天空/地面 | 全屏三角形程序化天空（三个渐变颜色可从 `lighting.sky_colors` 调）+ 解析无限网格（`fwidth` 抗锯齿 + 深度写入） |

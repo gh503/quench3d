@@ -394,6 +394,8 @@ struct GpuMesh {
     index_count: u32,
     bounds: Aabb,
     name: String,
+    /// 自动 LOD 的低模句柄（`lod_meshes` 下标）；空 = 没有可用 LOD。
+    auto_lod: Vec<usize>,
 }
 
 /// GPU 材质。
@@ -748,6 +750,12 @@ pub struct RendererOptions {
     pub dof: DofOptions,
     /// 色调映射算子（缺省 ACES，保持旧行为）。
     pub tonemap: Tonemap,
+    /// 自动 LOD（缺省关闭）：高面数、非蒙皮网格在**上传时**生成 1/2、1/4 两档；
+    /// 绘制时按批次包围盒与相机的距离选档。关闭时逐像素与旧行为一致。
+    ///
+    /// 注意：只在 `add_mesh*` 时生成，运行中把开关从 false 改成 true 不会给
+    /// 已上传的网格补 LOD；需要重新载入场景。
+    pub auto_lod: bool,
 }
 
 impl Default for RendererOptions {
@@ -767,7 +775,30 @@ impl Default for RendererOptions {
             environment: true,
             dof: DofOptions::default(),
             tonemap: Tonemap::default(),
+            auto_lod: false,
         }
+    }
+}
+
+/// 把一个 CPU 网格上传成 GPU 网格（含空 `auto_lod`）。
+fn upload_gpu_mesh(device: &wgpu::Device, mesh: &MeshData, name: &str) -> GpuMesh {
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("quench3d-vertices"),
+        contents: bytemuck::cast_slice(&mesh.vertices),
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("quench3d-indices"),
+        contents: bytemuck::cast_slice(&mesh.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    GpuMesh {
+        vertex_buffer,
+        index_buffer,
+        index_count: mesh.indices.len() as u32,
+        bounds: mesh.aabb(),
+        name: name.to_string(),
+        auto_lod: Vec::new(),
     }
 }
 
@@ -871,6 +902,8 @@ pub struct Renderer {
 
     // 资源表
     meshes: Vec<GpuMesh>,
+    /// 自动 LOD 的 GPU 网格（不占用户句柄空间）。
+    lod_meshes: Vec<GpuMesh>,
     materials: Vec<GpuMaterial>,
     textures: Vec<GpuTexture>,
     /// 环境贴图 IBL 的固定 cubemap（换图只覆写内容）；无图时全黑，shader 走解析式天空。
@@ -2049,6 +2082,7 @@ impl Renderer {
             shadow_frame_bind_groups,
             shadow_tile_size,
             meshes: Vec::new(),
+            lod_meshes: Vec::new(),
             materials: Vec::new(),
             textures: Vec::new(),
             environment_texture,
@@ -2169,6 +2203,7 @@ impl Renderer {
     /// 内置的默认贴图（白/平法线/黑）保留，它们不占用户句柄空间。
     pub fn clear_scene_assets(&mut self) {
         self.meshes.clear();
+        self.lod_meshes.clear();
         self.materials.clear();
         self.textures.clear();
         self.staging.clear();
@@ -2185,6 +2220,38 @@ impl Renderer {
         self.meshes.len()
     }
 
+    /// 按批次包围盒到相机的距离选 LOD；没有 LOD 时返回原网格。
+    ///
+    /// 阈值用**包围盒半径**做尺度：距离 > 6R 时 1/2 面数，> 12R 时 1/4 面数。
+    /// 用批次的合并包围盒而不是逐实例，避免一个 instancing 批次被拆成三次绘制。
+    fn mesh_for_batch(
+        &self,
+        mesh: MeshId,
+        bounds: &Aabb,
+        camera_position: Vec3,
+    ) -> Option<&GpuMesh> {
+        let base = self.meshes.get(mesh as usize)?;
+        if !self.options.auto_lod || base.auto_lod.is_empty() {
+            return Some(base);
+        }
+        let radius = (bounds.size().length() * 0.5).max(0.25);
+        let distance = (bounds.center() - camera_position).length();
+        let level: usize = if distance > radius * 12.0 {
+            2
+        } else if distance > radius * 6.0 {
+            1
+        } else {
+            0
+        };
+        if level == 0 {
+            return Some(base);
+        }
+        base.auto_lod
+            .get(level - 1)
+            .and_then(|i| self.lod_meshes.get(*i))
+            .or(Some(base))
+    }
+
     /// 已上传的用户材质数量（测试/诊断用）。
     pub fn material_count(&self) -> usize {
         self.materials.len()
@@ -2197,25 +2264,30 @@ impl Renderer {
 
     /// 上传网格并命名（调试用）。
     pub fn add_mesh_named(&mut self, ctx: &GpuContext, mesh: &MeshData, name: &str) -> MeshId {
-        let device = &ctx.device;
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("quench3d-vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("quench3d-indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
         let id = self.meshes.len() as MeshId;
-        self.meshes.push(GpuMesh {
-            vertex_buffer,
-            index_buffer,
-            index_count: mesh.indices.len() as u32,
-            bounds: mesh.aabb(),
-            name: name.to_string(),
-        });
+        self.meshes.push(upload_gpu_mesh(&ctx.device, mesh, name));
+        if self.options.auto_lod && mesh.triangle_count() >= 500 {
+            let mut levels = Vec::new();
+            let mut previous = mesh.triangle_count();
+            for ratio in [0.5f32, 0.25] {
+                let Some(coarse) = mesh.simplified(ratio) else {
+                    break;
+                };
+                // 更粗的一档必须真的更少，否则远距离反而更贵。
+                if coarse.triangle_count() >= previous {
+                    break;
+                }
+                previous = coarse.triangle_count();
+                let index = self.lod_meshes.len();
+                self.lod_meshes.push(upload_gpu_mesh(
+                    &ctx.device,
+                    &coarse,
+                    &format!("{name}-lod{}", levels.len() + 1),
+                ));
+                levels.push(index);
+            }
+            self.meshes[id as usize].auto_lod = levels;
+        }
         id
     }
 
@@ -3571,8 +3643,9 @@ impl Renderer {
                 if count == 0 {
                     continue;
                 }
+                let bounds = self.batches[batch_index].bounds;
                 let (Some(gm), Some(gmat)) = (
-                    self.meshes.get(mesh as usize),
+                    self.mesh_for_batch(mesh, &bounds, camera.position),
                     self.materials.get(material as usize),
                 ) else {
                     continue;
@@ -3602,8 +3675,13 @@ impl Renderer {
             // 透明物体：全局由远到近，逐实例画。不能合批——一旦把两个透明批次
             // 分别 instancing，批次之间的前后关系就丢了（玻璃叠玻璃会闪）。
             for &(_, material, mesh, instance_index) in &alpha_draws {
+                let bounds = self
+                    .staging
+                    .get(instance_index as usize)
+                    .map(|(_, b)| *b)
+                    .unwrap_or(Aabb::EMPTY);
                 let (Some(gm), Some(gmat)) = (
-                    self.meshes.get(mesh as usize),
+                    self.mesh_for_batch(mesh, &bounds, camera.position),
                     self.materials.get(material as usize),
                 ) else {
                     continue;

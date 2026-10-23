@@ -6,6 +6,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use quench3d_math::{Aabb, Mat4, Vec2, Vec3};
+use std::collections::{HashMap, HashSet};
 
 /// 顶点格式（位置 / 法线 / UV / 切线）。与着色器中的 `VertexInput` 一一对应。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -121,6 +122,137 @@ impl MeshData {
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&other.vertices);
         self.indices.extend(other.indices.iter().map(|i| i + base));
+    }
+
+    /// 顶点聚类简化（自动 LOD 用）：把包围盒切成网格，落在同一格的顶点合并。
+    ///
+    /// * `ratio` 是**目标顶点比例**（0<ratio<1），实际减面量由聚类结果决定；
+    /// * 有蒙皮权重（`weights` 非全 0）的网格直接返回 `None`——聚类会把关节打断；
+    /// * 退化三角形与重复三角形被丢弃，绕序保持不变；
+    /// * 减面不到 5% 或结果为空时返回 `None`（不值得为它多存一份 GPU 资源）。
+    ///
+    /// 这是**离线式**简化，不在每一帧跑；法线/UV/切线取簇内平均（法线重新归一化）。
+    pub fn simplified(&self, ratio: f32) -> Option<MeshData> {
+        if self.is_empty() || !ratio.is_finite() || ratio <= 0.0 || ratio >= 1.0 {
+            return None;
+        }
+        if self
+            .vertices
+            .iter()
+            .any(|v| v.weights.iter().any(|w| *w > 0.0))
+        {
+            return None;
+        }
+        let bounds = self.aabb();
+        if bounds == Aabb::EMPTY {
+            return None;
+        }
+        let size = bounds.size();
+        let max_extent = size.x.max(size.y).max(size.z);
+        if !max_extent.is_finite() || max_extent <= 1e-6 {
+            return None;
+        }
+        let target_vertices = ((self.vertices.len() as f32 * ratio).ceil() as usize).max(8);
+        // 立方根：三维网格每轴 n 格时，表面上的簇数大致与 n² 同阶；这个估计只用于选格子大小。
+        let n = (target_vertices as f32).cbrt().clamp(2.0, 96.0);
+        let cell = max_extent / n;
+        if !cell.is_finite() || cell <= 1e-9 {
+            return None;
+        }
+
+        #[derive(Clone, Copy)]
+        struct Accum {
+            position: Vec3,
+            normal: Vec3,
+            uv: Vec2,
+            tangent: [f32; 4],
+            count: f32,
+        }
+        let mut clusters: HashMap<[i32; 3], u32> = HashMap::new();
+        let mut accum: Vec<Accum> = Vec::new();
+        let mut remap = Vec::with_capacity(self.vertices.len());
+        for v in &self.vertices {
+            let p = v.pos();
+            let key = [
+                ((p.x - bounds.min.x) / cell).floor() as i32,
+                ((p.y - bounds.min.y) / cell).floor() as i32,
+                ((p.z - bounds.min.z) / cell).floor() as i32,
+            ];
+            let index = *clusters.entry(key).or_insert_with(|| {
+                accum.push(Accum {
+                    position: Vec3::ZERO,
+                    normal: Vec3::ZERO,
+                    uv: Vec2::ZERO,
+                    tangent: [0.0; 4],
+                    count: 0.0,
+                });
+                (accum.len() - 1) as u32
+            });
+            let a = &mut accum[index as usize];
+            a.position += p;
+            a.normal += v.nrm();
+            a.uv += Vec2::new(v.uv[0], v.uv[1]);
+            for (dst, src) in a.tangent.iter_mut().zip(v.tangent) {
+                *dst += src;
+            }
+            a.count += 1.0;
+            remap.push(index);
+        }
+        let vertices: Vec<Vertex> = accum
+            .iter()
+            .map(|a| {
+                let inv = 1.0 / a.count.max(1.0);
+                let normal = a.normal.normalize_or_zero();
+                Vertex {
+                    position: (a.position * inv).to_array(),
+                    normal: if normal == Vec3::ZERO {
+                        Vec3::Y.to_array()
+                    } else {
+                        normal.to_array()
+                    },
+                    uv: (a.uv * inv).to_array(),
+                    tangent: [
+                        a.tangent[0] * inv,
+                        a.tangent[1] * inv,
+                        a.tangent[2] * inv,
+                        1.0,
+                    ],
+                    joints: [0; 4],
+                    weights: [0.0; 4],
+                }
+            })
+            .collect();
+
+        let mut indices = Vec::with_capacity(self.indices.len());
+        let mut seen: HashSet<[u32; 3]> = HashSet::new();
+        for tri in self.indices.as_chunks::<3>().0 {
+            let Some(&a) = remap.get(tri[0] as usize) else {
+                continue;
+            };
+            let Some(&b) = remap.get(tri[1] as usize) else {
+                continue;
+            };
+            let Some(&c) = remap.get(tri[2] as usize) else {
+                continue;
+            };
+            if a == b || b == c || a == c {
+                continue;
+            }
+            let mut key = [a, b, c];
+            key.sort_unstable();
+            if !seen.insert(key) {
+                continue;
+            }
+            indices.extend_from_slice(&[a, b, c]);
+        }
+        if indices.len() < 12 {
+            return None;
+        }
+        // 减少不到 5%：不如直接用原网格，避免多一份资源却没有收益。
+        if (indices.len() as f32) > (self.indices.len() as f32) * 0.95 {
+            return None;
+        }
+        Some(MeshData { vertices, indices })
     }
 
     /// 翻转所有三角形绕序（配合 `cull_mode` 可用于内表面）。
@@ -853,6 +985,42 @@ mod tests {
             // 立方体的每个面法线必须是 ±X / ±Y / ±Z
             assert!(v.nrm().abs().max_element() > 0.999, "面法线应轴对齐");
         }
+    }
+
+    #[test]
+    fn simplified_reduces_triangles_keeps_winding_and_bounds() {
+        let mesh = MeshData::sphere(1.0, 48, 24);
+        let before = mesh.triangle_count();
+        let coarse = mesh.simplified(0.5).expect("高面数球应当能简化");
+        let after = coarse.triangle_count();
+        assert!(after > 4, "简化后至少要有几个三角形：{after}");
+        assert!(
+            after < before * 4 / 5,
+            "简化不足 20% 不值得做 LOD：{before} → {after}"
+        );
+        assert!(coarse.vertices.len() < mesh.vertices.len());
+        assert!(coarse
+            .indices
+            .iter()
+            .all(|i| (*i as usize) < coarse.vertices.len()));
+        for v in &coarse.vertices {
+            assert!(
+                (v.nrm().length() - 1.0).abs() < 1e-4,
+                "简化后的法线必须归一化：{:?}",
+                v.nrm()
+            );
+        }
+        let b = coarse.aabb();
+        assert!(
+            (b.size().x - 2.0).abs() < 0.35 && (b.size().y - 2.0).abs() < 0.35,
+            "简化后的包围盒不应塌掉：{:?}",
+            b.size()
+        );
+        // 低面数/蒙皮网格不生成 LOD。
+        assert!(MeshData::cube(1.0).simplified(0.5).is_none());
+        let mut skinned = mesh.clone();
+        skinned.vertices[0].weights = [1.0, 0.0, 0.0, 0.0];
+        assert!(skinned.simplified(0.5).is_none(), "蒙皮网格不能聚类简化");
     }
 
     #[test]

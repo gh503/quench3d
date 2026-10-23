@@ -437,6 +437,9 @@ impl Engine {
         if self.input.key_pressed(KeyCode::KeyT) {
             self.renderer.options.tonemap = self.renderer.options.tonemap.next();
         }
+        if self.input.key_pressed(KeyCode::KeyO) {
+            self.renderer.options.auto_lod = !self.renderer.options.auto_lod;
+        }
         if self.input.key_pressed(KeyCode::KeyP) {
             self.paused = !self.paused;
         }
