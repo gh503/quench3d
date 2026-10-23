@@ -198,7 +198,7 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   这个格式里 `scale` 就是图元尺寸（`shape.size` 折算而来），乘法继承会让"挂在大地板下的树"
   被压成一块饼；带刚体的物体不能有父物体（它的位姿由物理决定，校验器与引擎都会拒绝）。
 * **相机**：环绕相机由编辑器接管（`Engine::auto_camera = false`），`Tab` 仍可切到自由飞行；
-  其余引擎内置快捷键照旧（`R` 对准场景、`F3`/`F4` 网格/阴影、`F5`~`F8` 调试、`P` 暂停、`Esc` 退出）；
+  其余引擎内置快捷键照旧（`R` 对准场景、`F3`/`F4` 网格/阴影、`F5`~`F8` 与 `F11` 调试、`P` 暂停、`Esc` 退出）；
   **例外**：轨道相机下 `W`/`E`/`R`/`L` 归变换手柄（飞行相机下它们仍归相机与引擎）；
   在输入框里打字时这些快捷键自动让位（`egui_wants_keyboard_input`）。
 * **一帧是怎么拼出来的**：先跑界面（egui）→ 拿到这一帧的交互 → `Engine::tick` 推进物理与提交绘制 →
@@ -261,13 +261,13 @@ python3 -m http.server 8000 --directory web
 > export CARGO_HOME=<infra-dev>/.cargo-home
 > ```
 
-产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12867844 字节；release、
+产物 `web/pkg/quench3d_web_bg.wasm` 约 **12 MB**（`tools/gate.sh` 实测 12867864 字节；release、
 `lto=thin`、`opt-level=3`、已 strip 调试信息；胶水 `quench3d_web.js` 约 144 KB）。
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
 比物理示例包（5.4 MB）大了一倍，多出来的主要就是 egui 这一套 + 字体 + 模型解析。
 真要压体积：加一步 `wasm-opt -Oz`、把自检探针从发布包里去掉，或者只保留必需特性。
-浏览器里 `Esc` 退出、`Tab` 切换相机、`F3`~`F8` 是调试开关，和桌面端完全一致。
+浏览器里 `Esc` 退出、`Tab` 切换相机、`F3`~`F8` 与 `F11` 是调试开关，和桌面端完全一致。
 
 #### 后端怎么选（WebGPU → WebGL2 回退）
 
@@ -636,7 +636,7 @@ if engine.input.mouse_button_pressed(MouseButton::Left) {
 ```
 
 内置快捷键：`Tab` 切相机、`R` 对准场景、`F3` 网格、`F4` 阴影、`F5` 接触点、
-`F6` 包围盒、`F7` 查询探针、`F8` 模型骨骼、`P` 暂停、`Esc` 退出。
+`F6` 包围盒、`F7` 查询探针、`F8` 模型骨骼、`F11` 关节、`P` 暂停、`Esc` 退出。
 
 ### 3.5 截图 / 离屏渲染
 
@@ -1337,7 +1337,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 784 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 786 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

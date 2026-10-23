@@ -330,6 +330,8 @@ fn top_bar(
 
             ui.checkbox(&mut engine.renderer.options.grid, "网格");
             ui.checkbox(&mut engine.renderer.options.shadows, "阴影");
+            ui.checkbox(&mut engine.debug.joints, "关节")
+                .on_hover_text("画出物理关节的锚点、连线与铰链/滑块轴");
             ui.horizontal(|ui| {
                 ui.label("级联");
                 ui.add(

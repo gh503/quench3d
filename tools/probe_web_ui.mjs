@@ -205,6 +205,8 @@ async function main() {
   await toggle("查询探针 F7", "F7", "F7", 118);
   // F8 只在有播放模型时画骨头；默认场景没有动画，只验状态切换。
   await toggle("骨骼 F8", "F8", "F8", 119, false);
+  // 默认场景没有关节，F11 只验状态切换；线段绘制有 Rust 单测。
+  await toggle("关节 F11", "F11", "F11", 122, false);
   await toggle("暂停 P", "p", "KeyP", 80);
   // Tab 只切相机模式：状态必须变，但不强制中央视口立刻不同。
   await toggle("相机模式 Tab", "Tab", "Tab", 9, false);

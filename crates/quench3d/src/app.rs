@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use quench3d_math::{Transform, Vec2, Vec3, Vec4};
-use quench3d_physics::{BodyHandle, PhysicsWorld};
+use quench3d_physics::{BodyHandle, JointVisual, PhysicsWorld};
 use quench3d_render::{
     Camera, FlyCamera, FrameError, GpuContext, GpuOptions, Lighting, OrbitCamera, RenderStats,
     Renderer, RendererOptions,
@@ -86,6 +86,8 @@ pub struct DebugOptions {
     pub query_probe: bool,
     /// 画出播放中模型的骨骼线段（父关节 → 子关节）。
     pub bones: bool,
+    /// 画出物理关节的两端锚点、连线与铰链/滑块轴。
+    pub joints: bool,
     /// 是否启用（总开关）。
     pub enabled: bool,
 }
@@ -99,6 +101,7 @@ impl Default for DebugOptions {
             body_bounds: false,
             query_probe: false,
             bones: false,
+            joints: false,
             enabled: true,
         }
     }
@@ -106,6 +109,23 @@ impl Default for DebugOptions {
 
 /// 查询探针的最远距离（米）。
 pub const QUERY_PROBE_MAX: f32 = 500.0;
+
+/// 把关节可视化转成调试线段（纯函数，便于测试）。
+fn push_joint_debug_lines(lines: &mut quench3d_render::DebugLines, joints: &[JointVisual]) {
+    for joint in joints {
+        lines.line(joint.a, joint.b, Vec4::new(0.25, 0.9, 0.95, 1.0));
+        lines.contact_point(joint.a, Vec3::Y, 0.06, Vec4::new(1.0, 0.75, 0.15, 1.0));
+        lines.contact_point(joint.b, Vec3::Y, 0.06, Vec4::new(1.0, 0.75, 0.15, 1.0));
+        if let Some(axis) = joint.axis {
+            let mid = (joint.a + joint.b) * 0.5;
+            lines.line(
+                mid,
+                mid + axis.normalize_or_zero() * 0.35,
+                Vec4::new(1.0, 0.3, 1.0, 1.0),
+            );
+        }
+    }
+}
 
 /// 相机中心射线的最近命中（编辑器 F7 的查询探针；纯函数，便于离线测试）。
 pub fn center_probe(
@@ -411,6 +431,9 @@ impl Engine {
         if self.input.key_pressed(KeyCode::F8) {
             self.debug.bones = !self.debug.bones;
         }
+        if self.input.key_pressed(KeyCode::F11) {
+            self.debug.joints = !self.debug.joints;
+        }
         if self.input.key_pressed(KeyCode::KeyP) {
             self.paused = !self.paused;
         }
@@ -433,6 +456,11 @@ impl Engine {
         } else {
             Vec::new()
         };
+        let joint_visuals = if self.debug.joints {
+            self.world.joint_visuals()
+        } else {
+            Vec::new()
+        };
         let probe = if self.debug.query_probe {
             let camera = self.camera();
             let ray = camera.ndc_ray(Vec2::ZERO);
@@ -448,6 +476,7 @@ impl Engine {
             lines.line(a, b, Vec4::new(0.2, 0.95, 0.85, 0.95));
             lines.contact_point(a, Vec3::Y, 0.025, Vec4::new(1.0, 0.85, 0.2, 0.9));
         }
+        push_joint_debug_lines(lines, &joint_visuals);
         if self.debug.physics_contacts {
             for c in self.world.contacts() {
                 // 传感器（触发区）的接触不是真的"碰上"：用青色区分，免得看着像穿了模
@@ -1599,5 +1628,25 @@ mod tests {
         assert_eq!(frames, 20, "暂停时仍然渲染，帧计数要继续走");
         assert!((last_dt - 0.1).abs() < 1e-6);
         assert!((fps - 10.0).abs() < 1e-3, "fps 描述渲染开销，暂停时也更新");
+    }
+    #[test]
+    fn joint_debug_lines_draw_anchors_connector_and_axis() {
+        let mut lines = quench3d_render::DebugLines::new();
+        let a = Vec3::new(1.0, 2.0, 0.0);
+        let b = Vec3::new(3.0, 2.0, 0.0);
+        push_joint_debug_lines(
+            &mut lines,
+            &[JointVisual {
+                a,
+                b,
+                axis: Some(Vec3::Z),
+            }],
+        );
+        assert!(lines.line_count() >= 4, "锚点 + 连线 + 轴应当至少 4 条线");
+        assert_eq!(lines.vertices[0].position, a.to_array());
+        assert_eq!(lines.vertices[1].position, b.to_array());
+        let last = &lines.vertices[lines.vertices.len() - 1];
+        let mid = (a + b) * 0.5;
+        assert_eq!(last.position, (mid + Vec3::Z * 0.35).to_array());
     }
 }

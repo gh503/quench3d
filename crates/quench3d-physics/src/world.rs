@@ -268,6 +268,17 @@ pub struct PhysicsEvent {
     pub torque: f32,
 }
 
+/// 一个关节的可视化信息（世界坐标）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointVisual {
+    /// A 端锚点的世界位置。
+    pub a: Vec3,
+    /// B 端锚点的世界位置。
+    pub b: Vec3,
+    /// 铰链/滑块的轴（世界方向）；其它关节为 `None`。
+    pub axis: Option<Vec3>,
+}
+
 pub struct PhysicsWorld {
     bodies: Vec<BodySlot>,
     free: Vec<u32>,
@@ -776,6 +787,36 @@ impl PhysicsWorld {
     /// 关节数量。
     pub fn joint_count(&self) -> usize {
         self.joints.iter().filter(|s| s.joint.is_some()).count()
+    }
+
+    /// 每个关节两端的**世界**锚点与轴，给编辑器画调试线用。
+    ///
+    /// 返回的是当前刚体姿态下的值；关节被删除/刚体不存在时跳过，顺序与插入顺序一致。
+    pub fn joint_visuals(&self) -> Vec<JointVisual> {
+        let mut out = Vec::with_capacity(self.joint_count());
+        for slot in &self.joints {
+            let Some(joint) = slot.joint.as_ref() else {
+                continue;
+            };
+            let (ha, hb) = joint.bodies();
+            let (Some(a), Some(b)) = (self.body(ha), self.body(hb)) else {
+                continue;
+            };
+            let a_anchor = a.position() + a.rotation() * joint.local_anchor_a();
+            let b_anchor = b.position() + b.rotation() * joint.local_anchor_b();
+            let axis = match joint {
+                Joint::Hinge { local_axis_a, .. } | Joint::Slider { local_axis_a, .. } => {
+                    Some(a.rotation() * *local_axis_a)
+                }
+                _ => None,
+            };
+            out.push(JointVisual {
+                a: a_anchor,
+                b: b_anchor,
+                axis,
+            });
+        }
+        out
     }
 
     /// 设置关节的断裂阈值（`None` = 那一项不断）。
@@ -2173,5 +2214,39 @@ mod tests {
         assert!(w.remove_joint(j));
         assert!(!w.remove_joint(j), "重复删除应失败");
         assert_eq!(w.joint_count(), 0);
+    }
+
+    #[test]
+    fn joint_visuals_report_world_anchors_and_axis() {
+        let mut w = PhysicsWorld::new();
+        let a = w.add_body(
+            BodyBuilder::r#static(sphere(0.5))
+                .position(Vec3::new(1.0, 0.0, 0.0))
+                .build(),
+        );
+        let b = w.add_body(
+            BodyBuilder::dynamic(sphere(0.5))
+                .position(Vec3::new(3.0, 0.0, 0.0))
+                .build(),
+        );
+        w.add_joint(Joint::Hinge {
+            a,
+            b,
+            local_anchor_a: Vec3::new(0.5, 0.0, 0.0),
+            local_anchor_b: Vec3::new(-0.5, 0.0, 0.0),
+            local_axis_a: Vec3::Z,
+            local_axis_b: Vec3::Z,
+            limits: None,
+            motor: None,
+        });
+        let visuals = w.joint_visuals();
+        assert_eq!(visuals.len(), 1);
+        assert!((visuals[0].a - Vec3::new(1.5, 0.0, 0.0)).length() < 1e-6);
+        assert!((visuals[0].b - Vec3::new(2.5, 0.0, 0.0)).length() < 1e-6);
+        assert!((visuals[0].axis.unwrap_or(Vec3::ZERO) - Vec3::Z).length() < 1e-6);
+
+        // 删除刚体后不返回悬空关节。
+        w.remove_body(b);
+        assert!(w.joint_visuals().is_empty());
     }
 }

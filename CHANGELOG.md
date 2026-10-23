@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **物理关节调试可视化（第 128 轮）**：F11 / 工具栏「关节」开关画锚点、连线与
+  铰链/滑块轴；新增 `joint_visuals_report_world_anchors_and_axis` 与
+  `joint_debug_lines_draw_anchors_connector_and_axis`（总测试 784 → 786）。
+
 - **gizmo 轴心切换（第 127 轮）**：旋转/缩放可选物体原点、选中中心（默认）、世界原点，
   工具栏下拉框即时切换；`pivot_labels_cover_all_choices` 断言三档与求值，`ui_smoke`
   断言「选中中心」可见。测试总数 783 → 784。
