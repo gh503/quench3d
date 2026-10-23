@@ -474,7 +474,7 @@ pub fn scene_grammar() -> Value {
             "friction": "参与碰撞时的摩擦，缺省 0.8",
             "morph_weights": "手工覆盖 glTF morph target 的权重数组（0~1，按 target 顺序；缺省用资产默认值，缺项按 0）；写了它就优先于 clip 自带的 morph 权重动画",
             "ik": "两骨 IK 链数组：{ root, mid, tip, target:[x,y,z], pole? }。按 glTF 节点名引用，目标/极向量在模型局部空间；需要同时有 animation 或 animator；不可达目标夹到骨骼长度，不拉伸",
-            "animator": "时间/结束驱动状态机 { initial, states, transitions? }；与 animation 互斥。过渡按停留时间 after 秒，或 on_finished 时当前 clip 播完，fade 秒淡入（0 = 立即切换）；没有输入参数/事件",
+            "animator": "状态机 { initial, states, transitions? }；与 animation 互斥。过渡按停留时间 after 秒、on_finished 播完、conditions 参数比较（float 参数，6 种比较）或 on_event 事件切换；fade 秒淡入（0 = 立即切换）。宿主用 set_animator_parameter / fire_animator_event 输入；事件是有界 FIFO（8 条，每帧消费一条，满时丢最旧），可在当前动作结束前预输入下一招",
             "animation": "播放模型里的一条 glTF 动画：{ name, start?, speed?, loop?, blend? }。不写 = 静止（老行为）；loop 缺省 true（写 false = 播完停在最后一帧）；带 morph weights 轨道的 clip 会同时驱动形变（手工 morph_weights 优先；双 clip 只取主 clip 的 morph 轨道）；blend: { name, start?, speed?, loop?, weight?, fade? } 是第二条 clip 的交叉淡化（weight 缺省 0.5，fade 缺省 0 = 立即生效）；名字不存在**不是**校验错误（validate 不读资产），会在 simulate/render 报告的 models[].animation.found / models[].blend.found 里报 false"
         },
         "joint": {

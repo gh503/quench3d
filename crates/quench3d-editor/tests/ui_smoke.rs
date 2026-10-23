@@ -144,7 +144,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
                 value: 0.5,
                 default: 0.0,
             }],
-            pending_event: None,
+            event_buffer: std::collections::VecDeque::new(),
         }),
     }
 }
@@ -345,6 +345,10 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "事件 1 条"),
         "动画面板没有显示事件标记数"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "待处理事件 0"),
+        "状态机没有显示输入缓冲深度"
     );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(

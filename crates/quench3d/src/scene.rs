@@ -9,6 +9,7 @@
 //! 带刚体的物体不能有父物体（位姿归物理管）；删除物体要调 [`Scene::remove`]
 //! （它负责把子孙提到祖父、保持它们的世界位姿、并把后面的父下标前移）。
 
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -335,6 +336,9 @@ pub struct ModelAnimatorTransition {
     pub on_event: Option<String>,
 }
 
+/// 状态机输入缓冲的容量（条）。足够覆盖一帧内的连招/移动输入，又不会无限堆积。
+pub const ANIMATOR_EVENT_CAPACITY: usize = 8;
+
 /// 运行中的状态机：当前状态、已停留时间、正在淡入的目标状态。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelAnimatorRuntime {
@@ -350,8 +354,34 @@ pub struct ModelAnimatorRuntime {
     pub pending: Option<usize>,
     /// 运行时参数（按场景顺序；没有参数时为空）。
     pub parameters: Vec<ModelAnimatorParameter>,
-    /// 已收到、等下一帧帧首处理的事件（只保留一个；同帧多个只保留最后一个）。
-    pub pending_event: Option<String>,
+    /// 已收到、等帧首处理的事件（有界 FIFO，最多 [`ANIMATOR_EVENT_CAPACITY`] 条）。
+    ///
+    /// 每帧只消费队首一条；队列满时丢最旧的，保证最新输入不会因为
+    /// 旧事件堆积而永远轮不到。
+    pub event_buffer: VecDeque<String>,
+}
+
+impl ModelAnimatorRuntime {
+    /// 把一条事件压进输入缓冲；空名忽略。
+    ///
+    /// 缓冲区满时丢**最旧**的一条：输入缓冲服务的是"玩家刚按的键"，
+    /// 旧事件不应该把新事件挤掉。返回 true 表示已入队。
+    pub fn queue_event(&mut self, name: impl Into<String>) -> bool {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return false;
+        }
+        while self.event_buffer.len() >= ANIMATOR_EVENT_CAPACITY {
+            self.event_buffer.pop_front();
+        }
+        self.event_buffer.push_back(name);
+        true
+    }
+
+    /// 当前缓冲里还有多少条未处理事件。
+    pub fn queued_events(&self) -> usize {
+        self.event_buffer.len()
+    }
 }
 
 /// 一条两骨 IK 链（模型局部空间）。
@@ -789,8 +819,9 @@ fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
     let Some(current_name) = current_name else {
         return;
     };
-    // 事件在帧首消费：只保留一个，发完这一帧没被任何过渡接住就丢弃。
-    let event = anim.pending_event.take();
+    // 事件在帧首消费：每帧只取队首一条。没被任何过渡接住就丢弃，
+    // 后续事件留在缓冲里等下一帧（过渡期间不处理，见上面的 early return）。
+    let event = anim.event_buffer.pop_front();
     // 过渡在**帧首**判定：本帧开始时已经停留够 after 才切。这样目标 clip
     // 不会被多推进一整帧——它本帧只从 0 开始走这一帧的时间。
     //
@@ -1369,7 +1400,7 @@ impl Scene {
                 elapsed: 0.0,
                 pending: None,
                 parameters: Vec::new(),
-                pending_event: None,
+                event_buffer: VecDeque::new(),
             }),
         });
         Some(index)
@@ -1512,10 +1543,11 @@ impl Scene {
         changed
     }
 
-    /// 发一个离散事件：当前状态有匹配的 `on_event` 过渡时排队，下一帧帧首切换。
+    /// 发一个离散事件：状态机里有过渡监听这个名字时排队，下一帧帧首处理。
     ///
-    /// 返回 `false` 表示没有状态机的当前状态监听这个事件（不会静默堆积）。
-    /// 同帧多次调用只保留最后一个；过渡事件在帧首优先于同状态的时间过渡。
+    /// 返回 `false` 表示整个状态机里没有任何过渡监听这个事件（不会静默堆积）。
+    /// 同帧多次调用按 FIFO 入队（最多 8 条，满时丢最旧）；每帧帧首消费一条，
+    /// 过渡事件优先于同状态的时间过渡。
     pub fn fire_animator_event(&mut self, animation_index: usize, name: &str) -> bool {
         if name.trim().is_empty() {
             return false;
@@ -1527,18 +1559,17 @@ impl Scene {
         else {
             return false;
         };
-        let Some(current) = anim.states.get(anim.current).map(|s| s.name.as_str()) else {
-            return false;
-        };
+        // 只要状态机里**有**任何过渡监听这个名字就接收：输入缓冲的意义就是
+        // 在当前动作还没结束前先按下下一招（`from` 可能是未来的状态）。
+        // 本次帧首没有匹配过渡的事件会被丢弃，不会无限期留存。
         if !anim
             .transitions
             .iter()
-            .any(|t| t.from == current && t.on_event.as_deref() == Some(name))
+            .any(|t| t.on_event.as_deref() == Some(name))
         {
             return false;
         }
-        anim.pending_event = Some(name.to_string());
-        true
+        anim.queue_event(name)
     }
 
     /// 这个状态机里声明过的事件名（去重、保持过渡顺序；给编辑器画按钮）。
@@ -3239,13 +3270,13 @@ mod anim_tests {
         assert!(scene.fire_animator_event(idx, "跳跃"));
         scene.advance_animations(0.0);
         assert_eq!(scene.animations[idx].player.animation, "jump");
-        assert_eq!(
+        assert!(
             scene.animations[idx]
                 .animator
                 .as_ref()
                 .unwrap()
-                .pending_event,
-            None,
+                .event_buffer
+                .is_empty(),
             "事件必须被消费一次"
         );
     }
@@ -3285,20 +3316,95 @@ mod anim_tests {
         assert!(scene.fire_animator_event(idx, "跳跃"));
         scene.advance_animations(0.0);
         assert_eq!(scene.animations[idx].player.animation, "idle");
-        assert_eq!(
-            scene.animations[idx]
-                .animator
-                .as_ref()
-                .unwrap()
-                .pending_event,
-            None
-        );
+        assert!(scene.animations[idx]
+            .animator
+            .as_ref()
+            .unwrap()
+            .event_buffer
+            .is_empty());
 
         // 条件满足后同一个事件才切。
         assert!(scene.set_animator_parameter(idx, "speed", 1.0));
         assert!(scene.fire_animator_event(idx, "跳跃"));
         scene.advance_animations(0.0);
         assert_eq!(scene.animations[idx].player.animation, "jump");
+    }
+
+    #[test]
+    fn animator_event_buffer_is_fifo_bounded_and_one_per_frame() {
+        let model = condition_model();
+        let states = vec![
+            condition_state("idle", "idle"),
+            condition_state("jump", "jump"),
+        ];
+        let transitions = vec![
+            ModelAnimatorTransition {
+                from: "idle".into(),
+                to: "jump".into(),
+                after: 999.0,
+                on_finished: false,
+                fade: 0.0,
+                conditions: Vec::new(),
+                on_event: Some("a".into()),
+            },
+            ModelAnimatorTransition {
+                from: "jump".into(),
+                to: "idle".into(),
+                after: 999.0,
+                on_finished: false,
+                fade: 0.0,
+                conditions: Vec::new(),
+                on_event: Some("b".into()),
+            },
+        ];
+        let mut scene = Scene::new();
+        let idx = scene
+            .play_model_animator(model, Vec::new(), Vec::new(), states, transitions, 0)
+            .expect("clip 都在");
+        assert!(scene.fire_animator_event(idx, "a"));
+        assert!(scene.fire_animator_event(idx, "b"));
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .queued_events(),
+            2,
+            "同帧两条事件都要留在 FIFO 里"
+        );
+        // 每帧只消费队首一条：a 切到 jump，b 还在；下一帧 b 切回 idle。
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "jump");
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .queued_events(),
+            1
+        );
+        scene.advance_animations(0.0);
+        assert_eq!(scene.animations[idx].player.animation, "idle");
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .queued_events(),
+            0
+        );
+
+        // 容量上限 8：满时丢最旧，保留最新 8 条。
+        let animator = scene.animations[idx].animator.as_mut().unwrap();
+        for i in 0..12 {
+            assert!(animator.queue_event(format!("e{i}")));
+        }
+        let queued: Vec<_> = animator.event_buffer.iter().cloned().collect();
+        assert_eq!(
+            queued,
+            vec!["e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11"]
+        );
+        assert!(!animator.queue_event("   "), "空名不入队");
     }
 
     #[test]

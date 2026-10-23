@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **状态机输入缓冲（第 137 轮）**：`pending_event` 换成容量 8 的 FIFO；可在当前动作
+  未结束时预输入下一招，每帧帧首消费一条、满时丢最旧；`fire_animator_event` 接受
+  状态机里任意过渡监听的事件名。编辑器显示待处理事件数。测试总数 795 → 796。
+
 - **clip 动画事件标记与事件队列（第 136 轮）**：`models[].events`（`name/time/clip?`）+
   `Scene::take_animation_events` + `Game::on_animation_event`；半开区间、循环/非循环、
   clip 过滤、暂停不触发、状态机不支持（warning）。编辑器动画面板显示事件数。

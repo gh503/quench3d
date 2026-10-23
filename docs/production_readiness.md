@@ -83,7 +83,7 @@
 | 拖拽改父级 | 全部 | 属性面板里用"父物体"下拉改（**保世界位姿**）；场景树内拖放还没有 | 🟡 |
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
-| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、事件按钮和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、多轨混合 UI、状态机输入缓冲；**clip 事件标记/队列第 136 轮已补** | 🟡 |
+| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、事件按钮和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、多轨混合 UI、按时间窗口的输入缓冲；状态机有界 FIFO 与 clip 事件队列已补（第 136/137 轮） | 🟡 |
 | 骨骼 / 蒙皮 | 全部 | **GPU 蒙皮可用**（纯蒙皮：`JOINTS_0/WEIGHTS_0` 顶点属性 + 每帧关节调色板；`Scene::gpu_skinning=false` 退回 CPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**两骨 IK 可用**（`models[].ik`，每帧采样后解目标、CPU/GPU 蒙皮与 F8 骨架一致）；**morph+skin 已能走 GPU 蒙皮**（morph 位移仍 CPU 叠加后上传，关节只在 GPU 乘一次）；**全 GPU morph 仍无** | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
@@ -2195,7 +2195,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 与场景格式的接口 | ✅ 第 62 / 71 / 72 轮 | `models[].animation = { name, start?, speed?, loop?, blend? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`blend = { name, start?, speed?, loop?, weight?, fade? }`，`weight` 缺省 0.5、`fade` 缺省 0；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
 | 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）；第 86 轮可直接改状态 clip/起始时间并写回 `states[i]`；第 87 轮可增删状态和过渡（新状态自动选第一个 clip，新过渡从当前状态指向下一个状态，删除状态会连带删除引用它的过渡并改写 `initial`）；第 88 轮可改过渡的 `from/to` 与状态机初始状态；第 96 轮可直接改每条 IK 链的 target XYZ 并写回 `models[i].ik[j].target`；第 97 轮状态机参数有滑杆，拖动后 `dt=0` 立即判一次过渡（只改会话值，不写 default）；第 98 轮为 `on_event` 画「发送事件」按钮。第 119 轮把时间滑杆下方补成**可视化单 clip 时间轴**（刻度、播放头、点/拖定位，读数与 `player.time` 同步）。**仍不是**多轨混合器（不能加事件、改状态名或增删 IK 链） |
-| 参数/事件驱动状态机 | ✅ 第 75 / 80 / 97 / 98 轮 | `models[].animator`：`states` + `parameters` + `transitions`，按状态停留时间 `after`、`on_finished`、`conditions`（参数比较）或 `on_event`（离散事件，优先于时间过渡）切换；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；`Scene::set_animator_parameter` / `fire_animator_event` 是宿主输入入口；报告 `models[].animator`。**仍缺**：参数曲线、状态机输入缓冲；clip 动画事件标记 + 队列第 136 轮已补 |
+| 参数/事件驱动状态机 | ✅ 第 75 / 80 / 97 / 98 轮 | `models[].animator`：`states` + `parameters` + `transitions`，按状态停留时间 `after`、`on_finished`、`conditions`（参数比较）或 `on_event`（离散事件，优先于时间过渡）切换；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；`Scene::set_animator_parameter` / `fire_animator_event` 是宿主输入入口；报告 `models[].animator`。**仍缺**：参数曲线、按时间窗口的输入缓冲；clip 动画事件标记 + 队列第 136 轮、状态机有界 FIFO 第 137 轮已补 |
 | 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
 | `skins` + GPU 蒙皮 | ✅ 第 94 轮 | `JOINTS_0/WEIGHTS_0` 顶点属性 + 128 关节 uniform 调色板（8 KB）+ `pbr.wgsl`/`shadow.wgsl` 分支；场景提交时按 `(base,count)` 绑定，纯蒙皮不再 CPU 重算。`gpu_skinning=false` 可退回 CPU；WebGL2 的最低 4 KB uniform 设备只能用 CPU |
@@ -2227,7 +2227,7 @@ if let Some(v) = doc.physics.static_friction_speed {
    `animator.states/transitions` + 淡入。**GPU 蒙皮第 94 轮已补**（纯蒙皮）；
    **两骨 IK 第 96 轮已补**（`models[].ik`）；**morph+skin 的 GPU 蒙皮第 135 轮已补**
    （morph 位移仍 CPU，全 GPU morph 仍缺）；**clip 动画事件标记/队列第 136 轮已补**；
-   仍缺任意权重曲线、状态机输入缓冲、FK/IK 权重混合。
+   仍缺任意权重曲线、按时间窗口的输入缓冲、FK/IK 权重混合。
 5. ✅ **`skins` + GPU 蒙皮**（第 94 轮）：顶点属性扩展 + 128 关节 uniform 调色板 +
    `pbr.wgsl`/`shadow.wgsl` + 阴影管线绑定；morph+skin 也走 GPU 蒙皮（morph CPU 叠加），
    `gpu_skinning=false` 可整体退回。像素对照与调色板填充都有测试。
@@ -3094,8 +3094,30 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
   无 animation 与 animator 组合给 warning。
 * 编辑器 UI 冒烟断言 `事件 1 条` 真的被排版。
 
-**边界**：这不是脚本层，也不是状态机输入缓冲；宿主只拿到事件名/时间/clip，
+**边界**：这不是脚本层，也不是状态机输入缓冲（后者见 §23.38）；宿主只拿到事件名/时间/clip，
 没有参数载荷、没有回调排序之外的优先级；事件只按播放头跨过触发，seek 不补发。
+
+### 23.38 状态机输入缓冲（第 137 轮）
+
+**做了什么**：
+
+* `ModelAnimatorRuntime.pending_event: Option<String>` 换成
+  `event_buffer: VecDeque<String>`，容量常量 `ANIMATOR_EVENT_CAPACITY = 8`。
+* `fire_animator_event` 现在接受**状态机里任何过渡**监听的事件名，不再要求当前状态
+  监听：这样可以在 idle 还没结束时就预输入“跳/攻击”，等当前过渡完成后按 FIFO 消费。
+* 队列满时丢**最旧**的一条；每帧帧首只消费队首一条；没有匹配过渡的事件在那一帧丢弃，
+  不会无限期留存。
+* 编辑器事件按钮改走 `queue_event`，状态机状态行显示 `待处理事件 N`。
+
+**验证**：
+
+* `animator_event_buffer_is_fifo_bounded_and_one_per_frame`：同帧 a/b 两条事件依次
+  切 idle→jump→idle；容量 8、满时保留最新 8 条（e4..e11）；空名拒绝。
+* 既有事件条件、事件优先于时间过渡、事件只消费一次等测试保持通过。
+* 编辑器 UI 冒烟断言 `待处理事件 0` 被排版。
+
+**边界**：没有按时间窗口过期/优先级/合并；事件仍是字符串，没有参数载荷；
+过渡期间不消费队列（等新 clip 提为主 clip 后继续）。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

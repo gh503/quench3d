@@ -2129,7 +2129,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             ui.label(RichText::new("事件").small().strong());
                             for name in &event_names {
                                 if ui.small_button(format!("发送 {name}")).clicked() {
-                                    animator.pending_event = Some(name.clone());
+                                    animator.queue_event(name.clone());
                                     step_animator = true;
                                 }
                             }
@@ -2147,9 +2147,17 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     ui.label(
                         RichText::new(match pending {
                             Some(to) => {
-                                format!("状态机：{current} → {to}（停留 {:.2}s）", animator.elapsed)
+                                format!(
+                                    "状态机：{current} → {to}（停留 {:.2}s · 待处理事件 {}）",
+                                    animator.elapsed,
+                                    animator.queued_events()
+                                )
                             }
-                            None => format!("状态机：{current}（停留 {:.2}s）", animator.elapsed),
+                            None => format!(
+                                "状态机：{current}（停留 {:.2}s · 待处理事件 {}）",
+                                animator.elapsed,
+                                animator.queued_events()
+                            ),
                         })
                         .small()
                         .weak(),
