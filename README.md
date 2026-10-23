@@ -665,7 +665,7 @@ quench3d::write_png(&image, "out.png")?;
 | 能力 | 说明 |
 | --- | --- |
 | 着色 | 前向 Cook–Torrance PBR（金属度/粗糙度）、法线贴图、指数雾；物体写**线性 HDR** |
-| 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 统一色调映射（ACES / Reinhard / 线性三档，**只此一处**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`）。**GL/WebGL2 上 SSAO 与深度解析按能力整体关闭**（naga 的 GLSL 后端不支持读深度纹理，见 [production_readiness §12.7](docs/production_readiness.md)）；tonemap / bloom / FXAA 不受影响 |
+| 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 可选 TAA（当前帧 + 历史按深度重投影，`taa.wgsl`）→ 统一色调映射（ACES / Reinhard / 线性三档，**只此一处**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`）。**GL/WebGL2 上 SSAO、深度解析与 TAA 按能力整体关闭**（naga 的 GLSL 后端不支持读深度纹理，见 [production_readiness §12.7](docs/production_readiness.md)）；tonemap / bloom / FXAA 不受影响 |
 | LOD | 静态高模自动生成 1/2、1/4 两档（`render.auto_lod`，顶点聚类，非蒙皮），按批次包围盒距离切换；手工 `models[].lods` 仍可用；`O` 开关。蒙皮/动画网格不自动生成，无遮挡剔除 |
 | 阴影 | 太阳：单张（级联时 2×2 图集）`Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段，主 pass 按视空间深度选级。**局部光阴影**：`SpotLight.cast_shadows`（一张透视 2D 深度图，视锥 = 外锥角）与 `PointLight.cast_shadows`（**立方体阴影**：`texture_depth_2d_array` 6 层，每层 90°，面选择 + 面内 uv 是 CPU 纯函数、WGSL 逐字镜像，靠"公式 == 矩阵"的 CPU 测试保证两边一致）；两者**各自整帧只支持一盏**（第一盏要求投影的），缺点都是缺省 `false`（老场景像素逐位不变），两套图互相独立 |
 | 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **IBL 环境贴图**（`lighting.environment_map`，等距柱状 HDR/PNG/JPEG → 64px 7 级预滤波 cubemap，按粗糙度采样）或解析式环境高光（不写贴图时；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。IBL 没有精确 PMREM/GGX、没有屏幕空间反射 |
@@ -1101,6 +1101,10 @@ NaN 刚体  : 0
   它是**深度-only** 的（没有法线缓冲，法线由视空间位置的屏幕导数重建）、结果乘在整幅
   HDR 颜色上（不区分直接光/间接光）——这是后处理式 SSAO 的固有简化；
   平坦区域在掠射角下仍可能暗 1~2 个色阶（已知边界，见 §9）。
+* `lighting.taa` 同样**不写 = 关闭**；写 `{}` 就是打开。它用上一帧历史 + 当前深度
+  重投影累积，相机每帧做亚像素抖动；`feedback` 0~0.98（缺省 0.9），越大越平滑也越容易
+  拖影。**没有运动向量**（运动物体靠 3×3 邻域 clamp 抑制拖影），只在能读深度且
+  `render.msaa = 1` 的原生后端生效。
 * `lighting.fxaa` 同样**不写 = 关闭**（像素与关闭时逐位相同）；写 `{}` 就是打开。
   它工作在 tonemap **之后**的画面上（阈值按 0~1 的**感知**亮度定，不是线性光强），
   找边缘做一次定向模糊：平坦区域逐位不变，斜边/细边变柔和。
@@ -1845,7 +1849,8 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   `TriMesh↔TriMesh`、`Plane↔Plane` 不产生接触。
   `Joint::Fixed` 的角约束是速度级的：焊接的是**创建时**的相对姿态，不是参考姿态。
 * 渲染：单张阴影贴图（大场景需要更小的 `shadow_radius` 或后续加 CSM）；
-  有 HDR 中间目标 + bloom + FXAA + SSAO + 景深（DoF），但**还没有** TAA / AO 去噪（AO 是 16 抽样
+  有 HDR 中间目标 + bloom + FXAA + SSAO + 景深（DoF）+ **TAA**（相机抖动 + 深度重投影，
+  无运动向量；原生且未开 MSAA 时生效），但**还没有** AO 去噪（AO 是 16 抽样
   交错梯度噪声，接触处仍有轻微颗粒）、没有骨骼动画、没有延迟管线；
   Alpha 混合物体不写深度（后处理链已经能把混合放到 tonemap 之前，见 §4）。
 * 工程：窗口截图需要能创建 GPU 设备；无头验证依赖软件光栅（lavapipe）时较慢。
@@ -1886,8 +1891,9 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   **固定 example 名**（`web_client`）打包的，页面 `import` 的符号必须与之一致
   （`tools/check_web.mjs` 会静态核对）。
 * MCP：只实现 stdio 传输与工具（无 resources / prompts / HTTP SSE）。
-* 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO + 景深都在；TAA 还没接，
-  详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
+* 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO + 景深 + **TAA**都在；
+  TAA 用上一帧历史 + 当前深度重投影，相机每帧亚像素抖动；**没有运动向量**（运动物体会
+  有轻微拖影），且只在能读深度、未开 MSAA 的原生后端生效。详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
 * SSAO 是**深度-only**、无去噪：没有法线缓冲（法线由深度重建），也没有单独的 AO 模糊
   （AO 直接在后处理里算完就用）。表现是接触处有轻微颗粒（16 抽样 + 交错梯度噪声），
   以及掠射角下的平坦地面可能暗 1~2 个色阶；要更干净需要加一张 AO 目标 + 双边模糊。

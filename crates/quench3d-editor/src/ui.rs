@@ -395,6 +395,21 @@ fn top_bar(
                     );
                 });
             });
+            ui.checkbox(&mut engine.renderer.options.taa.enabled, "时域抗锯齿（TAA）")
+                .on_hover_text(
+                    "用上一帧历史 + 深度重投影做亚像素累积；相机每帧轻微抖动。\n                     比 FXAA 更平滑，但运动物体会有一点拖影；需要可读深度且未开 MSAA。",
+                );
+            ui.add_enabled_ui(engine.renderer.options.taa.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("历史权重");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.taa.feedback)
+                            .speed(0.01)
+                            .range(0.0..=0.98),
+                    )
+                    .on_hover_text("越大越平滑、越容易拖影；0 = 不累积");
+                });
+            });
             ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）")
                 .on_hover_text(
                     "后处理抗锯齿：在 tonemap 之后的画面上找边缘做定向模糊。\n                     关掉时画面与不开这个功能完全一致；MSAA 与它互不替代，可以同时开。",

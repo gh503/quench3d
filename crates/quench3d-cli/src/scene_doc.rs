@@ -2333,6 +2333,11 @@ pub struct LightingDoc {
     /// （着色噪声、材质内部的高频），代价是细节会略微变软。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fxaa: Option<FxaaDoc>,
+    /// 时域抗锯齿（TAA）。
+    ///
+    /// **不写 = 关闭**（像素与加这个功能之前一致）；需要可读深度且未开 MSAA。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taa: Option<TaaDoc>,
     /// SSAO（屏幕空间环境光遮蔽）。
     ///
     /// **不写 = 关闭**（像素与加这个功能之前逐位相同）；写了这一节就是打开。
@@ -2457,6 +2462,18 @@ pub struct FxaaDoc {
     /// 绝对边缘阈值下限，缺省 0.0833：压掉平坦区域里的单像素噪点。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_threshold_min: Option<f32>,
+}
+
+/// 时域抗锯齿（TAA）配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TaaDoc {
+    /// 是否启用，缺省 true（写了这一节就是想开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 历史权重（0~0.98），缺省 0.9；越大越平滑、越容易拖影。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<f32>,
 }
 
 /// Bloom（泛光）配置。
@@ -6626,6 +6643,19 @@ impl SceneDoc {
             }
         }
 
+        // TAA：历史权重必须落在 [0, 0.98]；超出会要么完全不累积要么无限拖影。
+        if let Some(t) = &self.lighting.taa {
+            if let Some(feedback) = t.feedback {
+                if !feedback.is_finite() || !(0.0..=0.98).contains(&feedback) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.taa.feedback",
+                        "TAA 历史权重必须是 0~0.98 的有限数",
+                    ));
+                }
+            }
+        }
+
         // FXAA：阈值必须落在 (0, 1) 这个量级，否则要么永远不触发要么糊成一片
         if let Some(f) = &self.lighting.fxaa {
             let enabled = f.enabled.unwrap_or(true);
@@ -8523,6 +8553,29 @@ mod tests {
             .validate()
             .iter()
             .any(|d| d.path == "lighting.environment_intensity" && d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn lighting_taa_doc_roundtrips_and_validates_feedback() {
+        let doc = SceneDoc::from_value(json!({
+            "lighting": { "taa": { "enabled": true, "feedback": 0.5 } }
+        }))
+        .unwrap();
+        let taa = doc.lighting.taa.expect("taa 段应解析");
+        assert_eq!(taa.enabled, Some(true));
+        assert!((taa.feedback.unwrap() - 0.5).abs() < 1e-6);
+
+        let bad = SceneDoc::from_value(json!({
+            "lighting": { "taa": { "feedback": 1.2 } }
+        }))
+        .unwrap();
+        let errors: Vec<String> = bad
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.path)
+            .collect();
+        assert_eq!(errors, vec!["lighting.taa.feedback".to_string()]);
     }
 
     #[test]

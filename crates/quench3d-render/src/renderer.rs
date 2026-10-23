@@ -67,6 +67,8 @@ const LINE_WGSL: &str = include_str!("shaders/line.wgsl");
 const POST_WGSL: &str = include_str!("shaders/post.wgsl");
 const BLOOM_WGSL: &str = include_str!("shaders/bloom.wgsl");
 const FXAA_WGSL: &str = include_str!("shaders/fxaa.wgsl");
+/// 时域抗锯齿（TAA）着色器。只在能读深度纹理的后端上建管线。
+const TAA_WGSL: &str = include_str!("shaders/taa.wgsl");
 const DEPTH_RESOLVE_WGSL: &str = include_str!("shaders/depth_resolve.wgsl");
 
 /// `post.wgsl` 里"依赖读深度纹理"的区段标记（见 [`post_wgsl_for`]）。
@@ -503,6 +505,18 @@ pub struct PostUniforms {
     pub dof: [f32; 4],
 }
 
+/// TAA 参数（与 `taa.wgsl` 的 `TaaParams` 逐字节一致）。
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+struct TaaUniforms {
+    inv_view_proj: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+    /// x = 历史是否有效，y = 历史权重，zw = 预留。
+    params: [f32; 4],
+    /// xy = 1/尺寸，zw = 尺寸。
+    texel: [f32; 4],
+}
+
 /// 屏幕空间水面选项。
 #[derive(Clone, Copy, Debug)]
 pub struct WaterOptions {
@@ -607,6 +621,31 @@ impl Default for FxaaOptions {
             enabled: false,
             edge_threshold: 0.166,
             edge_threshold_min: 0.0833,
+        }
+    }
+}
+
+/// 时域抗锯齿（TAA）配置。
+///
+/// 用上一帧历史 + 深度重投影做亚像素累积；相机每帧抖动，静态几何会收敛到
+/// 比 FXAA/没有 AA 更平滑的边缘。**没有运动向量**：运动物体会靠 3×3 颜色
+/// clamp 抑制拖影，但不会完全消除；相机快速切镜也可能短暂拖影。
+///
+/// **只在能读深度纹理、且没有 MSAA 的后端生效**（原生 wgpu）；GL/WebGL2 与
+/// `msaa_samples > 1` 会忽略并只警告一次。
+#[derive(Clone, Copy, Debug)]
+pub struct TaaOptions {
+    /// 是否启用（缺省关闭：多一张 HDR 历史/输出纹理 + 一趟全屏 pass）。
+    pub enabled: bool,
+    /// 历史权重（0~0.98）：越大越平滑、越容易拖影；0 = 等同关闭。
+    pub feedback: f32,
+}
+
+impl Default for TaaOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            feedback: 0.9,
         }
     }
 }
@@ -750,6 +789,8 @@ pub struct RendererOptions {
     pub dof: DofOptions,
     /// 色调映射算子（缺省 ACES，保持旧行为）。
     pub tonemap: Tonemap,
+    /// 时域抗锯齿（缺省关闭）。
+    pub taa: TaaOptions,
     /// 自动 LOD（缺省关闭）：高面数、非蒙皮网格在**上传时**生成 1/2、1/4 两档；
     /// 绘制时按批次包围盒与相机的距离选档。关闭时逐像素与旧行为一致。
     ///
@@ -775,6 +816,7 @@ impl Default for RendererOptions {
             environment: true,
             dof: DofOptions::default(),
             tonemap: Tonemap::default(),
+            taa: TaaOptions::default(),
             auto_lod: false,
         }
     }
@@ -949,6 +991,23 @@ pub struct Renderer {
     ///
     /// 只在开了 FXAA 时才会被写/读；关着的时候它只是占内存，不影响任何像素。
     ldr_view: Option<wgpu::TextureView>,
+    /// TAA 的当前输出与历史（HDR、单采样；只在能读深度且未开 MSAA 时建）。
+    taa_current: Option<wgpu::Texture>,
+    taa_history: Option<wgpu::Texture>,
+    taa_current_view: Option<wgpu::TextureView>,
+    taa_history_view: Option<wgpu::TextureView>,
+    /// TAA 读当前 HDR + 历史 + 深度（复用 post 布局）。
+    taa_bind_group: Option<wgpu::BindGroup>,
+    /// 后处理在 TAA 开启时读 `taa_current`，而不是原始 HDR。
+    post_taa_bind_group: Option<wgpu::BindGroup>,
+    taa_pipeline: Option<wgpu::RenderPipeline>,
+    taa_uniform: wgpu::Buffer,
+    taa_prev_view_proj: Mat4,
+    taa_history_valid: bool,
+    taa_was_active: bool,
+    taa_warned: bool,
+    /// 当前帧的抖动（NDC 单位）；关闭 TAA 时是 0。
+    taa_jitter: [f32; 2],
     /// 单采样深度（SSAO 的输入）。`sample_count == 1` 时就是主 pass 那一张，
     /// 多采样时是 `depth_resolve.wgsl` 写出来的那一张。
     ///
@@ -1023,6 +1082,30 @@ fn build_pipeline(device: &wgpu::Device, spec: PipelineSpec<'_>) -> wgpu::Render
         multiview_mask: None,
         cache: None,
     })
+}
+
+/// Halton 序列（base 2/3）：确定、无随机数状态，帧号直接决定子像素偏移。
+fn taa_halton(index: u32, base: u32) -> f32 {
+    let mut f = 1.0f64;
+    let mut r = 0.0f64;
+    let mut i = index as u64;
+    while i > 0 {
+        f /= base as f64;
+        r += f * (i % base as u64) as f64;
+        i /= base as u64;
+    }
+    r as f32
+}
+
+/// 当前帧的抖动（NDC）。幅度是一个像素：`(halton - 0.5) * 2 / size`。
+fn taa_jitter_offset(frame: u64, size: (u32, u32)) -> [f32; 2] {
+    let i = (frame as u32).wrapping_mul(5).wrapping_add(1);
+    let w = size.0.max(1) as f32;
+    let h = size.1.max(1) as f32;
+    [
+        (taa_halton(i, 2) - 0.5) * 2.0 / w,
+        (taa_halton(i, 3) - 0.5) * 2.0 / h,
+    ]
 }
 
 /// 全屏一趟的管线（后处理与 bloom 都是这类：无顶点缓冲、无深度、无 MSAA）。
@@ -1499,6 +1582,10 @@ impl Renderer {
         let post_module = ctx.create_shader("quench3d-post", &post_wgsl_for(depth_texture_read));
         let bloom_module = ctx.create_shader("quench3d-bloom", BLOOM_WGSL);
         let fxaa_module = ctx.create_shader("quench3d-fxaa", FXAA_WGSL);
+        // TAA 读深度纹理：GL/WebGL2 与 MSAA 后端不建；shader 里的
+        // `texture_depth_2d` 在 naga GLSL 后端不可用。
+        let taa_module = (depth_texture_read && ctx.msaa_samples <= 1)
+            .then(|| ctx.create_shader("quench3d-taa", TAA_WGSL));
         // 深度解析那一趟同样有 `textureLoad(ms_depth, ..)`：不支持就不建（连模块都不建）。
         let depth_resolve_module = depth_texture_read
             .then(|| ctx.create_shader("quench3d-depth-resolve", DEPTH_RESOLVE_WGSL));
@@ -1992,6 +2079,17 @@ impl Renderer {
             "fs_main",
             ctx.format,
         );
+        // TAA 输出 HDR；复用 post 的绑定组布局（0=当前 HDR, 3=历史, 4=深度）。
+        let taa_pipeline = taa_module.as_ref().map(|module| {
+            build_fullscreen_pipeline(
+                device,
+                "quench3d-taa",
+                &post_pipeline_layout,
+                module,
+                "fs_main",
+                HDR_FORMAT,
+            )
+        });
 
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("quench3d-dummy-depth"),
@@ -2011,6 +2109,12 @@ impl Renderer {
         let post_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("quench3d-post-uniform"),
             size: std::mem::size_of::<PostUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let taa_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-taa-uniform"),
+            size: std::mem::size_of::<TaaUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2127,6 +2231,19 @@ impl Renderer {
             water_mask_view: None,
             water_mask_msaa_view: None,
             ldr_view: None,
+            taa_current: None,
+            taa_history: None,
+            taa_current_view: None,
+            taa_history_view: None,
+            taa_bind_group: None,
+            post_taa_bind_group: None,
+            taa_pipeline,
+            taa_uniform,
+            taa_prev_view_proj: Mat4::IDENTITY,
+            taa_history_valid: false,
+            taa_was_active: false,
+            taa_warned: false,
+            taa_jitter: [0.0, 0.0],
             resolved_depth_view: None,
             dummy_depth_view,
             bloom_a_view: None,
@@ -2151,6 +2268,25 @@ impl Renderer {
     /// [`RendererOptions::ssao`] 里的开关。
     pub fn supports_ssao(&self) -> bool {
         self.depth_texture_read
+    }
+
+    /// 这个渲染器**能不能**做 TAA。
+    ///
+    /// 需要单采样深度纹理（GL/WebGL2 读不了）与未开 MSAA 的主 pass。
+    pub fn supports_taa(&self) -> bool {
+        self.taa_pipeline.is_some() && self.sample_count <= 1
+    }
+
+    /// 这一帧 TAA 是否真的生效；不支持时只警告一次。
+    fn taa_active(&mut self) -> bool {
+        if self.options.taa.enabled && !self.supports_taa() && !self.taa_warned {
+            self.taa_warned = true;
+            log::warn!(
+                "当前后端不支持 TAA（需要可读的深度纹理且未开 MSAA），TAA 已忽略；\
+                 画面与其它后处理不受影响"
+            );
+        }
+        self.options.taa.enabled && self.supports_taa()
     }
 
     /// 这一帧 SSAO 是否**真的**生效：配置里开着 **且** 后端支持。
@@ -2679,7 +2815,8 @@ impl Renderer {
         // 否则要么管线建不出来，要么着色器读了没绑的资源。
         let ssao_on = self.ssao_active();
         let ssao_depth_ready = ssao_on == self.resolved_depth_view.is_some();
-        if self.target_size == size && self.depth_view.is_some() && ssao_depth_ready {
+        let taa_ready = self.taa_pipeline.is_none() || self.taa_current.is_some();
+        if self.target_size == size && self.depth_view.is_some() && ssao_depth_ready && taa_ready {
             return;
         }
         let device = &ctx.device;
@@ -2719,6 +2856,45 @@ impl Renderer {
         });
         let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
         self.hdr_view = Some(hdr_view.clone());
+
+        // TAA 的当前输出/历史：两张同尺寸 HDR 纹理，历史每帧从当前复制。
+        if self.taa_pipeline.is_some() {
+            let make = |label: &str| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: HDR_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            let current = make("quench3d-taa-current");
+            let history = make("quench3d-taa-history");
+            self.taa_current_view =
+                Some(current.create_view(&wgpu::TextureViewDescriptor::default()));
+            self.taa_history_view =
+                Some(history.create_view(&wgpu::TextureViewDescriptor::default()));
+            self.taa_current = Some(current);
+            self.taa_history = Some(history);
+            self.taa_history_valid = false;
+        } else {
+            self.taa_current = None;
+            self.taa_history = None;
+            self.taa_current_view = None;
+            self.taa_history_view = None;
+            self.taa_bind_group = None;
+            self.post_taa_bind_group = None;
+        }
 
         // 水面 mask：单采样目标（后处理读）+（MSAA 时）多采样附件。
         let mask = device.create_texture(&wgpu::TextureDescriptor {
@@ -2903,6 +3079,75 @@ impl Renderer {
                 ],
             }),
         );
+        // TAA：读当前 HDR + 历史 + 主深度；后处理在 TAA 开启时读 TAA 输出。
+        if let (Some(current), Some(history), Some(depth)) = (
+            self.taa_current_view.as_ref(),
+            self.taa_history_view.as_ref(),
+            self.depth_view.as_ref(),
+        ) {
+            let water = self.water_mask_view.as_ref().expect("水面 mask 目标缺失");
+            self.taa_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quench3d-taa-bind-group"),
+                layout: &self.post_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&hdr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.taa_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(history),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(water),
+                    },
+                ],
+            }));
+            self.post_taa_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quench3d-post-taa-bind-group"),
+                layout: &self.post_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(current),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.post_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&bloom_a),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(water),
+                    },
+                ],
+            }));
+        }
+
         let bloom_bind = |label: &str, src: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(label),
@@ -2997,9 +3242,10 @@ impl Renderer {
         lighting: &Lighting,
         cascades: &[Mat4],
         splits: &[f32],
-        spot_shadow: Option<SpotShadowPlan>,
-        point_shadow: Option<PointShadowPlan>,
+        local_shadows: (Option<SpotShadowPlan>, Option<PointShadowPlan>),
+        view_proj: Mat4,
     ) -> FrameUniforms {
+        let (spot_shadow, point_shadow) = local_shadows;
         let shadow_matrix = cascades.first().copied().unwrap_or(Mat4::IDENTITY);
         let mut shadow_matrices = [[[0.0f32; 4]; 4]; MAX_SHADOW_CASCADES];
         for (i, m) in cascades.iter().take(MAX_SHADOW_CASCADES).enumerate() {
@@ -3016,7 +3262,6 @@ impl Renderer {
         } else {
             (1.0f32, self.options.shadow_map_size.clamp(512, 4096) as f32)
         };
-        let view_proj = camera.view_projection();
         let inv_view_proj = view_proj.inverse();
         let sun = lighting.sun;
 
@@ -3169,6 +3414,24 @@ impl Renderer {
         self.ensure_instance_capacity(&ctx.device, self.staging.len().max(1));
         self.ensure_line_capacity(&ctx.device, self.lines.vertices.len().max(1));
 
+        // TAA：先决定本帧是否生效、算子像素抖动，再把抖动乘进主 pass 的 view-proj。
+        let taa_on = self.taa_active();
+        if taa_on && !self.taa_was_active {
+            self.taa_history_valid = false;
+        }
+        self.taa_was_active = taa_on;
+        self.taa_jitter = if taa_on {
+            taa_jitter_offset(self.frame_index, size)
+        } else {
+            [0.0, 0.0]
+        };
+        let mut view_proj = camera.view_projection();
+        if taa_on {
+            view_proj =
+                Mat4::from_translation(Vec3::new(self.taa_jitter[0], self.taa_jitter[1], 0.0))
+                    * view_proj;
+        }
+
         let (cascades, splits) = self.shadow_cascades_for(camera, lighting);
         let shadow_count = cascades.len().min(MAX_SHADOW_CASCADES);
         // 聚光阴影：整帧最多一盏（规则见 `spot_shadow::pick_spot_shadow`）。
@@ -3185,8 +3448,8 @@ impl Renderer {
             lighting,
             &cascades,
             &splits,
-            spot_shadow,
-            point_shadow,
+            (spot_shadow, point_shadow),
+            view_proj,
         );
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniforms));
@@ -3804,6 +4067,54 @@ impl Renderer {
             }
         }
 
+        // ---------- TAA：当前 HDR + 历史 → taa_current ----------
+        if taa_on {
+            let taa = TaaUniforms {
+                inv_view_proj: view_proj.inverse().to_cols_arrays(),
+                prev_view_proj: self.taa_prev_view_proj.to_cols_arrays(),
+                params: [
+                    if self.taa_history_valid { 1.0 } else { 0.0 },
+                    self.options.taa.feedback.clamp(0.0, 0.98),
+                    0.0,
+                    0.0,
+                ],
+                texel: [
+                    1.0 / size.0.max(1) as f32,
+                    1.0 / size.1.max(1) as f32,
+                    size.0 as f32,
+                    size.1 as f32,
+                ],
+            };
+            ctx.queue
+                .write_buffer(&self.taa_uniform, 0, bytemuck::bytes_of(&taa));
+            if let (Some(pipeline), Some(bind_group), Some(dst)) = (
+                &self.taa_pipeline,
+                &self.taa_bind_group,
+                &self.taa_current_view,
+            ) {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quench3d-taa-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: dst,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.draw(0..3, 0..1);
+                stats.post_passes += 1;
+            }
+        }
+
         // ---------- 后处理 pass：tonemap（+ bloom 合成）→ 最终目标 ----------
         // 开了 FXAA 时先写 LDR 中间目标，再由下面那一趟做抗锯齿；否则直接写目标
         // （**关掉 FXAA 的像素与加这个功能之前逐位相同**：那一趟根本不跑）。
@@ -3834,13 +4145,41 @@ impl Renderer {
             } else {
                 &self.post_pipeline
             });
-            pass.set_bind_group(
-                0,
-                self.post_bind_group.as_ref().expect("后处理绑定组缺失"),
-                &[],
-            );
+            let post_bind = if taa_on {
+                self.post_taa_bind_group.as_ref()
+            } else {
+                self.post_bind_group.as_ref()
+            };
+            pass.set_bind_group(0, post_bind.expect("后处理绑定组缺失"), &[]);
             pass.draw(0..3, 0..1);
             stats.post_passes += 1;
+        }
+
+        // 把本帧 TAA 结果保存成下一帧的历史；历史纹理与当前输出尺寸/格式相同。
+        if taa_on {
+            if let (Some(current), Some(history)) = (&self.taa_current, &self.taa_history) {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: current,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: history,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: size.0.max(1),
+                        height: size.1.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                );
+                self.taa_prev_view_proj = view_proj;
+                self.taa_history_valid = true;
+            }
         }
 
         // ---------- FXAA：LDR 中间目标 → 目标（可选） ----------

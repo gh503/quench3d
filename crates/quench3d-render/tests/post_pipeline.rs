@@ -1508,3 +1508,125 @@ fn depth_of_field_blurs_out_of_focus_edges() {
         "光圈为 0 时 DoF 不该改变任何像素，实际有 {still_changed} 个"
     );
 }
+
+/// TAA 的像素级验证：相机不动时，重复 capture 必须有**历史累积**，
+/// 而关闭 TAA 时同一帧必须逐位稳定。
+#[test]
+fn taa_uses_temporal_history_and_off_stays_stable() {
+    let Some(mut ctx) = context(1, "TAA 的像素级验证（真的创建 wgpu 上下文）")
+    else {
+        return;
+    };
+    let mut renderer = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: false,
+            shadows: false,
+            sky: false,
+            taa: TaaOptions {
+                enabled: true,
+                feedback: 0.9,
+            },
+            ..Default::default()
+        },
+    );
+    if !renderer.supports_taa() {
+        eprintln!("跳过：当前后端不支持 TAA（GL/WebGL2 或 MSAA > 1）");
+        return;
+    }
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.9, 0.2, 0.15, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::new(Transform::from_trs(
+            vec3(0.0, 0.0, 0.0),
+            Quat::from_rotation_y(0.5) * Quat::from_rotation_x(0.35),
+            vec3(20.0, 20.0, 20.0),
+        )),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let lighting = Lighting {
+        exposure: 1.0,
+        ..Default::default()
+    };
+
+    let first = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("首帧");
+    let second = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("第二帧");
+    let third = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("第三帧");
+    let diff = |a: &ImageData, b: &ImageData| {
+        let mut n = 0;
+        for y in 0..a.height {
+            for x in 0..a.width {
+                if pixel(a, x, y) != pixel(b, x, y) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    assert!(
+        diff(&first, &second) > 0,
+        "第二帧必须消费历史（首帧 history_valid=false，之后应变化）"
+    );
+    assert!(diff(&first, &third) > 0, "第三帧仍应有历史累积");
+
+    // 同一个第 2 帧，feedback=0（等价于每帧只用当前抖动帧）与 0.9 必须不同：
+    // 这才能证明差异来自**历史混合**，而不只是抖动本身。
+    let mut flat = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: false,
+            shadows: false,
+            sky: false,
+            taa: TaaOptions {
+                enabled: true,
+                feedback: 0.0,
+            },
+            ..Default::default()
+        },
+    );
+    let flat_mat = flat.add_material(&ctx, MaterialDesc::from_srgb(0.9, 0.2, 0.15, 1.0).unlit());
+    let flat_cube = flat.add_mesh(&ctx, &MeshData::cube(1.0));
+    flat.draw(
+        flat_cube,
+        flat_mat,
+        InstanceDesc::new(Transform::from_trs(
+            vec3(0.0, 0.0, 0.0),
+            Quat::from_rotation_y(0.5) * Quat::from_rotation_x(0.35),
+            vec3(20.0, 20.0, 20.0),
+        )),
+    );
+    let _ = flat
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("feedback=0 首帧");
+    let flat_second = flat
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("feedback=0 第二帧");
+    assert!(
+        diff(&second, &flat_second) > 0,
+        "feedback=0.9 的第 2 帧必须与 feedback=0（纯当前帧）不同，否则历史没有参与"
+    );
+
+    // 关掉 TAA：没有抖动、没有历史，同一相机重复 capture 必须逐位相同。
+    renderer.options.taa.enabled = false;
+    let off_a = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("关 TAA 首帧");
+    let off_b = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("关 TAA 第二帧");
+    assert_eq!(
+        diff(&off_a, &off_b),
+        0,
+        "关闭 TAA 后同一相机重复 capture 必须逐位稳定"
+    );
+}

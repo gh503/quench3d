@@ -237,6 +237,10 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         edge_threshold: Some(opts.fxaa.edge_threshold),
         edge_threshold_min: Some(opts.fxaa.edge_threshold_min),
     });
+    lighting.taa = Some(quench3d_cli::scene_doc::TaaDoc {
+        enabled: Some(opts.taa.enabled),
+        feedback: Some(opts.taa.feedback),
+    });
     lighting.ssao = Some(quench3d_cli::scene_doc::SsaoDoc {
         enabled: Some(opts.ssao.enabled),
         radius: Some(opts.ssao.radius),
@@ -906,6 +910,7 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     // 的场景，预览里这两样都不在，而 CLI 渲出来是有的。
     engine.renderer.options.bloom = runner::bloom_options(&doc);
     engine.renderer.options.fxaa = runner::fxaa_options(&doc);
+    engine.renderer.options.taa = runner::taa_options(&doc);
     engine.renderer.options.ssao = runner::ssao_options(&doc);
     engine.renderer.options.dof = runner::dof_options(&doc);
     let name = doc.name.clone().unwrap_or_else(|| "scene".to_string());

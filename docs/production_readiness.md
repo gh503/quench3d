@@ -39,7 +39,7 @@
 | 色调映射可选性 | 全部 | 三档可选：ACES（默认）/ Reinhard / 线性，编辑器灯光面板即时切换；曝光仍可调（→ H1） | ✅ |
 | 阴影 | 全部 | 方向光 1~4 级 CSM（2×2 图集，视空间深度选级，`lighting.shadow_quality.cascades`）+ 3×3 PCF；聚光灯一张透视 2D 阴影图、点光源立方体阴影（各自整帧一盏，缺省关闭）。分辨率 512–4096（缺省 2048） | ✅ |
 | 阴影可调参数 | Blender / Unity | `DirectionalLight.shadow_bias`（0~4 纹素，缺省 0.75）公开；编辑器“强度/半径/偏移”滑杆、场景 `lighting.shadow_quality.bias` 都可调；仍有 `cast_shadows` 与全局开关 | ✅ |
-| 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO 与深度解析两趟按能力整体关闭**（§12.7） | 🟡 |
+| 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom →[TAA]→ post(SSAO) →[FXAA]），可按开关增减；TAA ✅（第 140 轮，相机抖动 + 深度重投影，无运动向量）、DOF ✅；**无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO、深度解析与 TAA 按能力整体关闭**（§12.7） | 🟡 |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4；**GL/WebGL2 上按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧，§12.7） | 🟡 |
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent + **GPU 蒙皮**（glTF `JOINTS_0/WEIGHTS_0` 顶点属性，≤4 关节/顶点，128 关节 uniform 调色板，8 KB；只满足 WebGL2 最低 4 KB uniform 的设备需 CPU 回退；纯蒙皮走 GPU，morph+skin 的 morph CPU 叠加、关节 GPU 乘）+ **morph target**（静态 `models[].morph_weights` + glTF `weights` 动画轨道；双 clip 只取主 clip）；**无顶点色** | 🟡 |
 | 实例化 | 全部 | 不透明有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
@@ -800,7 +800,7 @@ gap 表里与资产搜索路径（#11）同源，等那一项一起做；**编�
 最后选了不依赖法线精度的深度比较。
 
 **没做（诚实边界）**：AO 没有单独的目标与双边模糊（所以接触处有轻微颗粒，16 抽样 + IGN）；
-没有 TAA / CSM；FXAA 是 console 档（无子像素锯齿消除）。
+CSM 已补；TAA 第 140 轮已补（相机抖动 + 深度重投影，无运动向量）；FXAA 是 console 档（无子像素锯齿消除）。
 
 ### 8.2 「场景层级（父子变换）+ 格式 v2」怎么落的（第 16 轮，已跑门禁）
 
@@ -3161,6 +3161,36 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 * 场景格式/校验/运行时队列的既有测试继续通过。
 
 **边界**：没有多选、拖动标记、时间吸附、事件载荷；仍是单 clip 检查器。
+
+### 23.41 时域抗锯齿（TAA，第 140 轮）
+
+**做了什么**：
+
+* 新增 `TaaOptions { enabled, feedback }`、`lighting.taa { enabled?, feedback? }`
+  （缺省关闭；feedback 0~0.98，缺省 0.9）。
+* 场景先写 HDR 中间目标；开启 TAA 时多一趟全屏 pass：
+  * 当前 HDR + 上一帧历史 + 单采样深度；
+  * 用当前（含抖动）逆 view-proj 还原世界位置，再用上一帧 view-proj 投回上一帧 UV；
+  * 采样历史，夹进当前 3×3 邻域 AABB，按 feedback 混合；
+  * 结果写 `taa_current`，后处理读它；最后 `copy_texture_to_texture` 存成下一帧历史。
+* 相机每帧用 Halton(2,3) 做 ±0.5 像素抖动，乘进主 pass 的 view-proj；历史因此覆盖
+  不同子像素位置。
+* 只在 `depth_texture_read && sample_count <= 1` 时建管线；GL/WebGL2 或 MSAA 会忽略并
+  警告一次。resize / 重新开启时历史失效，首帧直接输出当前帧。
+* 编辑器渲染面板加 TAA 开关与历史权重；场景文件、schema、系统提示同步。
+
+**验证**：
+
+* GPU 像素测试 `taa_uses_temporal_history_and_off_stays_stable`：
+  * 相机不动时第 1→2 帧必须变化（历史被消费）；
+  * feedback 0.9 的第 2 帧与 feedback 0 不同（证明差异来自历史混合，不只是抖动）；
+  * 关闭 TAA 后同一相机重复 capture 逐位相同。
+* `lighting_taa_doc_roundtrips_and_validates_feedback`：0.5 可读回，1.2 报
+  `lighting.taa.feedback` 错误。
+* UI 冒烟断言 `时域抗锯齿（TAA）` 被排版。
+
+**边界**：没有 motion vectors（运动物体会拖影）；没有 MSAA 解析深度（MSAA 下关闭）；
+不做相机切镜检测；历史纹理占两张全屏 HDR。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

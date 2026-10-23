@@ -3897,7 +3897,18 @@ pub fn dof_options(doc: &SceneDoc) -> quench3d::render::DofOptions {
     }
 }
 
-/// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。
+/// 把场景文件里的 `lighting.taa` 映射成渲染器选项；不写 = 关闭。
+pub fn taa_options(doc: &SceneDoc) -> quench3d::render::TaaOptions {
+    let Some(t) = &doc.lighting.taa else {
+        return quench3d::render::TaaOptions::default();
+    };
+    let defaults = quench3d::render::TaaOptions::default();
+    quench3d::render::TaaOptions {
+        enabled: t.enabled.unwrap_or(true),
+        feedback: t.feedback.unwrap_or(defaults.feedback),
+    }
+}
+
 /// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。编辑器共用，理由见 [`bloom_options`]。
 pub fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
     let Some(f) = &doc.lighting.fxaa else {
@@ -4321,6 +4332,7 @@ fn run_render_single(
         renderer: quench3d::render::RendererOptions {
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
+            taa: taa_options(doc),
             ssao: ssao_options(doc),
             dof: dof_options(doc),
             shadow_cascades: shadow_cascades(doc),
@@ -4946,6 +4958,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         renderer: quench3d::render::RendererOptions {
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
+            taa: taa_options(doc),
             ssao: ssao_options(doc),
             dof: dof_options(doc),
             shadow_cascades: shadow_cascades(doc),

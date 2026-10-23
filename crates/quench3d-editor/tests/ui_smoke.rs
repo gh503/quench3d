@@ -359,6 +359,10 @@ fn all_editor_panels_draw_in_one_frame() {
         shapes_contain_text(&output.shapes, "事件标记"),
         "动画面板没有显示事件标记编辑器"
     );
+    assert!(
+        shapes_contain_text(&output.shapes, "时域抗锯齿（TAA）"),
+        "渲染面板没有显示 TAA 开关"
+    );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(
         (first_requests.outliner_width - 300.0).abs() < 1.0,
