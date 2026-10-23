@@ -161,9 +161,9 @@
 
 | 能力 | 对标 | quench3d 现状 | 等级 |
 |---|---|---|---|
-| 工具链固定 | 生产流水线 | **本轮**：CI / Pages 由 `@stable` 改为**钉 `@1.99.0`**；workspace 声明 MSRV `1.90`（编辑器 `1.95`）。刻意不加 `rust-toolchain.toml`：那会逼每个本地贡献者再下一份工具链，而 CI 的钉版才是可复现性的实际保证（见 §7 第 5 条） | ✅（本轮） |
+| 工具链固定 | 生产流水线 | CI / Pages 钉 `@1.99.0`；workspace 声明 MSRV `1.90`（编辑器 `1.95`）；第 131 轮补 `rust-toolchain.toml`（1.99.0 + fmt/clippy/wasm32），本地与 CI 同版本 | ✅ |
 | 锁定依赖构建 | 生产流水线 | **本轮**：CI 与 `tools/build_web.sh` 全部 `--locked` | ✅（本轮） |
-| 许可与依赖审计 | 企业合规 | 无 `deny.toml` / SBOM / `cargo-audit` | ❌ |
+| 许可与依赖审计 | 企业合规 | `tools/license_audit.py`：SPDX 表达式求值 + 允许列表 + 380 个外部依赖；生成并校验 `docs/sbom.json`（CycloneDX 1.5）。**没有** `cargo-audit` 漏洞库扫描 | ✅（许可/SBOM） |
 | 变更日志 | 全部 | **本轮**：`CHANGELOG.md` | ✅（本轮） |
 | 贡献指南 | 开源协作 | **本轮**：`CONTRIBUTING.md`（含门禁命令与验证配方） | ✅（本轮） |
 | 错误模型（可机读错误码） | 生产集成 | **本轮**：校验诊断每条都带稳定 `code`（**第 60 轮：18 个码**，文档表 + schema + 系统提示三处同步，有对账测试）；顶层 `error.kind` 仍是粗粒度（`report.rs` 不在本轮围栏内）。详见 §8.15 | 🟡 |
@@ -241,7 +241,7 @@
 | S3 物理仿真 | **有条件替代（窄）** | 无行业基准 V&V；确定性未划跨平台边界；无接触力导出/接触 ID | 确定性刚体参数扫描 / CI 回归 / 教学 |
 | S4 游戏 | **不能替代** | 动画、音频、UI、输入映射、存档四件全无；无存档迁移 | 刚体玩法原型的物理核心 |
 | S5 Web 分发 | **不能替代** | wasm 11 MB；真机 WebGPU 未验证（只有 SwiftShader）；H1 色彩；无无障碍 | 内部演示嵌入 |
-| S6 自动化流水线 | **有条件替代（最接近）** | 可复现构建缺口（本轮已补 3 项，仍缺 SBOM/许可审计）；无迁移器；错误码**校验路径已细化**（第 55 轮，`diagnostics[].code`），运行期错误仍粗 | Blender 无头脚本中"纯仿真/出图/回归"那部分 |
+| S6 自动化流水线 | **有条件替代（最接近）** | 可复现构建基本闭环（工具链/`--locked`/SBOM/许可审计；仍缺漏洞库扫描）；无迁移器；错误码**校验路径已细化**（第 55 轮，`diagnostics[].code`），运行期错误仍粗 | Blender 无头脚本中"纯仿真/出图/回归"那部分 |
 
 **一句话**：S6/S3 的窄子集已经可以进生产；S1/S2/S4/S5 在**任何**标的上都不构成替代，而这与"功能多不多"关系不大——是 §4 那四类硬指标在挡路。
 
@@ -281,7 +281,7 @@
 |---|---|---|---|---|
 | **H1** | **色彩管理**：输入/输出色彩空间、色调映射算子、曝光是否可声明与可选 | ACES / Reinhard / 线性三档可选（第 129 轮），曝光可调；README 新增色彩约定；**仍缺**可配置输出色彩空间/ICC 与输入贴图色彩空间元数据 | **低（文档）+ 中（可选算子）** | 已做：算子可选 + 曝光 + README 声明；待做：输出色彩空间与贴图元数据 |
 | **H2** | **无损往返**：存一次读一次之后场景不变 | **本轮已关闭编辑器侧的主要漏洞**：以前导出会把 `lighting`/`simulate`/`render`/`models`/`probes` 与材质 4 个贴图槽 + 7 个开关静默清零；现在以原文档为底稿，只覆盖编辑器管得着的字段，并有"存→读→再存字节相同"的固定点测试。**仍缺**：导入的 glTF 模型在编辑器里被移动后，位置改动写不回 `models` 引用 | **中** | 已做：固定点测试 + 底稿合并 + 悬空关节/动作清理。待做：模型实例的"位置回写引用"或"展开为 objects"二选一并测试 |
-| **H3** | **可复现构建**：别人拿到 commit 能构建出同样东西 | 无 `rust-toolchain.toml`、CI 未 `--locked`、无 `deny.toml`/SBOM | **低**（本轮做掉大半） | `rust-toolchain.toml` + CI `--locked`（本轮）→ 许可审计与 SBOM 留待下一轮 |
+| **H3** | **可复现构建**：别人拿到 commit 能构建出同样东西 | `rust-toolchain.toml`、CI 全 `--locked`、lockfile 提交、许可审计 + SBOM 校验都已落地（第 131 轮）；**仍缺** `cargo-audit` 漏洞库扫描与可复现二进制（未固定 linker/编译路径） | **低** | 已做：工具链/锁文件/许可审计/SBOM；待做：漏洞扫描、二进制可复现 |
 | **H4** | **真机设备矩阵**：真浏览器/真 GPU 上跑过 | 只有 headless Chrome + SwiftShader（软件光栅）。**第 57 轮之前这一行其实是不成立的**：WebGL2 上编辑器**启动即 panic**（SSAO 读深度、MSAA 多采样纹理两条 GL 不支持的路），而门禁与 CI 都跑在 Vulkan 上 —— "矩阵里有一行"不等于"那一行绿"。现在有一条可复现的真 WebGL2 探针（`tools/probe_webgl2.sh`，判据 = 第一帧已渲染 + 遮罩收起 + 没有 `INDEPENDENT_BLEND`/Cube 启发式日志），且 GL 上会真正降级的能力都有关卡（§12.7）；**仍然全是软件光栅**（llvmpipe / SwiftShader），没有真 GPU 记录 | **中** | 至少一条"真机 WebGPU/真机 WebGL2"人工验证记录 + 一张矩阵表（Chrome/Firefox/Safari × 独显/核显），每行都要有一条能重跑的命令（`tools/probe_webgl2.sh` 是 WebGL2 那行的模板） |
 | **H5** | **确定性边界**：哪些维度上确定、哪些不确定 | 同机同线程数有测试；跨平台/跨线程数未声明 | **低** | 文档写清边界 + 一条"跨线程数一致"的用例（已有）作为对照 |
 | **H6** | **单位与轴向约定** | 引擎内部 Y-up / 右手 / 1 单位 = 1 米（代码如此），文档未声明；导入不做轴向转换 | **低（声明）+ 中（导入选项）** | 文档声明 + 导入时的缩放/轴向选项 |
@@ -341,7 +341,8 @@
 
 ### 5.4 工程卫生（H3）
 
-- **CI / Pages 钉工具链**：`dtolnay/rust-toolchain@stable` → `@1.99.0`。
+- **CI / Pages 钉工具链**：`dtolnay/rust-toolchain@stable` → `@1.99.0`；
+  第 131 轮补 `rust-toolchain.toml` 与 `docs/sbom.json`。
 - **`--locked`**：CI 的全部 cargo 命令与 `tools/build_web.sh` 都加上。
 - **`CHANGELOG.md`**（含"未做"一节）与 **`CONTRIBUTING.md`**（门禁命令、三条红线、验证配方、平台事实）。
 - 刻意**没有**加 `rust-toolchain.toml`：那会逼每个本地贡献者再下载一份工具链（本机 stable 就是 1.99.0），
@@ -2946,6 +2947,28 @@ duration=1.0）——数据改了画面会跟着红。
 
 **边界**：只有 v1→v2 一条迁移；没有 v0、没有逐字段迁移表；迁移是**自动**的，
 不写回源文件，也不在报告里单独标"已迁移"。
+
+### 23.32 许可审计与 SBOM（第 131 轮）
+
+**做了什么**：
+
+* `tools/license_audit.py`：用 `cargo metadata --locked` 枚举全部**外部依赖**，
+  逐个求值 SPDX 表达式；`OR` 只需一条允许分支，`AND` 必须全部允许，
+  `WITH` 只接受 `Apache-2.0 WITH LLVM-exception`。没有 license 直接失败。
+* 生成 `docs/sbom.json`（CycloneDX 1.5，380 个外部依赖，含 purl 与 license expression）。
+* `--check` 在门禁与 CI 中校验 SBOM 与 `Cargo.lock` 一致；`--self-test`
+  覆盖 `MIT OR LGPL`（通过）、`GPL-3.0-only`（拒绝）、`WITH` 例外等分支。
+* 补 `rust-toolchain.toml`（1.99.0 + rustfmt/clippy/wasm32），本地与 CI 同版本；
+  MSRV job 仍显式覆盖为 1.90。
+
+**验证**：
+
+* `python3 tools/license_audit.py --self-test` 通过；
+* `--write` 生成 380 个依赖，`--check` 通过；
+* 门禁新增 `PASS license`，CI 新增同名步骤。
+
+**边界**：只做**许可**审计，没有 `cargo-audit` 的漏洞库/公告扫描；
+SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

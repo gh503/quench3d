@@ -112,6 +112,7 @@ tools/verify_all.sh
 | --- | --- | --- |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
 | 色调映射算子 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline tonemap_operator` | ACES/Reinhard/线性三档渲染像素与 CPU 公式一致、互不相同 |
+| 许可审计/SBOM | `python3 tools/license_audit.py --check` | 380 个外部依赖全部有许可且允许；SBOM 与 Cargo.lock 一致；GPL-only 自测被拒绝 |
 | 场景 v1 迁移 | `cargo test -p quench3d-cli --lib version_one` | v1 自动升 v2、parent 被删、无 Error；v99 仍报错 |
 | 关节调试线 | `cargo test -p quench3d-physics joint_visuals` + `cargo test -p quench3d --lib joint_debug` | 世界锚点/轴、删刚体不返回悬空；调试线连线与轴端点精确；Web F11 状态翻转 |
 | gizmo 轴心 | `cargo test -p quench3d-editor --lib pivot_labels` | 三档标签、默认选中中心、物体/中心/世界原点求值；UI 画出「选中中心」 |

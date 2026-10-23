@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **许可审计与 SBOM（第 131 轮）**：`tools/license_audit.py` 做 SPDX 表达式求值 +
+  `docs/sbom.json`（CycloneDX 1.5，380 依赖），门禁/CI 校验；补 `rust-toolchain.toml`。
+  测试总数保持 788。
+
 - **场景 v1 → v2 自动迁移（第 130 轮）**：`from_value` 在结构检查前升级版本并删除
   v1 下不生效的 `objects[].parent`，include 片段同规则；`version_one_is_migrated_and_parent_is_ignored`
   覆盖。测试总数保持 788（替换原拒绝用例）。

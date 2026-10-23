@@ -85,6 +85,9 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps --workspace
 
+      - name: 许可审计与 SBOM
+        run: python tools/license_audit.py --check
+
       - name: 全部测试
         # 按腿给开关：**能建出 wgpu 上下文**的腿显式打开"需要真实 wgpu 上下文"的测试 ——
         # 覆盖不能因为 CI 假红而丢；没有 GPU 的 windows 腿给 "0"，那几条测试整条不执行

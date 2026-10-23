@@ -225,6 +225,8 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.129   # 必须与 wasm-bindgen crate 版本一致
 
+# 可复现构建：仓库内 rust-toolchain.toml 钉 1.99.0；依赖许可/SBOM 用
+# python3 tools/license_audit.py --check（CI 与门禁都会跑）。
 tools/build_web.sh web_client                      # 默认就是它：编辑器（Web 客户端）
 python3 -m http.server 8000 --directory web
 # 打开 http://localhost:8000/

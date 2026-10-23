@@ -1,0 +1,7 @@
+# 可复现构建的一部分：本地与 CI 用同一个编译器。
+# MSRV 1.90 的检查在 CI 的 msrv job 里显式用 1.90 覆盖，不受这里影响。
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

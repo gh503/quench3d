@@ -79,6 +79,14 @@ else
   tail -n 20 "$LOG_DIR/gate-doc.log"
 fi
 
+step "许可审计与 SBOM"
+if python3 tools/license_audit.py --check >"$LOG_DIR/gate-license.log" 2>&1; then
+  ok license
+else
+  bad license
+  tail -n 20 "$LOG_DIR/gate-license.log"
+fi
+
 step "测试（全部 crate；QUENCH3D_GPU_TESTS=$QUENCH3D_GPU_TESTS）"
 # --no-fail-fast：**必须**。cargo 缺省在第一个失败的测试二进制就收工，后面的 crate 根本
 # 不会跑 —— 门禁于是只报"第一个"失败，剩下的红点要等你修完它、再跑一次才浮出来
