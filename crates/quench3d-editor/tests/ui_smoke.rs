@@ -309,6 +309,10 @@ fn all_editor_panels_draw_in_one_frame() {
         "工具栏没有画出「导出 glTF」按钮"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "历史"),
+        "工具栏没有画出「历史」菜单"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "导出 GLB"),
         "工具栏没有画出「导出 GLB」按钮"
     );

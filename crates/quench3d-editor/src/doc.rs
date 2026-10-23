@@ -841,7 +841,8 @@ impl Doc {
     /// 编辑完成之后记一步历史（与栈顶相同则自动跳过）。
     pub fn record_edit(&mut self, engine: &Engine) {
         let json = scene_json(engine, self);
-        self.history.record_json(json);
+        let label = self.status.clone();
+        self.history.record_json_labeled(json, Some(label));
     }
 
     /// 开始一段连续编辑（拖 gizmo / 拖数值框）：整段只算一步。
@@ -880,6 +881,24 @@ impl Doc {
             }
             Some(Err(e)) => self.status = format!("重做失败：{e}"),
             None => self.status = "没有可重做的步骤".to_string(),
+        }
+    }
+
+    /// 跳到历史里的第 `index` 步（0 是最旧），含状态提示与选区收敛。
+    pub fn jump_history(&mut self, engine: &mut Engine, index: usize) {
+        match self.history.jump_to(index, engine) {
+            Some(Ok(restored)) => {
+                self.refresh_base_from(&restored.snapshot);
+                self.model_instances = restored.instances;
+                self.clamp_selection(engine);
+                self.status = format!(
+                    "已跳到历史第 {} 步 → {} 个物体",
+                    index + 1,
+                    restored.objects
+                );
+            }
+            Some(Err(e)) => self.status = format!("跳转历史失败：{e}"),
+            None => self.status = "这一步就是当前状态".to_string(),
         }
     }
 

@@ -42,10 +42,17 @@ pub struct Restored {
     pub instances: Vec<ModelInstance>,
 }
 
+/// 一步历史：快照 + 给面板看的标签。
+#[derive(Clone)]
+struct Entry {
+    json: String,
+    label: String,
+}
+
 /// 编辑历史。
 pub struct History {
-    past: Vec<String>,
-    future: Vec<String>,
+    past: Vec<Entry>,
+    future: Vec<Entry>,
     capacity: usize,
     /// 拖拽/连续编辑期间为 true：这段时间里的 `record` 不再入栈，
     /// 整段拖拽只算**一步**（不然拖一次鼠标就能塞满历史）。
@@ -79,21 +86,32 @@ impl History {
         self.in_transaction = false;
         self.dirty_in_transaction = false;
         if let Some(json) = json {
-            self.past.push(json);
+            self.past.push(Entry {
+                json,
+                label: "起始状态".to_string(),
+            });
         }
     }
 
     /// 记一步（`json` = **编辑之后**的场景快照）。与栈顶相同（无变化）时不记录。
     pub fn record_json(&mut self, json: Option<String>) {
+        self.record_json_labeled(json, None);
+    }
+
+    /// 同 [`History::record_json`]，但给这一步一个面板里能看懂的标签。
+    pub fn record_json_labeled(&mut self, json: Option<String>, label: Option<String>) {
         if self.in_transaction {
             self.dirty_in_transaction = true;
             return;
         }
         let Some(json) = json else { return };
-        if self.past.last() == Some(&json) {
+        if self.past.last().is_some_and(|entry| entry.json == json) {
             return;
         }
-        self.past.push(json);
+        self.past.push(Entry {
+            json,
+            label: label.unwrap_or_else(|| "编辑".to_string()),
+        });
         if self.past.len() > self.capacity {
             let drop = self.past.len() - self.capacity;
             self.past.drain(0..drop);
@@ -150,6 +168,16 @@ impl History {
         self.past.len()
     }
 
+    /// 第 `index` 步的标签（0 是最旧）。
+    pub fn label(&self, index: usize) -> Option<&str> {
+        self.past.get(index).map(|entry| entry.label.as_str())
+    }
+
+    /// 当前状态是不是最后一步。
+    pub fn is_current(&self, index: usize) -> bool {
+        self.past.len().saturating_sub(1) == index
+    }
+
     /// 只有当前状态、且没有可重做的，就算"空历史"。
     pub fn is_empty(&self) -> bool {
         self.past.len() <= 1 && self.future.is_empty()
@@ -164,12 +192,12 @@ impl History {
         }
         let current = self.past.pop()?;
         let target = self.past.last().cloned()?;
-        match restore(engine, &target) {
+        match restore(engine, &target.json) {
             Ok((objects, instances)) => {
                 self.future.push(current);
                 Some(Ok(Restored {
                     objects,
-                    snapshot: target,
+                    snapshot: target.json,
                     instances,
                 }))
             }
@@ -183,9 +211,39 @@ impl History {
     /// 重做一步。语义同 [`History::undo`]。
     pub fn redo(&mut self, engine: &mut Engine) -> Option<Result<Restored, String>> {
         let target = self.future.pop()?;
-        match restore(engine, &target) {
+        match restore(engine, &target.json) {
             Ok((objects, instances)) => {
                 self.past.push(target.clone());
+                Some(Ok(Restored {
+                    objects,
+                    snapshot: target.json,
+                    instances,
+                }))
+            }
+            Err(e) => {
+                self.future.push(target);
+                Some(Err(e))
+            }
+        }
+    }
+
+    /// 直接跳回过去第 `index` 步（0 是最旧）；被跳过的步骤进入重做链。
+    ///
+    /// 返回语义同 [`History::undo`]：`None` = 已经是当前步/越界。
+    pub fn jump_to(
+        &mut self,
+        index: usize,
+        engine: &mut Engine,
+    ) -> Option<Result<Restored, String>> {
+        if index + 1 >= self.past.len() {
+            return None;
+        }
+        let target = self.past[index].json.clone();
+        let removed: Vec<Entry> = self.past.drain(index + 1..).collect();
+        match restore(engine, &target) {
+            Ok((objects, instances)) => {
+                self.future.clear();
+                self.future.extend(removed.into_iter().rev());
                 Some(Ok(Restored {
                     objects,
                     snapshot: target,
@@ -193,7 +251,7 @@ impl History {
                 }))
             }
             Err(e) => {
-                self.future.push(target);
+                self.past.extend(removed);
                 Some(Err(e))
             }
         }

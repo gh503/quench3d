@@ -235,6 +235,35 @@ fn top_bar(
             {
                 doc.redo(engine);
             }
+            // 历史列表：点任意一步直接跳过去；被跳过的步骤进入重做链。
+            let history_labels: Vec<String> = (0..doc.history.len())
+                .map(|i| {
+                    format!(
+                        "{}. {}",
+                        i + 1,
+                        doc.history.label(i).unwrap_or("编辑")
+                    )
+                })
+                .collect();
+            let current_step = doc.history.len().saturating_sub(1);
+            ui.menu_button("历史", |ui| {
+                ui.set_min_width(260.0);
+                if history_labels.len() <= 1 {
+                    ui.label(egui::RichText::new("还没有可跳转的步骤").weak());
+                }
+                for (i, label) in history_labels.iter().enumerate() {
+                    if ui
+                        .selectable_label(i == current_step, label)
+                        .clicked()
+                        && i != current_step
+                    {
+                        doc.jump_history(engine, i);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("撤销历史：点一步直接跳回去");
 
             ui.separator();
 

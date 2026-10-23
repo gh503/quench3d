@@ -294,6 +294,50 @@ fn history_is_bounded_and_new_edits_drop_the_redo_chain() {
     doc.record_edit(&engine);
     assert!(!doc.history.can_redo(), "新编辑必须清空重做链");
 }
+/// 可视化历史：直接跳到过去某一步，跳过的步骤仍可重做。
+#[test]
+fn jump_history_goes_back_and_redo_walks_forward() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    doc.reset_history(&engine);
+    let base = engine.scene.objects.len();
+
+    doc.spawn(&mut engine, Primitive::Cube);
+    doc.record_edit(&engine);
+    let after_one = engine.scene.objects.len();
+    doc.spawn(&mut engine, Primitive::Sphere);
+    doc.record_edit(&engine);
+    let after_two = engine.scene.objects.len();
+    doc.spawn(&mut engine, Primitive::Cylinder);
+    doc.record_edit(&engine);
+
+    assert_eq!(after_one, base + 1);
+    assert_eq!(after_two, base + 2);
+    assert_eq!(doc.history.len(), 4, "起始 + 三次编辑");
+    assert!(
+        doc.history.label(1).unwrap_or_default().contains("立方体"),
+        "历史标签应当来自当时的操作：{:?}",
+        doc.history.label(1)
+    );
+
+    doc.jump_history(&mut engine, 1);
+    assert_eq!(engine.scene.objects.len(), after_one, "跳到第 1 次编辑后");
+    assert!(doc.history.can_redo(), "被跳过的步骤要能重做");
+    doc.redo(&mut engine);
+    assert_eq!(
+        engine.scene.objects.len(),
+        after_two,
+        "重做应回到第 2 次编辑后"
+    );
+
+    doc.jump_history(&mut engine, 0);
+    assert_eq!(engine.scene.objects.len(), base, "跳到起始状态");
+    assert!(doc.history.label(0).unwrap_or_default().contains("起始"));
+}
+
 /// 多选删除：一次删掉所有选中物体，下标的后续物体不受伤。
 #[test]
 fn delete_selected_removes_every_selected_object() {
