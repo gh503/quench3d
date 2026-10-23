@@ -3380,6 +3380,7 @@ impl IncludeCtx {
         into.waters.extend(doc.waters.iter().cloned());
         into.fluids.extend(doc.fluids.iter().cloned());
         into.particles.extend(doc.particles.iter().cloned());
+        into.decals.extend(doc.decals.iter().cloned());
         into.objects.extend(doc.objects.iter().cloned());
         into.models.extend(doc.models.iter().cloned());
         into.joints.extend(doc.joints.iter().cloned());
@@ -3449,6 +3450,16 @@ impl IncludeCtx {
         for m in doc.models.iter_mut() {
             let s = m.path.to_string_lossy().to_string();
             m.path = PathBuf::from(rebase_path(&s, &from, root.as_deref()));
+        }
+        for p in doc.particles.iter_mut() {
+            if let Some(slot) = &mut p.texture {
+                *slot = rebase_path(slot, &from, root.as_deref());
+            }
+        }
+        for d in doc.decals.iter_mut() {
+            if let Some(slot) = &mut d.texture {
+                *slot = rebase_path(slot, &from, root.as_deref());
+            }
         }
         // `assets` 是根独有的段（片段写它会被判错），所以这里不需要重定基它。
     }
@@ -11056,6 +11067,44 @@ mod include_tests {
         SceneDoc::from_file(path)
             .expect("根场景要能解析")
             .resolved()
+    }
+
+    /// 片段的粒子/贴花贴图也要按片段目录重定基（与材质贴图同一套规则）。
+    #[test]
+    fn include_rebases_particle_and_decal_textures() {
+        let dir = temp_scene_dir(
+            "visual_tex",
+            &[
+                (
+                    "main.json",
+                    r#"{
+                      "format": "quench3d.scene", "version": 2,
+                      "include": ["parts/fx.json"]
+                    }"#,
+                ),
+                (
+                    "parts/fx.json",
+                    r#"{
+                      "format": "quench3d.scene", "version": 2,
+                      "particles": [ { "texture": "tex/smoke.png" } ],
+                      "decals": [ { "normal": [0, 1, 0], "texture": "tex/logo.png" } ]
+                    }"#,
+                ),
+                ("parts/tex/smoke.png", "not really png"),
+                ("parts/tex/logo.png", "not really png"),
+            ],
+        );
+        let resolved = resolved_of(&dir.join("main.json"));
+        assert!(!resolved.has_errors(), "{:?}", resolved.diagnostics);
+        let merged = resolved.doc.expect("合并必须成功");
+        assert_eq!(
+            merged.particles[0].texture.as_deref(),
+            Some("parts/tex/smoke.png")
+        );
+        assert_eq!(
+            merged.decals[0].texture.as_deref(),
+            Some("parts/tex/logo.png")
+        );
     }
 
     /// 合并顺序、具名表合并、根独有段保留、**片段资源路径重定基**、幂等、校验通过。
