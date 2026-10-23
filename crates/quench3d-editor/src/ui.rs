@@ -5,7 +5,7 @@
 
 use crate::camera::CameraFeed;
 use crate::doc::{BodyKind, Doc, Primitive};
-use crate::gizmo::{Gizmo, Mode as GizmoMode, Space as GizmoSpace};
+use crate::gizmo::{Gizmo, Mode as GizmoMode, Pivot as GizmoPivot, Space as GizmoSpace};
 use egui::{RichText, Ui};
 use quench3d::prelude::*;
 
@@ -314,6 +314,15 @@ fn top_bar(
                     ui.selectable_value(&mut gizmo.space, GizmoSpace::World, "世界");
                     ui.selectable_value(&mut gizmo.space, GizmoSpace::Local, "局部");
                 });
+            egui::ComboBox::from_id_salt("gizmo-pivot")
+                .selected_text(gizmo.pivot.label())
+                .show_ui(ui, |ui| {
+                    for pivot in GizmoPivot::ALL {
+                        ui.selectable_value(&mut gizmo.pivot, pivot, pivot.label());
+                    }
+                })
+                .response
+                .on_hover_text("旋转/缩放的轴心");
             ui.checkbox(&mut gizmo.enabled, "显示")
                 .on_hover_text("关掉后视口里只剩拾取与转视角");
 

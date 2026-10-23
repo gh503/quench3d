@@ -28,7 +28,7 @@
 //! ## 没做的（老实说）
 //!
 //! * 拖拽中键入数值（Blender 的 `G X 2.5 Enter`）——需要一层文本输入浮层，这版没有。
-//! * 轴心切换（各自原点 / 活动物体 / 3D 光标）——现在只有"物体自己的原点"。
+//! * 3D 光标 / 多点平均轴心——现在提供物体原点、选中中心、世界原点三种。
 //! * 屏幕空间旋转（轨迹球）、**多选**（框选 / Shift 加选）成组变换——多选还没做；
 //!   现在唯一的"成组"来源是模型实例（见上）。
 //! * 手柄是 egui 的 2D 图元，不写深度：被物体完全挡住的轴也看得见（刻意如此）。
@@ -103,6 +103,32 @@ impl Space {
     }
 }
 
+/// 旋转/缩放的轴心。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pivot {
+    /// 活动物体自己的原点。
+    Object,
+    /// 所有选中物体的包围盒中心（多选时的默认）。
+    #[default]
+    SelectionCenter,
+    /// 世界原点。
+    WorldOrigin,
+}
+
+impl Pivot {
+    /// 全部轴心（工具栏按这个顺序排）。
+    pub const ALL: [Pivot; 3] = [Pivot::Object, Pivot::SelectionCenter, Pivot::WorldOrigin];
+
+    /// 界面标签。
+    pub fn label(self) -> &'static str {
+        match self {
+            Pivot::Object => "物体",
+            Pivot::SelectionCenter => "选中中心",
+            Pivot::WorldOrigin => "世界原点",
+        }
+    }
+}
+
 /// 可抓的手柄。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
@@ -147,6 +173,8 @@ pub struct Gizmo {
     pub mode: Mode,
     /// 当前坐标系。
     pub space: Space,
+    /// 旋转/缩放的轴心。
+    pub pivot: Pivot,
     /// 总开关（关掉后视口里只剩拾取与转视角）。
     pub enabled: bool,
     /// 当前悬停的手柄。
@@ -162,6 +190,7 @@ impl Default for Gizmo {
         Self {
             mode: Mode::Translate,
             space: Space::World,
+            pivot: Pivot::SelectionCenter,
             enabled: true,
             hover: None,
             drag: None,
@@ -219,9 +248,7 @@ impl Gizmo {
             return true;
         }
 
-        let pivot = doc
-            .selection_center(engine)
-            .unwrap_or_else(|| engine.scene.world_transform(driver).position);
+        let pivot = self.pivot_position(engine, doc, driver);
         let screen = Screen::project(self, engine, rect, driver, pivot);
 
         // ---- 1. 已经在拖：每帧从 start_transform 重算 ----
@@ -395,6 +422,12 @@ impl Gizmo {
 
         self.paint(ui, engine, doc, rect, &screen, None);
         self.hover.is_some() && rect.contains(rect.min + pointer)
+    }
+
+    /// 按当前轴心设置求旋转/缩放中心。
+    fn pivot_position(&self, engine: &Engine, doc: &Doc, driver: usize) -> Vec3 {
+        let object = engine.scene.world_transform(driver).position;
+        pivot_point(self.pivot, object, doc.selection_center(engine))
     }
 
     /// 按下时把"这次拖拽"的全部参照物固定下来。
@@ -888,6 +921,15 @@ pub fn axis_translation(
     d
 }
 
+/// 按轴心设置求一个具体的世界坐标点。
+fn pivot_point(pivot: Pivot, object: Vec3, center: Option<Vec3>) -> Vec3 {
+    match pivot {
+        Pivot::Object => object,
+        Pivot::SelectionCenter => center.unwrap_or(object),
+        Pivot::WorldOrigin => Vec3::ZERO,
+    }
+}
+
 /// 把主物体的"本次变化量"套到另一个选中物体上。
 ///
 /// 平移直接加位移；旋转/缩放绕 `pivot`（多选中心）做刚体变换。这样多选时
@@ -1096,6 +1138,32 @@ mod tests {
         assert!((distance_to_segment(EVec2::new(-4.0, 0.0), a, b) - 4.0).abs() < 1e-5);
         assert!((distance_to_segment(EVec2::new(14.0, 0.0), a, b) - 4.0).abs() < 1e-5);
     }
+    #[test]
+    fn pivot_labels_cover_all_choices() {
+        assert_eq!(Pivot::ALL.len(), 3);
+        assert_eq!(Pivot::Object.label(), "物体");
+        assert_eq!(Pivot::SelectionCenter.label(), "选中中心");
+        assert_eq!(Pivot::WorldOrigin.label(), "世界原点");
+        assert_eq!(Pivot::default(), Pivot::SelectionCenter);
+
+        let object = Vec3::new(1.0, 2.0, 3.0);
+        let center = Vec3::new(10.0, 20.0, 30.0);
+        assert_eq!(pivot_point(Pivot::Object, object, Some(center)), object);
+        assert_eq!(
+            pivot_point(Pivot::SelectionCenter, object, Some(center)),
+            center
+        );
+        assert_eq!(
+            pivot_point(Pivot::SelectionCenter, object, None),
+            object,
+            "没有多选中心时退回活动物体"
+        );
+        assert_eq!(
+            pivot_point(Pivot::WorldOrigin, object, Some(center)),
+            Vec3::ZERO
+        );
+    }
+
     #[test]
     fn group_member_follows_translate_rotate_and_scale_around_pivot() {
         let pivot = Vec3::new(0.0, 0.0, 0.0);
