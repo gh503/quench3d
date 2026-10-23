@@ -3456,6 +3456,7 @@ pub fn setup_visuals(
                     tip: c.tip.clone(),
                     target: v3(c.target),
                     pole: c.pole.map(v3),
+                    weight: c.weight.unwrap_or(1.0),
                 })
                 .collect();
             engine.scene.set_model_ik(index, chains);

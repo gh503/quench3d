@@ -645,6 +645,26 @@ impl Doc {
         Some(path)
     }
 
+    /// 把 `models[i].ik[chain].weight` 写回底稿（0~1，IK/FK 混合）。
+    ///
+    /// 返回模型路径；没有映射、模型没有 `ik` 段或下标越界时返回 `None`。
+    pub fn set_ik_weight(
+        &mut self,
+        objects: &[usize],
+        chain: usize,
+        weight: f32,
+    ) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        let ik = doc.ik.as_mut()?.get_mut(chain)?;
+        ik.weight = Some(weight);
+        Some(path)
+    }
+
     /// 把状态机第 `index` 条过渡的时间/淡入/结束触发写回底稿。
     ///
     /// 返回模型路径；没有映射、模型没有 animator 或下标越界时返回 `None`。
@@ -1839,6 +1859,17 @@ mod tests {
         );
         assert!(doc.set_ik_target(&[4], 1, [0.0; 3]).is_none());
         assert!(doc.set_ik_target(&[99], 0, [0.0; 3]).is_none());
+        assert_eq!(doc.set_ik_weight(&[4], 0, 0.25).as_deref(), Some("rig.glb"));
+        assert_eq!(
+            doc.base_doc.as_ref().unwrap().models[0]
+                .ik
+                .as_ref()
+                .unwrap()[0]
+                .weight,
+            Some(0.25)
+        );
+        assert!(doc.set_ik_weight(&[4], 2, 0.5).is_none());
+        assert!(doc.set_ik_weight(&[99], 0, 0.5).is_none());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

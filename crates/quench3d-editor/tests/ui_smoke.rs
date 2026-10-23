@@ -100,6 +100,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
             tip: "脚".into(),
             target: Vec3::new(0.0, 0.2, 0.1),
             pole: Some(Vec3::Z),
+            weight: 1.0,
         }],
         events: vec![quench3d::scene::SceneAnimationEvent {
             name: "footstep".into(),
@@ -349,6 +350,10 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "待处理事件 0"),
         "状态机没有显示输入缓冲深度"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "权重"),
+        "IK 链没有显示 IK/FK 权重控件"
     );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(

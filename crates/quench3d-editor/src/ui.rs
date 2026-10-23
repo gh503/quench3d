@@ -1987,6 +1987,29 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             }
                             refresh = true;
                         }
+                        let mut weight = chain.weight;
+                        let response = ui.add(
+                            egui::DragValue::new(&mut weight)
+                                .range(0.0..=1.0)
+                                .speed(0.01)
+                                .prefix("权重 "),
+                        );
+                        if response.drag_started() {
+                            begin_edit = true;
+                        }
+                        if response.changed() {
+                            chain.weight = weight;
+                            if models[index].is_some() {
+                                if let Some(path) = doc.set_ik_weight(&objects, chain_index, weight)
+                                {
+                                    changed_model = Some(path);
+                                }
+                            }
+                            refresh = true;
+                        }
+                        if response.drag_stopped() {
+                            end_edit = true;
+                        }
                     }
                 }
                 ui.horizontal(|ui| {

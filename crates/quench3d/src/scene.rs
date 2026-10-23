@@ -402,6 +402,9 @@ pub struct IkChain {
     pub target: Vec3,
     /// 弯曲方向提示（模型局部空间的方向向量，不需要归一化）。
     pub pole: Option<Vec3>,
+    /// IK/FK 混合权重（0~1）：0 = 完全保持 FK 姿态，1 = 完全解到目标；中间值
+    /// 对两次关节旋转做 slerp，骨骼长度不变，但末端不再保证精确到达。
+    pub weight: f32,
 }
 
 /// 一条**动画事件标记**：播放头经过 `time` 时触发 `name`。
@@ -677,6 +680,14 @@ fn solve_ik_chains(model: &crate::assets::LoadedModel, worlds: &mut [Mat4], chai
         {
             continue;
         }
+        let weight = if chain.weight.is_finite() {
+            chain.weight.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if weight <= 0.0 {
+            continue;
+        }
         let (Some(&wr), Some(&wm), Some(&wt)) =
             (worlds.get(root), worlds.get(mid), worlds.get(tip))
         else {
@@ -694,6 +705,12 @@ fn solve_ik_chains(model: &crate::assets::LoadedModel, worlds: &mut [Mat4], chai
             (b - a).normalize_or_zero(),
             (mid_goal - a).normalize_or_zero(),
         );
+        // IK/FK 混合：从单位旋转 slerp 到解出来的旋转；weight=1 时与旧行为逐位一致。
+        let q1 = if weight < 1.0 {
+            Quat::IDENTITY.slerp(q1, weight)
+        } else {
+            q1
+        };
         rotate_subtree(model, worlds, root, a, q1);
 
         // 根骨旋转后重新取中间点；再绕它把末端对准目标。
@@ -703,6 +720,11 @@ fn solve_ik_chains(model: &crate::assets::LoadedModel, worlds: &mut [Mat4], chai
             (c_now - b_now).normalize_or_zero(),
             (tip_goal - b_now).normalize_or_zero(),
         );
+        let q2 = if weight < 1.0 {
+            Quat::IDENTITY.slerp(q2, weight)
+        } else {
+            q2
+        };
         rotate_subtree(model, worlds, mid, b_now, q2);
     }
 }
@@ -3007,6 +3029,7 @@ mod anim_tests {
             tip: "tip".into(),
             target,
             pole,
+            weight: 1.0,
         }
     }
 
@@ -3050,6 +3073,52 @@ mod anim_tests {
     }
 
     #[test]
+    fn ik_weight_blends_between_fk_and_full_solution() {
+        let model = three_bone_model();
+        let target = Vec3::new(0.0, 1.5, 0.5);
+        let mut full = model.bind_pose();
+        solve_ik_chains(&model, &mut full, &[ik_chain(target, Some(Vec3::Z))]);
+        assert!((full[2].translation() - target).length() < 1e-3);
+
+        let bind_tip = model.bind_pose()[2].translation();
+        let mut half = model.bind_pose();
+        let mut chain = ik_chain(target, Some(Vec3::Z));
+        chain.weight = 0.5;
+        solve_ik_chains(&model, &mut half, &[chain.clone()]);
+        let half_tip = half[2].translation();
+        assert!(
+            (half_tip - bind_tip).length() > 1e-3,
+            "0.5 权重必须离开 FK 姿态"
+        );
+        assert!(
+            (half_tip - target).length() > 1e-3,
+            "0.5 权重不能完全到达目标"
+        );
+        assert!(
+            (half_tip - target).length() > (full[2].translation() - target).length(),
+            "0.5 权重应比全 IK 更接近 FK"
+        );
+        // 骨骼长度仍是 1：混合的是旋转，不是位置。
+        let a = half[0].translation();
+        let b = half[1].translation();
+        let c = half[2].translation();
+        assert!(((b - a).length() - 1.0).abs() < 1e-3);
+        assert!(((c - b).length() - 1.0).abs() < 1e-3);
+
+        // 0 = 完全 FK；非法权重按 1 处理。
+        let mut none = model.bind_pose();
+        let mut zero = ik_chain(target, Some(Vec3::Z));
+        zero.weight = 0.0;
+        solve_ik_chains(&model, &mut none, &[zero]);
+        assert_eq!(none, model.bind_pose());
+        let mut clamped = model.bind_pose();
+        let mut over = ik_chain(target, Some(Vec3::Z));
+        over.weight = 2.0;
+        solve_ik_chains(&model, &mut clamped, &[over]);
+        assert!((clamped[2].translation() - target).length() < 1e-3);
+    }
+
+    #[test]
     fn two_bone_ik_skips_missing_or_broken_chains() {
         let model = three_bone_model();
         let mut worlds = model.bind_pose();
@@ -3063,6 +3132,7 @@ mod anim_tests {
                 tip: "mid".into(),
                 target: Vec3::new(1.0, 1.0, 1.0),
                 pole: None,
+                weight: 1.0,
             }],
         );
         assert_eq!(worlds, before, "坏链整条跳过，不能留下半截旋转");

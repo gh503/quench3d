@@ -1763,6 +1763,9 @@ pub struct ModelIkDoc {
     /// 弯曲方向提示（模型局部空间的方向，不是点）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pole: Option<[f32; 3]>,
+    /// IK/FK 混合权重（0~1）；缺省 1 = 完全解到目标，0 = 保持动画/FK 姿态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
 }
 
 /// 一个手工 LOD 替换层级。
@@ -5637,6 +5640,15 @@ impl SceneDoc {
                             ));
                         }
                     }
+                    if let Some(weight) = c.weight {
+                        if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{cp}.weight"),
+                                "IK/FK 权重必须是 0~1 的有限数",
+                            ));
+                        }
+                    }
                 }
             }
             if m.animator.is_some() && m.animation.is_some() {
@@ -8674,7 +8686,8 @@ mod tests {
                     "mid": "LeftLeg",
                     "tip": "LeftFoot",
                     "target": [0.0, 0.2, 0.1],
-                    "pole": [0.0, 0.0, 1.0]
+                    "pole": [0.0, 0.0, 1.0],
+                    "weight": 0.5
                 }]
             }]
         }))
@@ -8684,6 +8697,7 @@ mod tests {
         assert_eq!(chain.tip, "LeftFoot");
         assert_eq!(chain.target, [0.0, 0.2, 0.1]);
         assert_eq!(chain.pole, Some([0.0, 0.0, 1.0]));
+        assert_eq!(chain.weight, Some(0.5));
 
         // 再序列化一次仍可读回（编辑器保存场景时不会把 IK 丢掉）。
         let text = serde_json::to_string(&doc).unwrap();
@@ -8692,6 +8706,7 @@ mod tests {
             again.models[0].ik.as_ref().unwrap()[0].target,
             [0.0, 0.2, 0.1]
         );
+        assert_eq!(again.models[0].ik.as_ref().unwrap()[0].weight, Some(0.5));
 
         // 没有动画实例时 IK 无法求解：必须当场报错，不能静默不动。
         let no_anim = SceneDoc::from_value(json!({
@@ -8711,6 +8726,23 @@ mod tests {
             ik_errors.iter().any(|p| p == "models[0].ik"),
             "缺 animation/animator 应报错：{ik_errors:?}"
         );
+
+        // 权重超出 0~1 必须报错。
+        let bad_weight = SceneDoc::from_value(json!({
+            "models": [{
+                "path": "rig.glb",
+                "animation": { "name": "idle" },
+                "ik": [{ "root": "a", "mid": "b", "tip": "c", "target": [0.0, 0.0, 0.0], "weight": 1.5 }]
+            }]
+        }))
+        .unwrap();
+        let weight_errors: Vec<String> = bad_weight
+            .validate()
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error && d.path.ends_with(".weight"))
+            .map(|d| d.path)
+            .collect();
+        assert_eq!(weight_errors, vec!["models[0].ik[0].weight".to_string()]);
 
         // 拼错的字段必须报错，而不是静默忽略。
         assert!(SceneDoc::from_value(json!({

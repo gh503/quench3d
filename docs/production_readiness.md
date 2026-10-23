@@ -84,7 +84,7 @@
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
 | 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、事件按钮和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、多轨混合 UI、按时间窗口的输入缓冲；状态机有界 FIFO 与 clip 事件队列已补（第 136/137 轮） | 🟡 |
-| 骨骼 / 蒙皮 | 全部 | **GPU 蒙皮可用**（纯蒙皮：`JOINTS_0/WEIGHTS_0` 顶点属性 + 每帧关节调色板；`Scene::gpu_skinning=false` 退回 CPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**两骨 IK 可用**（`models[].ik`，每帧采样后解目标、CPU/GPU 蒙皮与 F8 骨架一致）；**morph+skin 已能走 GPU 蒙皮**（morph 位移仍 CPU 叠加后上传，关节只在 GPU 乘一次）；**全 GPU morph 仍无** | 🟡 |
+| 骨骼 / 蒙皮 | 全部 | **GPU 蒙皮可用**（纯蒙皮：`JOINTS_0/WEIGHTS_0` 顶点属性 + 每帧关节调色板；`Scene::gpu_skinning=false` 退回 CPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**两骨 IK 可用**（`models[].ik`，每帧采样后解目标、CPU/GPU 蒙皮与 F8 骨架一致）；**morph+skin 已能走 GPU 蒙皮**（morph 位移仍 CPU 叠加后上传，关节只在 GPU 乘一次）；**全 GPU morph 仍无**；两骨 IK 有 FK/IK 权重 | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
 
@@ -2187,14 +2187,14 @@ if let Some(v) = doc.physics.static_friction_speed {
 | glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ✅ 第 70 轮（CPU） | `LoadedSkin` + `LoadedMesh.skin/joints/weights`；缺任何顶点数据时整体退回刚性路径（不撕裂网格） |
 | CPU 蒙皮变形 + 顶点回写 | ✅ 第 70 轮 | `LoadedModel::skinned_mesh` 算 `Σ w·world(joint)·IBM·bindInverse`；`Scene::advance_animations_with_renderer` 调 `Renderer::update_mesh_vertices` 原地更新同一个 `MeshId`。GPU 像素回归 t=0/t=0.25 |
 | GPU 蒙皮（顶点着色器关节矩阵） | ✅ 第 94 轮 / 第 135 轮补 morph+skin | `Vertex.joints/weights` + 128 关节 uniform 调色板；纯蒙皮每帧只传关节矩阵。**morph+skin**：morph 位移 CPU 叠加后上传绑定姿态顶点，关节矩阵仍在 GPU 乘一次，不再每帧做 CPU 蒙皮。像素对照：纯蒙皮 0/4096；morph+skin 0/16384（覆盖 288 像素）。调色板填充有独立断言 |
-| 两骨 IK | ✅ 第 96 轮 | `models[].ik`（root/mid/tip 节点名 + 局部 target/pole）；每帧 CPU 采样后解三角形，只改 root/mid 朝向，长度不变；不可达夹取；`Scene::set_model_ik` 落在 `animation_worlds`，CPU/GPU 蒙皮、刚性片段、F8 骨架同源。**仍缺**：FK/IK 权重混合、多骨链、目标约束 |
+| 两骨 IK | ✅ 第 96 / 138 轮 | `models[].ik`（root/mid/tip 节点名 + 局部 target/pole）；每帧 CPU 采样后解三角形，只改 root/mid 朝向，长度不变；不可达夹取；`Scene::set_model_ik` 落在 `animation_worlds`，CPU/GPU 蒙皮、刚性片段、F8 骨架同源。**第 138 轮**加 `weight`（0~1）：对两次关节旋转从单位四元数 slerp，0 = FK、1 = 全 IK，中间值长度仍不变但末端不保证到点；编辑器滑杆可改并写回底稿。**仍缺**：多骨链、目标约束 |
 | CPU 侧**采样**（给定 t 求节点世界矩阵） | ✅ 第 61 轮 | `sample_animation(name, t)`；循环/时间推进仍由调用方做（`t.rem_euclid(duration)`） |
 | CPU 侧播放状态（循环/夹取/倍速） | ✅ 第 61 轮 | `ModelAnimationPlayer::advance(dt)` + `mesh_matrices(&model)`；**纯 CPU 可测**（循环用 `rem_euclid`、`duration <= 0` 不除零、非法 dt 不出 NaN） |
 | 场景层应用（`Scene::apply_animation`） | ✅ 第 61 轮 | 纯 CPU、可测：`base × 额外矩阵`（不累乘 → 不漂）、只动有轨道的片段、越界跳过 |
 | 渲染循环里的调用点 | ✅ 第 62 轮 | `Scene::advance_animations(dt)`；`Engine::tick`（窗口）与 `render_sequence_with_game`（无头 `movie`）每帧在 `sync_from_physics` 之后调一次，暂停不推进；单帧 `render` 用 `dt = 0` 摆起始姿态 |
 | 与场景格式的接口 | ✅ 第 62 / 71 / 72 轮 | `models[].animation = { name, start?, speed?, loop?, blend? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`blend = { name, start?, speed?, loop?, weight?, fade? }`，`weight` 缺省 0.5、`fade` 缺省 0；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
-| 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）；第 86 轮可直接改状态 clip/起始时间并写回 `states[i]`；第 87 轮可增删状态和过渡（新状态自动选第一个 clip，新过渡从当前状态指向下一个状态，删除状态会连带删除引用它的过渡并改写 `initial`）；第 88 轮可改过渡的 `from/to` 与状态机初始状态；第 96 轮可直接改每条 IK 链的 target XYZ 并写回 `models[i].ik[j].target`；第 97 轮状态机参数有滑杆，拖动后 `dt=0` 立即判一次过渡（只改会话值，不写 default）；第 98 轮为 `on_event` 画「发送事件」按钮。第 119 轮把时间滑杆下方补成**可视化单 clip 时间轴**（刻度、播放头、点/拖定位，读数与 `player.time` 同步）。**仍不是**多轨混合器（不能加事件、改状态名或增删 IK 链） |
+| 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）；第 86 轮可直接改状态 clip/起始时间并写回 `states[i]`；第 87 轮可增删状态和过渡（新状态自动选第一个 clip，新过渡从当前状态指向下一个状态，删除状态会连带删除引用它的过渡并改写 `initial`）；第 88 轮可改过渡的 `from/to` 与状态机初始状态；第 96 轮可直接改每条 IK 链的 target XYZ 并写回 `models[i].ik[j].target`，第 138 轮加权重滑杆写回 `models[i].ik[j].weight`；第 97 轮状态机参数有滑杆，拖动后 `dt=0` 立即判一次过渡（只改会话值，不写 default）；第 98 轮为 `on_event` 画「发送事件」按钮。第 119 轮把时间滑杆下方补成**可视化单 clip 时间轴**（刻度、播放头、点/拖定位，读数与 `player.time` 同步）。**仍不是**多轨混合器（不能加事件、改状态名或增删 IK 链） |
 | 参数/事件驱动状态机 | ✅ 第 75 / 80 / 97 / 98 轮 | `models[].animator`：`states` + `parameters` + `transitions`，按状态停留时间 `after`、`on_finished`、`conditions`（参数比较）或 `on_event`（离散事件，优先于时间过渡）切换；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；`Scene::set_animator_parameter` / `fire_animator_event` 是宿主输入入口；报告 `models[].animator`。**仍缺**：参数曲线、按时间窗口的输入缓冲；clip 动画事件标记 + 队列第 136 轮、状态机有界 FIFO 第 137 轮已补 |
 | 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
@@ -2227,7 +2227,7 @@ if let Some(v) = doc.physics.static_friction_speed {
    `animator.states/transitions` + 淡入。**GPU 蒙皮第 94 轮已补**（纯蒙皮）；
    **两骨 IK 第 96 轮已补**（`models[].ik`）；**morph+skin 的 GPU 蒙皮第 135 轮已补**
    （morph 位移仍 CPU，全 GPU morph 仍缺）；**clip 动画事件标记/队列第 136 轮已补**；
-   仍缺任意权重曲线、按时间窗口的输入缓冲、FK/IK 权重混合。
+   仍缺任意权重曲线、按时间窗口的输入缓冲、多骨 IK/目标约束。
 5. ✅ **`skins` + GPU 蒙皮**（第 94 轮）：顶点属性扩展 + 128 关节 uniform 调色板 +
    `pbr.wgsl`/`shadow.wgsl` + 阴影管线绑定；morph+skin 也走 GPU 蒙皮（morph CPU 叠加），
    `gpu_skinning=false` 可整体退回。像素对照与调色板填充都有测试。
@@ -3118,6 +3118,28 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 **边界**：没有按时间窗口过期/优先级/合并；事件仍是字符串，没有参数载荷；
 过渡期间不消费队列（等新 clip 提为主 clip 后继续）。
+
+### 23.39 两骨 IK 的 FK/IK 权重（第 138 轮）
+
+**做了什么**：
+
+* `IkChain` 新增 `weight: f32`；`models[].ik[].weight` 可选 0~1，缺省 1。
+* `solve_ik_chains` 先 clamp 权重；0 整条跳过，1 与旧行为逐位一致；中间值对两次关节
+  旋转做 `Quat::IDENTITY.slerp(q, weight)`，只混旋转、不改骨骼长度。
+* 编辑器 IK 段落加 `权重` DragValue，改动写回 `models[i].ik[j].weight`；
+  `Doc::set_ik_weight` 与场景文档校验（非有限/超界报错）。
+* schema / 系统提示的 IK 字段说明补 `weight`。
+
+**验证**：
+
+* `ik_weight_blends_between_fk_and_full_solution`：0.5 权重的末端离开 FK 且不到目标、
+  比全 IK 更接近 FK，两骨长度仍为 1；0 = 原姿态；2 被夹到 1 并精确到目标。
+* `model_ik_chains_roundtrip_through_the_scene_format` 保留 weight 并拒绝 1.5。
+* 编辑器 `set_ik_target_writes_the_model_chain` 覆盖 weight 写回；UI 冒烟断言 `权重`
+  控件被排版。
+
+**边界**：权重是全局标量，没有逐骨/逐轴权重；目标仍不做碰撞/关节限位；
+求解顺序仍是每条链依次执行。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
