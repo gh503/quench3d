@@ -3457,6 +3457,7 @@ pub fn setup_visuals(
                         default: p.default,
                     })
                     .collect();
+                runtime.event_window = anim.event_window.unwrap_or(0.0).clamp(0.0, 10.0);
             }
         }
         if let (Some(index), Some(chains)) = (animation_index, &m.ik) {
@@ -3947,6 +3948,7 @@ pub fn ssao_options(doc: &SceneDoc) -> quench3d::render::SsaoOptions {
         bias: a.bias.unwrap_or(defaults.bias),
         strength: a.strength.unwrap_or(defaults.strength),
         samples: a.samples.unwrap_or(defaults.samples),
+        denoise: a.denoise.unwrap_or(defaults.denoise),
     }
 }
 

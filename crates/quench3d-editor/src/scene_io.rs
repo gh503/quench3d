@@ -247,6 +247,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         bias: Some(opts.ssao.bias),
         strength: Some(opts.ssao.strength),
         samples: Some(opts.ssao.samples),
+        denoise: Some(opts.ssao.denoise),
     });
     lighting.dof = Some(quench3d_cli::scene_doc::DofDoc {
         enabled: Some(opts.dof.enabled),

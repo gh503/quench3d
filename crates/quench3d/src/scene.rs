@@ -359,6 +359,13 @@ pub struct ModelAnimatorRuntime {
     /// 每帧只消费队首一条；队列满时丢最旧的，保证最新输入不会因为
     /// 旧事件堆积而永远轮不到。
     pub event_buffer: VecDeque<String>,
+    /// 与 `event_buffer` 一一对应的年龄（秒）；只在 `event_window > 0` 时过期。
+    pub event_ages: VecDeque<f32>,
+    /// 输入事件的有效窗口（秒，0 = 不过期，旧行为）。
+    ///
+    /// 窗口从**入队**时开始计时；超过窗口还没被任何过渡接住就丢弃，
+    /// 避免"很久以前按的键"在角色落地/起身后突然生效。
+    pub event_window: f32,
 }
 
 impl ModelAnimatorRuntime {
@@ -373,9 +380,30 @@ impl ModelAnimatorRuntime {
         }
         while self.event_buffer.len() >= ANIMATOR_EVENT_CAPACITY {
             self.event_buffer.pop_front();
+            self.event_ages.pop_front();
         }
         self.event_buffer.push_back(name);
+        self.event_ages.push_back(0.0);
         true
+    }
+
+    /// 让队首事件变老；窗口 > 0 时丢掉过期项。队列按入队顺序，年龄单调，
+    /// 所以队首没过期时后面的也一定没过期。
+    fn age_events(&mut self, step: f32) {
+        if self.event_window <= 0.0 || step <= 0.0 {
+            return;
+        }
+        for age in &mut self.event_ages {
+            *age += step;
+        }
+        while self
+            .event_ages
+            .front()
+            .is_some_and(|age| *age > self.event_window)
+        {
+            self.event_buffer.pop_front();
+            self.event_ages.pop_front();
+        }
     }
 
     /// 当前缓冲里还有多少条未处理事件。
@@ -832,11 +860,15 @@ fn conditions_hold(anim: &ModelAnimatorRuntime, conditions: &[AnimatorCondition]
 }
 
 fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
+    let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+    // 事件窗口即使在过渡中也要计时：否则一次长淡入会让旧输入永远不过期。
+    if let Some(anim) = a.animator.as_mut() {
+        anim.age_events(step);
+    }
     // 过渡中不再启动下一条过渡；等 promotion 把新 clip 提为主 clip。
     if a.secondary.is_some() {
         return;
     }
-    let step = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
     // 在借 `animator` 之前取，避免同时借 `a.player` 的字段。
     let player_finished = a.player.finished;
     let Some(anim) = &mut a.animator else {
@@ -849,6 +881,7 @@ fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
     // 事件在帧首消费：每帧只取队首一条。没被任何过渡接住就丢弃，
     // 后续事件留在缓冲里等下一帧（过渡期间不处理，见上面的 early return）。
     let event = anim.event_buffer.pop_front();
+    anim.event_ages.pop_front();
     // 过渡在**帧首**判定：本帧开始时已经停留够 after 才切。这样目标 clip
     // 不会被多推进一整帧——它本帧只从 0 开始走这一帧的时间。
     //
@@ -1428,6 +1461,8 @@ impl Scene {
                 pending: None,
                 parameters: Vec::new(),
                 event_buffer: VecDeque::new(),
+                event_ages: VecDeque::new(),
+                event_window: 0.0,
             }),
         });
         Some(index)
@@ -3491,6 +3526,87 @@ mod anim_tests {
             vec!["e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11"]
         );
         assert!(!animator.queue_event("   "), "空名不入队");
+        assert_eq!(animator.event_ages.len(), animator.event_buffer.len());
+    }
+
+    #[test]
+    fn animator_event_window_expires_inputs_during_a_long_fade() {
+        let model = condition_model();
+        let states = vec![
+            condition_state("idle", "idle"),
+            condition_state("jump", "jump"),
+        ];
+        let transitions = vec![
+            ModelAnimatorTransition {
+                from: "idle".into(),
+                to: "jump".into(),
+                after: 999.0,
+                on_finished: false,
+                fade: 1.0,
+                conditions: Vec::new(),
+                on_event: Some("a".into()),
+            },
+            ModelAnimatorTransition {
+                from: "jump".into(),
+                to: "idle".into(),
+                after: 999.0,
+                on_finished: false,
+                fade: 0.0,
+                conditions: Vec::new(),
+                on_event: Some("b".into()),
+            },
+        ];
+        let mut scene = Scene::new();
+        let idx = scene
+            .play_model_animator(model, Vec::new(), Vec::new(), states, transitions, 0)
+            .expect("clip 都在");
+        scene.animations[idx]
+            .animator
+            .as_mut()
+            .unwrap()
+            .event_window = 0.25;
+        assert!(scene.fire_animator_event(idx, "a"));
+        // 0 秒推进只做帧首判定：a 命中过渡，开始 1 秒淡入（secondary 已存在）。
+        scene.advance_animations(0.0);
+        assert!(scene.animations[idx].secondary.is_some(), "淡入已开始");
+        // 淡入期间输入不被消费；窗口到期后应当丢弃，而不是等落地后突然生效。
+        assert!(scene.fire_animator_event(idx, "b"));
+        scene.advance_animations(0.1);
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .queued_events(),
+            1
+        );
+        scene.advance_animations(0.2);
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .queued_events(),
+            0,
+            "0.3s > 0.25s 窗口，b 应已过期"
+        );
+        // 窗口 0 = 不过期（旧行为）：再发一条应能留到淡入结束。
+        scene.animations[idx]
+            .animator
+            .as_mut()
+            .unwrap()
+            .event_window = 0.0;
+        assert!(scene.fire_animator_event(idx, "b"));
+        scene.advance_animations(1.0);
+        assert_eq!(
+            scene.animations[idx]
+                .animator
+                .as_ref()
+                .unwrap()
+                .queued_events(),
+            1,
+            "窗口 0 时旧行为不变"
+        );
     }
 
     #[test]

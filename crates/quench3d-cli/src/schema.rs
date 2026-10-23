@@ -475,7 +475,7 @@ pub fn scene_grammar() -> Value {
             "friction": "参与碰撞时的摩擦，缺省 0.8",
             "morph_weights": "手工覆盖 glTF morph target 的权重数组（0~1，按 target 顺序；缺省用资产默认值，缺项按 0）；写了它就优先于 clip 自带的 morph 权重动画",
             "ik": "两骨 IK 链数组：{ root, mid, tip, target:[x,y,z], pole?, weight? }。按 glTF 节点名引用，目标/极向量在模型局部空间；需要同时有 animation 或 animator；不可达目标夹到骨骼长度，不拉伸；weight 0~1 在 FK 姿态与全 IK 之间混合（缺省 1）",
-            "animator": "状态机 { initial, states, transitions? }；与 animation 互斥。过渡按停留时间 after 秒、on_finished 播完、conditions 参数比较（float 参数，6 种比较）或 on_event 事件切换；fade 秒淡入（0 = 立即切换）。宿主用 set_animator_parameter / fire_animator_event 输入；事件是有界 FIFO（8 条，每帧消费一条，满时丢最旧），可在当前动作结束前预输入下一招",
+            "animator": "状态机 { initial, states, transitions?, event_window? }；与 animation 互斥。过渡按停留时间 after 秒、on_finished 播完、conditions 参数比较（float 参数，6 种比较）或 on_event 事件切换；fade 秒淡入（0 = 立即切换）。宿主用 set_animator_parameter / fire_animator_event 输入；事件是有界 FIFO（8 条，每帧消费一条，满时丢最旧），可在当前动作结束前预输入下一招；event_window 秒内未被接住的事件自动过期（0 = 不过期）",
             "animation": "播放模型里的一条 glTF 动画：{ name, start?, speed?, loop?, blend? }。不写 = 静止（老行为）；loop 缺省 true（写 false = 播完停在最后一帧）；带 morph weights 轨道的 clip 会同时驱动形变（手工 morph_weights 优先；双 clip 只取主 clip 的 morph 轨道）；blend: { name, start?, speed?, loop?, weight?, fade? } 是第二条 clip 的交叉淡化（weight 缺省 0.5，fade 缺省 0 = 立即生效）；名字不存在**不是**校验错误（validate 不读资产），会在 simulate/render 报告的 models[].animation.found / models[].blend.found 里报 false"
         },
         "joint": {
@@ -558,7 +558,7 @@ pub fn scene_grammar() -> Value {
             "shadow_quality": "阴影质量：{ strength（0~1，缺省 0.85；0 = 阴影不压暗，1 = 全黑）, radius（阴影相机覆盖半径，米，缺省 28）, bias（阴影深度偏移，纹素，缺省 0.75，0~4）}。与开关 `shadows` 分开：这一节只调质量。radius 是「覆盖范围 ↔ 精度」的旋钮，给大能让远处也投上阴影但边缘更糊。**阴影贴图分辨率（像素）不在场景文件里**：它是渲染器构造参数",
             "sky_colors": "天空渐变颜色：{ zenith:[r,g,b], horizon:[r,g,b], ground:[r,g,b] }（**线性**、非 sRGB）。只覆盖写了的那几个通道，没写 = 跟随 preset。sky:false 时没有可见效果",
             "bloom": "泛光：{ enabled（缺省 true）, intensity（缺省 0.6）, threshold（缺省 1.0，线性 Rec.709 亮度）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。光照/自发光先落到线性 HDR 中间目标，超阈值的部分做半分辨率高斯模糊，再在 tonemap **之前**加回去——所以亮区外溢不会过曝成白块。想让太阳/自发光有「发光感」就写 { threshold: 1.0, intensity: 0.6 }",
-            "ssao": "环境光遮蔽：{ enabled（缺省 true）, radius（缺省 0.75，单位**米**）, bias（缺省 0.025）, strength（缺省 1.0）, samples（缺省 16，1~64）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。让物体与地面的接触缝隙、墙角变暗——廉价版的接触阴影。深度-only 实现（法线由深度重建），结果乘在整幅 HDR 颜色上（不区分直接光/间接光），这是后处理式 SSAO 的固有简化。物体尺度 1~2 米时 radius 用 0.5~1.0",
+            "ssao": "环境光遮蔽：{ enabled（缺省 true）, radius（缺省 0.75，单位**米**）, bias（缺省 0.025）, strength（缺省 1.0）, samples（缺省 16，1~64）, denoise（缺省 false，4 邻域双边去噪，AO 计算量 ×5）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。让物体与地面的接触缝隙、墙角变暗——廉价版的接触阴影。深度-only 实现（法线由深度重建），结果乘在整幅 HDR 颜色上（不区分直接光/间接光），这是后处理式 SSAO 的固有简化。物体尺度 1~2 米时 radius 用 0.5~1.0",
             "taa": "时域抗锯齿：{ enabled（缺省 true）, feedback（历史权重 0~0.98，缺省 0.9；越大越平滑也越容易拖影）}。**不写这一节 = 关闭**。相机每帧亚像素抖动 + 上一帧历史按深度重投影累积；**只在能读深度且未开 MSAA 的原生后端生效**（GL/WebGL2 与 msaa>1 忽略）",
             "fxaa": "后处理抗锯齿：{ enabled（缺省 true）, edge_threshold（缺省 0.166，越小越敏感）, edge_threshold_min（缺省 0.0833）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。它在 tonemap **之后**的画面（不是线性 HDR）上找感知边缘，沿边缘方向做一次定向模糊；平坦区域逐位不变。与 render.msaa 不冲突：MSAA 管几何边缘，FXAA 管着色噪声与剩下的锯齿，代价是细节略微变软。斜边多的场景写 {} 就够了",
             "dof": "深度景深：{ enabled（缺省 true）, focus（对焦距离，视空间米，缺省 2.0）, aperture（光圈强度，缺省 0.4，0 = 不模糊）, max_blur（最大模糊半径像素，缺省 8.0，常用 4~16）}。**不写这一节 = 关闭**（像素与关闭时一致）。后处理式：按像素到焦平面的距离做 16 tap 圆盘模糊，天空不参与；**只在能读深度纹理的后端生效**（原生 wgpu），GL/WebGL2 会忽略这一节"
@@ -879,7 +879,20 @@ pub fn json_schema() -> Value {
         d
     });
     defs.insert("modelAnimator".into(), {
-        let mut d = def(&["initial", "states", "parameters", "transitions"]);
+        let mut d = def(&[
+            "initial",
+            "states",
+            "parameters",
+            "transitions",
+            "event_window",
+        ]);
+        d["properties"]["event_window"] = json!({
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 10.0,
+            "default": 0.0,
+            "description": "输入事件有效窗口（秒），0 = 不过期"
+        });
         d["properties"]["states"] = json!({
             "type": "array",
             "minItems": 1,
@@ -1032,7 +1045,9 @@ pub fn json_schema() -> Value {
     defs.insert("skyColors".into(), def(&["zenith", "horizon", "ground"]));
     defs.insert(
         "ssao".into(),
-        def(&["enabled", "radius", "bias", "strength", "samples"]),
+        def(&[
+            "enabled", "radius", "bias", "strength", "samples", "denoise",
+        ]),
     );
     defs.insert(
         "fxaa".into(),

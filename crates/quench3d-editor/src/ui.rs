@@ -418,6 +418,13 @@ fn top_bar(
                 .on_hover_text(
                     "屏幕空间环境光遮蔽：让物体与地面接触的缝隙、墙角变暗。\n                     深度-only 实现，只影响间接光的近似；半径/强度在场景文件的 lighting.ssao 里调。",
                 );
+            ui.add_enabled_ui(engine.renderer.options.ssao.enabled, |ui| {
+                ui.checkbox(
+                    &mut engine.renderer.options.ssao.denoise,
+                    "SSAO 去噪（4 邻域双边，5× 采样）",
+                )
+                .on_hover_text("压掉接触处的颗粒；边缘按深度差保护，不会糊墙。");
+            });
             ui.checkbox(&mut engine.renderer.options.dof.enabled, "景深（DoF）")
                 .on_hover_text(
                     "按像素到焦平面的距离做圆盘模糊；天空不参与。\n                     只在能读深度的后端（原生 wgpu）生效，GL/WebGL2 会忽略。",
@@ -2296,6 +2303,18 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             }
                         });
                     }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("事件窗口").small().weak())
+                            .on_hover_text(
+                                "输入事件在这么多秒内没被接住就丢弃；0 = 不过期。\n只改本次会话，场景默认值写 models[i].animator.event_window。",
+                            );
+                        ui.add(
+                            egui::DragValue::new(&mut animator.event_window)
+                                .speed(0.01)
+                                .range(0.0..=10.0)
+                                .suffix("s"),
+                        );
+                    });
                     let current = animator
                         .states
                         .get(animator.current)

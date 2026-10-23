@@ -1749,6 +1749,12 @@ pub struct ModelAnimatorDoc {
     /// 过渡列表；可以为空（永远停在初始状态）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transitions: Vec<ModelAnimatorTransitionDoc>,
+    /// 输入事件的有效窗口（秒，0 = 不过期，旧行为）。
+    ///
+    /// 窗口从 `fire_animator_event` 入队时开始计时；淡入期间不消费输入，
+    /// 超过窗口还没被接住就丢弃，避免旧按键在动作结束后突然生效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_window: Option<f32>,
 }
 
 /// 一条两骨 IK 链（模型局部空间）。
@@ -2462,6 +2468,9 @@ pub struct SsaoDoc {
     /// 每像素采样数，缺省 16（1~64）：越多越平滑也越贵。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samples: Option<u32>,
+    /// 是否做 4 邻域双边去噪，缺省 false（AO 计算量 ×5）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denoise: Option<bool>,
 }
 
 /// FXAA（后处理抗锯齿）配置。
@@ -5790,6 +5799,15 @@ impl SceneDoc {
                         format!("初始状态 \"{}\" 不在 states 里", anim.initial),
                     ));
                 }
+                if let Some(window) = anim.event_window {
+                    if !window.is_finite() || !(0.0..=10.0).contains(&window) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{ap}.event_window"),
+                            "事件窗口必须是 0~10 秒的有限值（0 = 不过期）",
+                        ));
+                    }
+                }
                 for (ti, tr) in anim.transitions.iter().enumerate() {
                     let tp = format!("{ap}.transitions[{ti}]");
                     if !names.contains(&tr.from) {
@@ -8445,6 +8463,7 @@ mod tests {
                 "path": rig.clone(),
                 "animator": {
                     "initial": "idle",
+                    "event_window": 0.35,
                     "parameters": [
                         { "name": "speed", "default": 0.0 },
                         { "name": "grounded", "default": 1.0 }
@@ -8470,6 +8489,7 @@ mod tests {
         assert_eq!(anim.transitions[0].conditions.len(), 2);
         assert_eq!(anim.transitions[0].conditions[0].value, 0.1);
         assert_eq!(anim.transitions[0].on_event.as_deref(), Some("跳跃"));
+        assert_eq!(anim.event_window, Some(0.35));
         let diags: Vec<_> = doc
             .validate()
             .into_iter()
@@ -8490,6 +8510,30 @@ mod tests {
                 .on_event
                 .as_deref(),
             Some("跳跃")
+        );
+        assert_eq!(
+            again.models[0].animator.as_ref().unwrap().event_window,
+            Some(0.35)
+        );
+
+        // 事件窗口越界 / 非有限：错误。
+        let bad_window = SceneDoc::from_value(json!({
+            "models": [{
+                "path": rig.clone(),
+                "animator": {
+                    "initial": "idle",
+                    "event_window": 11.0,
+                    "states": [{ "name": "idle", "animation": "idle" }]
+                }
+            }]
+        }))
+        .unwrap();
+        assert!(
+            bad_window
+                .validate()
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.path.ends_with("event_window")),
+            "event_window 超出 0~10 秒必须报错"
         );
 
         // 条件引用不存在的参数：必须是错误，不能静默永远不切。
@@ -9248,6 +9292,7 @@ mod tests {
                 bias: Some(a.bias),
                 strength: Some(a.strength),
                 samples: Some(a.samples),
+                denoise: Some(a.denoise),
             },
         );
         assert_eq!(written.0.intensity, Some(1.25));

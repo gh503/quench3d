@@ -26,8 +26,8 @@ tools/verify_all.sh
 | 点光 / 聚光阴影 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test point_lights` | 有/无投影的像素差 |
 | Bloom | `cargo test -p quench3d-render --test post_pipeline bloom` | 亮区外溢、关闭时参数无效 |
 | FXAA | `cargo test -p quench3d-render --test post_pipeline fxaa` | 边缘变平滑、平面不变 |
-| TAA | `cargo test -p quench3d-render --test post_pipeline taa` | 相机不动时第 1→2 帧变化（历史被消费）；feedback 0.9 与 feedback 0 的第 2 帧不同；关闭 TAA 重复 capture 逐位相同；GL/MSAA 跳过 |
-| SSAO | `cargo test -p quench3d-render --test post_pipeline ssao` | 接触处变暗、远平面不变 |
+| TAA | `cargo test -p quench3d-render --test post_pipeline taa` | 相机不动时第 1→2 帧变化（历史被消费）；feedback 0.9 与 feedback 0 的第 2 帧不同；关闭 TAA 重复 capture 逐位相同；切镜（位置 >2m/朝向 >60°）丢弃历史；GL/MSAA 跳过 |
+| SSAO | `cargo test -p quench3d-render --test post_pipeline ssao` | 接触处变暗、远平面不变；可选去噪至少改 20 像素、接缝仍暗 ≥2.5/255、接触区粗糙度 5.10→2.38 |
 | 水面后处理 | `cargo test -p quench3d-render --test post_pipeline water` | 开/关、波强/泡沫/折射都改变像素 |
 | 解析式环境高光 | `cargo test -p quench3d-render --test post_pipeline analytic_environment` | 金属球开关像素不同 |
 | 透明排序 | `cargo test -p quench3d-render --test post_pipeline transparent` | 远蓝后画、近红先画仍得到正确混合 |
@@ -57,6 +57,7 @@ tools/verify_all.sh
 | morph 位移数学 | `cargo test -p quench3d --test model_loading morph_targets_displace_vertices_by_weight` | 手搓 GLB 的 `targets[0]` 解析；权重 0 原样、1 整体 +0.5、0.5 +0.25 |
 | morph 资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_morph_targets` | `info --json` 的 `morph_targets=1`，人类可读输出有「morph target」行 |
 | 动画事件标记/队列 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib model_events`、`cargo test -p quench3d-editor --lib set_animation_events` | 半开区间不重复、循环回到开头再触发、非循环结尾补触发、clip 过滤、Scene 队列取空、无 animation/animator warning；编辑器写入/清空 `models[].events`、空数组不留空段 |
+| 状态机输入窗口 | `cargo test -p quench3d --lib animator_event_window`、`cargo test -p quench3d-cli --lib animator_parameters` | 1 秒淡入期间入队的 `b` 0.1s 还在、0.3s（窗口 0.25s）后为 0；窗口 0 时保留；`event_window: 0.35` 往返、`11.0` 报错 |
 | 动画事件负载 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib event_payload` | 带 `payload` 的标记跨过后原样带出；1025 字节/NUL 在 `models[0].events[0].payload` 报错；JSON 往返保留负载 |
 | morph+skin 的 GPU 蒙皮 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --test model_loading gpu_skinning_with_morph` | 同一 GLB（关节平移 + morph 权重同 clip）：GPU/CPU 蒙皮 0/16384 像素差、覆盖 288 像素、调色板 >0 |
 | 场景 morph → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e scene_morph_weights_change_cli_render` | 同一个静态模型 `morph_weights:[0]` 与 `[1]` 的 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
@@ -184,8 +185,8 @@ tools/probe_web_camera.sh   # Chrome 假摄像头 + ?camera=1，两帧预览必�
 
 ## 6. 明确未覆盖（不要当成绿）
 
-* **动画状态机**：时间/播完过渡之外，第 97 轮加了 `parameters` + `conditions`（浮点输入、6 种比较、与时间条件是“与”），第 98 轮加了 `on_event` 离散事件（优先于到期的时间过渡，事件只消费一次）；编辑器有参数滑杆和事件发送按钮；仍没有参数曲线/按时间窗口的输入缓冲；状态机有界 FIFO（第 137 轮）与 **clip 动画事件标记 + 队列（第 136 轮）** 已补（`models[].events`，`Game::on_animation_event`）；第 139 轮编辑器可增删/改名/改时间/改作用 clip。
-* **GPU 蒙皮 / 动画混合 / IK**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，**纯蒙皮与 morph+skin** 都走顶点着色器（每顶点最多 4 关节、128 关节 uniform 调色板；`Scene::gpu_skinning=false` 可退回 CPU；morph+skin 的 morph 位移仍 CPU 叠加，关节只在 GPU 乘一次）。双 clip 混合、参数/事件驱动状态机、morph target（静态 + `weights` 动画 + 双 clip 插值）、两骨 IK（`models[].ik`）、静态模型手工 LOD 已做；**全 GPU morph、按时间窗口的输入缓冲、遮挡剔除**仍未做；TAA、两骨 IK/FK 权重、状态机 FIFO 与 clip 动画事件队列已做。
+* **动画状态机**：时间/播完过渡之外，第 97 轮加了 `parameters` + `conditions`（浮点输入、6 种比较、与时间条件是“与”），第 98 轮加了 `on_event` 离散事件（优先于到期的时间过渡，事件只消费一次）；编辑器有参数滑杆和事件发送按钮；仍没有参数曲线/按时间戳匹配的输入缓冲；状态机有界 FIFO（第 137 轮）、`event_window` 过期（第 144 轮）与 **clip 动画事件标记 + 队列（第 136 轮）** 已补（`models[].events`，`Game::on_animation_event`）；第 139 轮编辑器可增删/改名/改时间/改作用 clip。
+* **GPU 蒙皮 / 动画混合 / IK**：glTF `skins` + `JOINTS_0/WEIGHTS_0` 已解析，**纯蒙皮与 morph+skin** 都走顶点着色器（每顶点最多 4 关节、128 关节 uniform 调色板；`Scene::gpu_skinning=false` 可退回 CPU；morph+skin 的 morph 位移仍 CPU 叠加，关节只在 GPU 乘一次）。双 clip 混合、参数/事件驱动状态机、morph target（静态 + `weights` 动画 + 双 clip 插值）、两骨 IK（`models[].ik`）、静态模型手工 LOD 已做；**全 GPU morph、按时间戳匹配/重放的输入缓冲、遮挡剔除**仍未做（`event_window` 过期已做）；TAA、两骨 IK/FK 权重、状态机 FIFO 与 clip 动画事件队列已做。
 * **IBL / HDRI**：`lighting.environment_map` 已接入（Radiance HDR / PNG / JPEG，等距柱状，64px 7 级预滤波 cubemap）；没有精确 PMREM/GGX、没有从环境图提取太阳、没有`.exr`。
 * **LOD / 遮挡剔除 / 大规模合批**：逐实例视锥剔除 + 静态模型手工 LOD（`models[].lods`，距离 + 10% 滞回）+ 渲染器自动 LOD（`render.auto_lod`，顶点聚类 1/2、1/4，非蒙皮网格）；没有动画/蒙皮自动 LOD，也没有遮挡剔除。
 * **编辑器多选**：Shift/Ctrl 点选 + 组变换已做；框选、层级抑制（父子同选）、成组复制后的模型引用重建仍未做。

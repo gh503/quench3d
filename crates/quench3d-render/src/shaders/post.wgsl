@@ -166,6 +166,41 @@ fn ssao_factor(coord: vec2<i32>, uv: vec2<f32>) -> f32 {
     let ratio = occlusion / f32(count);
     return clamp(1.0 - ratio * post.ssao.w, 0.0, 1.0);
 }
+/// 可选的双边 4 邻域去噪：按深度相似度加权，压掉 IGN 颗粒。
+///
+/// 代价是 AO 计算量 ×5；缺省关闭，旧场景像素不变。边缘两侧深度差大 → 权重趋 0，
+/// 所以不会把接触阴影糊到墙上。
+fn ssao_filtered(coord: vec2<i32>, uv: vec2<f32>) -> f32 {
+    let center = ssao_factor(coord, uv);
+    if (post.ssao2.y < 0.5) {
+        return center;
+    }
+    let d0 = textureLoad(depth_texture, coord, 0);
+    let size = vec2<i32>(post.target_texel.zw);
+    let offsets = array<vec2<i32>, 4>(
+        vec2<i32>(-1, 0),
+        vec2<i32>(1, 0),
+        vec2<i32>(0, -1),
+        vec2<i32>(0, 1),
+    );
+    var sum = center;
+    var wsum = 1.0;
+    for (var i = 0; i < 4; i += 1) {
+        let c = clamp(coord + offsets[i], vec2<i32>(0), size - vec2<i32>(1));
+        let d = textureLoad(depth_texture, c, 0);
+        // 天空/远平面不参与：否则地面接缝旁会吸进黑边。
+        if (d >= 1.0) {
+            continue;
+        }
+        // 深度差 1/300 米量级就明显降权；同一平面上的邻居权重接近 1。
+        let w = 1.0 / (1.0 + abs(d - d0) * 300.0);
+        let nuv = (vec2<f32>(c) + vec2<f32>(0.5)) * post.target_texel.xy;
+        sum += ssao_factor(c, nuv) * w;
+        wsum += w;
+    }
+    return sum / wsum;
+}
+
 //@gl-depth-end
 
 struct PostOut {
@@ -194,7 +229,7 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
     //@gl-depth-begin
     // SSAO 先乘上去（在 bloom 之前：自发光/亮区的外溢不该被环境光遮蔽压暗）
     if (post.ssao.x > 0.5) {
-        hdr = hdr * ssao_factor(coord, uv);
+        hdr = hdr * ssao_filtered(coord, uv);
     }
     //@gl-depth-end
 

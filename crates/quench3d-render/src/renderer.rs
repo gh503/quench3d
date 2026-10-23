@@ -485,7 +485,7 @@ pub struct PostUniforms {
     pub fxaa: [f32; 4],
     /// SSAO：x = 开关（0/1），y = 半径（视空间，米），z = 深度偏移 bias，w = 强度。
     pub ssao: [f32; 4],
-    /// SSAO：x = 采样数，yzw = 预留。
+    /// SSAO：x = 采样数，y = 去噪开关（0/1），zw = 预留。
     pub ssao2: [f32; 4],
     /// 投影矩阵（视空间 → 裁剪空间）：把半球采样点投回屏幕要用。
     pub proj: [[f32; 4]; 4],
@@ -672,6 +672,10 @@ pub struct SsaoOptions {
     /// 缺省 16：12 时接触处的颗粒感还看得出来（每像素旋转的螺旋图案），
     /// 16 是这个 pass 的画质/开销平衡点（再多收益很小，画面已经不是瓶颈）。
     pub samples: u32,
+    /// 是否做 4 邻域双边去噪（缺省关闭：会让 AO 计算量变成 5 倍）。
+    ///
+    /// 按深度相似度加权，边缘两侧不会互相糊；只压颗粒，不改变遮挡位置。
+    pub denoise: bool,
 }
 
 impl Default for SsaoOptions {
@@ -682,6 +686,7 @@ impl Default for SsaoOptions {
             bias: 0.025,
             strength: 1.0,
             samples: 16,
+            denoise: false,
         }
     }
 }
@@ -1003,6 +1008,8 @@ pub struct Renderer {
     taa_pipeline: Option<wgpu::RenderPipeline>,
     taa_uniform: wgpu::Buffer,
     taa_prev_view_proj: Mat4,
+    /// 上一帧的相机位置/朝向，用来识别切镜并丢弃历史。
+    taa_prev_camera: Option<(Vec3, Vec3)>,
     taa_history_valid: bool,
     taa_was_active: bool,
     taa_warned: bool,
@@ -2240,6 +2247,7 @@ impl Renderer {
             taa_pipeline,
             taa_uniform,
             taa_prev_view_proj: Mat4::IDENTITY,
+            taa_prev_camera: None,
             taa_history_valid: false,
             taa_was_active: false,
             taa_warned: false,
@@ -3420,6 +3428,20 @@ impl Renderer {
             self.taa_history_valid = false;
         }
         self.taa_was_active = taa_on;
+        if taa_on {
+            let position = camera.position;
+            let forward = camera.forward();
+            // 切镜（位置跳 >2m 或朝向夹角 >60°）时上一帧历史没有参考价值：
+            // 继续重投影会拖出完全不相干的画面。正常走路/快速转身不会触发这两个阈值。
+            if let Some((last_pos, last_forward)) = self.taa_prev_camera {
+                if (position - last_pos).length() > 2.0 || forward.dot(last_forward) < 0.5 {
+                    self.taa_history_valid = false;
+                }
+            }
+            self.taa_prev_camera = Some((position, forward));
+        } else {
+            self.taa_prev_camera = None;
+        }
         self.taa_jitter = if taa_on {
             taa_jitter_offset(self.frame_index, size)
         } else {
@@ -3528,7 +3550,12 @@ impl Renderer {
                 ssao.bias.max(0.0),
                 ssao.strength.clamp(0.0, 1.0),
             ],
-            ssao2: [ssao.samples.clamp(1, 64) as f32, 0.0, 0.0, 0.0],
+            ssao2: [
+                ssao.samples.clamp(1, 64) as f32,
+                if ssao.denoise { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
             proj: [
                 proj.cols[0].to_array(),
                 proj.cols[1].to_array(),

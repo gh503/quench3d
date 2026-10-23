@@ -161,10 +161,13 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   `Scene::fire_animator_event(index, name)` 发离散事件（跳一下/攻击命中），下一帧帧首
   **立即**过渡，事件过渡优先于同状态到期的时间过渡；需要 `conditions` 时同样要满足，
   条件不满足则事件被丢弃。状态机事件进入**有界 FIFO**（8 条，满时丢最旧），
-  每帧帧首消费一条；可以在当前动作结束前先按下一招。clip 的动画事件标记另有队列
+  每帧帧首消费一条；可以在当前动作结束前先按下一招。`event_window`（0~10 秒，缺省 0 =
+  不过期）让入队后超过窗口还没被接住的事件自动丢弃——淡入期间输入不被消费，长过渡后
+  不会突然生效。clip 的动画事件标记另有队列
   （`models[].events` + `Game::on_animation_event`；标记可带 `payload` 字符串，
-  原样随 `FiredAnimationEvent` 交给宿主，不解析、不执行）。仍没有按时间窗口的输入缓冲，
-  也没有参数曲线。和 `models[].animation` 互斥。报告
+  原样随 `FiredAnimationEvent` 交给宿主，不解析、不执行）。输入有有界 FIFO 与
+  `event_window` 过期，但仍不是**按时间戳匹配/缓冲重放**，也没有参数曲线。
+  和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
 * **IBL / HDRI 环境光**：`lighting.environment_map` 指向等距柱状 `.hdr` / `.png` / `.jpg`，
   装载时解码成线性 RGB 并预滤波成 6 面 cubemap（64×64、7 级 mip）；着色器按粗糙度取
@@ -1104,6 +1107,8 @@ NaN 刚体  : 0
   它是**深度-only** 的（没有法线缓冲，法线由视空间位置的屏幕导数重建）、结果乘在整幅
   HDR 颜色上（不区分直接光/间接光）——这是后处理式 SSAO 的固有简化；
   平坦区域在掠射角下仍可能暗 1~2 个色阶（已知边界，见 §9）。
+  `denoise: true` 会做 4 邻域双边去噪（按深度差保护边缘，AO 计算量 ×5，缺省关）；
+  实测接触区粗糙度约减半，见 `post_pipeline` 的 SSAO 像素测试。
 * `lighting.taa` 同样**不写 = 关闭**；写 `{}` 就是打开。它用上一帧历史 + 当前深度
   重投影累积，相机每帧做亚像素抖动；`feedback` 0~0.98（缺省 0.9），越大越平滑也越容易
   拖影。**没有运动向量**（运动物体靠 3×3 邻域 clamp 抑制拖影），只在能读深度且
@@ -1852,9 +1857,9 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   `TriMesh↔TriMesh`、`Plane↔Plane` 不产生接触。
   `Joint::Fixed` 的角约束是速度级的：焊接的是**创建时**的相对姿态，不是参考姿态。
 * 渲染：单张阴影贴图（大场景需要更小的 `shadow_radius` 或后续加 CSM）；
-  有 HDR 中间目标 + bloom + FXAA + SSAO + 景深（DoF）+ **TAA**（相机抖动 + 深度重投影，
-  无运动向量；原生且未开 MSAA 时生效），但**还没有** AO 去噪（AO 是 16 抽样
-  交错梯度噪声，接触处仍有轻微颗粒）、没有骨骼动画、没有延迟管线；
+  有 HDR 中间目标 + bloom + FXAA + SSAO（可选 4 邻域双边去噪）+ 景深（DoF）+ **TAA**
+  （相机抖动 + 深度重投影，无运动向量；原生且未开 MSAA 时生效），但**还没有**
+  骨骼动画编辑器、没有延迟管线；
   Alpha 混合物体不写深度（后处理链已经能把混合放到 tonemap 之前，见 §4）。
 * 工程：窗口截图需要能创建 GPU 设备；无头验证依赖软件光栅（lavapipe）时较慢。
 * Web：没有 WebGPU 适配器的浏览器走 WebGL2（先探再定，见 §2 的「后端怎么选」）。
@@ -1897,9 +1902,10 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 * 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO + 景深 + **TAA**都在；
   TAA 用上一帧历史 + 当前深度重投影，相机每帧亚像素抖动；**没有运动向量**（运动物体会
   有轻微拖影），且只在能读深度、未开 MSAA 的原生后端生效。详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
-* SSAO 是**深度-only**、无去噪：没有法线缓冲（法线由深度重建），也没有单独的 AO 模糊
-  （AO 直接在后处理里算完就用）。表现是接触处有轻微颗粒（16 抽样 + 交错梯度噪声），
-  以及掠射角下的平坦地面可能暗 1~2 个色阶；要更干净需要加一张 AO 目标 + 双边模糊。
+* SSAO 是**深度-only**：没有法线缓冲（法线由深度重建），AO 直接在后处理里算完就用。
+  缺省 16 抽样 + 交错梯度噪声，接触处有轻微颗粒；`lighting.ssao.denoise: true` 可开
+  4 邻域双边去噪（按深度差保护边缘，AO 计算量 ×5，实测接触区粗糙度约减半）。
+  掠射角下的平坦地面仍可能暗 1~2 个色阶；要更干净需要独立 AO 目标 + 可分离双边/时域累积。
 * SSAO 需要采样深度，所以深度格式是 `Depth32Float`（`Depth24Plus` 不可采样）。
 * `simulate` / `render` / `movie` 的报告里，`sensor: true` 的物体会以 `sensors[]` 出现
   （每个进过它的刚体一条：`enter_step` / `exit_step` / `steps_inside` / `entries`）。

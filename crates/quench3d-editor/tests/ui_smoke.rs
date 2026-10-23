@@ -147,6 +147,8 @@ fn fake_animation_instance() -> ModelAnimationInstance {
                 default: 0.0,
             }],
             event_buffer: std::collections::VecDeque::new(),
+            event_ages: std::collections::VecDeque::new(),
+            event_window: 0.0,
         }),
     }
 }
@@ -367,6 +369,14 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "负载"),
         "事件行没有显示负载输入框"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "SSAO 去噪"),
+        "渲染面板没有显示 SSAO 去噪开关"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "事件窗口"),
+        "状态机面板没有显示输入事件窗口"
     );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(

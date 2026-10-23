@@ -757,7 +757,7 @@ fn fxaa_threshold_actually_gates_the_filter() {
 /// 这条路径（`depth_resolve.wgsl` 那一趟）只有这里才会被真正执行。
 /// 同一个 renderer 先关后开，顺带验证"运行时改 `options.ssao.enabled`"能生效
 /// （编辑器里勾选框走的就是这条路：`ensure_targets` 必须察觉开关变了）。
-fn ssao_images() -> Option<(ImageData, ImageData, Camera)> {
+fn ssao_images() -> Option<(ImageData, ImageData, ImageData, Camera)> {
     let ctx = context(4, "SSAO 的像素级验证（真的创建 wgpu 上下文）")?;
     let mut ctx = ctx;
     let mut renderer = Renderer::new(
@@ -822,7 +822,11 @@ fn ssao_images() -> Option<(ImageData, ImageData, Camera)> {
     let on = renderer
         .capture(&mut ctx, W, H, &camera, &lighting)
         .expect("离屏渲染（开 SSAO）");
-    Some((on, off, camera))
+    renderer.options.ssao.denoise = true;
+    let denoised = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染（开 SSAO + 去噪）");
+    Some((on, off, denoised, camera))
 }
 
 /// 一个屏幕窗口内的平均亮度（0~255）。
@@ -847,10 +851,39 @@ fn window_mean(image: &ImageData, center: (f32, f32), half: i32) -> f64 {
     }
 }
 
+/// 窗口内的平均相邻像素差（亮度），用来量 AO 颗粒的粗糙度。
+fn window_roughness(image: &ImageData, center: (f32, f32), half: i32) -> f64 {
+    let (cx, cy) = (center.0.round() as i32, center.1.round() as i32);
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for y in (cy - half)..=(cy + half) {
+        for x in (cx - half)..=(cx + half) {
+            if x < 0 || y < 0 || x + 1 >= image.width as i32 || y + 1 >= image.height as i32 {
+                continue;
+            }
+            let p = pixel(image, x as u32, y as u32);
+            let right = pixel(image, (x + 1) as u32, y as u32);
+            let down = pixel(image, x as u32, (y + 1) as u32);
+            sum += ((p[0] - right[0]).abs() + (p[1] - right[1]).abs() + (p[2] - right[2]).abs())
+                as f64
+                / 3.0;
+            sum += ((p[0] - down[0]).abs() + (p[1] - down[1]).abs() + (p[2] - down[2]).abs())
+                as f64
+                / 3.0;
+            n += 2.0;
+        }
+    }
+    if n == 0.0 {
+        f64::NAN
+    } else {
+        sum / n
+    }
+}
+
 /// SSAO 的像素级验证：**接触处变暗、远处与天空不动**，且运行时开关立刻生效。
 #[test]
 fn ssao_darkens_contacts_and_leaves_the_far_plane_alone() {
-    let Some((on, off, camera)) = ssao_images() else {
+    let Some((on, off, denoised, camera)) = ssao_images() else {
         return;
     };
     let viewport = vec2(W as f32, H as f32);
@@ -895,6 +928,32 @@ fn ssao_darkens_contacts_and_leaves_the_far_plane_alone() {
     assert!(
         contact_drop <= 120.0,
         "接缝被压得太狠（{contact_drop:.1}），不像 AO 像黑影"
+    );
+
+    // 去噪：必须真的改变像素（否则开关没接进 uniform），但接缝仍然明显变暗。
+    let mut changed = 0;
+    for y in 0..H {
+        for x in 0..W {
+            if pixel(&on, x, y) != pixel(&denoised, x, y) {
+                changed += 1;
+            }
+        }
+    }
+    assert!(
+        changed > 20,
+        "SSAO 去噪没有改变任何像素（只变了 {changed} 个）"
+    );
+    let contact_denoised = window_mean(&denoised, (contact.x, contact.y), 5);
+    let rough_on = window_roughness(&on, (contact.x, contact.y), 5);
+    let rough_denoised = window_roughness(&denoised, (contact.x, contact.y), 5);
+    eprintln!("接缝粗糙度：开 {rough_on:.3} → 去噪 {rough_denoised:.3}");
+    assert!(
+        rough_denoised < rough_on,
+        "去噪没有降低接触处颗粒：{rough_on:.3} → {rough_denoised:.3}"
+    );
+    assert!(
+        contact_denoised <= contact_off - 2.5,
+        "去噪把接触阴影糊掉了：关 {contact_off:.2}，去噪后 {contact_denoised:.2}"
     );
 
     // ② 远处的地面（离最近的方块 3 米以上，远超 0.75 米半径）：必须几乎不动
