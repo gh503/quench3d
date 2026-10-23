@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **场景 v1 → v2 自动迁移（第 130 轮）**：`from_value` 在结构检查前升级版本并删除
+  v1 下不生效的 `objects[].parent`，include 片段同规则；`version_one_is_migrated_and_parent_is_ignored`
+  覆盖。测试总数保持 788（替换原拒绝用例）。
+
 - **色调映射算子可选（第 129 轮）**：`Tonemap` 三档 ACES（默认）/Reinhard/线性，
   编辑器灯光面板切换，`T` 键循环；`post.wgsl` 按 uniform 选曲线。新增 CPU 曲线测试与 GPU
   像素对照（总测试 786 → 788）。README 补色彩约定。
@@ -80,7 +84,7 @@
 - **Web 摄像头外部 2D 骨架注入（第 120 轮）**：页面暴露 `window.quench3dCameraPose`
   / `...Clear`；`set_web_pose` 解析 33 点归一化坐标，预览图上画 35 根骨 + 关节。
   `data-quench3d-ui` 加 `camera_pose`；摄像头探针注入姿态后断言状态与洋红像素
-  （3921），再清空回 false。新增 1 个坐标映射单测（总测试 773 → 774）。浏览器
+  （3897），再清空回 false。新增 1 个坐标映射单测（总测试 773 → 774）。浏览器
   仍不内置推理。
 
 - **单 clip 可视化时间轴（第 119 轮）**：动画面板增加刻度/进度/播放头/读数，

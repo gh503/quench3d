@@ -633,6 +633,33 @@ pub struct AnimationDoc {
     pub rotation: Option<TrackDoc>,
 }
 
+/// 把旧版本场景值迁到 `target` 版本（目前只有 v1 → v2）。
+///
+/// v1 → v2 的唯一语义差别是 `objects[].parent` 在 v2 才生效。为了保持 v1 的行为，
+/// 迁移时**删掉所有 `parent`**，再把 `version` 写成目标版本；这样旧文件不会因为
+/// 自动升级突然多出父子关系。v1 没有 parent 时结果与直接改版本号完全一样。
+fn migrate_value(mut value: Value, target: u32) -> Value {
+    // 没写 version 时按当前默认版本（2）解释，不能当成 v1。
+    let Some(version) = value.get("version").and_then(Value::as_u64) else {
+        return value;
+    };
+    if version >= 2 || target < 2 {
+        return value;
+    }
+    let Some(root) = value.as_object_mut() else {
+        return value;
+    };
+    root.insert("version".to_string(), Value::from(target));
+    if let Some(objects) = root.get_mut("objects").and_then(Value::as_array_mut) {
+        for object in objects {
+            if let Some(object) = object.as_object_mut() {
+                object.remove("parent");
+            }
+        }
+    }
+    value
+}
+
 impl SceneDoc {
     /// 物体名（缺省 `objects[i]`）。
     pub fn object_name_at(&self, index: usize) -> String {
@@ -3117,6 +3144,7 @@ impl IncludeCtx {
                 return None;
             }
         };
+        let raw = migrate_value(raw, parent.version);
         if let Some(f) = raw.get("format").and_then(|v| v.as_str()) {
             if f != FORMAT {
                 self.diags.push(
@@ -3396,6 +3424,7 @@ impl SceneDoc {
 
     /// 从已经解析好的 JSON 值构造（便于 MCP / 内联场景直接复用）。
     pub fn from_value(value: Value) -> Result<Self, DocError> {
+        let value = migrate_value(value, VERSION);
         let structural = structural_diagnostics(&value);
         if !structural.is_empty() {
             return Err(DocError::Invalid(structural));
@@ -9683,13 +9712,31 @@ mod tests {
     }
 
     #[test]
-    fn version_one_is_rejected_with_a_clear_message() {
-        let doc =
-            SceneDoc::from_json(r#"{ "format": "quench3d.scene", "version": 1, "objects": [] }"#)
-                .unwrap();
-        let diags = doc.validate();
-        let d = diag_at(&diags, "version").expect("版本 1 必须报错");
-        assert!(d.message.contains("当前支持 2"), "{}", d.message);
+    fn version_one_is_migrated_and_parent_is_ignored() {
+        let text = r#"{
+            "format": "quench3d.scene",
+            "version": 1,
+            "objects": [
+                {"name": "child", "shape": {"type": "sphere", "radius": 0.4},
+                 "body": "static", "parent": "parent"}
+            ]
+        }"#;
+        let doc = SceneDoc::from_json(text).expect("v1 应当自动迁移");
+        assert_eq!(doc.version, VERSION);
+        assert!(
+            doc.objects[0].parent.is_none(),
+            "v1 的 parent 在旧语义下不生效，迁移时必须删掉"
+        );
+        assert!(
+            doc.validate().iter().all(|d| d.severity != Severity::Error),
+            "迁移后的 v1 场景应当合法"
+        );
+        // 非 1 的版本仍然按原有规则拒绝/提示。
+        let newer = SceneDoc::from_json(r#"{"version": 99, "objects": []}"#).unwrap();
+        assert!(newer
+            .validate()
+            .iter()
+            .any(|d| d.path == "version" && d.severity == Severity::Error));
     }
 
     // ---------- 诊断码：稳定契约（第 55 轮） ----------

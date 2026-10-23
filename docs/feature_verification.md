@@ -112,6 +112,7 @@ tools/verify_all.sh
 | --- | --- | --- |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
 | 色调映射算子 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline tonemap_operator` | ACES/Reinhard/线性三档渲染像素与 CPU 公式一致、互不相同 |
+| 场景 v1 迁移 | `cargo test -p quench3d-cli --lib version_one` | v1 自动升 v2、parent 被删、无 Error；v99 仍报错 |
 | 关节调试线 | `cargo test -p quench3d-physics joint_visuals` + `cargo test -p quench3d --lib joint_debug` | 世界锚点/轴、删刚体不返回悬空；调试线连线与轴端点精确；Web F11 状态翻转 |
 | gizmo 轴心 | `cargo test -p quench3d-editor --lib pivot_labels` | 三档标签、默认选中中心、物体/中心/世界原点求值；UI 画出「选中中心」 |
 | 撤销历史跳转 | `cargo test -p quench3d-editor --test history jump_history` | 三次编辑后跳到第 1 步、redo 到第 2 步、跳到起始；标签含操作与「起始」 |
@@ -126,7 +127,7 @@ tools/verify_all.sh
 | 历史 / 模型实例变换 | `cargo test -p quench3d-editor` | 模型组变换写回 |
 | 摄像头协议 / 3D 骨架 | `cargo test -p quench3d-editor --lib camera` | 解析/长度/坐标/线段数量/低可见度 |
 | 多输出 render | `cargo test -p quench3d-cli --test cli_e2e multiple_render_outputs`（真渲染那条需 GPU） | 路径/尺寸/no-clobber/向后兼容 + 真渲染 64×32 / 32×16 两张 PNG 尺寸对得上 |
-| Web 摄像头预览 + 外部 2D/3D 姿态 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动 >500（本次 11884/116000）；2D 注入后 `camera_pose=true`、洋红像素 3932；3D 世界点注入后 `camera_world=true`、视口变化 177 像素；清空后都回 false；**内置推理不做** |
+| Web 摄像头预览 + 外部 2D/3D 姿态 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动 >500（本次 18820/116000）；2D 注入后 `camera_pose=true`、洋红像素 3932；3D 世界点注入后 `camera_world=true`、视口变化 177 像素；清空后都回 false；**内置推理不做** |
 | 深度点云反投影 | `python -m unittest test_camera_mocap.PointCloudTests -v` | 中心像素落主轴、y 向上翻转、近深度 z=-0.3、步长下采样 |
 | 点云读入/绘制 | `cargo test -p quench3d-editor --lib camera` | `latest.points` 长度/布局校验；每点画 3 条十字线段 |
 
