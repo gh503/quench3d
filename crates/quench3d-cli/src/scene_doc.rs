@@ -1609,6 +1609,9 @@ pub struct ModelEventDoc {
     /// 可选的 clip 名；不写 = 主 clip。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<String>,
+    /// 可选的事件负载（原样带给宿主；最长 1024 字节，不解析、不执行）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
 }
 
 /// 模型动画的第二条 clip（交叉淡化）。
@@ -5590,6 +5593,22 @@ impl SceneDoc {
                             "事件时间必须是非负有限值（秒）",
                         ));
                     }
+                    if let Some(payload) = &event.payload {
+                        if payload.len() > 1024 {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{jp}.payload"),
+                                "事件负载最长 1024 字节（它只带给宿主，不执行）",
+                            ));
+                        }
+                        if payload.contains('\0') {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{jp}.payload"),
+                                "事件负载不能包含 NUL 字符",
+                            ));
+                        }
+                    }
                     if let Some(clip) = &event.clip {
                         if clip.trim().is_empty() {
                             out.push(Diagnostic::error_code(
@@ -8605,7 +8624,7 @@ mod tests {
                 "path": base,
                 "animation": { "name": "walk", "blend": { "name": "run", "weight": 0.4 } },
                 "events": [
-                    { "name": "footstep", "time": 0.3 },
+                    { "name": "footstep", "time": 0.3, "payload": "step=1" },
                     { "name": "run-step", "time": 0.6, "clip": "run" }
                 ]
             }]
@@ -8622,6 +8641,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].name, "footstep");
         assert_eq!(events[0].clip, None);
+        assert_eq!(events[0].payload.as_deref(), Some("step=1"));
         assert_eq!(events[1].clip.as_deref(), Some("run"));
 
         for (events, path) in [
@@ -8680,6 +8700,44 @@ mod tests {
             .validate()
             .iter()
             .any(|d| d.path == "models[0].events" && d.severity == Severity::Warning));
+    }
+
+    #[test]
+    fn event_payload_is_bounded_and_rejects_nul() {
+        let dir = std::env::temp_dir().join(format!("quench3d_payload_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("m.glb");
+        std::fs::write(&model, b"not-really-a-glb").unwrap();
+        let path = model.to_string_lossy().to_string();
+
+        let too_long = "x".repeat(1025);
+        let doc = SceneDoc::from_value(json!({
+            "models": [{
+                "path": path,
+                "animation": { "name": "walk" },
+                "events": [{ "name": "x", "time": 0.3, "payload": too_long }]
+            }]
+        }))
+        .unwrap();
+        assert!(doc
+            .validate()
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.path == "models[0].events[0].payload"));
+
+        let nul_payload = format!("a{}b", '\0');
+        let nul = SceneDoc::from_value(json!({
+            "models": [{
+                "path": model.to_string_lossy(),
+                "animation": { "name": "walk" },
+                "events": [{ "name": "x", "time": 0.3, "payload": nul_payload }]
+            }]
+        }))
+        .unwrap();
+        assert!(nul
+            .validate()
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.path == "models[0].events[0].payload"));
     }
 
     #[test]

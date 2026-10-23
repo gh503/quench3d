@@ -3320,6 +3320,7 @@ pub fn setup_visuals(
                         name: event.name.clone(),
                         time: event.time,
                         clip: event.clip.clone(),
+                        payload: event.payload.clone(),
                     })
                     .collect::<Vec<_>>();
                 let base = vec![transform; objects.len()];
@@ -3342,6 +3343,7 @@ pub fn setup_visuals(
                                 name: event.name.clone(),
                                 time: event.time,
                                 clip: event.clip.clone(),
+                                payload: event.payload.clone(),
                             })
                             .collect::<Vec<_>>();
                         let index = engine.scene.play_model_animation_blend_with_fade(

@@ -702,7 +702,7 @@ pub trait Game {
     /// 模型动画事件：播放头跨过场景里登记的事件标记时调用。
     ///
     /// 在动画推进**之后**、`draw` 之前触发；暂停时不触发。事件已从队列取走，
-    /// 同一帧里多个事件按播放头顺序回调。
+    /// 同一帧里多个事件按播放头顺序回调；`event.payload` 是标记上写的原样字符串。
     fn on_animation_event(&mut self, _engine: &mut Engine, _event: &crate::FiredAnimationEvent) {}
     /// 原始窗口事件。
     fn on_window_event(&mut self, _engine: &mut Engine, _event: &WindowEvent) {}

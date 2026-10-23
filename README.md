@@ -162,7 +162,8 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   **立即**过渡，事件过渡优先于同状态到期的时间过渡；需要 `conditions` 时同样要满足，
   条件不满足则事件被丢弃。状态机事件进入**有界 FIFO**（8 条，满时丢最旧），
   每帧帧首消费一条；可以在当前动作结束前先按下一招。clip 的动画事件标记另有队列
-  （`models[].events` + `Game::on_animation_event`）。仍没有按时间窗口的输入缓冲，
+  （`models[].events` + `Game::on_animation_event`；标记可带 `payload` 字符串，
+  原样随 `FiredAnimationEvent` 交给宿主，不解析、不执行）。仍没有按时间窗口的输入缓冲，
   也没有参数曲线。和 `models[].animation` 互斥。报告
   `models[].animator.{found,states,transitions,missing}`。
 * **IBL / HDRI 环境光**：`lighting.environment_map` 指向等距柱状 `.hdr` / `.png` / `.jpg`，
@@ -196,7 +197,7 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   「播完触发」（写回 `transitions[i]`）。状态机有参数时，面板会列出参数滑杆；拖动后
   立刻按新值判一次过渡（暂停也生效），但只改当前会话、不写场景默认值。有 `on_event`
   过渡时，面板会为每个事件画「发送 xxx」按钮，点击后同样以 `dt=0` 当场判一次。
-  clip 的**事件标记**也能在面板里增删、改名字/时间/作用 clip（写回 `models[i].events`，
+  clip 的**事件标记**也能在面板里增删、改名字/时间/作用 clip/负载（写回 `models[i].events`，
   会当场更新场景队列）；「在播放头加事件」用当前时间新建一条。模型有 `ik` 时，每条链的
   目标 XYZ 与 IK/FK 权重也可直接改并写回 `models[i].ik[j].target/weight`，视口里的蒙皮和
   `F8` 骨架当场跟着动。

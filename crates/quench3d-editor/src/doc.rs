@@ -1921,6 +1921,7 @@ mod tests {
                     name: "footstep".into(),
                     time: 0.35,
                     clip: None,
+                    payload: Some("step=2".into()),
                 }],
             )
             .as_deref(),

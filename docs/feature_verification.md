@@ -57,6 +57,7 @@ tools/verify_all.sh
 | morph 位移数学 | `cargo test -p quench3d --test model_loading morph_targets_displace_vertices_by_weight` | 手搓 GLB 的 `targets[0]` 解析；权重 0 原样、1 整体 +0.5、0.5 +0.25 |
 | morph 资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_morph_targets` | `info --json` 的 `morph_targets=1`，人类可读输出有「morph target」行 |
 | 动画事件标记/队列 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib model_events`、`cargo test -p quench3d-editor --lib set_animation_events` | 半开区间不重复、循环回到开头再触发、非循环结尾补触发、clip 过滤、Scene 队列取空、无 animation/animator warning；编辑器写入/清空 `models[].events`、空数组不留空段 |
+| 动画事件负载 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib event_payload` | 带 `payload` 的标记跨过后原样带出；1025 字节/NUL 在 `models[0].events[0].payload` 报错；JSON 往返保留负载 |
 | morph+skin 的 GPU 蒙皮 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --test model_loading gpu_skinning_with_morph` | 同一 GLB（关节平移 + morph 权重同 clip）：GPU/CPU 蒙皮 0/16384 像素差、覆盖 288 像素、调色板 >0 |
 | 场景 morph → CLI PNG | `cargo test -p quench3d-cli --test cli_e2e scene_morph_weights_change_cli_render` | 同一个静态模型 `morph_weights:[0]` 与 `[1]` 的 PNG 有可见像素差；无 GPU 按退出码 3 跳过 |
 | morph 权重校验 | `cargo test -p quench3d-cli --test cli_e2e scene_morph_weights_are_validated` | `validate` 报 `models[0].morph_weights[0]` / `[1]` 的 `out_of_range`，退出码 2 |

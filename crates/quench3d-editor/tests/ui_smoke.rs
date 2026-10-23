@@ -106,6 +106,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
             name: "footstep".into(),
             time: 0.5,
             clip: None,
+            payload: Some("step=1".into()),
         }],
         animator: Some(ModelAnimatorRuntime {
             states: vec![
@@ -362,6 +363,10 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "时域抗锯齿（TAA）"),
         "渲染面板没有显示 TAA 开关"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "负载"),
+        "事件行没有显示负载输入框"
     );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(

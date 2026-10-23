@@ -3212,6 +3212,26 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：只处理"上"轴；资产的前方/handedness 仍由用户 `rotation_deg` 调。
 不是通用导入坐标系转换（没有 per-asset pivot、单位换算；缩放直接用 `scale`）。
 
+### 23.43 动画事件负载（第 142 轮）
+
+**做了什么**：
+
+* `models[].events[].payload`：可选字符串，最长 1024 字节，不允许 NUL；不解析、不执行。
+* 引擎 `SceneAnimationEvent.payload` / `FiredAnimationEvent.payload` 原样传递；
+  `Game::on_animation_event`、`Scene::take_animation_events` 都能读到。
+* 编辑器事件行多一个「负载(可选)」输入框，写回 `models[i].events[j].payload`；
+  schema 的 `modelEvent.payload` 与系统提示同步。
+
+**验证**：
+
+* `scene_queues_animation_events_and_drains_them`：带负载的标记跨过后，
+  `fired[0].payload == Some("step=1")`。
+* `event_payload_is_bounded_and_rejects_nul`：1025 字节与含 NUL 的负载都在
+  `models[0].events[0].payload` 报错。
+* `model_events_validate_and_roundtrip` 的 JSON 往返保留 `payload`。
+
+**边界**：负载只是字符串，不是脚本/参数树；没有按事件类型做 schema；没有事件回放/去重。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：

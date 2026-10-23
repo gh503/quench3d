@@ -2159,6 +2159,23 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             event.clip = scope;
                             events_changed = true;
                         }
+                        ui.label(RichText::new("负载").small().weak());
+                        let mut payload = event.payload.clone().unwrap_or_default();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut payload)
+                                    .desired_width(70.0)
+                                    .hint_text("可选"),
+                            )
+                            .changed()
+                        {
+                            event.payload = if payload.is_empty() {
+                                None
+                            } else {
+                                Some(payload)
+                            };
+                            events_changed = true;
+                        }
                         if ui.small_button("删").clicked() {
                             remove_event = Some(event_index);
                         }
@@ -2184,6 +2201,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             name,
                             time: animation.player.time.clamp(0.0, duration),
                             clip: None,
+                            payload: None,
                         });
                         events_changed = true;
                     }
@@ -2203,6 +2221,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                     name: e.name.trim().to_string(),
                                     time: e.time,
                                     clip: e.clip.clone(),
+                                    payload: e.payload.clone(),
                                 })
                                 .collect();
                             if let Some(path) = doc.set_animation_events(&objects, docs) {

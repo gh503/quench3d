@@ -419,6 +419,8 @@ pub struct SceneAnimationEvent {
     pub time: f32,
     /// 可选的 clip 名；`None` = 主 clip。
     pub clip: Option<String>,
+    /// 可选的事件负载（原样带给宿主；不解析、不执行）。
+    pub payload: Option<String>,
 }
 
 /// 已经触发的一条动画事件（由 [`Scene::take_animation_events`] 取走）。
@@ -430,6 +432,8 @@ pub struct FiredAnimationEvent {
     pub clip: String,
     /// 标记上写的时间（秒，未取模）。
     pub time: f32,
+    /// 标记上写的负载（原样带给宿主；`None` = 没有）。
+    pub payload: Option<String>,
 }
 
 /// 场景里一个"正在播放 glTF 动画"的模型实例。
@@ -545,6 +549,7 @@ fn animation_events_in_span(
                     name: marker.name.clone(),
                     clip: clip.to_string(),
                     time: marker.time,
+                    payload: marker.payload.clone(),
                 });
                 if out.len() >= 256 {
                     break;
@@ -2672,6 +2677,7 @@ mod anim_tests {
             name: name.into(),
             time,
             clip: None,
+            payload: None,
         }
     }
 
@@ -2708,11 +2714,13 @@ mod anim_tests {
                 name: "副".into(),
                 time: 0.5,
                 clip: Some("转".into()),
+                payload: None,
             },
             SceneAnimationEvent {
                 name: "别的 clip".into(),
                 time: 0.5,
                 clip: Some("不存在的".into()),
+                payload: None,
             },
         ];
         let fired = animation_events_in_span(0.0, 0.6, 1.0, true, "转", true, &markers);
@@ -2740,6 +2748,7 @@ mod anim_tests {
                     name: "跑步".into(),
                     time: 0.5,
                     clip: Some("run".into()),
+                    payload: Some("step=3".into()),
                 },
             ],
         );
@@ -2764,7 +2773,9 @@ mod anim_tests {
             vec![Transform::default()],
             player,
         );
-        assert!(scene.set_model_events(index, vec![marker(0.25, "a")]));
+        let mut first = marker(0.25, "a");
+        first.payload = Some("step=1".into());
+        assert!(scene.set_model_events(index, vec![first]));
         assert_eq!(scene.model_events(index).map(|e| e.len()), Some(1));
         assert!(!scene.set_model_events(99, Vec::new()));
 
@@ -2774,6 +2785,11 @@ mod anim_tests {
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].name, "a");
         assert_eq!(fired[0].clip, "转");
+        assert_eq!(
+            fired[0].payload.as_deref(),
+            Some("step=1"),
+            "负载应原样带出"
+        );
         assert!(scene.take_animation_events().is_empty());
 
         // 不跨标记的帧不触发；dt=0（暂停）不触发。

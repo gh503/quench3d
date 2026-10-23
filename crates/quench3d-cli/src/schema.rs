@@ -835,6 +835,7 @@ pub fn json_schema() -> Value {
         let mut d = def(&["name", "time"]);
         d["properties"]["time"] = json!({ "type": "number", "minimum": 0.0 });
         d["properties"]["clip"] = json!({ "type": "string", "minLength": 1 });
+        d["properties"]["payload"] = json!({ "type": "string", "maxLength": 1024 });
         d["required"] = json!(["name", "time"]);
         d
     });
@@ -1262,13 +1263,13 @@ pub fn system_prompt() -> String {
            morph_weights: [0.0, 0.5],
            animation: { name: "Walk", start: 0, speed: 1, loop: true,
                         blend: { name: "Run", weight: 0.5, fade: 0.25 } },
-           events: [ { name: "footstep", time: 0.3 } ] }
+           events: [ { name: "footstep", time: 0.3, payload: "step=1" } ] }
   （animation 播放模型里的 glTF 动画片段，是**视觉**动画、不动物理；不写 = 静止。
     loop 缺省 true（循环），写 false = 播完停在最后一帧；名字写错不会让场景非法，
     但会在 simulate/render 报告的 models[].animation.found 里报 false ——
     可用名字看 `quench3d info 模型.glb` 的 animations。可选 blend 再给第二条 clip，
     两条按 weight（0..=1，缺省 0.5）在局部 TRS 上混合，适合行走↔奔跑的固定比例过渡。
-    events 给动画播放头挂事件：{ name, time, clip? }，跨过 time 秒时触发；
+    events 给动画播放头挂事件：{ name, time, clip?, payload? }，跨过 time 秒时触发；
     clip 不写 = 主 clip，写了只跟同名 clip；需要 animation，animator 暂不支持）
 - camera: { position: [x,y,z], look_at: [x,y,z], fov_deg: 50, near: 0.05, far: 5000,
 cameras: 命名相机表（名字 → 相机对象）；`--camera <名字>` 选一台渲染，缺省用 camera 段
