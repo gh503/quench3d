@@ -3503,7 +3503,7 @@ pub fn setup_visuals(
 
     add_water_visuals(engine, doc);
     add_fluid_visuals(engine, doc);
-    add_particle_visuals(engine, doc);
+    add_particle_visuals(engine, doc, &mut texture_cache)?;
     apply_water_options(engine, doc);
     apply_camera(engine, doc);
     Ok(instances)
@@ -3599,9 +3599,13 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
 ///
 /// 所有发射器共用一个白色 unlit、alpha 混合的双面四边形材质；颜色来自每颗
 /// 粒子的实例色（含寿命淡出）。`Scene::update_particles` 每帧负责位置/朝向/alpha。
-fn add_particle_visuals(engine: &mut Engine, doc: &SceneDoc) {
+fn add_particle_visuals(
+    engine: &mut Engine,
+    doc: &SceneDoc,
+    texture_cache: &mut TextureCache,
+) -> Result<(), RunError> {
     if doc.particles.is_empty() {
-        return;
+        return Ok(());
     }
     let mesh = engine.assets.mesh(
         &mut engine.renderer,
@@ -3624,7 +3628,43 @@ fn add_particle_visuals(engine: &mut Engine, doc: &SceneDoc) {
         "$particle_billboard",
         desc,
     );
-    for p in &doc.particles {
+    // 贴图粒子按贴图 id 复用材质；没有贴图的仍共用上面那块纯色材质。
+    let mut textured: BTreeMap<TextureId, MaterialId> = BTreeMap::new();
+    for (index, p) in doc.particles.iter().enumerate() {
+        let material = if let Some(rel) = &p.texture {
+            let id = texture_from_doc(
+                engine,
+                doc,
+                &format!("particles[{index}].texture"),
+                rel,
+                true,
+                texture_cache,
+            )?;
+            if let Some(existing) = textured.get(&id) {
+                *existing
+            } else {
+                let textured_desc = MaterialDesc {
+                    base_color: Vec4::ONE,
+                    metallic: 0.0,
+                    roughness: 1.0,
+                    unlit: true,
+                    alpha_blend: true,
+                    double_sided: true,
+                    base_color_texture: Some(id),
+                    ..MaterialDesc::default()
+                };
+                let created = engine.assets.material(
+                    &mut engine.renderer,
+                    &engine.gpu,
+                    &format!("$particle_billboard_tex_{id}"),
+                    textured_desc,
+                );
+                textured.insert(id, created);
+                created
+            }
+        } else {
+            material
+        };
         let position = p.position.unwrap_or([0.0, 1.0, 0.0]);
         let velocity = p.velocity.unwrap_or([0.0, 1.2, 0.0]);
         let gravity = p.gravity.unwrap_or([0.0, -1.0, 0.0]);
@@ -3645,6 +3685,7 @@ fn add_particle_visuals(engine: &mut Engine, doc: &SceneDoc) {
             },
         );
     }
+    Ok(())
 }
 
 /// 把 `waters` 画成半透明水面（一单元网格，按水域尺寸缩放）。

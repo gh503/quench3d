@@ -7627,6 +7627,20 @@ fn export_writes_glb_that_info_can_read() {
     assert_eq!(info["data"]["meshes"].as_u64().unwrap(), 2);
 }
 
+/// 写一张纯色 RGBA PNG（给粒子贴图这类需要真实文件的测试用）。
+fn write_solid_png(path: &std::path::Path, rgba: [u8; 4]) {
+    let file = std::fs::File::create(path).expect("创建 PNG");
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 64, 64);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("写 PNG 头");
+    let mut data = Vec::with_capacity(64 * 64 * 4);
+    for _ in 0..(64 * 64) {
+        data.extend_from_slice(&rgba);
+    }
+    writer.write_image_data(&data).expect("写 PNG 数据");
+}
+
 /// 公告板粒子：同一相机/光照下，有粒子的画面中心必须比没粒子更红。
 #[test]
 fn particle_billboards_change_pixels() {
@@ -7679,5 +7693,69 @@ fn particle_billboards_change_pixels() {
     assert!(
         br > ar + 40.0 && br > bg + 30.0 && br > bb + 30.0,
         "粒子必须让中心变红：无粒子 ({ar:.1},{ag:.1},{ab:.1}) vs 有粒子 ({br:.1},{bg:.1},{bb:.1})"
+    );
+}
+
+/// 粒子贴图：同样的白色实例色，Green 贴图必须把中心从白变成绿。
+#[test]
+fn particle_texture_tints_the_billboard() {
+    let doctor = run(&["doctor", "--json"]).json();
+    if !doctor["data"]["gpu_available"].as_bool().unwrap() {
+        eprintln!("跳过渲染断言：没有可用 GPU");
+        return;
+    }
+    let dir = temp_dir("particle_texture");
+    let texture = dir.join("green.png");
+    write_solid_png(&texture, [0, 255, 0, 255]);
+    let base = r#"{
+        "camera": { "position": [0, 1.5, 6], "look_at": [0, 1.5, 0] },
+        "lighting": { "sun_intensity": 0, "ambient": 0, "preset": "none" },
+        "render": { "output": "ignored.png", "width": 320, "height": 240, "msaa": 1 }
+    }"#;
+    let particle = r#"{
+        "count": 16,
+        "position": [0, 1.5, 0],
+        "radius": 0,
+        "velocity": [0, 0, 0],
+        "spread": 0,
+        "lifetime": 10,
+        "size": 2.0,
+        "gravity": [0, 0, 0],
+        "color": [1.0, 1.0, 1.0, 1.0]
+    }"#;
+    let plain = dir.join("plain.json");
+    let textured = dir.join("textured.json");
+    let plain_png = dir.join("plain.png");
+    let textured_png = dir.join("textured.png");
+    let mut doc: serde_json::Value = serde_json::from_str(base).unwrap();
+    doc["particles"] = serde_json::from_str(&format!("[{particle}]")).unwrap();
+    std::fs::write(&plain, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    let mut particle_doc: serde_json::Value = serde_json::from_str(particle).unwrap();
+    particle_doc["texture"] = serde_json::Value::String(texture.display().to_string());
+    doc["particles"] = serde_json::json!([particle_doc]);
+    std::fs::write(&textured, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    for (scene, out) in [(&plain, &plain_png), (&textured, &textured_png)] {
+        let r = run(&[
+            "render",
+            scene.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(r.code, 0, "渲染失败：{}", r.stderr);
+    }
+    let (w, h, a) = decode_rgba(&plain_png);
+    let (w2, h2, b) = decode_rgba(&textured_png);
+    assert_eq!((w, h), (w2, h2));
+    let (ar, ag, ab) = center_mean(w, h, &a);
+    let (br, bg, bb) = center_mean(w2, h2, &b);
+    assert!(
+        ar > 180.0 && (ar - ag).abs() < 25.0 && (ar - ab).abs() < 25.0,
+        "无贴图粒子应是白的：({ar:.1},{ag:.1},{ab:.1})"
+    );
+    assert!(
+        bg > br + 60.0 && bg > bb + 60.0,
+        "绿色贴图没有生效：无贴图 ({ar:.1},{ag:.1},{ab:.1}) vs 有贴图 ({br:.1},{bg:.1},{bb:.1})"
     );
 }

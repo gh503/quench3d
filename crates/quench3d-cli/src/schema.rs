@@ -370,8 +370,8 @@ pub fn scene_grammar() -> Value {
             "materials": "名字 → 材质对象",
             "particles": [
                 "CPU 公告板粒子发射器数组（纯视觉，不参与物理）",
-                "每项字段：count（1~4096，缺省 64）、position（缺省 [0,1,0]）、radius（初始球形半径，缺省 0.1）、velocity（缺省 [0,1.2,0]）、spread（速度扰动，缺省 0.4）、lifetime（秒，必须 >0，缺省 2）、size（四边形边长米，必须 >0，缺省 0.12）、gravity（缺省 [0,-1,0]）、color（线性 RGBA，alpha 0~1，缺省 [1,0.65,0.2,0.8]）",
-                "粒子是面向相机的四边形；按寿命淡出后回到发射器重生。没有贴图、没有排序粒子间遮挡、没有 GPU 粒子",
+                "每项字段：count（1~4096，缺省 64）、position（缺省 [0,1,0]）、radius（初始球形半径，缺省 0.1）、velocity（缺省 [0,1.2,0]）、spread（速度扰动，缺省 0.4）、lifetime（秒，必须 >0，缺省 2）、size（四边形边长米，必须 >0，缺省 0.12）、gravity（缺省 [0,-1,0]）、color（线性 RGBA，alpha 0~1，缺省 [1,0.65,0.2,0.8]）、texture（可选 PNG/JPEG 公告板贴图，颜色仍乘上去）",
+                "粒子是面向相机的四边形；按寿命淡出后回到发射器重生。有可选贴图，但没有粒子间排序遮挡、没有 GPU 粒子",
             ],
             "include": [
                 "被包含的外部场景片段路径数组（跨文件复用：把一份场景拆成多个文件）",
@@ -770,7 +770,7 @@ pub fn json_schema() -> Value {
     defs.insert("particle".into(), {
         let mut d = def(&[
             "count", "position", "radius", "velocity", "spread", "lifetime", "size", "gravity",
-            "color",
+            "color", "texture",
         ]);
         d["description"] =
             json!("一个 CPU 公告板粒子发射器（纯视觉，不参与物理）：粒子面向相机、按寿命淡出");

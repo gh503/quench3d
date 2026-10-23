@@ -88,7 +88,7 @@ Quench3D 目前的定位是**一个垂直切片**：自研物理 + 自研渲染 
 | P1 | ~~**无聚光灯、点光无阴影**~~ ✅ 已补 | `SpotLight` + `PointLight.cast_shadows`（各自整帧一盏，缺省关闭；`spot_shadow.rs` / `point_shadow.rs`） | 室内、手电、舞台灯可用；多盏同时投影仍是后续 |
 | P1 | ~~透明物体之间不排序~~ ✅ 2026-10-21 | 半透明按实例 AABB 中心到相机的距离全局由远到近逐实例绘制（`renderer.rs` 的 `alpha_draws`）；像素测试 `transparent_objects_are_drawn_back_to_front` | 玻璃叠玻璃不再按材质 id 闪错；代价是透明物体不合批 |
 | P2 | 无 AO 贴图、无 HDR/浮点纹理、无 KTX2/BC/ASTC | `params2.z` 硬编码 1.0（`material.rs:217`）；只支持 `Rgba8Unorm(Srgb)`（`texture.rs:284-288`） | 大贴图包体积、缺少接触阴影细节 |
-| P2 | 无粒子 / billboard / 贴花 | `particle`/`decal` 全仓 0 命中 | 火、烟、雨、命中特效、弹孔都没有 |
+| P2 | 🟡 粒子/公告板已做 + 贴图（第 66/145 轮），**贴花仍无** | `particles` 发射器 + `particle_texture`；`decal` 全仓 0 命中 | 火、烟、雨、命中特效可用 sprite；弹孔/投影贴花仍做不了 |
 | P2 | 流体有"可配置屏幕空间水"但仍不是物理折射 | 第 63 轮 `waters`（排开体积浮力 + 半透明平面）+ 第 64 轮 `fluids`（CPU PBF：密度约束/迭代/XSPH + 冲量反推 + 自由表面浮力，`fluid.rs`）+ 第 66 轮粒子/水面渲染（低模球 + alpha 平面）+ 第 67 轮 MRT mask 屏幕空间水 + 第 68 轮 M4.2（mask.g 水面高度、射线-平面、程序化波面法线、太阳高光、顶层 `water` 风格）。仍没有表面张力、涡量、真实波浪模拟、焦散、水下体积光；折射仍是屏幕空间偏移 | 水花/波浪/烟的**物理**仍做不了；物理折射/焦散/白水是后续 |
 | P2 | 🟡 手工 LOD + 渲染器自动 LOD（第 48 轮）；无遮挡剔除 / 空间加速 | `models[].lods` + `Scene::update_lods`（相机距离 + 10% 滞回）；`render.auto_lod` 顶点聚类 1/2、1/4，按批包围盒距离；逐实例线性剔除，`occlusion_query_set: None` 是占位 | 静态网格可自动减面；动画/蒙皮自动 LOD、遮挡剔除仍没有，数千物体时 CPU 剔除仍成瓶颈 |
 | P2 | 无 UI / 文字渲染 | `font`/`glyph`/`sdf` 全仓 0 命中 | HUD、标签、菜单全部要靠宿主自绘 |
@@ -318,7 +318,7 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 
 | 层 | 缺什么（**本轮 grep 的命中数**） | 对标物 | 挡住了什么 |
 | --- | --- | --- | --- |
-| 内容层 | 粒子（0）、贴花（0） | GPU 蒙皮/双 clip/时间状态机/morph/两骨 IK（含 FK/IK 权重）已补；GPU 蒙皮覆盖纯蒙皮与 morph+skin（morph 位移 CPU） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 单/双 clip 角色能显示；参数/事件状态机、状态机 FIFO 与 clip 事件队列已有，按时间窗口的缓冲仍要宿主自绘 |
+| 内容层 | 粒子/公告板 ✅（第 66 轮，第 145 轮可贴图）、贴花（0） | GPU 蒙皮/双 clip/时间状态机/morph/两骨 IK（含 FK/IK 权重）已补；GPU 蒙皮覆盖纯蒙皮与 morph+skin（morph 位移 CPU） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 单/双 clip 角色能显示；参数/事件状态机、状态机 FIFO 与 clip 事件队列已有，按时间窗口的缓冲仍要宿主自绘 |
 | 手工界面 | ✅ **已有**（2026-10-16）：`quench3d-editor` 用 egui 做了工具栏/场景树/属性面板/视口拾取，桌面与 Web 共用（§2.5）。**引擎本体仍不带** UI/文字系统（`font\|glyph\|sdf` 在 `quench3d-render` 里仍是 0）——GUI 由宿主（编辑器就是这样一个宿主）自己选库 | Unity/Godot 的 UI 是引擎内建；Bevy 走 `bevy_ui` + 第三方编辑器 | 想在自己游戏里画 HUD，得自己接一个 UI 库（本仓库演示了怎么和 wgpu 渲染器共存） |
 | 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM ✅（1~4）、聚光灯/点光阴影 ✅（各一盏）、透明距离排序 ✅、解析式环境高光 ✅、IBL/环境贴图 🟡（手工预滤波）、景深 ✅（深度后处理）/TAA ✅（第 140 轮，无运动向量）、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属只有天空/地面反射，没有环境贴图里的具体物体；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
 | 玩法层（物理） | 碰撞过滤 layer/mask ✅、传感器/触发事件 ✅（轮询式，无回调总线）、CCD 🟡（中心射线式）、复合形状（1 刚体 1 形状）、关节限位/马达补全、持久流形/特征 ID、物理材质与 combine（0）、快照回放、渲染插值（`interpolat` = 0）、地形高度场（0） | PhysX 5 / Jolt / Rapier / Box2D 的标配 | 队友互不碰撞、拾取/伤害区、子弹穿墙、载具悬挂、存档与回滚、高刷平滑 |
@@ -656,7 +656,7 @@ CLI / MCP / SDK 都是给程序用的，人想摆个场景只能写 JSON。本�
 ### P2（长尾，按需）
 
 - **格式**：`units`/`up_axis` 自描述、凸包按 `points` 生成真实渲染网格（现在只做 AABB 盒体近似 + 告警）、多地面、~~形状补全（Cone/圆角盒/HeightField）~~ ✅ 第 61 轮补齐。~~地面可配摩擦~~ ✅ 已做、~~`scale` 与碰撞体一致性诊断~~ ✅ 已做（告警）。
-- **引擎**：透明距离排序 + OIT、贴花、粒子/ billboard、自动 LOD + 遮挡剔除、多视口、地形/水体、快照与回放、渲染插值、时间缩放与单步调试、音频、脚本层、输入映射与手柄/触屏、多体/articulation、TGS/SIMD 求解器、精确凸包质量属性。
+- **引擎**：透明距离排序 + OIT、贴花、自动 LOD + 遮挡剔除、多视口、地形/水体、快照与回放、渲染插值、时间缩放与单步调试、音频、脚本层、输入映射与手柄/触屏、多体/articulation、TGS/SIMD 求解器、精确凸包质量属性。
 - **交付**：crate 元数据 + `cargo publish --dry-run`、CHANGELOG/semver 策略、cargo-deny 依赖审计、预编译发行（cargo-dist）、Web 产物 `wasm-opt`/Brotli/文件名哈希（编辑器包 11 MB，见 README §2）、移动端。
 - **编辑器**：~~拖拽 gizmo~~、~~撤销/重做~~、原生文件对话框、~~多选/成组~~（第 101 轮）、~~模型导入到场景树~~、
   贴图选择、~~层级与父变换~~、场景内行为编辑 —— 详见 §2.5。

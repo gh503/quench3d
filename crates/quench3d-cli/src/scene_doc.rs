@@ -1139,6 +1139,11 @@ pub struct ParticleDoc {
     /// 颜色（线性 RGBA），缺省 `[1.0, 0.65, 0.2, 0.8]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 4]>,
+    /// 可选公告板贴图（PNG/JPEG，相对场景文件解析）；颜色仍作为实例色乘上去。
+    ///
+    /// 适合烟雾/火焰/光斑这类带 alpha 的 sprite；不写就是纯色四边形。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
 }
 
 impl FluidDoc {
@@ -4056,6 +4061,44 @@ impl SceneDoc {
                         format!("{path}.color"),
                         "颜色必须是有限数，RGBA 都在 0~1 之间",
                     ));
+                }
+            }
+            if let Some(texture) = &p.texture {
+                let field = format!("{path}.texture");
+                if texture.trim().is_empty() {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        field,
+                        "粒子贴图路径不能为空",
+                    ));
+                } else {
+                    let lower = texture.to_ascii_lowercase();
+                    if !(lower.ends_with(".png")
+                        || lower.ends_with(".jpg")
+                        || lower.ends_with(".jpeg"))
+                    {
+                        cam_diags.push(Diagnostic::warn_code(
+                            ErrorCode::InvalidValue,
+                            field.clone(),
+                            format!("只支持 PNG/JPEG 贴图，当前是 \"{texture}\""),
+                        ));
+                    }
+                    if self.resolve_asset(texture).is_none() {
+                        let tried = self
+                            .asset_candidates(texture)
+                            .iter()
+                            .map(|c| c.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(" / ");
+                        cam_diags.push(
+                            Diagnostic::error_code(
+                                ErrorCode::AssetNotFound,
+                                field,
+                                format!("找不到粒子贴图 \"{texture}\"（找过：{tried}）"),
+                            )
+                            .with_hint("把贴图放到场景文件同目录，或写成绝对路径"),
+                        );
+                    }
                 }
             }
         }
@@ -7841,22 +7884,51 @@ mod tests {
 
     #[test]
     fn particles_parse_validate_and_roundtrip() {
+        let dir =
+            std::env::temp_dir().join(format!("quench3d_particle_tex_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let texture = dir.join("green.png");
+        std::fs::write(&texture, b"not-a-real-png").unwrap();
+        let texture_path = texture.to_string_lossy().to_string();
         let doc = SceneDoc::from_value(json!({
             "particles": [
                 { "count": 12, "position": [0, 2, 0], "color": [1, 0.5, 0.2, 0.7] },
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
-                  "velocity": [0, 2, 0], "gravity": [0, -3, 0] }
+                  "velocity": [0, 2, 0], "gravity": [0, -3, 0] },
+                { "count": 2, "texture": texture_path.clone() }
             ]
         }))
         .expect("particles 要能解析");
         assert!(doc.validate().is_empty(), "{:?}", doc.validate());
-        assert_eq!(doc.particles.len(), 2);
+        assert_eq!(doc.particles.len(), 3);
         assert_eq!(doc.particles[0].count, Some(12));
+        assert_eq!(
+            doc.particles[2].texture.as_deref(),
+            Some(texture_path.as_str())
+        );
         let text = serde_json::to_string(&doc).expect("序列化");
         assert!(text.contains("\"particles\""), "粒子段要写回：{text}");
         let again = SceneDoc::from_json(&text).expect("往返");
-        assert_eq!(again.particles.len(), 2);
+        assert_eq!(again.particles.len(), 3);
         assert_eq!(again.particles[1].size, Some(0.2));
+        assert_eq!(
+            again.particles[2].texture.as_deref(),
+            Some(texture_path.as_str())
+        );
+
+        // 贴图路径必须真的找得到（和材质贴图同一套规则）。
+        let missing = SceneDoc::from_value(json!({
+            "particles": [{ "texture": "definitely-missing.png" }]
+        }))
+        .unwrap();
+        assert!(
+            missing
+                .validate()
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.path == "particles[0].texture"),
+            "缺文件要报 particles[0].texture"
+        );
 
         for (particle, path) in [
             (json!({"count": 0}), "particles[0].count"),
