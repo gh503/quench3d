@@ -860,6 +860,7 @@ fn gpu_skinning_with_morph_matches_cpu_pixels_and_uses_palette() {
     };
     let empty = match empty {
         Ok(image) => image,
+        Err(e) if e.contains("GPU 适配器") || e.contains("GPU adapter") => return,
         Err(e) => panic!("空场景对照渲染失败：{e}"),
     };
     let (cpu, gpu) = match (cpu, gpu) {
