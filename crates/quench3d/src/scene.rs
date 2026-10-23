@@ -566,9 +566,9 @@ fn animation_matrices(a: &ModelAnimationInstance) -> Vec<Mat4> {
 
 /// 本帧可以走 GPU 蒙皮的实例规划。
 ///
-/// 返回 `(调色板, 物体下标 → (起始, 数量))`。只收**纯蒙皮**片段：带 morph 的片段
-/// 必须先做绑定姿态位移、再乘关节矩阵，仍由 CPU 路径处理；调色板超过 128 个关节的
-/// 模型也退回 CPU，避免越界。
+/// 返回 `(调色板, 物体下标 → (起始, 数量))`。收**所有带有效 JOINTS/WEIGHTS 的片段**，
+/// 包括同时有 morph 的片段：morph 位移仍在 CPU 的绑定姿态上叠加并上传顶点，
+/// 关节矩阵由顶点着色器乘；调色板超过 128 个关节的模型退回 CPU，避免越界。
 fn gpu_skin_plan(
     animations: &[ModelAnimationInstance],
     enabled: bool,
@@ -588,7 +588,6 @@ fn gpu_skin_plan(
                 continue;
             };
             if mesh.skin.is_none()
-                || !mesh.morph_targets.is_empty()
                 || mesh.joints.len() != mesh.data.vertices.len()
                 || mesh.weights.len() != mesh.data.vertices.len()
             {
@@ -804,7 +803,8 @@ pub struct Scene {
     pub animations: Vec<ModelAnimationInstance>,
     /// 是否用顶点着色器做蒙皮（缺省开）。关掉退回 CPU 蒙皮，用于对照/排障。
     ///
-    /// 只有**纯蒙皮**片段走 GPU；带 morph 的片段仍走 CPU。
+    /// 纯蒙皮与 morph+skin 都走 GPU 蒙皮；morph 位移是 CPU 叠加后上传，
+    /// 关节矩阵仍只乘一次（在顶点着色器里）。
     pub gpu_skinning: bool,
     /// 手工 LOD 组；每帧按相机距离切可见层级。
     pub lods: Vec<ModelLodGroup>,
@@ -1615,12 +1615,34 @@ impl Scene {
                             .map(|(_, w)| w.as_slice())
                     })
                 };
-                let Some(data) = a.model.deformed_mesh(mesh_index, &worlds, weights) else {
+                let gpu_skin = gpu_skinned.contains_key(&object_index);
+                // GPU 蒙皮时只上传 **morph 后的绑定姿态**：关节矩阵仍在顶点着色器里乘。
+                // 顺序必须与 CPU 路径一致（先 morph 再 skin），所以这里不能用
+                // `deformed_mesh`——那会把关节也乘进去，GPU 再乘一次。
+                if gpu_skin && mesh.morph_targets.is_empty() {
+                    continue;
+                }
+                let Some(mut data) = (if gpu_skin {
+                    a.model.morphed_mesh(mesh_index, weights)
+                } else {
+                    a.model.deformed_mesh(mesh_index, &worlds, weights)
+                }) else {
                     continue;
                 };
-                // 纯蒙皮片段已经交给 GPU：不再每帧回写整张顶点缓冲。
-                if gpu_skinned.contains_key(&object_index) {
-                    continue;
+                // `morphed_mesh` 从 `mesh.data` 克隆，而 JOINTS_0/WEIGHTS_0 存在
+                // `mesh.joints/weights` 里；GPU 蒙皮必须把它们原样带回去，否则
+                // 每帧上传会把关节清零，蒙皮直接塌成绑定姿态。
+                if gpu_skin {
+                    if mesh.joints.len() == data.vertices.len()
+                        && mesh.weights.len() == data.vertices.len()
+                    {
+                        for (i, vertex) in data.vertices.iter_mut().enumerate() {
+                            vertex.joints = mesh.joints[i];
+                            vertex.weights = mesh.weights[i];
+                        }
+                    } else {
+                        continue;
+                    }
                 }
                 let Some(object) = objects.get_mut(object_index) else {
                     continue;

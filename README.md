@@ -138,7 +138,8 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   关节下标/权重放进顶点，顶点着色器按关节矩阵变形；场景每帧只上传关节调色板
   （最多 128 个矩阵），不再重算/重传整张顶点缓冲。场景里用 `models[].animation`
   选一条 clip；`Scene::gpu_skinning = false` 可退回 CPU 对照。
-  边界：每顶点最多 4 关节；带 morph 的蒙皮网格仍走 CPU（先 morph 再蒙皮）；
+  边界：每顶点最多 4 关节；morph+skin 网格的 morph 位移仍在 CPU 叠加（每帧上传顶点），
+  关节矩阵在 GPU 乘（只乘一次）；
   IK 见下；`info` 会列出 `skins` / `skinned_meshes`。
 * **morph target（静态权重 + 权重动画）**：带 glTF `targets` 的网格解析逐顶点
   `POSITION/NORMAL/TANGENT` 位移；场景里用 `models[].morph_weights` 覆盖权重

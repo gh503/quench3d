@@ -856,7 +856,8 @@ impl LoadedModel {
                 .morphed_mesh(i, None)
                 .unwrap_or_else(|| mesh.data.clone());
             // 纯蒙皮片段把 JOINTS_0 / WEIGHTS_0 放进顶点，交给 GPU；
-            // 同时带 morph 的片段仍走 CPU（morph 位移在绑定姿态里，顺序不能反）。
+            // 带 morph 的片段：morph 位移仍在绑定姿态里由 CPU 叠加，之后关节矩阵
+            // 可以交给 GPU（第 49 轮起）；顺序不能反。
             let mesh_id = if mesh.skin.is_some()
                 && mesh.morph_targets.is_empty()
                 && mesh.joints.len() == data.vertices.len()

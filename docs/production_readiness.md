@@ -41,7 +41,7 @@
 | 阴影可调参数 | Blender / Unity | `DirectionalLight.shadow_bias`（0~4 纹素，缺省 0.75）公开；编辑器“强度/半径/偏移”滑杆、场景 `lighting.shadow_quality.bias` 都可调；仍有 `cast_shadows` 与全局开关 | ✅ |
 | 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO 与深度解析两趟按能力整体关闭**（§12.7） | 🟡 |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4；**GL/WebGL2 上按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧，§12.7） | 🟡 |
-| 网格与顶点属性 | 全部 | position/normal/uv/tangent + **GPU 蒙皮**（glTF `JOINTS_0/WEIGHTS_0` 顶点属性，≤4 关节/顶点，128 关节 uniform 调色板，8 KB；只满足 WebGL2 最低 4 KB uniform 的设备需 CPU 回退；纯蒙皮走 GPU，带 morph 仍走 CPU）+ **morph target**（静态 `models[].morph_weights` + glTF `weights` 动画轨道；双 clip 只取主 clip）；**无顶点色** | 🟡 |
+| 网格与顶点属性 | 全部 | position/normal/uv/tangent + **GPU 蒙皮**（glTF `JOINTS_0/WEIGHTS_0` 顶点属性，≤4 关节/顶点，128 关节 uniform 调色板，8 KB；只满足 WebGL2 最低 4 KB uniform 的设备需 CPU 回退；纯蒙皮走 GPU，morph+skin 的 morph CPU 叠加、关节 GPU 乘）+ **morph target**（静态 `models[].morph_weights` + glTF `weights` 动画轨道；双 clip 只取主 clip）；**无顶点色** | 🟡 |
 | 实例化 | 全部 | 不透明有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
 | 透明排序 | 全部 | 半透明按实例 AABB 中心到相机的距离**全局由远到近**逐实例绘制，不同材质/网格之间也正确；代价是透明物体不合批 | ✅ |
 | LOD | 引擎级 | 手工 LOD：`models[].lods` 按相机距离换静态粗模，10% 滞回；无自动减面/自动生成、动画模型不支持、无遮挡剔除 | 🟡 |
@@ -84,7 +84,7 @@
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
 | 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、事件按钮和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、事件队列、多轨混合 UI | 🟡 |
-| 骨骼 / 蒙皮 | 全部 | **GPU 蒙皮可用**（纯蒙皮：`JOINTS_0/WEIGHTS_0` 顶点属性 + 每帧关节调色板；`Scene::gpu_skinning=false` 退回 CPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**两骨 IK 可用**（`models[].ik`，每帧采样后解目标、CPU/GPU 蒙皮与 F8 骨架一致）；**morph+skin 的 GPU 路径仍无** | 🟡 |
+| 骨骼 / 蒙皮 | 全部 | **GPU 蒙皮可用**（纯蒙皮：`JOINTS_0/WEIGHTS_0` 顶点属性 + 每帧关节调色板；`Scene::gpu_skinning=false` 退回 CPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**两骨 IK 可用**（`models[].ik`，每帧采样后解目标、CPU/GPU 蒙皮与 F8 骨架一致）；**morph+skin 已能走 GPU 蒙皮**（morph 位移仍 CPU 叠加后上传，关节只在 GPU 乘一次）；**全 GPU morph 仍无** | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
 
@@ -2185,7 +2185,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | glTF `animations` 解析 | ✅ 第 61 / 76 / 81 轮 | `LoadedModel.animations`（TRS 轨道、STEP/LINEAR、旋转 slerp；CUBICSPLINE 用 Hermite 入/出切线）；morph 权重轨道也解析并保留入/出切线 |
 | glTF `skins` 解析（joints / inverse bind matrices / JOINTS_0 / WEIGHTS_0） | ✅ 第 70 轮（CPU） | `LoadedSkin` + `LoadedMesh.skin/joints/weights`；缺任何顶点数据时整体退回刚性路径（不撕裂网格） |
 | CPU 蒙皮变形 + 顶点回写 | ✅ 第 70 轮 | `LoadedModel::skinned_mesh` 算 `Σ w·world(joint)·IBM·bindInverse`；`Scene::advance_animations_with_renderer` 调 `Renderer::update_mesh_vertices` 原地更新同一个 `MeshId`。GPU 像素回归 t=0/t=0.25 |
-| GPU 蒙皮（顶点着色器关节矩阵） | ✅ 第 94 轮 | `Vertex.joints/weights` + 128 关节 uniform 调色板；`Scene` 每帧只上传关节矩阵，纯蒙皮片段不再回写顶点缓冲。像素对照：CPU 与 GPU 渲染 0/4096 像素差；调色板填充有独立断言。带 morph 的蒙皮仍走 CPU |
+| GPU 蒙皮（顶点着色器关节矩阵） | ✅ 第 94 轮 / 第 49 轮补 morph+skin | `Vertex.joints/weights` + 128 关节 uniform 调色板；纯蒙皮每帧只传关节矩阵。**morph+skin**：morph 位移 CPU 叠加后上传绑定姿态顶点，关节矩阵仍在 GPU 乘一次，不再每帧做 CPU 蒙皮。像素对照：纯蒙皮 0/4096；morph+skin 0/16384（覆盖 288 像素）。调色板填充有独立断言 |
 | 两骨 IK | ✅ 第 96 轮 | `models[].ik`（root/mid/tip 节点名 + 局部 target/pole）；每帧 CPU 采样后解三角形，只改 root/mid 朝向，长度不变；不可达夹取；`Scene::set_model_ik` 落在 `animation_worlds`，CPU/GPU 蒙皮、刚性片段、F8 骨架同源。**仍缺**：FK/IK 权重混合、多骨链、目标约束 |
 | CPU 侧**采样**（给定 t 求节点世界矩阵） | ✅ 第 61 轮 | `sample_animation(name, t)`；循环/时间推进仍由调用方做（`t.rem_euclid(duration)`） |
 | CPU 侧播放状态（循环/夹取/倍速） | ✅ 第 61 轮 | `ModelAnimationPlayer::advance(dt)` + `mesh_matrices(&model)`；**纯 CPU 可测**（循环用 `rem_euclid`、`duration <= 0` 不除零、非法 dt 不出 NaN） |
@@ -2224,10 +2224,11 @@ if let Some(v) = doc.physics.static_friction_speed {
    （第 74 轮）：`weights` 轨道 + 场景逐帧采样；双 clip 的 morph 权重按 `blend_weight`
    逐 target 插值。✅ **时间驱动状态机**（第 75 轮）：
    `animator.states/transitions` + 淡入。**GPU 蒙皮第 94 轮已补**（纯蒙皮）；
-   **两骨 IK 第 96 轮已补**（`models[].ik`）；仍缺 morph+skin 的 GPU 路径、
-   任意权重曲线、事件队列/输入缓冲、FK/IK 权重混合。
+   **两骨 IK 第 96 轮已补**（`models[].ik`）；**morph+skin 的 GPU 蒙皮第 49 轮已补**
+   （morph 位移仍 CPU，全 GPU morph 仍缺）；仍缺任意权重曲线、事件队列/输入缓冲、
+   FK/IK 权重混合。
 5. ✅ **`skins` + GPU 蒙皮**（第 94 轮）：顶点属性扩展 + 128 关节 uniform 调色板 +
-   `pbr.wgsl`/`shadow.wgsl` + 阴影管线绑定；带 morph 的蒙皮仍走 CPU，
+   `pbr.wgsl`/`shadow.wgsl` + 阴影管线绑定；morph+skin 也走 GPU 蒙皮（morph CPU 叠加），
    `gpu_skinning=false` 可整体退回。像素对照与调色板填充都有测试。
 
 ## 20. 第 63 轮：`waters` —— 解析水域 + 浮力（M1）
@@ -3039,6 +3040,30 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：没有动画/蒙皮 LOD、逐实例选档、屏幕空间误差或滞回；顶点聚类不保 UV 接缝，
 远处可能出现纹理拉伸；LOD 资源只随 `clear_scene_assets` 释放。
 
+### 23.36 morph + skin 的 GPU 蒙皮（第 49 轮）
+
+**做了什么**：
+
+* `gpu_skin_plan` 不再排除带 morph 的片段：只要 `JOINTS_0/WEIGHTS_0` 完整、
+  关节数不超 128，就能进 GPU 调色板。
+* `upload_animated_vertices` 对这类片段只把 **morph 后的绑定姿态**写回顶点缓冲，
+  关节矩阵交给顶点着色器；不再调用 `deformed_mesh` 做 CPU 蒙皮。
+* 回写时从 `mesh.joints/weights` 恢复 `JOINTS_0/WEIGHTS_0`：`morphed_mesh` 从
+  `mesh.data` 克隆，而关节存在旁边的数组里，不恢复会被清零。
+* `gpu_skinning=false` 时仍走原来的 `deformed_mesh`（先 morph 再 CPU 蒙皮），
+  两条路径的几何顺序一致：**先 morph，再乘关节，且只乘一次**。
+
+**验证**：
+
+* 新 GLB fixture：同一 clip 同时含关节平移（y 0→2）与 morph 权重（0→1），
+  顶点先 +0.5 再随关节 +2。
+* `gpu_skinning_with_morph_matches_cpu_pixels_and_uses_palette`：
+  GPU/CPU 像素差 **0/16384**，覆盖 288 像素，GPU 调色板 >0。
+* 既有纯蒙皮 CPU/GPU 像素对照、morph 权重测试、编辑器 morph 滑杆测试全部保持通过。
+
+**边界**：morph 位移仍是 CPU 每帧叠加并上传顶点（不是 GPU morph target 存储）；
+没有 morph 法线/切线的 GPU 混合；全 GPU morph 仍未做。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：
@@ -3100,7 +3125,7 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
   `camera` Orbit→Fly。
 * `tools/probe_webgl2.sh`：第一帧 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式。
 
-**仍未做**：morph+skin 的 GPU 路径（纯蒙皮已 GPU 化）、离散事件驱动的动画状态机、
+**仍未做**：全 GPU morph（morph 位移仍在 CPU）、离散事件驱动的动画状态机、
 遮挡剔除、音频/脚本层、Web 摄像头**内置**骨骼推理（外部 JS 注入 2D 骨架已做，见 §23.24）、单帧 golden 基线、真机 GPU 矩阵。清单与命令见 `docs/feature_verification.md` §6。
 
 ---

@@ -227,6 +227,98 @@ fn morph_glb() -> Vec<u8> {
     glb_from_parts(json, bin)
 }
 
+/// 手搓一个「1 关节 + morph target + 同一 clip 里平移与权重」的 GLB。
+///
+/// 用来钉住 **morph + skin 的混合路径**：绑定姿态先加 morph 位移（y+0.5），
+/// 再乘关节矩阵（y+2）；GPU 蒙皮只应乘一次关节，不能把 CPU 已蒙皮的结果再乘一次。
+fn skinned_morph_glb() -> Vec<u8> {
+    let mut bin = Vec::new();
+    // POSITION @0
+    for f in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // NORMAL @36
+    for _ in 0..3 {
+        for f in [0.0f32, 0.0, 1.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    // JOINTS_0 @72
+    for _ in 0..3 {
+        bin.extend_from_slice(&[0, 0, 0, 0]);
+    }
+    // WEIGHTS_0 @84
+    for _ in 0..3 {
+        for f in [1.0f32, 0.0, 0.0, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    // indices @132（u16 + 2 字节对齐）
+    for i in [0u16, 1, 2] {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    bin.extend_from_slice(&[0, 0]);
+    // inverse bind @140
+    for f in [
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // morph 位移 @204：所有顶点 y +0.5
+    for _ in 0..3 {
+        for f in [0.0f32, 0.5, 0.0] {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    // 动画时间 @240
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // 关节平移 @248：y 0 → 2
+    for f in [0.0f32, 0.0, 0.0, 0.0, 2.0, 0.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    // morph 权重 @272：0 → 1
+    for f in [0.0f32, 1.0] {
+        bin.extend_from_slice(&f.to_le_bytes());
+    }
+    let json = r#"{"asset":{"version":"2.0"},"scene":0,
+"scenes":[{"nodes":[1]}],
+"nodes":[{"name":"joint"},{"name":"skin","mesh":0,"skin":0}],
+"meshes":[{"name":"tri","weights":[0.0],"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"JOINTS_0":2,"WEIGHTS_0":3},"indices":4,"targets":[{"POSITION":5}]}]}],
+"skins":[{"joints":[0],"inverseBindMatrices":6}],
+"accessors":[
+ {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,1.0,0.0]},
+ {"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"},
+ {"bufferView":2,"componentType":5121,"count":3,"type":"VEC4"},
+ {"bufferView":3,"componentType":5126,"count":3,"type":"VEC4"},
+ {"bufferView":4,"componentType":5123,"count":3,"type":"SCALAR"},
+ {"bufferView":6,"componentType":5126,"count":3,"type":"VEC3","min":[0.0,0.0,0.0],"max":[1.0,0.5,0.0]},
+ {"bufferView":5,"componentType":5126,"count":1,"type":"MAT4"},
+ {"bufferView":7,"componentType":5126,"count":2,"type":"SCALAR","min":[0.0],"max":[1.0]},
+ {"bufferView":8,"componentType":5126,"count":2,"type":"VEC3"},
+ {"bufferView":9,"componentType":5126,"count":2,"type":"SCALAR"}],
+"bufferViews":[
+ {"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":36,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":72,"byteLength":12,"target":34962},
+ {"buffer":0,"byteOffset":84,"byteLength":48,"target":34962},
+ {"buffer":0,"byteOffset":132,"byteLength":6,"target":34963},
+ {"buffer":0,"byteOffset":140,"byteLength":64},
+ {"buffer":0,"byteOffset":204,"byteLength":36,"target":34962},
+ {"buffer":0,"byteOffset":240,"byteLength":8},
+ {"buffer":0,"byteOffset":248,"byteLength":24},
+ {"buffer":0,"byteOffset":272,"byteLength":8}],
+"buffers":[{"byteLength":280}],
+"animations":[{"name":"combo","samplers":[
+ {"input":7,"output":8,"interpolation":"LINEAR"},
+ {"input":7,"output":9,"interpolation":"LINEAR"}],
+ "channels":[
+ {"sampler":0,"target":{"node":0,"path":"translation"}},
+ {"sampler":1,"target":{"node":1,"path":"weights"}}]}]}"#;
+    glb_from_parts(json, bin)
+}
+
 /// 与 `morph_glb` 相同的三角形，但权重轨道是 CUBICSPLINE：
 /// 关键帧 0 = (入 0, 值 0, 出 2)，关键帧 1 = (入 0, 值 1, 出 0)。
 fn morph_cubic_glb() -> Vec<u8> {
@@ -697,6 +789,137 @@ fn gpu_skinning_matches_cpu_skinning_pixels() {
         "GPU 与 CPU 蒙皮差得太多：{differing}/{pixels}（最大 {max_diff}）"
     );
     assert!(mean < 1.0, "GPU 与 CPU 蒙皮平均像素差 {mean:.4}");
+}
+
+#[test]
+fn gpu_skinning_with_morph_matches_cpu_pixels_and_uses_palette() {
+    let palette = std::sync::Arc::new(AtomicUsize::new(0));
+    let probe = std::sync::Arc::clone(&palette);
+    let rendered = with_gpu_tests(
+        "morph + GPU 蒙皮的 CPU 像素对照（真的创建 wgpu 上下文）",
+        move || {
+            let model = Arc::new(
+                load_model_from_bytes("skinned-morph.glb", &skinned_morph_glb())
+                    .expect("morph + skin GLB 应当能解析"),
+            );
+            let config = EngineConfig {
+                width: 128,
+                height: 128,
+                msaa_samples: 1,
+                ..Default::default()
+            };
+            let render_at = |gpu: bool| {
+                let model = Arc::clone(&model);
+                let probe = std::sync::Arc::clone(&probe);
+                quench3d::render_offscreen(128, 128, &config, move |engine| {
+                    let spawned = model.spawn(
+                        &mut engine.renderer,
+                        &engine.gpu,
+                        &mut engine.scene,
+                        Transform::default(),
+                    );
+                    let mut player = model.player("combo").expect("动画存在");
+                    player.time = 1.0;
+                    engine.scene.gpu_skinning = gpu;
+                    engine.scene.play_model_animation(
+                        Arc::clone(&model),
+                        spawned.objects,
+                        spawned.base,
+                        player,
+                    );
+                    engine.scene.lighting.sun = None;
+                    engine.scene.lighting.ambient_color = Vec3::ONE;
+                    engine.scene.lighting.ambient_intensity = 2.0;
+                    engine.orbit.focus = Vec3::new(0.5, 3.0, 0.0);
+                    engine.orbit.distance = 3.5;
+                    engine.orbit.yaw = 0.0;
+                    engine.orbit.pitch = 0.0;
+                    engine
+                        .scene
+                        .refresh_animations_with_renderer(&mut engine.renderer, &engine.gpu);
+                    engine.scene.submit(&mut engine.renderer);
+                    if gpu {
+                        probe.store(engine.renderer.skin_palette_len(), Ordering::SeqCst);
+                    }
+                })
+            };
+            let empty = quench3d::render_offscreen(128, 128, &config, move |engine| {
+                engine.scene.lighting.sun = None;
+                engine.scene.lighting.ambient_color = Vec3::ONE;
+                engine.scene.lighting.ambient_intensity = 2.0;
+                engine.orbit.focus = Vec3::new(0.5, 3.0, 0.0);
+                engine.orbit.distance = 3.5;
+                engine.orbit.yaw = 0.0;
+                engine.orbit.pitch = 0.0;
+            });
+            (render_at(false), render_at(true), empty)
+        },
+    );
+    let Some((cpu, gpu, empty)) = rendered else {
+        return;
+    };
+    let empty = match empty {
+        Ok(image) => image,
+        Err(e) => panic!("空场景对照渲染失败：{e}"),
+    };
+    let (cpu, gpu) = match (cpu, gpu) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => {
+            if e.contains("GPU 适配器") || e.contains("GPU adapter") {
+                return;
+            }
+            panic!("morph + 蒙皮对照渲染失败：{e}");
+        }
+    };
+    assert!(
+        palette.load(Ordering::SeqCst) > 0,
+        "morph + 蒙皮片段也应该用 GPU 关节调色板"
+    );
+    let mut differing = 0usize;
+    let mut max_diff = 0i32;
+    let mut total = 0i64;
+    for (a, b) in cpu
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(gpu.rgba.as_chunks::<4>().0)
+    {
+        let mut pixel_diff = 0i32;
+        for k in 0..3 {
+            let d = (a[k] as i32 - b[k] as i32).abs();
+            total += d as i64;
+            pixel_diff = pixel_diff.max(d);
+        }
+        max_diff = max_diff.max(pixel_diff);
+        if pixel_diff > 3 {
+            differing += 1;
+        }
+    }
+    let pixels = (cpu.width * cpu.height) as usize;
+    let mean = total as f64 / (pixels * 3) as f64;
+    let center = ((cpu.height / 2 * cpu.width + cpu.width / 2) * 4) as usize;
+    let covered = cpu
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(empty.rgba.as_chunks::<4>().0)
+        .filter(|(a, b)| (0..3).any(|k| (a[k] as i32 - b[k] as i32).abs() > 10))
+        .count();
+    eprintln!(
+        "morph + GPU/CPU 蒙皮像素：{differing}/{pixels} 差>3，最大差 {max_diff}，平均 {mean:.4}，覆盖 {covered}，中心 {:?}",
+        &cpu.rgba[center..center + 3]
+    );
+    assert!(
+        covered > 100,
+        "morph + 蒙皮三角形必须真的出现在画面里：{covered} 像素"
+    );
+    assert!(
+        differing * 100 <= pixels,
+        "morph + GPU 与 CPU 蒙皮差得太多：{differing}/{pixels}（最大 {max_diff}）"
+    );
+    assert!(mean < 1.0, "morph + GPU/CPU 蒙皮平均像素差 {mean:.4}");
 }
 
 #[test]
