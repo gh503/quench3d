@@ -11,7 +11,7 @@
 
 use crate::camera::CameraFeed;
 use crate::doc::Doc;
-use crate::gizmo::{Gizmo, Mode as GizmoMode, Space as GizmoSpace};
+use crate::gizmo::{Gizmo, Mode as GizmoMode, Pivot as GizmoPivot, Space as GizmoSpace};
 use crate::ui::{self, Viewport};
 use egui_wgpu::ScreenDescriptor;
 use quench3d::prelude::*;
@@ -355,6 +355,25 @@ impl Inner {
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
         // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
         self.camera.add_lines(&mut self.engine.renderer.lines);
+        if self.gizmo.pivot == GizmoPivot::Cursor {
+            let c = self.gizmo.cursor;
+            let color = quench3d::prelude::Vec4::new(1.0, 0.75, 0.2, 1.0);
+            self.engine.renderer.lines.line(
+                c - quench3d::prelude::Vec3::X * 0.6,
+                c + quench3d::prelude::Vec3::X * 0.6,
+                color,
+            );
+            self.engine.renderer.lines.line(
+                c - quench3d::prelude::Vec3::Y * 0.6,
+                c + quench3d::prelude::Vec3::Y * 0.6,
+                color,
+            );
+            self.engine.renderer.lines.line(
+                c - quench3d::prelude::Vec3::Z * 0.6,
+                c + quench3d::prelude::Vec3::Z * 0.6,
+                color,
+            );
+        }
         self.autosave_tick();
         #[cfg(target_arch = "wasm32")]
         publish_ui_debug_state(UiDebugState {
@@ -373,6 +392,8 @@ impl Inner {
                 .unwrap_or(false),
             camera_mode: self.engine.camera_mode,
             gizmo_mode: self.gizmo.mode,
+            gizmo_pivot: self.gizmo.pivot.label(),
+            cursor: self.gizmo.cursor.to_array(),
             contacts: self.engine.debug.physics_contacts,
             bounds: self.engine.debug.body_bounds,
             query: self.engine.debug.query_probe,
@@ -831,6 +852,8 @@ struct UiDebugState {
     sun_cast: bool,
     camera_mode: quench3d::prelude::CameraMode,
     gizmo_mode: GizmoMode,
+    gizmo_pivot: &'static str,
+    cursor: [f32; 3],
     contacts: bool,
     bounds: bool,
     query: bool,
@@ -864,6 +887,8 @@ fn publish_ui_debug_state(state: UiDebugState) {
         sun_cast,
         camera_mode,
         gizmo_mode,
+        gizmo_pivot,
+        cursor,
         contacts,
         bounds,
         query,
@@ -889,7 +914,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
@@ -1070,6 +1095,17 @@ impl EditorApp {
                         }
                         // 正在拖手柄时 Esc = 取消这次拖拽，不能让引擎把它当成"退出"。
                         if code == KeyCode::Escape && inner.gizmo.is_dragging() {
+                            return;
+                        }
+                        if code == KeyCode::KeyK {
+                            if let Some(center) = inner.doc.selection_center(engine) {
+                                inner.gizmo.cursor = center;
+                            }
+                            inner.gizmo.pivot = GizmoPivot::Cursor;
+                            inner.doc.status = format!(
+                                "3D 光标：({:.2}, {:.2}, {:.2})",
+                                inner.gizmo.cursor.x, inner.gizmo.cursor.y, inner.gizmo.cursor.z
+                            );
                             return;
                         }
                         // W/E/R 切手柄模式、L 切坐标系：只在轨道相机下生效。

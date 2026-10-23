@@ -209,6 +209,8 @@ async function main() {
   await toggle("关节 F11", "F11", "F11", 122, false);
   // 默认场景的亮度足够区分 ACES/Reinhard：要求状态与画面都变。
   await toggle("色调 T", "t", "KeyT", 84);
+  // K 只移动 3D 光标/切轴心；默认选中物可能正好在原点，所以只验状态。
+  await toggle("3D 光标 K", "k", "KeyK", 75, false);
   await toggle("暂停 P", "p", "KeyP", 80);
   // Tab 只切相机模式：状态必须变，但不强制中央视口立刻不同。
   await toggle("相机模式 Tab", "Tab", "Tab", 9, false);

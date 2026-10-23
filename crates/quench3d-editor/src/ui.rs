@@ -323,6 +323,30 @@ fn top_bar(
                 })
                 .response
                 .on_hover_text("旋转/缩放的轴心");
+            if gizmo.pivot == GizmoPivot::Cursor {
+                let mut cursor = gizmo.cursor.to_array();
+                ui.horizontal(|ui| {
+                    ui.label("光标");
+                    for (i, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                        ui.label(axis);
+                        ui.add(
+                            egui::DragValue::new(&mut cursor[i])
+                                .speed(0.05)
+                                .range(-10_000.0..=10_000.0),
+                        );
+                    }
+                    if ui
+                        .button("到选中中心")
+                        .on_hover_text("把 3D 光标放到当前选中物体的中心（快捷键 K）")
+                        .clicked()
+                    {
+                        if let Some(center) = doc.selection_center(engine) {
+                            gizmo.cursor = center;
+                        }
+                    }
+                });
+                gizmo.cursor = Vec3::new(cursor[0], cursor[1], cursor[2]);
+            }
             ui.checkbox(&mut gizmo.enabled, "显示")
                 .on_hover_text("关掉后视口里只剩拾取与转视角");
 

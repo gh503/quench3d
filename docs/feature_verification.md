@@ -128,7 +128,7 @@ tools/verify_all.sh
 | 历史 / 模型实例变换 | `cargo test -p quench3d-editor` | 模型组变换写回 |
 | 摄像头协议 / 3D 骨架 | `cargo test -p quench3d-editor --lib camera` | 解析/长度/坐标/线段数量/低可见度 |
 | 多输出 render | `cargo test -p quench3d-cli --test cli_e2e multiple_render_outputs`（真渲染那条需 GPU） | 路径/尺寸/no-clobber/向后兼容 + 真渲染 64×32 / 32×16 两张 PNG 尺寸对得上 |
-| Web 摄像头预览 + 外部 2D/3D 姿态 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动 >500（本次 11884/116000）；2D 注入后 `camera_pose=true`、洋红像素 3932；3D 世界点注入后 `camera_world=true`、视口变化 177 像素；清空后都回 false；**内置推理不做** |
+| Web 摄像头预览 + 外部 2D/3D 姿态 | `tools/probe_web_camera.sh`（Chrome 假摄像头 + `?camera=1`，需 PIL） | 预览区域两帧运动 >500（本次 20323/116000）；2D 注入后 `camera_pose=true`、洋红像素 3932；3D 世界点注入后 `camera_world=true`、视口变化 177 像素；清空后都回 false；**内置推理不做** |
 | 深度点云反投影 | `python -m unittest test_camera_mocap.PointCloudTests -v` | 中心像素落主轴、y 向上翻转、近深度 z=-0.3、步长下采样 |
 | 点云读入/绘制 | `cargo test -p quench3d-editor --lib camera` | `latest.points` 长度/布局校验；每点画 3 条十字线段 |
 
@@ -139,7 +139,7 @@ tools/verify_all.sh
 | wasm 构建 + 产物自检 | `tools/build_web.sh web_client`；`node tools/check_web.mjs` | 符号/实例化/内存都在 |
 | WebGL2 启动 | `tools/probe_webgl2.sh` | 第一帧日志 + 遮罩收起 + 无 panic/`INDEPENDENT_BLEND`/Cube 启发式 |
 | 线上 Pages 启动 | `tools/probe_deployed.sh [URL]` | HTTP 200 + 线上 wasm 第一帧 + 遮罩收起；网络不通跳过 |
-| Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/T/P 前后 UI 状态与中央视口截图都必须变；F5/F8/F11 只断言状态（默认场景可能没有接触/动画/关节），Tab 断言相机模式（Orbit→Fly） |
+| Web UI 按键 → 状态 → 画面 | `tools/probe_web_ui.sh` | F3/F4/R/F6/F7/T/P 前后 UI 状态与中央视口截图都必须变；F5/F8/F11/K 只断言状态（默认场景可能没有接触/动画/关节），Tab 断言相机模式（Orbit→Fly） |
 | 模型骨骼叠加 | `cargo test -p quench3d --lib model_skeleton` | 三关节链（中间夹一个非关节节点）只产出 root→mid、mid→tip 两条边；叠加层再乘模型世界变换（+10,+2） |
 | 公告板粒子 | `cargo test -p quench3d --lib particle` / `cargo test -p quench3d-cli --lib particles_parse` / `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-cli --test cli_e2e particle_billboards` / `cargo test -p quench3d-editor --test history particles_survive` | 生成 N 个隐藏代理物体、初速度/重力积分、面向相机、按寿命淡出、到寿命重生（不额外多飞一帧）、非法参数回退；CLI 同相机下中心红色分量比无粒子高 40；编辑器存盘保留 `particles` 且重新载入建出发射器 |
 | 父子同选 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test history selected_parent` | 父+子同选时驱动者=父、子不进组；同层旁人仍进组；只选子时驱动者=子 |

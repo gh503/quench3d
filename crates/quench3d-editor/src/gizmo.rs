@@ -113,11 +113,18 @@ pub enum Pivot {
     SelectionCenter,
     /// 世界原点。
     WorldOrigin,
+    /// 可放置的 3D 光标（`K` 放到选中中心，或工具栏手输）。
+    Cursor,
 }
 
 impl Pivot {
     /// 全部轴心（工具栏按这个顺序排）。
-    pub const ALL: [Pivot; 3] = [Pivot::Object, Pivot::SelectionCenter, Pivot::WorldOrigin];
+    pub const ALL: [Pivot; 4] = [
+        Pivot::Object,
+        Pivot::SelectionCenter,
+        Pivot::WorldOrigin,
+        Pivot::Cursor,
+    ];
 
     /// 界面标签。
     pub fn label(self) -> &'static str {
@@ -125,6 +132,7 @@ impl Pivot {
             Pivot::Object => "物体",
             Pivot::SelectionCenter => "选中中心",
             Pivot::WorldOrigin => "世界原点",
+            Pivot::Cursor => "3D 光标",
         }
     }
 }
@@ -175,6 +183,8 @@ pub struct Gizmo {
     pub space: Space,
     /// 旋转/缩放的轴心。
     pub pivot: Pivot,
+    /// 3D 光标位置（`Pivot::Cursor` 用）。
+    pub cursor: Vec3,
     /// 总开关（关掉后视口里只剩拾取与转视角）。
     pub enabled: bool,
     /// 当前悬停的手柄。
@@ -191,6 +201,7 @@ impl Default for Gizmo {
             mode: Mode::Translate,
             space: Space::World,
             pivot: Pivot::SelectionCenter,
+            cursor: Vec3::ZERO,
             enabled: true,
             hover: None,
             drag: None,
@@ -427,7 +438,12 @@ impl Gizmo {
     /// 按当前轴心设置求旋转/缩放中心。
     fn pivot_position(&self, engine: &Engine, doc: &Doc, driver: usize) -> Vec3 {
         let object = engine.scene.world_transform(driver).position;
-        pivot_point(self.pivot, object, doc.selection_center(engine))
+        pivot_point(
+            self.pivot,
+            object,
+            doc.selection_center(engine),
+            self.cursor,
+        )
     }
 
     /// 按下时把"这次拖拽"的全部参照物固定下来。
@@ -922,11 +938,12 @@ pub fn axis_translation(
 }
 
 /// 按轴心设置求一个具体的世界坐标点。
-fn pivot_point(pivot: Pivot, object: Vec3, center: Option<Vec3>) -> Vec3 {
+fn pivot_point(pivot: Pivot, object: Vec3, center: Option<Vec3>, cursor: Vec3) -> Vec3 {
     match pivot {
         Pivot::Object => object,
         Pivot::SelectionCenter => center.unwrap_or(object),
         Pivot::WorldOrigin => Vec3::ZERO,
+        Pivot::Cursor => cursor,
     }
 }
 
@@ -1140,26 +1157,34 @@ mod tests {
     }
     #[test]
     fn pivot_labels_cover_all_choices() {
-        assert_eq!(Pivot::ALL.len(), 3);
+        assert_eq!(Pivot::ALL.len(), 4);
         assert_eq!(Pivot::Object.label(), "物体");
         assert_eq!(Pivot::SelectionCenter.label(), "选中中心");
         assert_eq!(Pivot::WorldOrigin.label(), "世界原点");
+        assert_eq!(Pivot::Cursor.label(), "3D 光标");
         assert_eq!(Pivot::default(), Pivot::SelectionCenter);
-
         let object = Vec3::new(1.0, 2.0, 3.0);
         let center = Vec3::new(10.0, 20.0, 30.0);
-        assert_eq!(pivot_point(Pivot::Object, object, Some(center)), object);
+        let cursor = Vec3::new(-4.0, 5.0, 6.0);
         assert_eq!(
-            pivot_point(Pivot::SelectionCenter, object, Some(center)),
+            pivot_point(Pivot::Cursor, object, Some(center), cursor),
+            cursor
+        );
+        assert_eq!(
+            pivot_point(Pivot::Object, object, Some(center), cursor),
+            object
+        );
+        assert_eq!(
+            pivot_point(Pivot::SelectionCenter, object, Some(center), cursor),
             center
         );
         assert_eq!(
-            pivot_point(Pivot::SelectionCenter, object, None),
+            pivot_point(Pivot::SelectionCenter, object, None, cursor),
             object,
             "没有多选中心时退回活动物体"
         );
         assert_eq!(
-            pivot_point(Pivot::WorldOrigin, object, Some(center)),
+            pivot_point(Pivot::WorldOrigin, object, Some(center), cursor),
             Vec3::ZERO
         );
     }
