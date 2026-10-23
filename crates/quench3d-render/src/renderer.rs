@@ -3052,7 +3052,11 @@ impl Renderer {
                 // 保证这一点（各级都按最大那一段的 2*radius 建矩阵）。
                 // 每级用自己的范围会让近处的世界 bias 小一个数量级：实测近景受影响像素
                 // 5.4% → 15.7%（满屏麻点），所以这条不变量有单测钉着。
-                0.75 / texel_map,
+                lighting
+                    .sun
+                    .map(|sun| sun.shadow_bias.max(0.0))
+                    .unwrap_or(0.75)
+                    / texel_map,
                 1.0 / texel_map,
                 lighting.shadow_strength.clamp(0.0, 1.0),
             ],

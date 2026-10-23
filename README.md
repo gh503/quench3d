@@ -953,7 +953,7 @@ NaN 刚体  : 0
   "lighting": { "preset": "studio", "sun_direction": [-0.4, -1, -0.35], "shadows": true,
                 "point_lights": [ { "position": [0, 3, 0], "intensity": 30, "radius": 25 } ],
                 "fog": { "color": [0.36, 0.46, 0.63], "density": 0.03 },
-                "shadow_quality": { "strength": 0.85, "radius": 28 },
+                "shadow_quality": { "strength": 0.85, "radius": 28, "bias": 0.75 },
                 "sky_colors": { "zenith": [0.22, 0.42, 0.78], "horizon": [0.62, 0.74, 0.88] },
                 "bloom": { "intensity": 0.6, "threshold": 1.0 } },
   "physics": { "friction_combine": "min", "restitution_combine": "max",
@@ -1062,6 +1062,8 @@ NaN 刚体  : 0
 * `lighting.point_lights.color` / `lighting.fog.color` / `lighting.sky_colors.*` 都是
   **线性空间**数值（跟 `materials.*.color` 的 sRGB 约定不同）——想要暖光就写
   `[1, 0.92, 0.85]` 这种数，写 `[1, 235, 220]` 那种 0~255 的整数会过曝或全黑。
+* `lighting.shadow_quality.bias` 是阴影深度偏移（单位：纹素，缺省 0.75，0~4）：
+  太小会自阴影麻点，太大会让阴影脱离物体；编辑器里叫“偏移”。
 * `lighting.shadow_quality` 与开关 `lighting.shadows` 是两件事：开关管"投不投"，
   这一节管"投得好不好"（`strength` 0~1、`radius` 米）。**阴影贴图分辨率不在场景文件里**。
   `cascades`（1~4，缺省 1）决定分几级：1 = 单级（与老场景逐像素一致，覆盖范围看 `radius`），

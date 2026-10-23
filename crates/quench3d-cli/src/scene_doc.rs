@@ -2349,6 +2349,11 @@ pub struct ShadowQualityDoc {
     /// 真实场景里阴影不会全黑（还有环境光），所以 0.6~0.9 通常比 1.0 好看。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strength: Option<f32>,
+    /// 阴影深度偏移（单位：阴影贴图纹素，缺省 0.75，范围 0~4）。
+    ///
+    /// 太小会出现自阴影麻点，太大阴影会脱离物体（peter-panning）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bias: Option<f32>,
     /// 阴影相机覆盖半径（米），缺省 28。
     ///
     /// **这是"覆盖范围 ↔ 精度"的旋钮**：给得越大，远处物体也能投上阴影，
@@ -4604,6 +4609,17 @@ impl SceneDoc {
                         "阴影强度必须在 0~1 之间",
                     )
                     .with_hint("0 = 阴影不压暗（等于没有），1 = 全黑；真实场景 0.6~0.9 更自然"),
+                ),
+                _ => {}
+            }
+            match q.bias {
+                Some(v) if !v.is_finite() || !(0.0..=4.0).contains(&v) => out.push(
+                    Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.shadow_quality.bias",
+                        "阴影深度偏移必须在 0~4 个纹素之间",
+                    )
+                    .with_hint("缺省 0.75；0 容易产生自阴影麻点，太大阴影会脱离物体"),
                 ),
                 _ => {}
             }
@@ -8926,6 +8942,7 @@ mod tests {
                 assert_eq!(shadow_split_lambda(&doc), lambda);
                 let written = ShadowQualityDoc {
                     strength: Some(1.0),
+                    bias: None,
                     radius: None,
                     cascades: Some(shadow_cascades(&doc)),
                     split_lambda: Some(shadow_split_lambda(&doc)),
@@ -9634,7 +9651,7 @@ mod tests {
         let doc = SceneDoc::from_json(
             r#"{ "lighting": {
                   "fog": { "color": [0.2, 0.3, 0.4], "density": 0.05 },
-                  "shadow_quality": { "strength": 0.7, "radius": 40 },
+                  "shadow_quality": { "strength": 0.7, "radius": 40, "bias": 0.75 },
                   "sky_colors": { "zenith": [0.1, 0.2, 0.5], "horizon": [0.6, 0.7, 0.8],
                                   "ground": [0.05, 0.05, 0.06] } } }"#,
         )
@@ -9653,6 +9670,10 @@ mod tests {
             Some(40.0)
         );
         assert_eq!(
+            back.lighting.shadow_quality.and_then(|q| q.bias),
+            Some(0.75)
+        );
+        assert_eq!(
             back.lighting.sky_colors.and_then(|s| s.zenith),
             Some([0.1, 0.2, 0.5])
         );
@@ -9663,7 +9684,7 @@ mod tests {
         let bad = SceneDoc::from_json(
             r#"{ "lighting": {
                   "fog": { "color": [-1.0, 0.3, 0.4], "density": -0.1 },
-                  "shadow_quality": { "strength": 1.5, "radius": 0.0 },
+                  "shadow_quality": { "strength": 1.5, "radius": 0.0, "bias": 9.0 },
                   "sky_colors": { "horizon": [0.6, -0.2, 0.8] } } }"#,
         )
         .unwrap();
@@ -9673,6 +9694,7 @@ mod tests {
             "lighting.fog.density",
             "lighting.shadow_quality.strength",
             "lighting.shadow_quality.radius",
+            "lighting.shadow_quality.bias",
             "lighting.sky_colors.horizon",
         ] {
             let d = diag_at(&diags, path).unwrap_or_else(|| panic!("{path} 必须报错：{diags:?}"));

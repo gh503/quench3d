@@ -212,6 +212,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     // `shadow_quality_survives_the_round_trip_through_renderer_options`）。
     lighting.shadow_quality = Some(quench3d_cli::scene_doc::ShadowQualityDoc {
         strength: Some(light.shadow_strength),
+        bias: light.sun.as_ref().map(|s| s.shadow_bias),
         radius: light.sun.as_ref().map(|s| s.shadow_radius),
         cascades: Some(engine.renderer.options.shadow_cascades),
         split_lambda: Some(engine.renderer.options.shadow_split_lambda),

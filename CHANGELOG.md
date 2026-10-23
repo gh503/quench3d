@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **阴影深度偏移可调（第 132 轮）**：`DirectionalLight.shadow_bias`（缺省 0.75 纹素）、
+  场景 `lighting.shadow_quality.bias`、编辑器“强度/半径/偏移”滑杆；GPU 像素断言
+  bias 0.75→30 真的改变阴影。测试总数保持 788。
+
 - **许可审计与 SBOM（第 131 轮）**：`tools/license_audit.py` 做 SPDX 表达式求值 +
   `docs/sbom.json`（CycloneDX 1.5，380 依赖），门禁/CI 校验；补 `rust-toolchain.toml`。
   测试总数保持 788。
@@ -88,7 +92,7 @@
 - **Web 摄像头外部 2D 骨架注入（第 120 轮）**：页面暴露 `window.quench3dCameraPose`
   / `...Clear`；`set_web_pose` 解析 33 点归一化坐标，预览图上画 35 根骨 + 关节。
   `data-quench3d-ui` 加 `camera_pose`；摄像头探针注入姿态后断言状态与洋红像素
-  （3897），再清空回 false。新增 1 个坐标映射单测（总测试 773 → 774）。浏览器
+  （3921），再清空回 false。新增 1 个坐标映射单测（总测试 773 → 774）。浏览器
   仍不内置推理。
 
 - **单 clip 可视化时间轴（第 119 轮）**：动画面板增加刻度/进度/播放头/读数，

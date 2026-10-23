@@ -155,6 +155,7 @@ fn lighting(engine: &mut Engine) {
         intensity: 2.9,
         cast_shadows: true,
         shadow_radius: 28.0,
+        shadow_bias: 0.75,
         shadow_map_size: 2048,
     });
     l.ambient_color = Vec3::new(0.40, 0.47, 0.62);

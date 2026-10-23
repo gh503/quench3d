@@ -15,6 +15,11 @@ pub struct DirectionalLight {
     pub cast_shadows: bool,
     /// 阴影相机沿光线方向覆盖的半径（越大覆盖越广、精度越低）。
     pub shadow_radius: f32,
+    /// 阴影深度偏移（单位：阴影贴图纹素，缺省 0.75）。
+    ///
+    /// 太小会出现自阴影麻点（shadow acne），太大会让接触处的阴影脱离物体
+    /// （peter-panning）。只在 `cast_shadows` 为真时有意义。
+    pub shadow_bias: f32,
     /// 阴影贴图分辨率（需在创建渲染器时确定，运行时修改需重建）。
     pub shadow_map_size: u32,
 }
@@ -28,6 +33,7 @@ impl Default for DirectionalLight {
             intensity: 2.9,
             cast_shadows: true,
             shadow_radius: 28.0,
+            shadow_bias: 0.75,
             shadow_map_size: 2048,
         }
     }

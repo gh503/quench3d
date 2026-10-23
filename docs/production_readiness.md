@@ -38,7 +38,7 @@
 | HDR 管线 | three.js / Unity | `rgba16float` 中间目标（`renderer.rs:41`）+ ACES 色调映射（`shaders/post.wgsl:26`，Narkowicz 近似）+ 可选半分辨率 bloom（`renderer.rs:253`、`shaders/bloom.wgsl`）+ 标量曝光（`light.rs:177`） | ✅ |
 | 色调映射可选性 | 全部 | 三档可选：ACES（默认）/ Reinhard / 线性，编辑器灯光面板即时切换；曝光仍可调（→ H1） | ✅ |
 | 阴影 | 全部 | 方向光 1~4 级 CSM（2×2 图集，视空间深度选级，`lighting.shadow_quality.cascades`）+ 3×3 PCF；聚光灯一张透视 2D 阴影图、点光源立方体阴影（各自整帧一盏，缺省关闭）。分辨率 512–4096（缺省 2048） | ✅ |
-| 阴影可调参数 | Blender / Unity | bias 是编译期常量（`renderer.rs:795`），**没有公开字段**；只有 `DirectionalLight.cast_shadows` + 全局开关 | 🟠 |
+| 阴影可调参数 | Blender / Unity | `DirectionalLight.shadow_bias`（0~4 纹素，缺省 0.75）公开；编辑器“强度/半径/偏移”滑杆、场景 `lighting.shadow_quality.bias` 都可调；仍有 `cast_shadows` 与全局开关 | ✅ |
 | 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom → post(SSAO) →[FXAA]），可按开关增减；**无 TAA、无 DOF、无 AO 去噪、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO 与深度解析两趟按能力整体关闭**（§12.7） | 🟡 |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4；**GL/WebGL2 上按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧，§12.7） | 🟡 |
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent + **GPU 蒙皮**（glTF `JOINTS_0/WEIGHTS_0` 顶点属性，≤4 关节/顶点，128 关节 uniform 调色板，8 KB；只满足 WebGL2 最低 4 KB uniform 的设备需 CPU 回退；纯蒙皮走 GPU，带 morph 仍走 CPU）+ **morph target**（静态 `models[].morph_weights` + glTF `weights` 动画轨道；双 clip 只取主 clip）；**无顶点色** | 🟡 |
@@ -2969,6 +2969,27 @@ duration=1.0）——数据改了画面会跟着红。
 
 **边界**：只做**许可**审计，没有 `cargo-audit` 的漏洞库/公告扫描；
 SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
+
+### 23.33 阴影深度偏移可调（第 132 轮）
+
+**做了什么**：
+
+* `DirectionalLight.shadow_bias: f32`（单位：阴影贴图纹素，缺省 0.75，范围 0~4），
+  渲染时写进 `FrameUniforms.params.y`，`pbr.wgsl` 的 `sample_shadow` 用它算
+  `clip.z - bias`（与斜率因子 `1 - n·l·0.8` 相乘）。
+* 场景格式 `lighting.shadow_quality.bias`；runner 应用到太阳；编辑器“阴影强度/半径/偏移”
+  三连滑杆；存盘从引擎写回 `ShadowQualityDoc.bias`。
+* 校验范围 0~4；0 会提示容易产生自阴影麻点，太大提示 peter-panning。
+
+**验证**：
+
+* 场景文档测试把 `bias: 0.75` 往返保留；`bias: 9` 产生
+  `lighting.shadow_quality.bias` Error。
+* GPU 像素：同一带阴影场景把 `shadow_bias` 从 0.75 改到 30，阴影像素变化 >20，
+  证明偏移确实进了 uniform 并参与深度比较，而不是只改了个字段。
+
+**边界**：只有平行光的深度偏移；聚光/点光仍用各自固定的纹素偏移；
+没有法线偏移（normal bias）单独旋钮。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

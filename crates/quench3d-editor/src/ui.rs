@@ -1415,7 +1415,7 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 }
                 if let Some(sun) = light.sun.as_mut() {
                     ui.horizontal(|ui| {
-                        ui.label("阴影强度/覆盖半径");
+                        ui.label("阴影强度/半径/偏移");
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut light.shadow_strength)
@@ -1428,6 +1428,14 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                 egui::DragValue::new(&mut sun.shadow_radius)
                                     .speed(0.5)
                                     .range(2.0..=4000.0),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut sun.shadow_bias)
+                                    .speed(0.05)
+                                    .range(0.0..=4.0)
+                                    .prefix("偏移 "),
                             )
                             .changed();
                     });

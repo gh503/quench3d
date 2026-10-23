@@ -3960,6 +3960,11 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) -> Result<(), RunErro
                 sun.shadow_radius = radius;
             }
         }
+        if let Some(bias) = q.bias {
+            if let Some(sun) = lighting.sun.as_mut() {
+                sun.shadow_bias = bias;
+            }
+        }
     }
     // 天空颜色：只覆盖写了的那几个通道（没写 = 跟随预设）
     if let Some(sky) = &l.sky_colors {

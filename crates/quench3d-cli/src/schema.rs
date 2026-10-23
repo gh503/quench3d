@@ -554,7 +554,7 @@ pub fn scene_grammar() -> Value {
             "spot_lights": "聚光灯数组：{ position:[x,y,z], direction:[x,y,z]（会被归一化）, color:[r,g,b]（**线性**）, intensity（缺省 12）, radius（影响半径，缺省 18）, inner_deg（内锥角，缺省 20）, outer_deg（外锥角，缺省 30）, cast_shadows（缺省 **false** = 只照亮不投影）}；与点光源共享 8 盏名额。**投影整帧只支持一盏**：多盏勾上时按数组顺序取第一盏（校验会警告并说明用哪一盏）；点光源是**另一套**阴影图，同样各自只支持一盏",
             "point_lights": "点光源数组：{ position:[x,y,z], color:[r,g,b]（**线性**、非 sRGB）, intensity（缺省 12）, radius（影响半径，缺省 18）, cast_shadows（缺省 **false** = 只照亮不投影）}；最多 8 盏生效。**不写这个字段 = 保留预设自带的补光**，写 [] 才是显式清空。投影用的是 6 个 90° 面的深度数组（立方体阴影），整帧**只支持一盏**：多盏勾上时按数组顺序取第一盏（校验会警告并说明用哪一盏）；它与聚光灯那张 2D 阴影图是两套独立资源，所以「一盏投影点光源 + 一盏投影聚光灯」可以同时存在",
             "fog": "指数距离雾：{ color:[r,g,b]（**线性**、非 sRGB，缺省跟随预设）, density（每米，缺省 0.02，0 = 关闭）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。天空与参考网格也会跟着淡出；常见 density 0.02~0.1（0.05 大约 20 米外看不清）",
-            "shadow_quality": "阴影质量：{ strength（0~1，缺省 0.85；0 = 阴影不压暗，1 = 全黑）, radius（阴影相机覆盖半径，米，缺省 28）}。与开关 `shadows` 分开：这一节只调质量。radius 是「覆盖范围 ↔ 精度」的旋钮，给大能让远处也投上阴影但边缘更糊。**阴影贴图分辨率（像素）不在场景文件里**：它是渲染器构造参数",
+            "shadow_quality": "阴影质量：{ strength（0~1，缺省 0.85；0 = 阴影不压暗，1 = 全黑）, radius（阴影相机覆盖半径，米，缺省 28）, bias（阴影深度偏移，纹素，缺省 0.75，0~4）}。与开关 `shadows` 分开：这一节只调质量。radius 是「覆盖范围 ↔ 精度」的旋钮，给大能让远处也投上阴影但边缘更糊。**阴影贴图分辨率（像素）不在场景文件里**：它是渲染器构造参数",
             "sky_colors": "天空渐变颜色：{ zenith:[r,g,b], horizon:[r,g,b], ground:[r,g,b] }（**线性**、非 sRGB）。只覆盖写了的那几个通道，没写 = 跟随 preset。sky:false 时没有可见效果",
             "bloom": "泛光：{ enabled（缺省 true）, intensity（缺省 0.6）, threshold（缺省 1.0，线性 Rec.709 亮度）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。光照/自发光先落到线性 HDR 中间目标，超阈值的部分做半分辨率高斯模糊，再在 tonemap **之前**加回去——所以亮区外溢不会过曝成白块。想让太阳/自发光有「发光感」就写 { threshold: 1.0, intensity: 0.6 }",
             "ssao": "环境光遮蔽：{ enabled（缺省 true）, radius（缺省 0.75，单位**米**）, bias（缺省 0.025）, strength（缺省 1.0）, samples（缺省 16，1~64）}。**不写这一节 = 关闭**（像素与关闭时逐位相同）。让物体与地面的接触缝隙、墙角变暗——廉价版的接触阴影。深度-only 实现（法线由深度重建），结果乘在整幅 HDR 颜色上（不区分直接光/间接光），这是后处理式 SSAO 的固有简化。物体尺度 1~2 米时 radius 用 0.5~1.0",
@@ -1001,7 +1001,7 @@ pub fn json_schema() -> Value {
     defs.insert("fog".into(), def(&["color", "density"]));
     defs.insert(
         "shadowQuality".into(),
-        def(&["strength", "radius", "cascades", "split_lambda"]),
+        def(&["strength", "radius", "bias", "cascades", "split_lambda"]),
     );
     defs.insert("skyColors".into(), def(&["zenith", "horizon", "ground"]));
     defs.insert(

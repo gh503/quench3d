@@ -208,6 +208,7 @@ fn shadow_strength_only_darkens_the_shadowed_pixels() {
         intensity: 3.0,
         cast_shadows: true,
         shadow_radius: 16.0,
+        shadow_bias: 0.75,
         shadow_map_size: 1024,
     });
     lighting.shadow_strength = 0.0;
@@ -244,5 +245,17 @@ fn shadow_strength_only_darkens_the_shadowed_pixels() {
     assert!(
         delta_half < 0 && delta_half > delta,
         "强度 0.5 的暗化（{delta_half}）应当落在 0（0）与 {delta}（1.0）之间"
+    );
+
+    // 偏移量必须真的进 uniform：30 个纹素会把阴影明显挪开/削掉。
+    lighting.shadow_strength = 1.0;
+    lighting.sun.as_mut().unwrap().shadow_bias = 30.0;
+    let biased = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染");
+    let (changed, _) = diff(&full_shadow, &biased);
+    assert!(
+        changed > 20,
+        "shadow_bias 0.75 → 30 只改了 {changed} 个像素：偏移没有进 uniform 或没有参与比较"
     );
 }
