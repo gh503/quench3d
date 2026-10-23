@@ -3192,6 +3192,26 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：没有 motion vectors（运动物体会拖影）；没有 MSAA 解析深度（MSAA 下关闭）；
 不做相机切镜检测；历史纹理占两张全屏 HDR。
 
+### 23.42 模型资产上轴修正（第 141 轮）
+
+**做了什么**：
+
+* `models[].up_axis`：`"y"`（缺省，glTF 规范）或 `"z"`（Blender/OBJ 常见）。
+* 写 `z` 时变换为 `R_user * R_x(-90°)`：先转资产局部轴，再套场景欧拉角；
+  +Z 映射到 +Y。位置、缩放不变。
+* 同一变换用在三处：渲染（`engine.add_model`）、手工 LOD 各层、`collide: true`
+  的三角网格碰撞体（先旋转顶点再加 origin），避免"看着立起来、碰撞还躺着"。
+* schema 的 `model.up_axis` 枚举与系统提示同步；场景文件不必写 `y`。
+
+**验证**：
+
+* `model_up_axis_conversion_is_local_and_maps_z_to_y`：Z-up 的局部 +Z 变成 +Y；
+  Y-up 不转；用户绕 Y 90° 时结果是 `R_user * +Y`（证明轴修正在局部空间）。
+* schema 自洽测试通过（字段/类型来自源码结构）。
+
+**边界**：只处理"上"轴；资产的前方/handedness 仍由用户 `rotation_deg` 调。
+不是通用导入坐标系转换（没有 per-asset pivot、单位换算；缩放直接用 `scale`）。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：

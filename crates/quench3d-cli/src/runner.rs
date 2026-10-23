@@ -22,8 +22,8 @@ use quench3d::render::{environment::EnvironmentMap, RenderStats, Vertex};
 use serde::{Deserialize, Serialize};
 
 use crate::scene_doc::{
-    arr, v3, ActionKind, BodyKind, JointDoc, JointKind, MaterialDoc, PointLightDoc, ProbeDoc,
-    ProbeShapeDoc, SceneDoc, ShapeDoc, ShapeKind, SpotLightDoc,
+    arr, v3, ActionKind, BodyKind, JointDoc, JointKind, MaterialDoc, ModelUpAxis, PointLightDoc,
+    ProbeDoc, ProbeShapeDoc, SceneDoc, ShapeDoc, ShapeKind, SpotLightDoc,
 };
 
 /// 运行期错误。
@@ -1757,6 +1757,16 @@ pub fn euler_quat(deg: Option<[f32; 3]>) -> Quat {
     }
 }
 
+/// 资产的"上"轴修正：Z-up → Y-up 是绕 X 轴的 -90°。
+///
+/// 乘在用户旋转的**右边**（局部空间）：先转资产轴，再按场景里的欧拉角摆位。
+pub fn model_axis_quat(axis: Option<ModelUpAxis>) -> Quat {
+    match axis {
+        Some(ModelUpAxis::Z) => Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        Some(ModelUpAxis::Y) | None => Quat::IDENTITY,
+    }
+}
+
 /// 固定关节的参考姿态（`frame_a` / `frame_b`，欧拉角**度**）→ 四元数。
 ///
 /// 语义上就是 [`euler_quat`]，单独起个名字是为了让"参考姿态走的是同一份换算"在调用点
@@ -1980,7 +1990,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
         let model = load_model_cached(&resolved)?;
         let s = m.scale.unwrap_or(1.0);
-        let rot = euler_quat(m.rotation_deg);
+        let rot = euler_quat(m.rotation_deg) * model_axis_quat(m.up_axis);
         let origin = v3(m.position.unwrap_or([0.0, 0.0, 0.0]));
         let mut vertices: Vec<Vec3> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -3225,7 +3235,7 @@ pub fn setup_visuals(
     for (i, m) in doc.models.iter().enumerate() {
         let transform = Transform::new(
             v3(m.position.unwrap_or([0.0, 0.0, 0.0])),
-            euler_quat(m.rotation_deg),
+            euler_quat(m.rotation_deg) * model_axis_quat(m.up_axis),
             Vec3::splat(m.scale.unwrap_or(1.0)),
         );
         let resolved = resolve_model_path(doc, &format!("models[{i}].path"), &m.path)?;
@@ -5221,6 +5231,30 @@ pub fn run_doctor() -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Z-up 资产必须先转成 Y-up，再套用户旋转；顺序反了物体会"躺"在错误方向。
+    #[test]
+    fn model_up_axis_conversion_is_local_and_maps_z_to_y() {
+        let axis = model_axis_quat(Some(ModelUpAxis::Z));
+        let up = axis.mul_vec3(Vec3::Z);
+        assert!(
+            (up - Vec3::Y).length() < 1e-5,
+            "Z-up 的局部 +Z 应变成 +Y，实际 {up:?}"
+        );
+        assert!(
+            (model_axis_quat(Some(ModelUpAxis::Y)).mul_vec3(Vec3::Z) - Vec3::Z).length() < 1e-5,
+            "Y-up 不应转动资产"
+        );
+
+        let user = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let combined = user * axis;
+        let rotated_up = combined.mul_vec3(Vec3::Z);
+        let expected = user.mul_vec3(Vec3::Y);
+        assert!(
+            (rotated_up - expected).length() < 1e-5,
+            "轴修正应发生在用户旋转的局部空间：{rotated_up:?} vs {expected:?}"
+        );
+    }
 
     /// 世界级物理参数必须**逐字段**落到 `SolverConfig` 的同名字段上。
     ///

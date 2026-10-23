@@ -51,6 +51,7 @@ tools/verify_all.sh
 | 雾 / 阴影质量 / 天空 | `... fog_and_shadow_quality` | 字段真的从 JSON 传到像素；bias 越界报错、0.75↔30 像素变化 |
 | 动画 / 动作 / 探针 | `cargo test -p quench3d-cli --test cli_e2e`（animation/probe/action 用例） | 状态/探针结果随步数变化 |
 | 场景 include / 模板 / 实例 | `cargo test -p quench3d-cli --test scene_fixtures` | 合并、重名、路径、往返 |
+| 模型上轴 | `cargo test -p quench3d-cli --lib model_up_axis` | Z-up 局部 +Z→+Y；Y-up 不变；用户旋转在轴修正之后（`R_user * R_x(-90°)`）；schema 枚举 `y`/`z` |
 | 模型动画对账 | `cargo test -p quench3d-cli --test cli_e2e model` | 动画名存在/不存在、时长/轨道 |
 | 蒙皮资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_skins` | `info --json` 的 `skins=1` / `skinned_meshes=1`，人类可读输出有「蒙皮」行 |
 | morph 位移数学 | `cargo test -p quench3d --test model_loading morph_targets_displace_vertices_by_weight` | 手搓 GLB 的 `targets[0]` 解析；权重 0 原样、1 整体 +0.5、0.5 +0.25 |

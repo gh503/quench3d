@@ -470,6 +470,7 @@ pub fn scene_grammar() -> Value {
             "position": "[x, y, z]",
             "rotation_deg": "欧拉角，度",
             "scale": "均匀缩放，缺省 1",
+            "up_axis": "资产的「上」轴：y（缺省，glTF 规范）或 z（Blender/OBJ 常见的 Z-up）。写 z 时在用户 rotation_deg **之前**绕 X 轴 -90°，位置/缩放不变；碰撞体与 LOD 用同一变换",
             "collide": "true 时把模型合并成静态三角网格碰撞体，缺省 false",
             "friction": "参与碰撞时的摩擦，缺省 0.8",
             "morph_weights": "手工覆盖 glTF morph target 的权重数组（0~1，按 target 顺序；缺省用资产默认值，缺项按 0）；写了它就优先于 clip 自带的 morph 权重动画",
@@ -795,6 +796,7 @@ pub fn json_schema() -> Value {
             "position",
             "rotation_deg",
             "scale",
+            "up_axis",
             "collide",
             "friction",
             "morph_weights",
@@ -804,6 +806,11 @@ pub fn json_schema() -> Value {
             "animation",
             "events",
         ]);
+        d["properties"]["up_axis"] = json!({
+            "type": "string",
+            "enum": ["y", "z"],
+            "description": "资产的上轴，缺省 y；z 会在用户旋转之前绕 X 轴 -90°"
+        });
         d["properties"]["morph_weights"] = json!({
             "type": "array",
             "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 }

@@ -1781,6 +1781,16 @@ pub struct ModelLodDoc {
     pub min_distance: f32,
 }
 
+/// 模型资产的"上"轴。缺省 `Y`（glTF 规范）；`Z` 用于 Blender/OBJ 常见的 Z-up 资产。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelUpAxis {
+    /// Y 向上（不转换）。
+    Y,
+    /// Z 向上（绕 X 轴 -90° 转成 Y-up）。
+    Z,
+}
+
 /// 一个外部模型文件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1796,6 +1806,10 @@ pub struct ModelDoc {
     /// 均匀缩放，缺省 1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f32>,
+    /// 资产的"上"轴，缺省 `y`。写 `z` 时在**用户旋转之前**先绕 X 轴 -90°，
+    /// 把 Z-up 资产转成引擎的 Y-up；位置/缩放不变，碰撞体与 LOD 用同一变换。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_axis: Option<ModelUpAxis>,
     /// 是否把模型合并成静态三角网格碰撞体（关卡地形），缺省 false。
     #[serde(default)]
     pub collide: bool,
