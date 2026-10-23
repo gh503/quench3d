@@ -7759,3 +7759,52 @@ fn particle_texture_tints_the_billboard() {
         "绿色贴图没有生效：无贴图 ({ar:.1},{ag:.1},{ab:.1}) vs 有贴图 ({br:.1},{bg:.1},{bb:.1})"
     );
 }
+
+/// 平面贴花：朝向相机的红色四边形必须让中心变红；没有贴花时中心仍是黑的。
+#[test]
+fn decal_quad_changes_pixels() {
+    let doctor = run(&["doctor", "--json"]).json();
+    if !doctor["data"]["gpu_available"].as_bool().unwrap() {
+        eprintln!("跳过渲染断言：没有可用 GPU");
+        return;
+    }
+    let dir = temp_dir("decal");
+    let plain = dir.join("plain.json");
+    let with = dir.join("with.json");
+    let plain_png = dir.join("plain.png");
+    let with_png = dir.join("with.png");
+    let base = r#"{
+        "camera": { "position": [0, 1.5, 6], "look_at": [0, 1.5, 0] },
+        "lighting": { "sun_intensity": 0, "ambient": 0, "preset": "none" },
+        "render": { "output": "ignored.png", "width": 320, "height": 240, "msaa": 1 }
+    }"#;
+    std::fs::write(&plain, base).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(base).unwrap();
+    doc["decals"] = serde_json::json!([{
+        "position": [0.0, 1.5, 0.0],
+        "normal": [0.0, 0.0, 1.0],
+        "size": [2.0, 2.0],
+        "color": [1.0, 0.05, 0.02, 1.0]
+    }]);
+    std::fs::write(&with, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    for (scene, out) in [(&plain, &plain_png), (&with, &with_png)] {
+        let r = run(&[
+            "render",
+            scene.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(r.code, 0, "渲染失败：{}", r.stderr);
+    }
+    let (w, h, a) = decode_rgba(&plain_png);
+    let (w2, h2, b) = decode_rgba(&with_png);
+    assert_eq!((w, h), (w2, h2));
+    let (ar, ag, ab) = center_mean(w, h, &a);
+    let (br, bg, bb) = center_mean(w2, h2, &b);
+    assert!(
+        br > ar + 80.0 && br > bg + 60.0 && br > bb + 60.0,
+        "贴花必须让中心变红：无贴花 ({ar:.1},{ag:.1},{ab:.1}) vs 有贴花 ({br:.1},{bg:.1},{bb:.1})"
+    );
+}

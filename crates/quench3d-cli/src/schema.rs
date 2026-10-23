@@ -373,6 +373,11 @@ pub fn scene_grammar() -> Value {
                 "每项字段：count（1~4096，缺省 64）、position（缺省 [0,1,0]）、radius（初始球形半径，缺省 0.1）、velocity（缺省 [0,1.2,0]）、spread（速度扰动，缺省 0.4）、lifetime（秒，必须 >0，缺省 2）、size（四边形边长米，必须 >0，缺省 0.12）、gravity（缺省 [0,-1,0]）、color（线性 RGBA，alpha 0~1，缺省 [1,0.65,0.2,0.8]）、texture（可选 PNG/JPEG 公告板贴图，颜色仍乘上去）",
                 "粒子是面向相机的四边形；按寿命淡出后回到发射器重生。有可选贴图，但没有粒子间排序遮挡、没有 GPU 粒子",
             ],
+            "decals": [
+                "平面贴花数组（纯视觉，不参与物理）",
+                "每项字段：position（缺省 [0,0,0]）、normal（缺省 [0,1,0]，会归一化）、size（[宽,高] 米，缺省 [1,1]，必须 >0）、rotation（绕法线角度，缺省 0）、color（线性 RGBA，缺省白）、texture（可选 PNG/JPEG）",
+                "贴花是**平的**四边形：沿 normal 抬 1cm 防 z-fight；不做深度投影，曲面/斜坡上会悬空或穿插",
+            ],
             "include": [
                 "被包含的外部场景片段路径数组（跨文件复用：把一份场景拆成多个文件）",
                 "相对路径以**写这一行的文件**所在目录为基准；片段可以再 include（最多 16 层，同一个文件只并入一次，成环报 include_cycle）",
@@ -767,6 +772,20 @@ pub fn json_schema() -> Value {
         d["required"] = json!(["size"]);
         d
     });
+    defs.insert("decal".into(), {
+        let mut d = def(&["position", "normal", "size", "rotation", "color", "texture"]);
+        d["description"] =
+            json!("一个平面贴花（纯视觉）：四边形按 normal 朝向、沿法线抬 1cm；不做深度投影");
+        d["properties"]["position"] = json!({ "$ref": "#/$defs/vec3" });
+        d["properties"]["normal"] = json!({ "$ref": "#/$defs/vec3" });
+        d["properties"]["size"] = json!({ "type": "array", "minItems": 2, "maxItems": 2,
+            "items": { "type": "number", "exclusiveMinimum": 0 } });
+        d["properties"]["rotation"] = json!({ "type": "number" });
+        d["properties"]["color"] = json!({ "type": "array", "minItems": 4, "maxItems": 4,
+            "items": { "type": "number", "minimum": 0, "maximum": 1 } });
+        d["properties"]["texture"] = json!({ "type": "string" });
+        d
+    });
     defs.insert("particle".into(), {
         let mut d = def(&[
             "count", "position", "radius", "velocity", "spread", "lifetime", "size", "gravity",
@@ -1132,6 +1151,8 @@ pub fn json_schema() -> Value {
                             "description": "CPU PBF 粒子流体：粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；不写 = 没有粒子" },
                 "particles": { "type": "array", "items": { "$ref": "#/$defs/particle" },
                                "description": "CPU 公告板粒子：面向相机、按寿命淡出；纯视觉，不参与物理；不写 = 没有粒子" },
+                "decals": { "type": "array", "items": { "$ref": "#/$defs/decal" },
+                            "description": "平面贴花：按 normal 朝向的四边形（沿法线抬 1cm），纯视觉；不写 = 没有贴花" },
                 "water": { "$ref": "#/$defs/waterStyle",
                            "description": "屏幕空间水外观（颜色/清澈度/波浪/泡沫/折射）；只影响画面，不影响物理；根独有段" },
                 "materials": { "type": "object",

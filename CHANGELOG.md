@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **平面贴花（第 146 轮）**：`decals[]`（position/normal/size/rotation/color/texture）
+  按法线朝向、沿法线抬 1cm，unlit/alpha/双面材质；校验/schema/README 同步。e2e 无光照
+  红色贴花中心变红。测试总数 804 → 806。
+
 - **粒子公告板贴图（第 145 轮）**：`particles[].texture`（PNG/JPEG，可选）按贴图 id
   复用 unlit/alpha 材质，实例色仍乘上去；缺文件校验、schema 同步。e2e 用绿色贴图验证
   白色粒子被染绿。测试总数 803 → 804。

@@ -373,6 +373,12 @@ pub struct SceneDoc {
     /// 不写 = 没有粒子；每颗粒子是一个面向相机的四边形，按寿命淡出。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub particles: Vec<ParticleDoc>,
+    /// 平面贴花（纯视觉）：贴在平面上的带色/带贴图四边形，不参与物理。
+    ///
+    /// 不写 = 没有贴花。贴花是**平面**四边形（按 normal 朝向、沿 normal 抬 1cm），
+    /// 不做深度投影；适合地标、箭头、污渍这类平面标记。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decals: Vec<DecalDoc>,
     /// 屏幕空间水的全局风格（颜色/清澈度/波浪/泡沫/折射）。
     ///
     /// 不写 = 使用渲染器缺省值；写了只影响**画面**，不影响物理（浮力/粒子结果逐位相同）。
@@ -967,6 +973,7 @@ impl Default for SceneDoc {
             waters: Vec::new(),
             fluids: Vec::new(),
             particles: Vec::new(),
+            decals: Vec::new(),
             water: None,
             materials: BTreeMap::new(),
             include: Vec::new(),
@@ -1142,6 +1149,33 @@ pub struct ParticleDoc {
     /// 可选公告板贴图（PNG/JPEG，相对场景文件解析）；颜色仍作为实例色乘上去。
     ///
     /// 适合烟雾/火焰/光斑这类带 alpha 的 sprite；不写就是纯色四边形。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
+}
+
+/// 一个平面贴花（纯视觉）。
+///
+/// 四边形在局部 XY 平面、法线 +Z；加载时按 `normal` 旋转、沿法线抬 1cm 防 z-fight。
+/// 不是投影贴花——曲面/斜坡上会悬空或穿插，只适合平面标记。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DecalDoc {
+    /// 中心位置 `[x, y, z]`，缺省 `[0, 0, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f32; 3]>,
+    /// 表面法线 `[x, y, z]`，缺省 `[0, 1, 0]`；会归一化，零向量是错误。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<[f32; 3]>,
+    /// 平面尺寸 `[宽, 高]`（米），缺省 `[1, 1]`；必须为正。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 2]>,
+    /// 绕法线的旋转（度），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f32>,
+    /// 颜色（线性 RGBA），缺省白色；alpha < 1 会走混合。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 4]>,
+    /// 可选贴图（PNG/JPEG，相对场景文件解析）；颜色/alpha 仍乘上去。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture: Option<String>,
 }
@@ -4095,6 +4129,94 @@ impl SceneDoc {
                                 ErrorCode::AssetNotFound,
                                 field,
                                 format!("找不到粒子贴图 \"{texture}\"（找过：{tried}）"),
+                            )
+                            .with_hint("把贴图放到场景文件同目录，或写成绝对路径"),
+                        );
+                    }
+                }
+            }
+        }
+        // 平面贴花：位置/法线/尺寸/颜色/贴图都要当场检查，避免加载时才炸。
+        for (i, d) in self.decals.iter().enumerate() {
+            let path = format!("decals[{i}]");
+            if let Some(p) = d.position {
+                if !p.iter().all(|x| x.is_finite()) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.position"),
+                        "贴花位置必须是有限数",
+                    ));
+                }
+            }
+            if let Some(n) = d.normal {
+                if !n.iter().all(|x| x.is_finite()) || n.iter().map(|x| x * x).sum::<f32>() <= 1e-12
+                {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        format!("{path}.normal"),
+                        "贴花法线必须是非零有限向量",
+                    ));
+                }
+            }
+            if let Some(size) = d.size {
+                if !size.iter().all(|x| x.is_finite() && *x > 0.0) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.size"),
+                        "贴花宽高必须是正的有限数",
+                    ));
+                }
+            }
+            if let Some(rotation) = d.rotation {
+                if !rotation.is_finite() {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.rotation"),
+                        "贴花旋转必须是有限数",
+                    ));
+                }
+            }
+            if let Some(c) = d.color {
+                if !c.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.color"),
+                        "贴花颜色 RGBA 必须在 0~1 之间",
+                    ));
+                }
+            }
+            if let Some(texture) = &d.texture {
+                let field = format!("{path}.texture");
+                if texture.trim().is_empty() {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        field,
+                        "贴花贴图路径不能为空",
+                    ));
+                } else {
+                    let lower = texture.to_ascii_lowercase();
+                    if !(lower.ends_with(".png")
+                        || lower.ends_with(".jpg")
+                        || lower.ends_with(".jpeg"))
+                    {
+                        cam_diags.push(Diagnostic::warn_code(
+                            ErrorCode::InvalidValue,
+                            field.clone(),
+                            format!("只支持 PNG/JPEG 贴图，当前是 \"{texture}\""),
+                        ));
+                    }
+                    if self.resolve_asset(texture).is_none() {
+                        let tried = self
+                            .asset_candidates(texture)
+                            .iter()
+                            .map(|c| c.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(" / ");
+                        cam_diags.push(
+                            Diagnostic::error_code(
+                                ErrorCode::AssetNotFound,
+                                field,
+                                format!("找不到贴花贴图 \"{texture}\"（找过：{tried}）"),
                             )
                             .with_hint("把贴图放到场景文件同目录，或写成绝对路径"),
                         );
@@ -7941,6 +8063,51 @@ mod tests {
             (json!({"position": [0, "x", 0]}), "particles"),
         ] {
             let doc = match SceneDoc::from_value(json!({ "particles": [particle] })) {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
+            let diags = doc.validate();
+            assert!(
+                diags.iter().any(|d| d.path == path),
+                "要报 {path}: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decals_parse_validate_and_roundtrip() {
+        let doc = SceneDoc::from_value(json!({
+            "decals": [
+                { "position": [0, 0.01, 0], "normal": [0, 1, 0], "size": [2, 1.5],
+                  "rotation": 90, "color": [1, 0.2, 0.1, 0.8] },
+                { "normal": [0, 0, 1], "texture": "missing-decal.png" }
+            ]
+        }))
+        .unwrap();
+        // 第二张的贴图不存在 → 校验必须报错；第一张本身合法。
+        let diags = doc.validate();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.path == "decals[1].texture"),
+            "{diags:?}"
+        );
+        let text = serde_json::to_string(&doc).unwrap();
+        let again = SceneDoc::from_json(&text).unwrap();
+        assert_eq!(again.decals.len(), 2);
+        assert_eq!(again.decals[0].size, Some([2.0, 1.5]));
+        assert_eq!(again.decals[0].rotation, Some(90.0));
+        assert_eq!(again.decals[0].color, Some([1.0, 0.2, 0.1, 0.8]));
+
+        for (decal, path) in [
+            (json!({"normal": [0, 0, 0]}), "decals[0].normal"),
+            (json!({"size": [0, 1]}), "decals[0].size"),
+            (json!({"size": [1, -1]}), "decals[0].size"),
+            (json!({"rotation": "x"}), "decals"),
+            (json!({"color": [1, 1, 1, 2]}), "decals[0].color"),
+            (json!({"position": [0, "y", 0]}), "decals"),
+        ] {
+            let doc = match SceneDoc::from_value(json!({ "decals": [decal] })) {
                 Ok(doc) => doc,
                 Err(_) => continue,
             };

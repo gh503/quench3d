@@ -57,6 +57,7 @@ tools/verify_all.sh
 | morph 位移数学 | `cargo test -p quench3d --test model_loading morph_targets_displace_vertices_by_weight` | 手搓 GLB 的 `targets[0]` 解析；权重 0 原样、1 整体 +0.5、0.5 +0.25 |
 | morph 资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_morph_targets` | `info --json` 的 `morph_targets=1`，人类可读输出有「morph target」行 |
 | 动画事件标记/队列 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib model_events`、`cargo test -p quench3d-editor --lib set_animation_events` | 半开区间不重复、循环回到开头再触发、非循环结尾补触发、clip 过滤、Scene 队列取空、无 animation/animator warning；编辑器写入/清空 `models[].events`、空数组不留空段 |
+| 平面贴花 | `cargo test -p quench3d-cli --test cli_e2e decal_quad`、`cargo test -p quench3d-cli --lib decals_parse` | 无光照下红色贴花让中心 R 高 80/255、R 比 G/B 高 60/255；size/rotation/color 往返；零法线/0 尺寸/越界 alpha/缺贴图报错 |
 | 粒子贴图 | `cargo test -p quench3d-cli --test cli_e2e particle_texture`、`cargo test -p quench3d-cli --lib particles_parse` | 白色实例色 + 绿色贴图：无贴图中心≈白，贴图后 G 比 R/B 高 60/255；贴图路径往返、缺文件报错 |
 | 状态机输入窗口 | `cargo test -p quench3d --lib animator_event_window`、`cargo test -p quench3d-cli --lib animator_parameters` | 1 秒淡入期间入队的 `b` 0.1s 还在、0.3s（窗口 0.25s）后为 0；窗口 0 时保留；`event_window: 0.35` 往返、`11.0` 报错 |
 | 动画事件负载 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib event_payload` | 带 `payload` 的标记跨过后原样带出；1025 字节/NUL 在 `models[0].events[0].payload` 报错；JSON 往返保留负载 |

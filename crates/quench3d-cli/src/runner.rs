@@ -3504,6 +3504,7 @@ pub fn setup_visuals(
     add_water_visuals(engine, doc);
     add_fluid_visuals(engine, doc);
     add_particle_visuals(engine, doc, &mut texture_cache)?;
+    add_decal_visuals(engine, doc, &mut texture_cache)?;
     apply_water_options(engine, doc);
     apply_camera(engine, doc);
     Ok(instances)
@@ -3684,6 +3685,98 @@ fn add_particle_visuals(
                 color: Vec4::new(color[0], color[1], color[2], color[3]),
             },
         );
+    }
+    Ok(())
+}
+
+/// 把 `decals` 画成平面贴花（一单元四边形，按 normal 朝向、沿 normal 抬 1cm）。
+///
+/// 不是投影贴花：四边形本身是平的，曲面/斜坡上会悬空或穿插。材质是 unlit、
+/// alpha 混合、双面；颜色来自实例色，有贴图时按贴图 id 复用材质。
+fn add_decal_visuals(
+    engine: &mut Engine,
+    doc: &SceneDoc,
+    texture_cache: &mut TextureCache,
+) -> Result<(), RunError> {
+    if doc.decals.is_empty() {
+        return Ok(());
+    }
+    let mesh = engine.assets.mesh(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$decal_quad",
+        &MeshData::quad(Vec2::ONE),
+    );
+    let plain_desc = MaterialDesc {
+        base_color: Vec4::ONE,
+        metallic: 0.0,
+        roughness: 1.0,
+        unlit: true,
+        alpha_blend: true,
+        double_sided: true,
+        ..MaterialDesc::default()
+    };
+    let plain = engine.assets.material(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$decal_plain",
+        plain_desc,
+    );
+    let mut textured: BTreeMap<TextureId, MaterialId> = BTreeMap::new();
+    for (index, d) in doc.decals.iter().enumerate() {
+        let mut normal = v3(d.normal.unwrap_or([0.0, 1.0, 0.0]));
+        if normal.length_squared() <= 1e-12 {
+            normal = Vec3::Y;
+        }
+        let normal = normal.normalize_or_zero();
+        let position = v3(d.position.unwrap_or([0.0, 0.0, 0.0]));
+        let size = d.size.unwrap_or([1.0, 1.0]);
+        let (w, h) = (size[0].max(1e-4), size[1].max(1e-4));
+        let roll = d.rotation.unwrap_or(0.0).to_radians();
+        let rotation =
+            Quat::from_rotation_arc(Vec3::Z, normal) * Quat::from_axis_angle(Vec3::Z, roll);
+        // 抬 1cm，避开与承载面的 z-fight；透明批次本来就不写深度。
+        let transform =
+            Transform::from_trs(position + normal * 0.01, rotation, Vec3::new(w, h, 1.0));
+        let material = if let Some(rel) = &d.texture {
+            let id = texture_from_doc(
+                engine,
+                doc,
+                &format!("decals[{index}].texture"),
+                rel,
+                true,
+                texture_cache,
+            )?;
+            if let Some(existing) = textured.get(&id) {
+                *existing
+            } else {
+                let desc = MaterialDesc {
+                    base_color: Vec4::ONE,
+                    metallic: 0.0,
+                    roughness: 1.0,
+                    unlit: true,
+                    alpha_blend: true,
+                    double_sided: true,
+                    base_color_texture: Some(id),
+                    ..MaterialDesc::default()
+                };
+                let created = engine.assets.material(
+                    &mut engine.renderer,
+                    &engine.gpu,
+                    &format!("$decal_tex_{id}"),
+                    desc,
+                );
+                textured.insert(id, created);
+                created
+            }
+        } else {
+            plain
+        };
+        let object = engine
+            .scene
+            .add_named(mesh, material, transform, &format!("贴花{index}"));
+        let color = d.color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+        engine.scene.objects[object].color = Vec4::new(color[0], color[1], color[2], color[3]);
     }
     Ok(())
 }
