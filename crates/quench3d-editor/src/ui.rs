@@ -1820,6 +1820,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     let mut begin_edit = false;
     let mut end_edit = false;
     let mut record_edit = false;
+    let mut event_updates: Vec<(usize, Vec<SceneAnimationEvent>)> = Vec::new();
     egui::CollapsingHeader::new(format!("动画（{count} 个实例）"))
         .default_open(true)
         .show(ui, |ui| {
@@ -2095,10 +2096,113 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         refresh = true;
                     }
                 }
+                ui.label(
+                    RichText::new("事件标记（播放头跨过时触发）")
+                        .small()
+                        .strong(),
+                );
+                let mut events_changed = false;
+                let mut remove_event = None;
+                for (event_index, event) in animation.events.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        let mut name = event.name.clone();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut name)
+                                    .desired_width(76.0)
+                                    .hint_text("名字"),
+                            )
+                            .changed()
+                        {
+                            event.name = name;
+                            events_changed = true;
+                        }
+                        let mut time = event.time;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut time)
+                                    .range(0.0..=duration)
+                                    .speed(0.005)
+                                    .prefix("t "),
+                            )
+                            .changed()
+                        {
+                            event.time = time;
+                            events_changed = true;
+                        }
+                        let mut scope = event.clip.clone();
+                        egui::ComboBox::from_id_salt(format!("event-clip-{index}-{event_index}"))
+                            .selected_text(scope.clone().unwrap_or_else(|| "主 clip".to_string()))
+                            .width(78.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut scope, None, "主 clip");
+                                for clip in &clips[index] {
+                                    ui.selectable_value(&mut scope, Some(clip.clone()), clip);
+                                }
+                            });
+                        if scope != event.clip {
+                            event.clip = scope;
+                            events_changed = true;
+                        }
+                        if ui.small_button("删").clicked() {
+                            remove_event = Some(event_index);
+                        }
+                    });
+                }
+                if let Some(remove) = remove_event {
+                    animation.events.remove(remove);
+                    events_changed = true;
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("在播放头加事件").clicked() {
+                        let name = {
+                            let mut n = animation.events.len() + 1;
+                            loop {
+                                let candidate = format!("event{n}");
+                                if !animation.events.iter().any(|e| e.name == candidate) {
+                                    break candidate;
+                                }
+                                n += 1;
+                            }
+                        };
+                        animation.events.push(SceneAnimationEvent {
+                            name,
+                            time: animation.player.time.clamp(0.0, duration),
+                            clip: None,
+                        });
+                        events_changed = true;
+                    }
+                    if animation.events.is_empty() {
+                        ui.label(RichText::new("（无）").small().weak());
+                    }
+                });
+                if events_changed {
+                    if animation.events.iter().any(|e| e.name.trim().is_empty()) {
+                        doc.status = "事件名不能为空（未写回场景；修好后才会保存）".to_string();
+                    } else {
+                        if models[index].is_some() {
+                            let docs: Vec<quench3d_cli::scene_doc::ModelEventDoc> = animation
+                                .events
+                                .iter()
+                                .map(|e| quench3d_cli::scene_doc::ModelEventDoc {
+                                    name: e.name.trim().to_string(),
+                                    time: e.time,
+                                    clip: e.clip.clone(),
+                                })
+                                .collect();
+                            if let Some(path) = doc.set_animation_events(&objects, docs) {
+                                changed_model = Some(path);
+                            }
+                        }
+                        event_updates.push((index, animation.events.clone()));
+                        record_edit = true;
+                    }
+                }
+
                 if let Some(secondary) = &animation.secondary {
                     ui.label(
                         RichText::new(format!(
-                            "过渡到「{}」 · 权重 {:.2}",
+                            "过渡到「{}」· 权重 {:.2}",
                             secondary.animation, animation.blend_weight
                         ))
                         .small()
@@ -2614,6 +2718,9 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         let (scene, renderer, gpu) = (&mut engine.scene, &mut engine.renderer, &engine.gpu);
         scene.advance_animations_with_renderer(0.0, renderer, gpu);
         refresh = true;
+    }
+    for (index, events) in event_updates {
+        engine.scene.set_model_events(index, events);
     }
     if refresh {
         let (scene, renderer, gpu) = (&mut engine.scene, &mut engine.renderer, &engine.gpu);

@@ -355,6 +355,10 @@ fn all_editor_panels_draw_in_one_frame() {
         shapes_contain_text(&output.shapes, "权重"),
         "IK 链没有显示 IK/FK 权重控件"
     );
+    assert!(
+        shapes_contain_text(&output.shapes, "事件标记"),
+        "动画面板没有显示事件标记编辑器"
+    );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(
         (first_requests.outliner_width - 300.0).abs() < 1.0,

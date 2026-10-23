@@ -83,7 +83,7 @@
 | 拖拽改父级 | 全部 | 属性面板里用"父物体"下拉改（**保世界位姿**）；场景树内拖放还没有 | 🟡 |
 | 重命名 / 删除 / 复制 | 全部 | 有（重名自动加后缀） | ✅ |
 | 撤销 / 重做 | 全部 | **本轮补上**（快照式 + 事务合并，见 §5.1） | ✅（本轮） |
-| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、事件按钮和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、多轨混合 UI、按时间窗口的输入缓冲；状态机有界 FIFO 与 clip 事件队列已补（第 136/137 轮） | 🟡 |
+| 关键帧动画 | 全部 | glTF 节点级 TRS 动画（STEP/LINEAR）+ GPU 皮肤蒙皮 + 双 clip 混合（一次性淡入）+ **参数/事件驱动状态机**（浮点参数、6 种比较、`on_event` 离散事件）；编辑器有**暂停可拖的时间检查器**、参数滑杆、状态机事件按钮、**clip 事件标记增删/改名/改时间**和**单 clip 可视化时间轴**（点击/拖动定位）；仍无参数曲线、多轨混合 UI、按时间窗口的输入缓冲；状态机有界 FIFO 与 clip 事件队列已补（第 136/137 轮） | 🟡 |
 | 骨骼 / 蒙皮 | 全部 | **GPU 蒙皮可用**（纯蒙皮：`JOINTS_0/WEIGHTS_0` 顶点属性 + 每帧关节调色板；`Scene::gpu_skinning=false` 退回 CPU）；**morph target 可用**（静态场景权重 + glTF `weights` 权重动画；双 clip 按 `blend_weight` 插值 morph 权重）；**两骨 IK 可用**（`models[].ik`，每帧采样后解目标、CPU/GPU 蒙皮与 F8 骨架一致）；**morph+skin 已能走 GPU 蒙皮**（morph 位移仍 CPU 叠加后上传，关节只在 GPU 乘一次）；**全 GPU morph 仍无**；两骨 IK 有 FK/IK 权重 | 🟡 |
 | 音频 | Unity / Godot | 无 | ❌ |
 | UI / 输入映射 / 存档 | Unity / Godot | 无 | ❌ |
@@ -2194,7 +2194,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 渲染循环里的调用点 | ✅ 第 62 轮 | `Scene::advance_animations(dt)`；`Engine::tick`（窗口）与 `render_sequence_with_game`（无头 `movie`）每帧在 `sync_from_physics` 之后调一次，暂停不推进；单帧 `render` 用 `dt = 0` 摆起始姿态 |
 | 与场景格式的接口 | ✅ 第 62 / 71 / 72 轮 | `models[].animation = { name, start?, speed?, loop?, blend? }`（**向后兼容**：不写 = 静止，老场景逐字节不变）；`blend = { name, start?, speed?, loop?, weight?, fade? }`，`weight` 缺省 0.5、`fade` 缺省 0；`LoadedModel::spawn` 返回 `SpawnedModel { objects, base }`，两份映射同源 |
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
-| 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）；第 86 轮可直接改状态 clip/起始时间并写回 `states[i]`；第 87 轮可增删状态和过渡（新状态自动选第一个 clip，新过渡从当前状态指向下一个状态，删除状态会连带删除引用它的过渡并改写 `initial`）；第 88 轮可改过渡的 `from/to` 与状态机初始状态；第 96 轮可直接改每条 IK 链的 target XYZ 并写回 `models[i].ik[j].target`，第 138 轮加权重滑杆写回 `models[i].ik[j].weight`；第 97 轮状态机参数有滑杆，拖动后 `dt=0` 立即判一次过渡（只改会话值，不写 default）；第 98 轮为 `on_event` 画「发送事件」按钮。第 119 轮把时间滑杆下方补成**可视化单 clip 时间轴**（刻度、播放头、点/拖定位，读数与 `player.time` 同步）。**仍不是**多轨混合器（不能加事件、改状态名或增删 IK 链） |
+| 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）；第 86 轮可直接改状态 clip/起始时间并写回 `states[i]`；第 87 轮可增删状态和过渡（新状态自动选第一个 clip，新过渡从当前状态指向下一个状态，删除状态会连带删除引用它的过渡并改写 `initial`）；第 88 轮可改过渡的 `from/to` 与状态机初始状态；第 96 轮可直接改每条 IK 链的 target XYZ 并写回 `models[i].ik[j].target`，第 138 轮加权重滑杆写回 `models[i].ik[j].weight`；第 97 轮状态机参数有滑杆，拖动后 `dt=0` 立即判一次过渡（只改会话值，不写 default）；第 98 轮为 `on_event` 画「发送事件」按钮。第 119 轮把时间滑杆下方补成**可视化单 clip 时间轴**（刻度、播放头、点/拖定位，读数与 `player.time` 同步）。第 139 轮可在动画面板增删 clip 事件标记、改名字/时间/作用 clip，并写回 `models[i].events`、当场更新场景事件队列。**仍不是**多轨混合器（不能改状态名或增删 IK 链） |
 | 参数/事件驱动状态机 | ✅ 第 75 / 80 / 97 / 98 轮 | `models[].animator`：`states` + `parameters` + `transitions`，按状态停留时间 `after`、`on_finished`、`conditions`（参数比较）或 `on_event`（离散事件，优先于时间过渡）切换；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；`Scene::set_animator_parameter` / `fire_animator_event` 是宿主输入入口；报告 `models[].animator`。**仍缺**：参数曲线、按时间窗口的输入缓冲；clip 动画事件标记 + 队列第 136 轮、状态机有界 FIFO 第 137 轮已补 |
 | 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
@@ -3140,6 +3140,27 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 **边界**：权重是全局标量，没有逐骨/逐轴权重；目标仍不做碰撞/关节限位；
 求解顺序仍是每条链依次执行。
+
+### 23.40 编辑器里的 clip 事件标记编辑（第 139 轮）
+
+**做了什么**：
+
+* 动画面板在时间轴下方列出 `animation.events`：每条可改名字、时间（夹在
+  `[0, duration]`）、作用 clip（主 clip / 资产里的任一 clip），可删除。
+* 「在播放头加事件」按 `player.time` 新增 `eventN`，名字冲突时自动递增。
+* 任何改动都会：
+  * 更新运行时 `Scene::set_model_events`，下一次播放头跨过立即生效；
+  * 通过 `Doc::set_animation_events` 写回 `models[i].events`（空数组写成 `None`）；
+  * 走 `record_edit`，可撤销。
+* 名字为空时拒绝写回并在状态栏提示；运行时保留输入，修好后下一次改动才保存。
+
+**验证**：
+
+* `set_animation_events_writes_and_clears_the_model_events`：写入/清空/越界。
+* UI 冒烟断言 `事件标记` 标题被排版；`事件 1 条` 仍显示。
+* 场景格式/校验/运行时队列的既有测试继续通过。
+
+**边界**：没有多选、拖动标记、时间吸附、事件载荷；仍是单 clip 检查器。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

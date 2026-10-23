@@ -645,6 +645,28 @@ impl Doc {
         Some(path)
     }
 
+    /// 把 `models[i].events` 整组写回底稿；空数组写成 `None`（不留下空段）。
+    ///
+    /// 返回模型路径；没有映射或模型下标越界时返回 `None`。
+    pub fn set_animation_events(
+        &mut self,
+        objects: &[usize],
+        events: Vec<quench3d_cli::scene_doc::ModelEventDoc>,
+    ) -> Option<String> {
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        doc.events = if events.is_empty() {
+            None
+        } else {
+            Some(events)
+        };
+        Some(path)
+    }
+
     /// 把 `models[i].ik[chain].weight` 写回底稿（0~1，IK/FK 混合）。
     ///
     /// 返回模型路径；没有映射、模型没有 `ik` 段或下标越界时返回 `None`。
@@ -1870,6 +1892,51 @@ mod tests {
         );
         assert!(doc.set_ik_weight(&[4], 2, 0.5).is_none());
         assert!(doc.set_ik_weight(&[99], 0, 0.5).is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_animation_events_writes_and_clears_the_model_events() {
+        let mut doc = Doc::new();
+        doc.base_doc = Some(
+            serde_json::from_value(serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "models": [{
+                    "path": "hero.glb",
+                    "animation": {"name": "walk"},
+                    "events": [{"name": "old", "time": 0.1}]
+                }]
+            }))
+            .expect("场景 JSON"),
+        );
+        doc.set_model_instances(vec![quench3d_cli::runner::ModelInstance {
+            model: 0,
+            path: "hero.glb".into(),
+            objects: vec![4],
+        }]);
+        assert_eq!(
+            doc.set_animation_events(
+                &[4],
+                vec![quench3d_cli::scene_doc::ModelEventDoc {
+                    name: "footstep".into(),
+                    time: 0.35,
+                    clip: None,
+                }],
+            )
+            .as_deref(),
+            Some("hero.glb")
+        );
+        let events = doc.base_doc.as_ref().unwrap().models[0]
+            .events
+            .as_ref()
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "footstep");
+        assert!((events[0].time - 0.35).abs() < 1e-6);
+        // 空数组应清掉整段，而不是留下 `events: []`。
+        assert!(doc.set_animation_events(&[4], Vec::new()).is_some());
+        assert!(doc.base_doc.as_ref().unwrap().models[0].events.is_none());
+        assert!(doc.set_animation_events(&[99], Vec::new()).is_none());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
