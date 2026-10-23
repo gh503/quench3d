@@ -41,6 +41,9 @@
 
 ### 新增
 
+- **粒子颜色渐变（第 147 轮）**：`particles[].color_end` 让 RGB/alpha 随寿命线性插值，
+  再乘二次淡出；不写保持同色。测试总数 807 → 808。
+
 - **平面贴花（第 146 轮）**：`decals[]`（position/normal/size/rotation/color/texture）
   按法线朝向、沿法线抬 1cm，unlit/alpha/双面材质；校验/schema/README 同步。e2e 无光照
   红色贴花中心变红。片段里的粒子/贴花贴图也按片段目录重定基。测试总数 804 → 807。

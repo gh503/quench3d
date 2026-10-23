@@ -1146,6 +1146,9 @@ pub struct ParticleDoc {
     /// 颜色（线性 RGBA），缺省 `[1.0, 0.65, 0.2, 0.8]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 4]>,
+    /// 寿命结束时的颜色（线性 RGBA）；不写 = 与 `color` 相同（不渐变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_end: Option<[f32; 4]>,
     /// 可选公告板贴图（PNG/JPEG，相对场景文件解析）；颜色仍作为实例色乘上去。
     ///
     /// 适合烟雾/火焰/光斑这类带 alpha 的 sprite；不写就是纯色四边形。
@@ -4099,13 +4102,15 @@ impl SceneDoc {
                     }
                 }
             }
-            if let Some(c) = p.color {
-                if !c.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)) {
-                    cam_diags.push(Diagnostic::error_code(
-                        ErrorCode::OutOfRange,
-                        format!("{path}.color"),
-                        "颜色必须是有限数，RGBA 都在 0~1 之间",
-                    ));
+            for (name, value) in [("color", p.color), ("color_end", p.color_end)] {
+                if let Some(c) = value {
+                    if !c.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)) {
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.{name}"),
+                            "颜色必须是有限数，RGBA 都在 0~1 之间",
+                        ));
+                    }
                 }
             }
             if let Some(texture) = &p.texture {
@@ -8028,7 +8033,8 @@ mod tests {
             "particles": [
                 { "count": 12, "position": [0, 2, 0], "color": [1, 0.5, 0.2, 0.7] },
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
-                  "velocity": [0, 2, 0], "gravity": [0, -3, 0] },
+                  "velocity": [0, 2, 0], "gravity": [0, -3, 0],
+                  "color_end": [0, 0, 1, 0.2] },
                 { "count": 2, "texture": texture_path.clone() }
             ]
         }))
@@ -8045,6 +8051,7 @@ mod tests {
         let again = SceneDoc::from_json(&text).expect("往返");
         assert_eq!(again.particles.len(), 3);
         assert_eq!(again.particles[1].size, Some(0.2));
+        assert_eq!(again.particles[1].color_end, Some([0.0, 0.0, 1.0, 0.2]));
         assert_eq!(
             again.particles[2].texture.as_deref(),
             Some(texture_path.as_str())
@@ -8071,6 +8078,10 @@ mod tests {
             (json!({"radius": -1}), "particles[0].radius"),
             (json!({"spread": -1}), "particles[0].spread"),
             (json!({"color": [1, 1, 1, 2]}), "particles[0].color"),
+            (
+                json!({"color_end": [1, 1, 1, -1]}),
+                "particles[0].color_end",
+            ),
             (json!({"position": [0, "x", 0]}), "particles"),
         ] {
             let doc = match SceneDoc::from_value(json!({ "particles": [particle] })) {

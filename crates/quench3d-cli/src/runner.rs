@@ -3670,6 +3670,7 @@ fn add_particle_visuals(
         let velocity = p.velocity.unwrap_or([0.0, 1.2, 0.0]);
         let gravity = p.gravity.unwrap_or([0.0, -1.0, 0.0]);
         let color = p.color.unwrap_or([1.0, 0.65, 0.2, 0.8]);
+        let color_end = p.color_end.unwrap_or(color);
         engine.scene.add_particle_system(
             mesh,
             material,
@@ -3683,6 +3684,7 @@ fn add_particle_visuals(
                 size: p.size.unwrap_or(0.12),
                 gravity: Vec3::new(gravity[0], gravity[1], gravity[2]),
                 color: Vec4::new(color[0], color[1], color[2], color[3]),
+                color_end: Vec4::new(color_end[0], color_end[1], color_end[2], color_end[3]),
             },
         );
     }

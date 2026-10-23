@@ -1076,11 +1076,13 @@ NaN 刚体  : 0
 * `particles` 是 **CPU 公告板粒子**（纯视觉，不参与物理）：`{ "count": 64,
   "position": [0, 1, 0], "radius": 0.1, "velocity": [0, 1.2, 0], "spread": 0.4,
   "lifetime": 2.0, "size": 0.12, "gravity": [0, -1, 0], "color": [1, 0.65, 0.2, 0.8],
-  "texture": "tex/smoke.png" }`（`texture` 可省略）。
+  "color_end": [0.3, 0.05, 0.02, 0.0], "texture": "tex/smoke.png" }`
+  （`color_end`/`texture` 可省略）。
   每颗粒子是一个面向相机的四边形（`MeshData::quad`），按寿命二次淡出，寿命到点回到
   发射器附近重生；`update_particles` 每帧做老化/重力/速度积分/朝向。没有贴图的发射器
   共用一个白色 unlit、alpha 混合、双面材质；写 `texture` 时按贴图 id 各建一份材质，
-  颜色仍作为实例色乘上去（适合烟/火/光斑 sprite）。**边界**：没有软粒子/
+  颜色仍作为实例色乘上去（适合烟/火/光斑 sprite）。`color_end` 让 RGB/alpha 随寿命
+  线性插值到寿命终点，再乘二次淡出。**边界**：没有软粒子/
   粒子间排序遮挡（透明批次按物体距离排序，不按粒子深度）、没有 GPU 粒子/发射器形状/
   曲线编辑；编辑器不创建也不编辑粒子，只显示并原样保存场景 JSON 里的 `particles`。
 * `decals` 是**平面贴花**（纯视觉）：`{ "position": [0, 0.01, 0], "normal": [0, 1, 0],

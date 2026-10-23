@@ -3319,6 +3319,24 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：平面四边形，不是深度投影；曲面/斜坡会悬空或穿插；没有贴花裁剪/图集/
 法线混合/编辑器创建入口；透明批次按物体距离排序，多个贴花互相遮挡时仍可能顺序不完美。
 
+### 23.48 粒子颜色渐变（第 147 轮）
+
+**做了什么**：
+
+* `particles[].color_end`（可选）：RGB 与 alpha 从 `color` 到 `color_end` 按寿命线性插值，
+  再乘原来的二次淡出；不写 = 同色不渐变（旧场景逐像素不变）。
+* `ParticleDesc.color_end` / `ParticleSystem.color_end` 公开；schema/README 同步。
+
+**验证**：
+
+* `particle_color_gradient_lerps_with_lifetime`：红→蓝、寿命 2s、推进 1s 后
+  `(0.5,0,0.5)`、alpha `0.8*0.25=0.2`；同色端点时 RGB 不变。
+* `particles_parse_validate_and_roundtrip`：`color_end` 往返保留；越界 alpha 在
+  `particles[0].color_end` 报错。
+
+**边界**：线性插值，不是渐变曲线/多段色标；只影响公告板实例色（贴图仍乘上去），
+不影响物理。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：

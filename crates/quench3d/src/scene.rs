@@ -121,6 +121,10 @@ pub struct ParticleDesc {
     pub gravity: Vec3,
     /// 颜色（线性 RGBA；alpha 再乘寿命淡出）。
     pub color: Vec4,
+    /// 寿命结束时的颜色（线性 RGBA）；缺省与 `color` 相同 = 不渐变。
+    ///
+    /// RGB 按寿命线性插值，alpha 也插值后再乘寿命淡出。
+    pub color_end: Vec4,
 }
 
 impl Default for ParticleDesc {
@@ -135,6 +139,7 @@ impl Default for ParticleDesc {
             size: 0.12,
             gravity: Vec3::new(0.0, -1.0, 0.0),
             color: Vec4::new(1.0, 0.65, 0.2, 0.8),
+            color_end: Vec4::new(1.0, 0.65, 0.2, 0.8),
         }
     }
 }
@@ -159,6 +164,8 @@ pub struct ParticleSystem {
     pub gravity: Vec3,
     /// 基础颜色（alpha 在运行时乘淡出）。
     pub color: Vec4,
+    /// 寿命结束时的颜色（与基础色相同 = 不渐变）。
+    pub color_end: Vec4,
     /// 每颗粒子的年龄与速度。
     state: Vec<ParticleState>,
     /// 确定性伪随机种子。
@@ -1123,6 +1130,7 @@ impl Scene {
             size,
             gravity: desc.gravity,
             color: desc.color,
+            color_end: desc.color_end,
             state: Vec::with_capacity(count),
             seed,
         };
@@ -1195,13 +1203,10 @@ impl Scene {
                         Quat::from_rotation_arc(Vec3::Z, to_camera.normalize());
                 }
                 object.transform.scale = Vec3::splat(system.size);
-                let fade = (1.0 - (state.age / system.lifetime).clamp(0.0, 1.0)).powi(2);
-                object.color = Vec4::new(
-                    system.color.x,
-                    system.color.y,
-                    system.color.z,
-                    system.color.w * fade,
-                );
+                let t = (state.age / system.lifetime).clamp(0.0, 1.0);
+                let fade = (1.0 - t).powi(2);
+                let color = system.color.lerp(system.color_end, t);
+                object.color = Vec4::new(color.x, color.y, color.z, color.w * fade);
                 object.visible = fade > 0.001;
             }
         }
@@ -3780,7 +3785,43 @@ mod particle_tests {
             size: 0.25,
             gravity: Vec3::new(0.0, -2.0, 0.0),
             color: Vec4::new(0.2, 0.4, 0.8, 0.6),
+            color_end: Vec4::new(0.2, 0.4, 0.8, 0.6),
         }
+    }
+
+    #[test]
+    fn particle_color_gradient_lerps_with_lifetime() {
+        let mut scene = Scene::new();
+        let desc = ParticleDesc {
+            count: 1,
+            position: Vec3::ZERO,
+            radius: 0.0,
+            velocity: Vec3::ZERO,
+            spread: 0.0,
+            lifetime: 2.0,
+            size: 0.1,
+            gravity: Vec3::ZERO,
+            color: Vec4::new(1.0, 0.0, 0.0, 0.8),
+            color_end: Vec4::new(0.0, 0.0, 1.0, 0.8),
+        };
+        scene.add_particle_system(0, 0, desc);
+        // 初始年龄是确定伪随机（让粒子错峰重生）；这里钉到 0 才能断言中点。
+        scene.particles[0].state[0].age = 0.0;
+        scene.update_particles(Vec3::new(0.0, 0.0, 10.0), 1.0);
+        let color = scene.objects[scene.particles[0].objects[0]].color;
+        assert!((color.x - 0.5).abs() < 1e-5, "红应线性降到 0.5：{color:?}");
+        assert!((color.z - 0.5).abs() < 1e-5, "蓝应线性升到 0.5：{color:?}");
+        // alpha：两个端点都是 0.8，寿命中点 fade = 0.25。
+        assert!((color.w - 0.2).abs() < 1e-5, "alpha 应为 0.2：{color:?}");
+
+        // 不写 color_end（= 同色）时颜色不变，只按寿命淡出。
+        let mut scene = Scene::new();
+        scene.add_particle_system(0, 0, ParticleDesc::default());
+        scene.particles[0].state[0].age = 0.0;
+        scene.update_particles(Vec3::new(0.0, 0.0, 10.0), 1.0);
+        let color = scene.objects[scene.particles[0].objects[0]].color;
+        let base = ParticleDesc::default().color;
+        assert!((color.x - base.x).abs() < 1e-5 && (color.z - base.z).abs() < 1e-5);
     }
 
     #[test]
