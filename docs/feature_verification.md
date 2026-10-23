@@ -58,6 +58,7 @@ tools/verify_all.sh
 | morph 资产对账 | `cargo test -p quench3d-cli --test cli_e2e info_reports_morph_targets` | `info --json` 的 `morph_targets=1`，人类可读输出有「morph target」行 |
 | 动画事件标记/队列 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib model_events`、`cargo test -p quench3d-editor --lib set_animation_events` | 半开区间不重复、循环回到开头再触发、非循环结尾补触发、clip 过滤、Scene 队列取空、无 animation/animator warning；编辑器写入/清空 `models[].events`、空数组不留空段 |
 | 平面贴花 | `cargo test -p quench3d-cli --test cli_e2e decal_quad`、`cargo test -p quench3d-cli --lib decals_parse`、`include_rebases_particle` | 无光照下红色贴花让中心 R 高 80/255、R 比 G/B 高 60/255；size/rotation/color 往返；零法线/0 尺寸/越界 alpha/缺贴图报错 |
+| 模型根运动 | `cargo test -p quench3d --lib root_motion_moves`、`cargo test -p quench3d-cli --test cli_e2e model_root_motion`、`cargo test -p quench3d-cli --lib root_motion_roundtrips` | 0.5s 物体前移 1m、网格不双移；真实 GLB 报告 found；错节点 found=false；loop/blend 组合校验失败；UI 显示根运动节点 |
 | 粒子颜色渐变 | `cargo test -p quench3d --lib particle_color_gradient`、`cargo test -p quench3d-cli --lib particles_parse` | 红→蓝、寿命 2s 推进 1s 后 (0.5,0,0.5)、alpha 0.2；同色端点 RGB 不变；`color_end` 往返、越界 alpha 报错 |
 | 粒子贴图 | `cargo test -p quench3d-cli --test cli_e2e particle_texture`、`cargo test -p quench3d-cli --lib particles_parse` | 白色实例色 + 绿色贴图：无贴图中心≈白，贴图后 G 比 R/B 高 60/255；贴图路径往返、缺文件报错 |
 | 状态机输入窗口 | `cargo test -p quench3d --lib animator_event_window`、`cargo test -p quench3d-cli --lib animator_parameters` | 1 秒淡入期间入队的 `b` 0.1s 还在、0.3s（窗口 0.25s）后为 0；窗口 0 时保留；`event_window: 0.35` 往返、`11.0` 报错 |

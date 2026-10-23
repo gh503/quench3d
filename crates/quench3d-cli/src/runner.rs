@@ -376,6 +376,10 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
                     speed: a.speed.unwrap_or(1.0),
                     looping: a.looping.unwrap_or(true),
                     start: a.start.unwrap_or(0.0),
+                    root_motion: a.root_motion.as_ref().map(|node| ModelRootMotionStatus {
+                        node: node.clone(),
+                        found: model.nodes.iter().any(|n| n.name == *node),
+                    }),
                 },
                 blend,
                 None,
@@ -410,6 +414,7 @@ fn model_animation_reports_of(doc: &SceneDoc) -> Result<Vec<ModelReport>, RunErr
                     speed: initial.and_then(|s| s.speed).unwrap_or(1.0),
                     looping: initial.and_then(|s| s.looping).unwrap_or(true),
                     start: initial.and_then(|s| s.start).unwrap_or(0.0),
+                    root_motion: None,
                 },
                 None,
                 Some(ModelAnimatorStatus {
@@ -548,6 +553,18 @@ pub struct ModelAnimationStatus {
     pub looping: bool,
     /// 起始时间（秒，缺省 0）。
     pub start: f32,
+    /// 根运动节点的装载结果；没写 `root_motion` 时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_motion: Option<ModelRootMotionStatus>,
+}
+
+/// 请求的根运动节点是否真的在资产里。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelRootMotionStatus {
+    /// 场景里写的节点名。
+    pub node: String,
+    /// 资产里有没有这个节点；`false` = 不提取，整个模型保持在原地。
+    pub found: bool,
 }
 
 /// 请求的第二条模型动画（交叉淡化）的装载结果。
@@ -3370,6 +3387,11 @@ pub fn setup_visuals(
                         player,
                     );
                     engine.scene.set_model_events(index, primary_events);
+                    if let Some(node) = &a.root_motion {
+                        // 配置非法/节点不存在时引擎返回 false；报告里的 found 会说明
+                        // 节点在不在，避免这里静默改场景。
+                        engine.scene.set_model_root_motion(index, node);
+                    }
                     animation_index = Some(index);
                 }
             }

@@ -2198,7 +2198,7 @@ if let Some(v) = doc.physics.static_friction_speed {
 | 名字不存在的诊断 | ✅ 第 62 轮（口径变了） | **不在 `validate`**：`validate` 不读资产，读不到 glTF 里的动画名。结构错误（空名字 / `speed <= 0` / `start < 0`）在 `validate`；"名字在不在"在 `simulate`/`render`/`movie` 报告的 `models[]`（`found`/`duration`/`tracks`/`clips`）+ `warnings`/`notes`，写错名字不是致命错误 |
 | 编辑器可达 | ✅ 第 62 / 79 / 82 轮 | 编辑器载入即登记播放（共用 `setup_visuals` + `Engine::tick`），存盘保留 `models[].animation`；第 79 轮加「动画」面板：列出 clip/时长/倍速/循环/状态机，拖动时间轴调用 `refresh_animations_with_renderer` 当场重算位姿与蒙皮/morph；第 82 轮把倍速/循环写回 `models[i].animation` 或状态机当前 state（`Doc::set_animation_params`，可撤销）；第 83 轮普通动画可从资产里换 clip 并写回 `animation.name`（状态机片段仍由 states 管）；第 84 轮可改每条状态机过渡的 `after`/`fade`/`on_finished` 并写回 `transitions[i]`；第 85 轮可勾选「手动 morph 覆盖」并用滑杆写回 `morph_weights`（多网格共用一组，与场景格式一致）；第 86 轮可直接改状态 clip/起始时间并写回 `states[i]`；第 87 轮可增删状态和过渡（新状态自动选第一个 clip，新过渡从当前状态指向下一个状态，删除状态会连带删除引用它的过渡并改写 `initial`）；第 88 轮可改过渡的 `from/to` 与状态机初始状态；第 96 轮可直接改每条 IK 链的 target XYZ 并写回 `models[i].ik[j].target`，第 138 轮加权重滑杆写回 `models[i].ik[j].weight`；第 97 轮状态机参数有滑杆，拖动后 `dt=0` 立即判一次过渡（只改会话值，不写 default）；第 98 轮为 `on_event` 画「发送事件」按钮。第 119 轮把时间滑杆下方补成**可视化单 clip 时间轴**（刻度、播放头、点/拖定位，读数与 `player.time` 同步）。第 139 轮可在动画面板增删 clip 事件标记、改名字/时间/作用 clip，并写回 `models[i].events`、当场更新场景事件队列。**仍不是**多轨混合器（不能改状态名或增删 IK 链） |
 | 参数/事件驱动状态机 | ✅ 第 75 / 80 / 97 / 98 轮 | `models[].animator`：`states` + `parameters` + `transitions`，按状态停留时间 `after`、`on_finished`、`conditions`（参数比较）或 `on_event`（离散事件，优先于时间过渡）切换；`fade` 秒旧→新淡入，完成后把新 clip 提为主 clip；`Scene::set_animator_parameter` / `fire_animator_event` 是宿主输入入口；报告 `models[].animator`。**仍缺**：参数曲线、按时间戳匹配/重放的输入缓冲；clip 动画事件标记 + 队列第 136 轮、状态机有界 FIFO 第 137 轮、`event_window` 过期第 144 轮已补 |
-| 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。**仍缺**：任意权重曲线、>2 条 clip、事件/根运动 |
+| 混合（多轨道 / 权重） | ✅ 第 71~72 轮（双 clip + 一次性淡入） | `animation.blend`：两条 clip 各自推进时间，局部 TRS 插值（旋转 slerp），统一累乘父子链；`fade` 秒内从 0 smoothstep 升到 `weight`。报告 `models[].blend`（`found/weight/fade/duration/tracks`）。根运动见 §23.49（只提取平移）。**仍缺**：任意权重曲线、>2 条 clip、根旋转提取 |
 | `skins` + CPU 蒙皮 | ✅ 第 70 轮 | `LoadedMesh.skin/joints/weights` + `skinned_mesh`，每帧写回顶点缓冲；刚性片段仍走 `mesh_matrix`，绑定姿态逐位不变 |
 | `skins` + GPU 蒙皮 | ✅ 第 94 轮 | `JOINTS_0/WEIGHTS_0` 顶点属性 + 128 关节 uniform 调色板（8 KB）+ `pbr.wgsl`/`shadow.wgsl` 分支；场景提交时按 `(base,count)` 绑定，纯蒙皮不再 CPU 重算。`gpu_skinning=false` 可退回 CPU；WebGL2 的最低 4 KB uniform 设备只能用 CPU |
 | glTF `targets` / 静态 morph | ✅ 第 73 轮 | `LoadedMorphTarget` 解析 position/normal/tangent 位移（按节点世界方向烘过）；`LoadedModel::morphed_mesh` 按权重叠加，`deformed_mesh` 保证**先 morph 再蒙皮**；`models[].morph_weights` 覆盖 + GPU 静态回写；`info` 报 `morph_targets` |
@@ -3336,6 +3336,29 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 **边界**：线性插值，不是渐变曲线/多段色标；只影响公告板实例色（贴图仍乘上去），
 不影响物理。
+
+### 23.49 模型根运动（第 148 轮）
+
+**做了什么**：
+
+* `models[].animation.root_motion`：写 glTF 节点名；`Scene::set_model_root_motion`
+  记录设置时的节点世界位置，每帧把 XZ 差值从所有节点世界矩阵里扣掉，再把同样的
+  世界位移加到模型物体的基础变换上。
+* 只支持单 clip、`loop: false`、无 `blend`/`animator`/IK；只取 XZ，Y 与旋转保留在
+  模型内部。`ModelAnimationStatus.root_motion` 报 `{node, found}`；节点不存在时
+  `found=false` 并保持原地。
+* 编辑器动画面板显示「根运动 · 节点名」；schema/README/系统提示同步。
+
+**验证**：
+
+* `root_motion_moves_the_object_but_not_the_deformed_mesh_twice`：0.5s 物体前移 1m、
+  网格矩阵回到绑定位置（不双移），1s 前移 2m；循环实例拒绝启用。
+* `model_root_motion_is_reported_and_validated`（e2e）：真实 GLB 报告 `found=true`；
+  错节点 `found=false`；loop 缺省 + root_motion、blend + root_motion 都校验失败。
+* UI smoke：动画面板排版出「根运动 · root」。
+
+**边界**：不是完整 root motion 系统——不提取旋转/垂直位移，不做重定向、速度曲线、
+根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，不跟根运动走。
 
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 

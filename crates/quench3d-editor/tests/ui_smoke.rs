@@ -8,7 +8,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use quench3d::assets::{
-    LoadedAnimation, LoadedMesh, LoadedModel, LoadedMorphTarget, ModelAnimationPlayer,
+    LoadedAnimation, LoadedMesh, LoadedModel, LoadedMorphTarget, LoadedNode, ModelAnimationPlayer,
 };
 use quench3d::prelude::*;
 use quench3d::render::context::with_gpu_tests;
@@ -150,6 +150,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
             event_ages: std::collections::VecDeque::new(),
             event_window: 0.0,
         }),
+        root_motion: None,
     }
 }
 
@@ -163,7 +164,10 @@ fn fake_plain_animation_instance() -> ModelAnimationInstance {
         }],
         materials: Vec::new(),
         images: Vec::new(),
-        nodes: Vec::new(),
+        nodes: vec![LoadedNode {
+            name: "root".into(),
+            ..Default::default()
+        }],
         animations: Vec::new(),
         skins: Vec::new(),
     };
@@ -193,6 +197,10 @@ fn fake_plain_animation_instance() -> ModelAnimationInstance {
         ik: Vec::new(),
         events: Vec::new(),
         animator: None,
+        root_motion: Some(quench3d::scene::ModelRootMotion {
+            node: 0,
+            origin: Vec3::ZERO,
+        }),
     }
 }
 
@@ -377,6 +385,10 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "事件窗口"),
         "状态机面板没有显示输入事件窗口"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "根运动 · root"),
+        "动画面板没有显示根运动节点"
     );
     let first_requests = requests.expect("panels 必须返回本帧请求");
     assert!(

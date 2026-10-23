@@ -1872,6 +1872,19 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .small()
                     .weak(),
                 );
+                if let Some(root) = animation.root_motion {
+                    let node = animation
+                        .model
+                        .nodes
+                        .get(root.node)
+                        .map(|n| n.name.as_str())
+                        .unwrap_or("?");
+                    ui.label(
+                        RichText::new(format!("根运动 · {node}（只提取水平位移）"))
+                            .small()
+                            .weak(),
+                    );
+                }
                 if animation.animator.is_none() && !clips[index].is_empty() {
                     let mut selected = animation.player.animation.clone();
                     ui.horizontal(|ui| {

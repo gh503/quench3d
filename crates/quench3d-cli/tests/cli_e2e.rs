@@ -7202,6 +7202,76 @@ fn animated_glb_bytes() -> Vec<u8> {
     glb_from_parts(json, bin)
 }
 
+/// 根运动：报告节点是否存在；loop=true/带 blend 时校验器必须拒绝。
+///
+/// 几何是否真的前移由引擎侧 `root_motion_moves_the_object_but_not_the_deformed_mesh_twice`
+/// 钉住（不需要显卡）；这里钉"字段 → 报告/校验"这条链。
+#[test]
+fn model_root_motion_is_reported_and_validated() {
+    let dir = temp_dir("root_motion");
+    std::fs::write(dir.join("anim.glb"), animated_glb_bytes()).expect("写夹具 GLB");
+    let scene = |name: &str, animation: serde_json::Value| {
+        write_scene(
+            &dir,
+            name,
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2, "name": "根运动",
+                "models": [{ "path": "anim.glb", "animation": animation }],
+                "simulate": { "steps": 2, "dt": 0.01666667 }
+            }),
+        )
+    };
+
+    let p = scene(
+        "ok.json",
+        serde_json::json!({ "name": "摆动", "loop": false, "root_motion": "块" }),
+    );
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    let rm = &d["data"]["models"][0]["animation"]["root_motion"];
+    assert_eq!(rm["node"], "块", "{d}");
+    assert_eq!(rm["found"], true, "{d}");
+
+    // 节点名错：场景仍合法，但报告要说明不会提取。
+    let p = scene(
+        "missing.json",
+        serde_json::json!({ "name": "摆动", "loop": false, "root_motion": "没有这个节点" }),
+    );
+    let r = run(&["simulate", p.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let d = r.json();
+    assert_eq!(
+        d["data"]["models"][0]["animation"]["root_motion"]["found"], false,
+        "{d}"
+    );
+
+    // 循环片段 + 根运动：位移会跳回，直接判非法。
+    let p = scene(
+        "looping.json",
+        serde_json::json!({ "name": "摆动", "root_motion": "块" }),
+    );
+    let r = run(&["validate", p.to_str().unwrap(), "--json"]);
+    assert_ne!(r.code, 0, "循环根运动必须校验失败");
+    assert!(
+        r.stdout.contains("root_motion") || r.stderr.contains("root_motion"),
+        "诊断要指向 root_motion：{} {}",
+        r.stdout,
+        r.stderr
+    );
+
+    // 与 blend 同用也非法。
+    let p = scene(
+        "blend.json",
+        serde_json::json!({
+            "name": "摆动", "loop": false, "root_motion": "块",
+            "blend": { "name": "摆动", "weight": 0.5 }
+        }),
+    );
+    let r = run(&["validate", p.to_str().unwrap(), "--json"]);
+    assert_ne!(r.code, 0, "blend + root_motion 必须校验失败");
+}
+
 /// gap #23：`models[].animation` 是场景格式字段，而"动画名在不在资产里"**只能装载后判定**
 ///（`validate` 不读资产）。这条钉住三个契约：
 ///

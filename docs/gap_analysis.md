@@ -318,7 +318,7 @@ WebGL2 上的 HDR 路径**没有拦路虎**：`EXT_color_buffer_float`（半浮�
 
 | 层 | 缺什么（**本轮 grep 的命中数**） | 对标物 | 挡住了什么 |
 | --- | --- | --- | --- |
-| 内容层 | 粒子/公告板 ✅（第 66 轮，第 145 轮可贴图）、平面贴花 ✅（第 146 轮；投影贴花无） | GPU 蒙皮/双 clip/时间状态机/morph/两骨 IK（含 FK/IK 权重）已补；GPU 蒙皮覆盖纯蒙皮与 morph+skin（morph 位移 CPU） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 单/双 clip 角色能显示；参数/事件状态机、状态机 FIFO 与 clip 事件队列已有，按时间窗口的缓冲仍要宿主自绘 |
+| 内容层 | 粒子/公告板 ✅（第 66 轮，第 145 轮可贴图）、平面贴花 ✅（第 146 轮；投影贴花无） | GPU 蒙皮/双 clip/时间状态机/morph/两骨 IK（含 FK/IK 权重）已补；GPU 蒙皮覆盖纯蒙皮与 morph+skin（morph 位移 CPU） | Unity / Godot / Bevy 全有；skins/animations 是 glTF 核心扩展 | 单/双 clip 角色能显示；参数/事件状态机、状态机 FIFO 与 clip 事件队列已有，按时间窗口的缓冲仍要宿主自绘；根运动已做**水平平移提取**（第 148 轮） |
 | 手工界面 | ✅ **已有**（2026-10-16）：`quench3d-editor` 用 egui 做了工具栏/场景树/属性面板/视口拾取，桌面与 Web 共用（§2.5）。**引擎本体仍不带** UI/文字系统（`font\|glyph\|sdf` 在 `quench3d-render` 里仍是 0）——GUI 由宿主（编辑器就是这样一个宿主）自己选库 | Unity/Godot 的 UI 是引擎内建；Bevy 走 `bevy_ui` + 第三方编辑器 | 想在自己游戏里画 HUD，得自己接一个 UI 库（本仓库演示了怎么和 wgpu 渲染器共存） |
 | 表现层 | HDR 中间目标 + tonemap + bloom ✅ + FXAA ✅ + SSAO ✅、CSM ✅（1~4）、聚光灯/点光阴影 ✅（各一盏）、透明距离排序 ✅、解析式环境高光 ✅、IBL/环境贴图 🟡（手工预滤波）、景深 ✅（深度后处理）/TAA ✅（第 140 轮，无运动向量）、纹理压缩与浮点纹理（只有 `Rgba8Unorm(Srgb)`） | Filament 的 HDR→tonemap→post 链、Unity URP、Godot 4 | 金属只有天空/地面反射，没有环境贴图里的具体物体；大场景阴影糊；大贴图包体积下不来；少了 AO/景深/抗锯齿这些"最后一公里"的观感项 |
 | 玩法层（物理） | 碰撞过滤 layer/mask ✅、传感器/触发事件 ✅（轮询式，无回调总线）、CCD 🟡（中心射线式）、复合形状（1 刚体 1 形状）、关节限位/马达补全、持久流形/特征 ID、物理材质与 combine（0）、快照回放、渲染插值（`interpolat` = 0）、地形高度场（0） | PhysX 5 / Jolt / Rapier / Box2D 的标配 | 队友互不碰撞、拾取/伤害区、子弹穿墙、载具悬挂、存档与回滚、高刷平滑 |

@@ -1638,6 +1638,12 @@ pub struct ModelAnimationDoc {
     /// `models[].blend.found = false` 会说明它没生效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<ModelAnimationBlendDoc>,
+    /// 可选根运动：把 glTF 里这个**节点名**的水平位移提取到整个物体上。
+    ///
+    /// 只支持单 clip、`"loop": false`、无 `blend`、无 `animator`、无两骨 IK 的模型；
+    /// 只取 XZ，Y 与旋转不提取。节点名不存在时报告 `root_motion.found = false`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_motion: Option<String>,
 }
 
 /// 一条动画事件标记（模型播放头经过 `time` 时触发 `name`）。
@@ -5688,6 +5694,46 @@ impl SceneDoc {
                         ));
                     }
                 }
+                if let Some(node) = &a.root_motion {
+                    if node.trim().is_empty() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{ap}.root_motion"),
+                            "根运动节点名不能为空",
+                        ));
+                    }
+                    if a.looping != Some(false) {
+                        out.push(
+                            Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{ap}.root_motion"),
+                                "根运动要求显式写 \"loop\": false",
+                            )
+                            .with_hint("循环片段的根位移会跳回起点，整个物体会瞬移"),
+                        );
+                    }
+                    if a.blend.is_some() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{ap}.root_motion"),
+                            "根运动不能与 blend 同时使用",
+                        ));
+                    }
+                    if m.animator.is_some() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{ap}.root_motion"),
+                            "根运动不能与 animator 状态机同时使用",
+                        ));
+                    }
+                    if m.ik.as_ref().is_some_and(|ik| !ik.is_empty()) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{ap}.root_motion"),
+                            "根运动不能与两骨 IK 同时使用",
+                        ));
+                    }
+                }
                 if let Some(b) = &a.blend {
                     let bp = format!("{ap}.blend");
                     if b.name.trim().is_empty() {
@@ -8709,6 +8755,57 @@ mod tests {
             cleared.lighting.point_lights.as_ref().map(|v| v.len()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn root_motion_roundtrips_and_rejects_invalid_combinations() {
+        let doc = SceneDoc::from_value(json!({
+            "models": [{
+                "path": "m.glb",
+                "animation": { "name": "run", "loop": false, "root_motion": "Root" }
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            doc.models[0]
+                .animation
+                .as_ref()
+                .and_then(|a| a.root_motion.as_deref()),
+            Some("Root")
+        );
+        let text = serde_json::to_string(&doc).unwrap();
+        let again = SceneDoc::from_json(&text).unwrap();
+        assert_eq!(
+            again.models[0]
+                .animation
+                .as_ref()
+                .and_then(|a| a.root_motion.as_deref()),
+            Some("Root")
+        );
+        // 合法组合不报 root_motion（模型文件不存在是另一条 AssetNotFound）。
+        assert!(!doc
+            .validate()
+            .iter()
+            .any(|d| d.path.ends_with("root_motion")));
+
+        for animation in [
+            json!({ "name": "run", "root_motion": "Root" }),
+            json!({ "name": "run", "loop": false, "root_motion": "",
+                    "blend": { "name": "walk" } }),
+            json!({ "name": "run", "loop": false, "root_motion": "Root",
+                    "blend": { "name": "walk" } }),
+        ] {
+            let doc = SceneDoc::from_value(json!({
+                "models": [{ "path": "m.glb", "animation": animation }]
+            }))
+            .unwrap();
+            assert!(
+                doc.validate()
+                    .iter()
+                    .any(|d| d.path.ends_with("root_motion")),
+                "应当拒绝非法根运动组合"
+            );
+        }
     }
 
     #[test]

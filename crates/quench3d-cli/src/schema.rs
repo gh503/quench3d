@@ -481,7 +481,7 @@ pub fn scene_grammar() -> Value {
             "morph_weights": "手工覆盖 glTF morph target 的权重数组（0~1，按 target 顺序；缺省用资产默认值，缺项按 0）；写了它就优先于 clip 自带的 morph 权重动画",
             "ik": "两骨 IK 链数组：{ root, mid, tip, target:[x,y,z], pole?, weight? }。按 glTF 节点名引用，目标/极向量在模型局部空间；需要同时有 animation 或 animator；不可达目标夹到骨骼长度，不拉伸；weight 0~1 在 FK 姿态与全 IK 之间混合（缺省 1）",
             "animator": "状态机 { initial, states, transitions?, event_window? }；与 animation 互斥。过渡按停留时间 after 秒、on_finished 播完、conditions 参数比较（float 参数，6 种比较）或 on_event 事件切换；fade 秒淡入（0 = 立即切换）。宿主用 set_animator_parameter / fire_animator_event 输入；事件是有界 FIFO（8 条，每帧消费一条，满时丢最旧），可在当前动作结束前预输入下一招；event_window 秒内未被接住的事件自动过期（0 = 不过期）",
-            "animation": "播放模型里的一条 glTF 动画：{ name, start?, speed?, loop?, blend? }。不写 = 静止（老行为）；loop 缺省 true（写 false = 播完停在最后一帧）；带 morph weights 轨道的 clip 会同时驱动形变（手工 morph_weights 优先；双 clip 只取主 clip 的 morph 轨道）；blend: { name, start?, speed?, loop?, weight?, fade? } 是第二条 clip 的交叉淡化（weight 缺省 0.5，fade 缺省 0 = 立即生效）；名字不存在**不是**校验错误（validate 不读资产），会在 simulate/render 报告的 models[].animation.found / models[].blend.found 里报 false"
+            "animation": "播放模型里的一条 glTF 动画：{ name, start?, speed?, loop?, blend?, root_motion? }。不写 = 静止（老行为）；loop 缺省 true（写 false = 播完停在最后一帧）；带 morph weights 轨道的 clip 会同时驱动形变（手工 morph_weights 优先；双 clip 只取主 clip 的 morph 轨道）；blend: { name, start?, speed?, loop?, weight?, fade? } 是第二条 clip 的交叉淡化（weight 缺省 0.5，fade 缺省 0 = 立即生效）；root_motion 写 glTF 节点名，把该节点水平位移提取到整个物体上（只支持单 clip、loop=false、无 blend/animator/ik；只取 XZ，Y 和旋转留在模型内）；名字不存在**不是**校验错误（validate 不读资产），会在 simulate/render 报告的 models[].animation.found / models[].blend.found / root_motion.found 里报 false"
         },
         "joint": {
             "type": ["fixed", "ball", "hinge", "distance", "slider"],
@@ -898,8 +898,13 @@ pub fn json_schema() -> Value {
         d
     });
     defs.insert("modelAnimation".into(), {
-        let mut d = def(&["name", "start", "speed", "loop", "blend"]);
+        let mut d = def(&["name", "start", "speed", "loop", "blend", "root_motion"]);
         d["properties"]["blend"] = json!({ "$ref": "#/$defs/modelAnimationBlend" });
+        d["properties"]["root_motion"] = json!({
+            "type": "string",
+            "minLength": 1,
+            "description": "把该 glTF 节点的水平位移提取到整个物体上；要求 loop=false，且不能与 blend/animator/ik 同用"
+        });
         d["required"] = json!(["name"]);
         d
     });

@@ -503,6 +503,17 @@ pub struct ModelAnimationInstance {
     pub ik: Vec<IkChain>,
     /// 动画事件标记（主/副 clip 用 `clip` 区分）；空 = 不触发。
     pub events: Vec<SceneAnimationEvent>,
+    /// 根运动：把根节点的水平位移提取到整个物体上；`None` = 不提取。
+    pub root_motion: Option<ModelRootMotion>,
+}
+
+/// 根运动提取状态：根节点下标 + 设置时该节点的世界位置（水平位移的零点）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelRootMotion {
+    /// 被当作根运动的节点下标。
+    pub node: usize,
+    /// 设置根运动时该节点的世界位置；只取 XZ 差值。
+    pub origin: Vec3,
 }
 
 /// 与 `ModelAnimationPlayer::advance` 相同的倍速兜底：非正/非有限按 1 倍速。
@@ -608,8 +619,69 @@ fn animation_worlds(a: &ModelAnimationInstance) -> Option<Vec<Mat4>> {
             .blended_node_worlds(&a.player, secondary, a.blend_weight),
         None => a.player.node_worlds(&a.model),
     }?;
+    // 根运动：把根节点的水平位移从节点世界矩阵里扣掉，再整体加到物体变换上。
+    // 这样蒙皮/刚性片段的可见结果与没提取时**逐像素一致**，但外层的场景物体
+    // 真的往前走了（摄像机/物理/编辑器选择都跟着）。
+    if let Some(rm) = a.root_motion {
+        let delta = root_motion_delta(a, &worlds);
+        let local = root_motion_local(a, delta);
+        if local.length_squared() > 1e-16 {
+            shift_worlds(&mut worlds, local);
+        }
+        let _ = rm;
+    }
     solve_ik_chains(&a.model, &mut worlds, &a.ik);
     Some(worlds)
+}
+
+/// 根节点相对设置时的世界位移（只取 XZ）。
+fn root_motion_delta(a: &ModelAnimationInstance, worlds: &[Mat4]) -> Vec3 {
+    let Some(rm) = a.root_motion else {
+        return Vec3::ZERO;
+    };
+    let Some(world) = worlds.get(rm.node) else {
+        return Vec3::ZERO;
+    };
+    let delta = world.translation() - rm.origin;
+    if delta.is_finite() {
+        Vec3::new(delta.x, 0.0, delta.z)
+    } else {
+        Vec3::ZERO
+    }
+}
+
+/// 把世界位移换到物体的基础变换局部空间（位置偏移不乘基础旋转/缩放以外的量）。
+fn root_motion_local(a: &ModelAnimationInstance, world: Vec3) -> Vec3 {
+    let Some(base) = a.base.first() else {
+        return world;
+    };
+    let local = base.rotation.inverse() * world;
+    Vec3::new(
+        if base.scale.x.abs() > 1e-8 {
+            local.x / base.scale.x
+        } else {
+            local.x
+        },
+        if base.scale.y.abs() > 1e-8 {
+            local.y / base.scale.y
+        } else {
+            local.y
+        },
+        if base.scale.z.abs() > 1e-8 {
+            local.z / base.scale.z
+        } else {
+            local.z
+        },
+    )
+}
+
+/// 从所有节点世界矩阵里扣掉一个局部平移（根运动提取的第二步）。
+fn shift_worlds(worlds: &mut [Mat4], local: Vec3) {
+    for world in worlds.iter_mut() {
+        world.cols[3].x -= local.x;
+        world.cols[3].y -= local.y;
+        world.cols[3].z -= local.z;
+    }
 }
 
 /// 节点名 → 下标；空名字不参与匹配。
@@ -1311,7 +1383,7 @@ impl Scene {
         player: &crate::assets::ModelAnimationPlayer,
     ) -> usize {
         let mats = player.mesh_matrices(model);
-        apply_matrices(&mut self.objects, objects, base, &mats)
+        apply_matrices(&mut self.objects, objects, base, &mats, Vec3::ZERO)
     }
 
     /// 登记一个会播放的模型动画，返回登记序号。
@@ -1341,6 +1413,7 @@ impl Scene {
             ik: Vec::new(),
             events: Vec::new(),
             animator: None,
+            root_motion: None,
         });
         index
     }
@@ -1412,6 +1485,7 @@ impl Scene {
             ik: Vec::new(),
             events: Vec::new(),
             animator: None,
+            root_motion: None,
         });
         index
     }
@@ -1469,8 +1543,34 @@ impl Scene {
                 event_ages: VecDeque::new(),
                 event_window: 0.0,
             }),
+            root_motion: None,
         });
         Some(index)
+    }
+
+    /// 启用**根运动提取**：把 `node` 的水平位移移到整个物体上。
+    ///
+    /// 只支持单 clip、非循环、无副 clip、无状态机、无 IK 的实例；任一条件不满足
+    /// 返回 `false`（不改变实例）。设置成功时以**当前播放时间**的根节点世界位置为零点；
+    /// 只提取 XZ，Y 与旋转仍留在模型内部（跳/转身动画不会把角色整体抬走/转向）。
+    pub fn set_model_root_motion(&mut self, animation_index: usize, node: &str) -> bool {
+        let Some(a) = self.animations.get_mut(animation_index) else {
+            return false;
+        };
+        if a.secondary.is_some() || a.animator.is_some() || a.player.looping || !a.ik.is_empty() {
+            return false;
+        }
+        let Some(node) = node_index(&a.model, node) else {
+            return false;
+        };
+        let Some(worlds) = a.player.node_worlds(&a.model) else {
+            return false;
+        };
+        let Some(origin) = worlds.get(node).map(Mat4::translation) else {
+            return false;
+        };
+        a.root_motion = Some(ModelRootMotion { node, origin });
+        true
     }
 
     /// 覆盖某个动画实例的 morph 权重（下标来自 `play_model_animation*`）。
@@ -1795,7 +1895,8 @@ impl Scene {
             fired_animation_events.extend(primary_events);
             fired_animation_events.extend(secondary_events);
             let mats = animation_matrices(a);
-            updated += apply_matrices(objects, &a.objects, &a.base, &mats);
+            let offset = root_motion_delta(a, &a.player.node_worlds(&a.model).unwrap_or_default());
+            updated += apply_matrices(objects, &a.objects, &a.base, &mats, offset);
         }
         // 极端 dt 下事件可能超过上限：保留最新的 1024 条，避免队列无限增长。
         if fired_animation_events.len() > 1024 {
@@ -1821,7 +1922,8 @@ impl Scene {
         let mut updated = 0;
         for a in animations.iter() {
             let mats = animation_matrices(a);
-            updated += apply_matrices(objects, &a.objects, &a.base, &mats);
+            let offset = root_motion_delta(a, &a.player.node_worlds(&a.model).unwrap_or_default());
+            updated += apply_matrices(objects, &a.objects, &a.base, &mats, offset);
         }
         updated
     }
@@ -2631,6 +2733,7 @@ fn apply_matrices(
     object_indices: &[usize],
     base: &[Transform],
     mats: &[Mat4],
+    world_offset: Vec3,
 ) -> usize {
     let mut updated = 0;
     for (mesh_index, &object) in object_indices.iter().enumerate() {
@@ -2638,7 +2741,8 @@ fn apply_matrices(
             continue;
         };
         let m = mats.get(mesh_index).copied().unwrap_or(Mat4::IDENTITY);
-        let base = base.get(mesh_index).copied().unwrap_or(obj.transform);
+        let mut base = base.get(mesh_index).copied().unwrap_or(obj.transform);
+        base.position += world_offset;
         obj.transform = compose(base, &m);
         updated += 1;
     }
@@ -2722,6 +2826,55 @@ mod anim_tests {
     }
 
     /// 事件区间是半开 `[start, end)`：停在标记上不重复触发，循环回到开头会再触发。
+    #[test]
+    fn root_motion_moves_the_object_but_not_the_deformed_mesh_twice() {
+        let model = std::sync::Arc::new(pulley_model());
+        let mut scene = Scene::new();
+        let dummy = scene.add_named(0, 0, Transform::default(), "根");
+        let object = scene.add_named(1, 0, Transform::default(), "滑轮");
+        let mut player = model.player("转").expect("有动画");
+        player.looping = false;
+        let index = scene.play_model_animation(
+            std::sync::Arc::clone(&model),
+            vec![dummy, object],
+            vec![Transform::default(), Transform::default()],
+            player,
+        );
+        assert!(
+            !scene.set_model_root_motion(index, "不存在"),
+            "不存在的节点必须拒绝"
+        );
+        assert!(scene.set_model_root_motion(index, "滑轮"));
+        assert_eq!(scene.objects[object].transform.position.x, 0.0);
+
+        scene.advance_animations(0.5);
+        let moved = scene.objects[object].transform.position.x;
+        assert!((moved - 1.0).abs() < 1e-4, "0.5s 应前移 1m：{moved}");
+        // mesh 矩阵已经被扣掉同样的位移：绑定姿态下的相对几何仍在原点附近，
+        // 不会出现“物体走 1m、网格又走 1m”的双重位移。
+        let worlds = animation_worlds(&scene.animations[index]).unwrap();
+        let mesh = model.mesh_matrices_from_worlds(&worlds)[1].translation();
+        assert!(mesh.length() < 1e-4, "网格应回到绑定位置：{mesh:?}");
+
+        scene.advance_animations(0.5);
+        let end = scene.objects[object].transform.position.x;
+        assert!((end - 2.0).abs() < 1e-4, "1s 应前移 2m：{end}");
+
+        // 循环实例拒绝根运动（位移跳回会瞬移）。
+        let mut scene = Scene::new();
+        let dummy = scene.add_named(0, 0, Transform::default(), "根");
+        let object = scene.add_named(1, 0, Transform::default(), "滑轮");
+        let player = model.player("转").unwrap();
+        assert!(player.looping);
+        let index = scene.play_model_animation(
+            std::sync::Arc::clone(&model),
+            vec![dummy, object],
+            vec![Transform::default(), Transform::default()],
+            player,
+        );
+        assert!(!scene.set_model_root_motion(index, "滑轮"));
+    }
+
     #[test]
     fn animation_events_fire_once_per_crossing_and_loop() {
         let markers = vec![marker(0.25, "a"), marker(0.75, "b")];
