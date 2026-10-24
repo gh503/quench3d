@@ -408,6 +408,10 @@ fn all_editor_panels_draw_in_one_frame() {
         "动画面板标题没有出现在绘制图元里"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "多轨总览（2 条）"),
+        "多轨总览没有出现在绘制图元里"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "idle"),
         "动画 clip 名没有出现在面板内容里"
     );

@@ -1955,6 +1955,30 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     let mut end_edit = false;
     let mut record_edit = false;
     let mut event_updates: Vec<(usize, Vec<SceneAnimationEvent>)> = Vec::new();
+    // 多轨总览：所有动画实例放在同一块里，一次看到每条轨的播放头；
+    // 拖动任意一条只改该实例的 `player.time`，不是混合器。
+    egui::CollapsingHeader::new(format!("多轨总览（{count} 条）"))
+        .default_open(true)
+        .show(ui, |ui| {
+            for (index, animation) in engine.scene.animations.iter_mut().enumerate() {
+                let duration = animation.player.duration.max(0.0);
+                if duration <= 0.0 {
+                    continue;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("#{index} {}", animation.player.animation)).small(),
+                    );
+                    if let Some(scrubbed) =
+                        timeline_bar(ui, animation.player.time, duration, 10_000 + index)
+                    {
+                        animation.player.time = scrubbed;
+                        animation.player.finished = false;
+                        refresh = true;
+                    }
+                });
+            }
+        });
     egui::CollapsingHeader::new(format!("动画（{count} 个实例）"))
         .default_open(true)
         .show(ui, |ui| {

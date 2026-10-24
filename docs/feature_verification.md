@@ -131,6 +131,7 @@ tools/verify_all.sh
 | Web 自动保存读/写/恢复 | `tools/probe_web_ui.sh` | 写入 localStorage → reload → `recovery=true`；F9 后 `recovery=false`、`objects` 从默认场景变成 1、截图变化；随后 localStorage 立刻写出 2987 字节的新恢复点；再刷新出现恢复点，F10 丢弃后状态与键都清 |
 | 崩溃恢复提示绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | `doc.recovery=Some(..)` 时绘制图元里出现「发现自动保存」与「丢弃」按钮 |
 | 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
+| 动画多轨总览 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 动画面板绘制出「多轨总览（2 条）」；播放头映射沿用 `timeline_scrub_maps_and_clamps` |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
 | 场景双时间线 | `cargo test -p quench3d --test model_loading scene_blended_animation_advances_both_clips` | `Scene::advance_animations` 同时推进两条 clip，t=.5 落在 base+2.5 |
