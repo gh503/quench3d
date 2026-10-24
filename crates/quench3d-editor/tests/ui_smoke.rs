@@ -910,6 +910,60 @@ fn shape_texture_rect(shape: &egui::Shape, texture_id: egui::TextureId) -> Optio
     }
 }
 
+/// 物体材质面板：显式设置过贴图的物体自动展开材质段，四个槽位有「应用/清除」。
+#[test]
+fn material_texture_slots_have_apply_and_clear_buttons() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let text = r#"{
+        "objects": [
+            { "name": "箱", "shape": { "type": "box", "size": [1, 1, 1] } }
+        ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
+    doc.selected = Some(0);
+    doc.textures.insert(
+        "箱".to_string(),
+        quench3d_editor::doc::TexturePaths {
+            base_color: Some("tex.png".to_string()),
+            ..Default::default()
+        },
+    );
+    let ctx = egui::Context::default();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 2200.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    let shapes = std::mem::take(&mut output.shapes);
+    output.textures_delta.clear();
+    assert!(
+        shapes_contain_text(&shapes, "应用基础色贴图（从磁盘读取）"),
+        "物体材质面板没有应用基础色贴图按钮"
+    );
+    assert!(
+        shapes_contain_text(&shapes, "清除基础色贴图"),
+        "物体材质面板没有清除基础色贴图按钮"
+    );
+}
+
 fn shapes_contain_texture(
     shapes: &[egui::epaint::ClippedShape],
     texture_id: egui::TextureId,

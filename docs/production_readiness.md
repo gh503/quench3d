@@ -3367,6 +3367,31 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.77 物体材质贴图可清除（第 177 轮）
+
+**做了什么**：
+
+* 物体材质面板的四个贴图槽（基础色/法线/金属度-粗糙度/自发光）在「应用」旁
+  增加「清除」。
+* 清除同时做三件事：`set_material_texture(slot, None)`、把本地 `desc` 的对应槽清零
+  （避免同一帧的 `update_material` 把旧贴图写回去）、把 `doc.textures` 对应项置空，
+  再 `record_edit`。
+* 应用贴图时也同步更新本地 `desc` 的槽位，修掉"应用后同帧改别的材质参数会把贴图
+  覆盖回旧值"的隐患。
+* 有显式贴图设置（`doc.textures` 有该物体）时材质段自动展开，避免"设了贴图却看不到
+  入口"。
+
+**验证**：
+
+* `scene_roundtrip::set_material_texture_swaps_and_rejects_bad_ids` 继续覆盖
+  `set_material_texture(None)` 的底层行为。
+* `material_texture_slots_have_apply_and_clear_buttons`：给物体写入基础色贴图路径后，
+  材质段自动展开，绘制列表里出现「应用基础色贴图（从磁盘读取）」和「清除基础色贴图」。
+* 全量门禁 833 测试。
+
+**边界**：物体材质可能被多个物体共享；清除只影响当前材质句柄。仍在 Web 端隐藏
+文件按钮。
+
 ### 23.76 画中画角落可选（第 176 轮）
 
 **做了什么**：
@@ -3397,7 +3422,7 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 * `decal_and_particle_texture_apply_and_clear` 改为：临时目录里放 PNG 和
   `scene.quench3d.json`，只传相对名 `tex.png`；贴花/粒子都能加载并写回相对路径。
-* 全量门禁 832 测试。
+* 全量门禁 833 测试。
 
 **边界**：不搜索 `assets.search_paths`；找不到场景路径时仍按工作目录；不改变 CLI
 运行期的解析规则。

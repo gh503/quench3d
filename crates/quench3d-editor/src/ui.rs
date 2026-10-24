@@ -1638,8 +1638,10 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     };
     let mut desc = before.clone();
     let mut changed = false;
+    // 有显式贴图设置时自动展开：否则用户设置了贴图却看不到入口。
+    let has_texture_settings = doc.textures.contains_key(&object_name);
     egui::CollapsingHeader::new("材质（缩放与开关）")
-        .default_open(false)
+        .default_open(has_texture_settings)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("UV 平铺");
@@ -1761,6 +1763,20 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                     format!("{label}应用失败（材质或贴图句柄无效）：{path}")
                                 };
                                 if ok {
+                                    match slot {
+                                        quench3d::render::MaterialTextureSlot::BaseColor => {
+                                            desc.base_color_texture = Some(texture)
+                                        }
+                                        quench3d::render::MaterialTextureSlot::Normal => {
+                                            desc.normal_texture = Some(texture)
+                                        }
+                                        quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+                                            desc.metallic_roughness_texture = Some(texture)
+                                        }
+                                        quench3d::render::MaterialTextureSlot::Emissive => {
+                                            desc.emissive_texture = Some(texture)
+                                        }
+                                    }
                                     doc.record_edit(engine);
                                 }
                             }
@@ -1768,6 +1784,49 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                 // 场景校验器要求贴图文件存在；失败必须说清原因，不能静默留旧图。
                                 doc.status = format!("读图失败：{error}（{path}）");
                             }
+                        }
+                    }
+                    if ui.button(format!("清除{label}")).clicked() {
+                        let ok = engine.renderer.set_material_texture(
+                            &engine.gpu,
+                            material_id,
+                            slot,
+                            None,
+                        );
+                        if ok {
+                            match slot {
+                                quench3d::render::MaterialTextureSlot::BaseColor => {
+                                    desc.base_color_texture = None
+                                }
+                                quench3d::render::MaterialTextureSlot::Normal => {
+                                    desc.normal_texture = None
+                                }
+                                quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+                                    desc.metallic_roughness_texture = None
+                                }
+                                quench3d::render::MaterialTextureSlot::Emissive => {
+                                    desc.emissive_texture = None
+                                }
+                            }
+                            let entry = doc.textures.entry(object_name.clone()).or_default();
+                            match slot {
+                                quench3d::render::MaterialTextureSlot::BaseColor => {
+                                    entry.base_color = None
+                                }
+                                quench3d::render::MaterialTextureSlot::Normal => {
+                                    entry.normal = None
+                                }
+                                quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+                                    entry.metallic_roughness = None
+                                }
+                                quench3d::render::MaterialTextureSlot::Emissive => {
+                                    entry.emissive = None
+                                }
+                            }
+                            doc.status = format!("已清除{label}");
+                            doc.record_edit(engine);
+                        } else {
+                            doc.status = format!("{label}清除失败（材质句柄无效）");
                         }
                     }
                 }

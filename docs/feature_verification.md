@@ -145,6 +145,7 @@ tools/verify_all.sh
 
 | 功能 | 正向证据 | 判据 |
 | --- | --- | --- |
+| 物体材质贴图清除 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test scene_roundtrip set_material_texture` + `...ui_smoke material_texture_slots` | 底层清空成功；有贴图设置时材质段自动展开，绘制出「应用基础色贴图」「清除基础色贴图」 |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
 | 色调映射算子 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline tonemap_operator` | ACES/Reinhard/线性三档渲染像素与 CPU 公式一致、互不相同 |
 | 许可审计/SBOM | `python3 tools/license_audit.py --check` | 380 个外部依赖全部有许可且允许；SBOM 与 Cargo.lock 一致；GPL-only 自测被拒绝 |
