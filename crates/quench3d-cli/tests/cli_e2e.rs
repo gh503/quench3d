@@ -7536,6 +7536,63 @@ fn export_writes_obj_and_mtl_that_info_can_read() {
 }
 
 #[test]
+fn export_writes_binary_stl_with_matching_triangle_count() {
+    let dir = temp_dir("export_stl");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+          "format":"quench3d.scene","version":2,"name":"stl",
+          "objects":[
+            {"name":"box","shape":{"type":"box","size":[2,1,3]},"position":[0,1,0]},
+            {"name":"ball","shape":{"type":"sphere","radius":0.5},"position":[3,1,0]}
+          ]
+        }"#,
+    )
+    .expect("写临时场景");
+    let stl = dir.join("model.stl");
+    let r = run(&[
+        "export",
+        scene.to_str().unwrap(),
+        stl.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stderr={}\nstdout={}", r.stderr, r.stdout);
+    let env = r.json();
+    assert_eq!(env["data"]["format"], "stl");
+    let triangles = env["data"]["triangles"].as_u64().unwrap();
+    assert_eq!(triangles, 12 + 768, "盒子 12 + 球 768");
+    let bytes = std::fs::read(&stl).unwrap();
+    assert_eq!(bytes.len() as u64, env["data"]["bytes"].as_u64().unwrap());
+    assert_eq!(
+        bytes.len(),
+        84 + triangles as usize * 50,
+        "二进制 STL = 84 字节头/计数 + 每三角形 50 字节"
+    );
+    assert!(bytes.starts_with(b"quench3d STL export"));
+    assert_eq!(
+        u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as u64,
+        triangles
+    );
+    // 每个三角形的法线必须是有限、单位长（退化三角形写 0 也接受）。
+    for i in 0..triangles as usize {
+        let start = 84 + i * 50;
+        let read = |offset: usize| {
+            f32::from_le_bytes(
+                bytes[start + offset..start + offset + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let n = [read(0), read(4), read(8)];
+        assert!(n.iter().all(|v| v.is_finite()), "法线不是有限数：{n:?}");
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        assert!(len < 1e-6 || (len - 1.0).abs() < 1e-4, "法线长度 {len}");
+    }
+    assert!(!dir.join("model.mtl").exists(), "STL 不应产生 MTL");
+}
+
+#[test]
 fn export_writes_single_file_gltf_that_info_can_read() {
     let dir = temp_dir("export_gltf");
     let scene = dir.join("scene.json");

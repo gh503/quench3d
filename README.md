@@ -847,6 +847,7 @@ quench3d validate scene.json --json
 quench3d export scene.json model.obj                    # 图元 → OBJ/MTL
 quench3d export scene.json model.gltf                   # 图元 → 单文件 glTF 2.0
 quench3d export scene.json model.glb                    # 同一份场景 → 二进制 GLB
+quench3d export scene.json model.stl                    # 图元 → 二进制 STL（3D 打印）
 quench3d simulate scene.json --steps 600 --json
 quench3d simulate scene.json --trace-all --json            # 附带每条轨迹的结论
 quench3d render scene.json --out scene.png --width 960 --height 600

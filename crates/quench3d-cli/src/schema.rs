@@ -135,17 +135,18 @@ pub fn schema() -> Value {
             },
             {
                 "name": "export",
-                "summary": "把场景里的图元物体导出为 Wavefront OBJ + MTL，或按扩展名 .gltf/.glb 导出单文件 glTF 2.0（.gltf 用 base64 内嵌 buffer，.glb 用二进制 BIN chunk）；导入的 models[]、凸包、缺贴图会列进 skipped",
+                "summary": "把场景里的图元物体导出为 Wavefront OBJ + MTL、按扩展名 .gltf/.glb 导出单文件 glTF 2.0（.gltf 用 base64 内嵌 buffer，.glb 用二进制 BIN chunk），或 .stl 导出二进制 STL；导入的 models[]、凸包、缺贴图会列进 skipped",
                 "args": [
                     { "name": "scene", "type": "path", "required": true, "description": "场景 JSON 路径" },
-                    { "name": "out", "type": "path", "required": false, "description": "输出路径；.gltf/.glb 走 glTF 2.0（文本/二进制），否则 OBJ + MTL；缺省与场景同名 .obj" }
+                    { "name": "out", "type": "path", "required": false, "description": "输出路径；.gltf/.glb 走 glTF 2.0，.stl 走二进制 STL，否则 OBJ + MTL；缺省与场景同名 .obj" }
                 ],
-                "output": "{ scene, out, mtl, objects, vertices, triangles, skipped[] }",
+                "output": "{ scene, out, mtl?, format?, objects, vertices, triangles, bytes?, skipped[] }",
                 "notes": "只导出 objects/templates/instances 展开后的图元几何；贴图不嵌入 MTL，材质只写标量色/粗糙度/自发光/透明度；导出的是文档初始位姿，不是物理步进后的快照",
                 "examples": [
                     "quench3d export scene.json model.obj --json",
                     "quench3d export scene.json model.gltf --json",
-                    "quench3d export scene.json model.glb"
+                    "quench3d export scene.json model.glb",
+                    "quench3d export scene.json model.stl"
                 ]
             },
             {

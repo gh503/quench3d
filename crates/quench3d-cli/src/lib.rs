@@ -32,3 +32,4 @@ pub mod report;
 pub mod runner;
 pub mod scene_doc;
 pub mod schema;
+pub mod stl_export;

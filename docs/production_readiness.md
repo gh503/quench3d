@@ -223,7 +223,7 @@
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
 | 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」「导出 GLB」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`/`.glb`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图、节点树、位置/旋转动画）；骨骼/morph 动画未导出 | ✅（OBJ/glTF 几何） |
-| 格式覆盖 | 全部 | 无 STL / FBX / USD / USDZ / DAE / PLY | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | ❌ |
+| 格式覆盖 | 全部 | **STL 导出已做**（二进制，CLI）；STL 导入 / FBX / USD / USDZ / DAE / PLY 无 | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | 🟡（导出半边） |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；`--encoder mp4` 可选调用外部 ffmpeg 直接封装 MP4，PNG 路线仍给建议命令 | 直接产出 H.265/无 ffmpeg 的 MP4 | **1 人月**（纯 Rust 编码器） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
 | 版本升级路径 | 全部 | **无迁移器**（版本不符直接报错，`scene_doc.rs:1325`） | 旧文件能一键升到新版本并留备份 | **0.5–1 人月** | ❌ |
@@ -3366,6 +3366,29 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：不是完整 root motion 系统——只提取三维位移与绕 Y 偏航，不提取俯仰/滚转，
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
+
+### 23.95 二进制 STL 导出（第 195 轮）
+
+**问题**：互操作表里「格式覆盖」明确写缺 STL；3D 打印/切片软件要的正是二进制 STL。
+
+**做了什么**：
+
+* 新增 `quench3d-cli/src/stl_export.rs`：
+  - 与 OBJ 导出共用 `resolve_world` / `mesh_for_shape`，父子变换、圆角盒、高度场网格同一份；
+  - 输出二进制 STL（80 字节头 + `u32` 三角形数 + 每三角形 50 字节），法线由三角形叉积归一化；
+  - `models[]`、凸包照旧进 `skipped[]`，不静默丢；
+  - 导出的是文档初始位姿，不是物理快照。
+* `quench3d export scene.json model.stl` 按扩展名分派；报告 `format: "stl"`，
+  带 `objects` / `vertices` / `triangles` / `bytes` / `skipped[]`。
+* `schema` 的 export 摘要、输出形状与示例同步。
+
+**验证**：
+
+* 单元：立方体 12 三角形、字节数 `84 + 12×50`、计数一致；平面法线单位长且顶点跟随平移；
+  凸包 0 三角形并出现在 `skipped`。
+* e2e：盒子+球导出 `12 + 768` 三角形，文件长度与报告 `bytes` 一致，
+  头部魔数、三角形计数、每个法线有限且单位长，且不产生 `.mtl`。
+* 全量门禁 **851** 测试、0 失败（新增 4 个测试）。
 
 ### 23.94 场景树搜索过滤（第 194 轮）
 

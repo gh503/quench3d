@@ -530,6 +530,48 @@ fn dispatch(args: &Args) -> i32 {
                     }
                 });
             }
+            if ext.eq_ignore_ascii_case("stl") {
+                let exported = match quench3d_cli::stl_export::export_stl(&doc, &out_path) {
+                    Ok(exported) => exported,
+                    Err(e) => {
+                        return fail(args, "export", ErrorInfo::new("export_failed", e), started)
+                    }
+                };
+                if let Err(e) = std::fs::write(&out_path, &exported.bytes) {
+                    return fail(
+                        args,
+                        "export",
+                        ErrorInfo::new("write_failed", format!("写 {out_path} 失败：{e}")),
+                        started,
+                    );
+                }
+                let value = json!({
+                    "scene": scene_path,
+                    "out": out_path,
+                    "format": "stl",
+                    "objects": exported.objects,
+                    "vertices": exported.vertices,
+                    "triangles": exported.triangles,
+                    "bytes": exported.bytes.len(),
+                    "skipped": exported.skipped,
+                });
+                return finish(args, "export", Ok(value), started, |v| {
+                    println!(
+                        "已导出 {}（二进制 STL：{} 个物体 / {} 三角形 / {} 字节）",
+                        v["out"].as_str().unwrap_or(""),
+                        v["objects"].as_u64().unwrap_or(0),
+                        v["triangles"].as_u64().unwrap_or(0),
+                        v["bytes"].as_u64().unwrap_or(0),
+                    );
+                    if let Some(skipped) = v["skipped"].as_array() {
+                        for s in skipped {
+                            if let Some(s) = s.as_str() {
+                                println!("  跳过：{s}");
+                            }
+                        }
+                    }
+                });
+            }
             let exported = match quench3d_cli::obj_export::export_obj(&doc, &out_path) {
                 Ok(exported) => exported,
                 Err(e) => return fail(args, "export", ErrorInfo::new("export_failed", e), started),
