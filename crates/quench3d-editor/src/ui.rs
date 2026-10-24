@@ -3022,6 +3022,117 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
 
 /// 粒子发射器面板。粒子代理在场景树里是隐藏的，没有这块面板就完全看不见；
 /// 参数可直接改，并写回底稿的 `particles[i]`，保存后保持。
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn replace_decal_texture(
+    engine: &mut Engine,
+    doc: &mut Doc,
+    index: usize,
+    path: &str,
+) -> Result<(), String> {
+    let object_index = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == format!("贴花{index}"))
+        .ok_or_else(|| format!("找不到贴花{index}"))?;
+    let path = path.trim();
+    let texture_id = if path.is_empty() {
+        None
+    } else {
+        let image = quench3d::render::ImageData::from_file(path)
+            .map_err(|e| format!("贴花贴图读图失败：{e}"))?;
+        Some(engine.renderer.add_texture(&engine.gpu, &image, true))
+    };
+    let old = engine.scene.objects[object_index].material;
+    let mut desc = engine.renderer.material(old).cloned().unwrap_or_default();
+    desc.base_color_texture = None;
+    let name = format!("$decal_ui_{index}_{}", engine.renderer.material_count());
+    let material = engine
+        .assets
+        .material(&mut engine.renderer, &engine.gpu, &name, desc);
+    if let Some(texture_id) = texture_id {
+        if !engine.renderer.set_material_texture(
+            &engine.gpu,
+            material,
+            quench3d::render::MaterialTextureSlot::BaseColor,
+            Some(texture_id),
+        ) {
+            return Err("贴花贴图应用失败（材质或贴图句柄无效）".into());
+        }
+    }
+    engine.scene.objects[object_index].material = material;
+    if let Some(base) = doc.base_doc_mut() {
+        if let Some(decal) = base.decals.get_mut(index) {
+            decal.texture = if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            };
+        }
+    }
+    doc.record_edit(engine);
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn replace_particle_texture(
+    engine: &mut Engine,
+    doc: &mut Doc,
+    index: usize,
+    path: &str,
+) -> Result<(), String> {
+    if index >= engine.scene.particles.len() {
+        return Err(format!("找不到粒子发射器 #{index}"));
+    }
+    let path = path.trim();
+    let texture_id = if path.is_empty() {
+        None
+    } else {
+        let image = quench3d::render::ImageData::from_file(path)
+            .map_err(|e| format!("粒子贴图读图失败：{e}"))?;
+        Some(engine.renderer.add_texture(&engine.gpu, &image, true))
+    };
+    let old_material = engine.scene.particles[index].material;
+    let objects = engine.scene.particles[index].objects.clone();
+    let mut desc = engine
+        .renderer
+        .material(old_material)
+        .cloned()
+        .unwrap_or_default();
+    desc.base_color_texture = None;
+    let name = format!("$particle_ui_{index}_{}", engine.renderer.material_count());
+    let material = engine
+        .assets
+        .material(&mut engine.renderer, &engine.gpu, &name, desc);
+    if let Some(texture_id) = texture_id {
+        if !engine.renderer.set_material_texture(
+            &engine.gpu,
+            material,
+            quench3d::render::MaterialTextureSlot::BaseColor,
+            Some(texture_id),
+        ) {
+            return Err("粒子贴图应用失败（材质或贴图句柄无效）".into());
+        }
+    }
+    engine.scene.particles[index].material = material;
+    for object in objects {
+        if let Some(obj) = engine.scene.objects.get_mut(object) {
+            obj.material = material;
+        }
+    }
+    if let Some(base) = doc.base_doc_mut() {
+        if let Some(particle) = base.particles.get_mut(index) {
+            particle.texture = if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            };
+        }
+    }
+    doc.record_edit(engine);
+    Ok(())
+}
+
 fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     if engine.scene.particles.is_empty() {
         return;
@@ -3253,95 +3364,34 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.text_edit_singleline(&mut texture);
         });
         #[cfg(not(target_arch = "wasm32"))]
-        if ui
-            .add_enabled(
-                !texture.trim().is_empty(),
-                egui::Button::new("应用粒子贴图（从磁盘读取）"),
-            )
-            .clicked()
         {
-            match quench3d::render::ImageData::from_file(texture.trim()) {
-                Ok(image) => {
-                    let texture_id = engine.renderer.add_texture(&engine.gpu, &image, true);
-                    let old_material = engine.scene.particles[i].material;
-                    let objects = engine.scene.particles[i].objects.clone();
-                    let mut desc = engine
-                        .renderer
-                        .material(old_material)
-                        .cloned()
-                        .unwrap_or_default();
-                    desc.base_color_texture = None;
-                    let name = format!("$particle_ui_{i}_{}", engine.renderer.material_count());
-                    let material =
-                        engine
-                            .assets
-                            .material(&mut engine.renderer, &engine.gpu, &name, desc);
-                    let ok = engine.renderer.set_material_texture(
-                        &engine.gpu,
-                        material,
-                        quench3d::render::MaterialTextureSlot::BaseColor,
-                        Some(texture_id),
-                    );
-                    if ok {
-                        engine.scene.particles[i].material = material;
-                        for object in objects {
-                            if let Some(obj) = engine.scene.objects.get_mut(object) {
-                                obj.material = material;
-                            }
-                        }
-                        if let Some(base) = doc.base_doc_mut() {
-                            if let Some(particle) = base.particles.get_mut(i) {
-                                particle.texture = Some(texture.trim().to_string());
-                            }
-                        }
-                        doc.record_edit(engine);
-                        doc.status = format!("粒子贴图已应用：{}", texture.trim());
-                    } else {
-                        doc.status = "粒子贴图应用失败（材质或贴图句柄无效）".into();
-                    }
-                }
-                Err(error) => doc.status = format!("粒子贴图读图失败：{error}"),
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if ui
-            .add_enabled(
-                doc.base_doc()
-                    .and_then(|base| base.particles.get(i))
-                    .and_then(|p| p.texture.as_ref())
-                    .is_some(),
-                egui::Button::new("清除粒子贴图"),
-            )
-            .clicked()
-        {
-            let old_material = engine.scene.particles[i].material;
-            let objects = engine.scene.particles[i].objects.clone();
-            let mut desc = engine
-                .renderer
-                .material(old_material)
-                .cloned()
-                .unwrap_or_default();
-            desc.base_color_texture = None;
-            let name = format!(
-                "$particle_ui_clear_{i}_{}",
-                engine.renderer.material_count()
-            );
-            let material = engine
-                .assets
-                .material(&mut engine.renderer, &engine.gpu, &name, desc);
-            engine.scene.particles[i].material = material;
-            for object in objects {
-                if let Some(obj) = engine.scene.objects.get_mut(object) {
-                    obj.material = material;
+            if ui
+                .add_enabled(
+                    !texture.trim().is_empty(),
+                    egui::Button::new("应用粒子贴图（从磁盘读取）"),
+                )
+                .clicked()
+            {
+                match replace_particle_texture(engine, doc, i, &texture) {
+                    Ok(()) => doc.status = format!("粒子贴图已应用：{}", texture.trim()),
+                    Err(e) => doc.status = e,
                 }
             }
-            if let Some(base) = doc.base_doc_mut() {
-                if let Some(particle) = base.particles.get_mut(i) {
-                    particle.texture = None;
+            if ui
+                .add_enabled(
+                    doc.base_doc()
+                        .and_then(|base| base.particles.get(i))
+                        .and_then(|p| p.texture.as_ref())
+                        .is_some(),
+                    egui::Button::new("清除粒子贴图"),
+                )
+                .clicked()
+            {
+                match replace_particle_texture(engine, doc, i, "") {
+                    Ok(()) => doc.status = "粒子贴图已清除".into(),
+                    Err(e) => doc.status = e,
                 }
             }
-            doc.record_edit(engine);
-            doc.status = "粒子贴图已清除".into();
         }
         if changed {
             engine.scene.set_particle_enabled(i, new_enabled);
@@ -3509,80 +3559,27 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.text_edit_singleline(&mut texture);
         });
         #[cfg(not(target_arch = "wasm32"))]
-        if ui
-            .add_enabled(
-                !texture.trim().is_empty(),
-                egui::Button::new("应用贴图（从磁盘读取）"),
-            )
-            .clicked()
         {
-            match quench3d::render::ImageData::from_file(texture.trim()) {
-                Ok(image) => {
-                    let texture_id = engine.renderer.add_texture(&engine.gpu, &image, true);
-                    if let Some(index) = engine
-                        .scene
-                        .objects
-                        .iter()
-                        .position(|o| o.name == format!("贴花{i}"))
-                    {
-                        let old = engine.scene.objects[index].material;
-                        let mut desc = engine.renderer.material(old).cloned().unwrap_or_default();
-                        desc.base_color_texture = None;
-                        let name = format!("$decal_ui_{i}_{}", engine.renderer.material_count());
-                        let material =
-                            engine
-                                .assets
-                                .material(&mut engine.renderer, &engine.gpu, &name, desc);
-                        engine.scene.objects[index].material = material;
-                        let ok = engine.renderer.set_material_texture(
-                            &engine.gpu,
-                            material,
-                            quench3d::render::MaterialTextureSlot::BaseColor,
-                            Some(texture_id),
-                        );
-                        if ok {
-                            if let Some(base) = doc.base_doc_mut() {
-                                if let Some(decal) = base.decals.get_mut(i) {
-                                    decal.texture = Some(texture.trim().to_string());
-                                }
-                            }
-                            doc.record_edit(engine);
-                            doc.status = format!("贴花贴图已应用：{}", texture.trim());
-                        } else {
-                            doc.status = "贴花贴图应用失败（材质或贴图句柄无效）".into();
-                        }
-                    }
-                }
-                Err(error) => doc.status = format!("贴花贴图读图失败：{error}"),
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if ui
-            .add_enabled(decal.texture.is_some(), egui::Button::new("清除贴图"))
-            .clicked()
-        {
-            if let Some(index) = engine
-                .scene
-                .objects
-                .iter()
-                .position(|o| o.name == format!("贴花{i}"))
+            if ui
+                .add_enabled(
+                    !texture.trim().is_empty(),
+                    egui::Button::new("应用贴图（从磁盘读取）"),
+                )
+                .clicked()
             {
-                let old = engine.scene.objects[index].material;
-                let mut desc = engine.renderer.material(old).cloned().unwrap_or_default();
-                desc.base_color_texture = None;
-                let name = format!("$decal_ui_clear_{i}_{}", engine.renderer.material_count());
-                let material =
-                    engine
-                        .assets
-                        .material(&mut engine.renderer, &engine.gpu, &name, desc);
-                engine.scene.objects[index].material = material;
-                if let Some(base) = doc.base_doc_mut() {
-                    if let Some(decal) = base.decals.get_mut(i) {
-                        decal.texture = None;
-                    }
+                match replace_decal_texture(engine, doc, i, &texture) {
+                    Ok(()) => doc.status = format!("贴花贴图已应用：{}", texture.trim()),
+                    Err(e) => doc.status = e,
                 }
-                doc.record_edit(engine);
-                doc.status = "贴花贴图已清除".into();
+            }
+            if ui
+                .add_enabled(decal.texture.is_some(), egui::Button::new("清除贴图"))
+                .clicked()
+            {
+                match replace_decal_texture(engine, doc, i, "") {
+                    Ok(()) => doc.status = "贴花贴图已清除".into(),
+                    Err(e) => doc.status = e,
+                }
             }
         }
         if !changed {

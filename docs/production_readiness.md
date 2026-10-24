@@ -3379,7 +3379,10 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 * `inspector_lists_decals_from_base_doc` 排版出「清除贴图」。
 * `inspector_lists_particle_emitters_with_live_parameters` 排版出「清除粒子贴图」。
-* 全量门禁 831 测试（未新增测试函数）。
+* `decal_and_particle_texture_apply_and_clear`：临时 PNG 应用后材质确实带
+  `BaseColor` 贴图、底稿 `texture` 写回；清除后材质无贴图、底稿 `texture = None`；
+  粒子所有代理物体都换到新材质。
+* 全量门禁 832 测试。
 
 **边界**：仍不能改 UV/图集/软粒子；旧材质不回收。
 
@@ -3459,7 +3462,7 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 * `viewport_draws_pip_texture_when_selected`：选绘画中画并给一张 2×2 纹理后，视口
   的绘制列表里出现该纹理 ID 的 mesh。
 * `named_camera_selector_applies_scene_camera`：属性面板排版出「画中画」入口。
-* 全量门禁 831 测试。
+* 全量门禁 832 测试。
 
 **边界**：这是 CPU 回读预览，不是 GPU 实时分屏，也不支持多窗口；约 5 Hz、回读会
 阻塞当前帧；小窗不能单独转视角/拾取；捕获会推进渲染器 TAA 状态，下一帧主视图可能

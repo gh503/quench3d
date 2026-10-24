@@ -1819,3 +1819,133 @@ mod preview_camera_tests {
         assert!(a.rgba != b.rgba, "正面与侧面必须是不同的画面");
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod texture_edit_tests {
+    use super::*;
+
+    /// 贴花/粒子贴图应用与清除都真的换材质、写回底稿；不是只改 UI 文案。
+    #[test]
+    fn decal_and_particle_texture_apply_and_clear() {
+        if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+            return;
+        }
+        let gpu = match pollster::block_on(GpuContext::headless(
+            64,
+            64,
+            quench3d::render::GpuOptions::default(),
+        )) {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("跳过：没有可用的 wgpu 适配器（{e}）");
+                return;
+            }
+        };
+        let config = EngineConfig {
+            width: 64,
+            height: 64,
+            msaa_samples: 1,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(gpu, &config);
+        let mut doc = Doc::new();
+        let text = r#"{
+            "objects": [
+                { "name": "地面", "shape": { "type": "plane", "size": [4, 4, 1] } }
+            ],
+            "decals": [
+                { "position": [0, 0.01, 0], "normal": [0, 1, 0], "size": [1, 1] }
+            ],
+            "particles": [
+                { "count": 2, "position": [0, 1, 0], "lifetime": 1.0, "size": 0.1 }
+            ]
+        }"#;
+        crate::scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
+
+        let path = std::env::temp_dir().join(format!(
+            "quench3d-texture-edit-{}-{}.png",
+            std::process::id(),
+            line!()
+        ));
+        let mut png = Vec::new();
+        quench3d::render::ImageData::solid([0, 255, 0, 255])
+            .write_png(&mut png)
+            .expect("应能编码 PNG");
+        std::fs::write(&path, &png).expect("应能写临时 PNG");
+        let path_text = path.to_string_lossy().to_string();
+
+        let decal_object = engine
+            .scene
+            .objects
+            .iter()
+            .position(|o| o.name == "贴花0")
+            .expect("场景应生成贴花物体");
+        let old_decal_material = engine.scene.objects[decal_object].material;
+        crate::ui::replace_decal_texture(&mut engine, &mut doc, 0, &path_text)
+            .expect("贴花贴图应应用成功");
+        let new_decal_material = engine.scene.objects[decal_object].material;
+        assert_ne!(
+            old_decal_material, new_decal_material,
+            "应用贴图必须换成新材质，不能改共享材质"
+        );
+        assert!(
+            engine
+                .renderer
+                .material(new_decal_material)
+                .and_then(|m| m.base_color_texture)
+                .is_some(),
+            "新材质必须真的带 BaseColor 贴图"
+        );
+        assert_eq!(
+            doc.base_doc().and_then(|d| d.decals[0].texture.clone()),
+            Some(path_text.clone())
+        );
+
+        crate::ui::replace_decal_texture(&mut engine, &mut doc, 0, "").expect("贴花贴图应清除");
+        assert!(
+            engine
+                .renderer
+                .material(engine.scene.objects[decal_object].material)
+                .and_then(|m| m.base_color_texture)
+                .is_none(),
+            "清除后材质必须没有 BaseColor 贴图"
+        );
+        assert_eq!(
+            doc.base_doc().and_then(|d| d.decals[0].texture.clone()),
+            None
+        );
+
+        let old_particle_material = engine.scene.particles[0].material;
+        crate::ui::replace_particle_texture(&mut engine, &mut doc, 0, &path_text)
+            .expect("粒子贴图应应用成功");
+        let new_particle_material = engine.scene.particles[0].material;
+        assert_ne!(old_particle_material, new_particle_material);
+        assert!(engine
+            .renderer
+            .material(new_particle_material)
+            .and_then(|m| m.base_color_texture)
+            .is_some());
+        for object in &engine.scene.particles[0].objects {
+            assert_eq!(
+                engine.scene.objects[*object].material, new_particle_material,
+                "所有粒子代理都必须换到新材质"
+            );
+        }
+        assert_eq!(
+            doc.base_doc().and_then(|d| d.particles[0].texture.clone()),
+            Some(path_text)
+        );
+
+        crate::ui::replace_particle_texture(&mut engine, &mut doc, 0, "").expect("粒子贴图应清除");
+        assert!(engine
+            .renderer
+            .material(engine.scene.particles[0].material)
+            .and_then(|m| m.base_color_texture)
+            .is_none());
+        assert_eq!(
+            doc.base_doc().and_then(|d| d.particles[0].texture.clone()),
+            None
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}

@@ -45,7 +45,8 @@
   在找不到适配器时打印跳过；修复 ubuntu CI 的假红。
 
 - **贴花/粒子贴图可清除（第 174 轮）**：两个面板增加清除按钮，新建无贴图材质并
-  写回 `texture = None`。测试总数仍为 831（扩展现有 UI smoke）。
+  写回 `texture = None`。新增 `decal_and_particle_texture_apply_and_clear` 正向测试
+  （临时 PNG → 材质/底稿 → 清除），测试总数 832。
 
 - **粒子贴图可应用（第 173 轮）**：面板从磁盘读图，给该发射器新建独立材质并写回
   `particles[].texture`。测试总数仍为 831（扩展现有 UI smoke）。
