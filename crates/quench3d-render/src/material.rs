@@ -36,6 +36,8 @@ pub struct MaterialUniform {
     pub params: [f32; 4],
     /// x = alpha 裁剪阈值，y = 法线强度，z = 环境光遮蔽强度，w = 备用。
     pub params2: [f32; 4],
+    /// xy = UV 偏移，z = 旋转 cos，w = 旋转 sin。
+    pub uv_transform: [f32; 4],
 }
 
 /// 材质描述（创建后不可变，修改请重新创建）。
@@ -53,6 +55,10 @@ pub struct MaterialDesc {
     pub emissive_strength: f32,
     /// UV 缩放（平铺次数）。
     pub uv_scale: f32,
+    /// UV 偏移（贴图坐标，0.5 = 半个贴图）。
+    pub uv_offset: [f32; 2],
+    /// UV 旋转（弧度，绕 (0.5, 0.5)）。
+    pub uv_rotation: f32,
     /// 基础色贴图。
     pub base_color_texture: Option<TextureId>,
     /// 法线贴图。
@@ -89,6 +95,8 @@ impl Default for MaterialDesc {
             emissive: Vec3::ZERO,
             emissive_strength: 1.0,
             uv_scale: 1.0,
+            uv_offset: [0.0, 0.0],
+            uv_rotation: 0.0,
             base_color_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,
@@ -237,6 +245,12 @@ impl MaterialDesc {
                 1.0,
                 if self.water_mask { 1.0 } else { 0.0 },
             ],
+            uv_transform: [
+                self.uv_offset[0],
+                self.uv_offset[1],
+                self.uv_rotation.cos(),
+                self.uv_rotation.sin(),
+            ],
         }
     }
 
@@ -273,7 +287,21 @@ mod tests {
     #[test]
     fn uniform_layout_is_16_byte_aligned() {
         assert_eq!(std::mem::size_of::<MaterialUniform>() % 16, 0);
-        assert_eq!(std::mem::size_of::<MaterialUniform>(), 64);
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 80);
+    }
+
+    #[test]
+    fn uv_transform_is_carried_as_offset_and_rotation() {
+        let m = MaterialDesc {
+            uv_offset: [0.25, -0.5],
+            uv_rotation: std::f32::consts::FRAC_PI_2,
+            ..MaterialDesc::default()
+        };
+        let u = m.to_uniform().uv_transform;
+        assert_eq!(u[0], 0.25);
+        assert_eq!(u[1], -0.5);
+        assert!(u[2].abs() < 1e-6, "cos(90°) 应约为 0：{}", u[2]);
+        assert!((u[3] - 1.0).abs() < 1e-6, "sin(90°) 应约为 1：{}", u[3]);
     }
 
     #[test]

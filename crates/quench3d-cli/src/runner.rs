@@ -3959,6 +3959,12 @@ fn material_desc(
     if let Some(u) = m.uv_scale {
         desc.uv_scale = u;
     }
+    if let Some(o) = m.uv_offset {
+        desc.uv_offset = o;
+    }
+    if let Some(r) = m.uv_rotation {
+        desc.uv_rotation = r.to_radians();
+    }
     if let Some(n) = m.normal_scale {
         desc.normal_scale = n;
     }

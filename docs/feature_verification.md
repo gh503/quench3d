@@ -150,6 +150,7 @@ tools/verify_all.sh
 
 | 功能 | 正向证据 | 判据 |
 | --- | --- | --- |
+| 材质 UV 偏移/旋转 | `cargo test -p quench3d-render --lib uv_transform` + `...ui_smoke material_texture` | uniform 带 offset/cos/sin；材质段绘制两个控件 |
 | 物体材质贴图应用/清除 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib texture_edit` + `...ui_smoke material_texture_slots` | 应用后材质贴图与 `doc.textures` 非空，清除后都为空；有贴图设置时材质段自动展开并绘制两个按钮 |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
 | 色调映射算子 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline tonemap_operator` | ACES/Reinhard/线性三档渲染像素与 CPU 公式一致、互不相同 |

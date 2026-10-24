@@ -69,6 +69,8 @@ struct Material {
     params: vec4<f32>,
     // x = alpha 裁剪阈值, y = 法线强度, z = 环境光遮蔽强度, w = 备用
     params2: vec4<f32>,
+    // xy = UV 偏移, z = 旋转 cos, w = 旋转 sin
+    uv_transform: vec4<f32>,
 };
 
 const PI: f32 = 3.14159265359;

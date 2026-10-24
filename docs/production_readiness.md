@@ -69,7 +69,7 @@
 | PBR 通道 | 全部 | base color / metallic / roughness / metallic-roughness 贴图 / emissive(+色+强度+贴图) / normal(+normal_scale) / alpha cutoff / alpha blend / unlit / double_sided（`material.rs:43-77`） | ✅ |
 | 贴图槽 | 全部 | **4 槽**：base color / normal / MR / emissive（`material.rs:57-63`） | ✅ |
 | 遮挡贴图（AO 通道） | 全部 | 无（`params2.z` 硬编码 1.0 且 shader 不读，`material.rs:229`） | ❌ |
-| UV 变换 | 全部 | 只有**全局标量** `uv_scale`（`material.rs:55`）；无 offset/rotation、无逐贴图变换 | 🟠 |
+| UV 变换 | 全部 | 材质级 `uv_scale` + `uv_offset` + `uv_rotation`（度，绕贴图中心）；无逐贴图变换、无 UV 动画 | 🟡 |
 | 多材质槽（一个模型多材质） | 全部 | 无（物体 = 1 材质） | ❌ |
 | 材质编辑 | 全部 | 颜色/金属度/粗糙度/自发光可在属性面板即时改（≤1 帧生效）；4 个贴图槽可应用/清除；有显式贴图设置时材质段自动展开 | ✅ |
 | 材质节点图 / 材质球 | Blender / Unreal | 无 | ❌ |
@@ -3366,6 +3366,30 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：不是完整 root motion 系统——只提取三维位移与绕 Y 偏航，不提取俯仰/滚转，
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
+
+### 23.84 材质 UV 偏移与旋转（第 184 轮）
+
+**做了什么**：
+
+* `MaterialDesc` 新增 `uv_offset: [f32; 2]`、`uv_rotation: f32`（弧度）；默认零，
+  旧材质逐像素不变。
+* 材质常量新增 `uv_transform: vec4`（xy = 偏移，z/w = cos/sin）；PBR 着色器在
+  `uv_scale` 之前先绕 `(0.5, 0.5)` 旋转、再平移。
+* 场景格式 `materials[]` 新增 `uv_offset`（贴图坐标）与 `uv_rotation`（度）；
+  CLI 转成弧度写入材质。
+* 编辑器材质段新增「UV 偏移」x/y 与「UV 旋转（度）」；写回 `doc.textures`。
+
+**验证**：
+
+* `uv_transform_is_carried_as_offset_and_rotation`：偏移原样进入 uniform，
+  `cos(90°)≈0`、`sin(90°)≈1`；`MaterialUniform` 仍为 16 字节对齐（80 字节）。
+* `newly_wired_fields_are_validated`：场景 JSON 的 `uv_offset/uv_rotation` 能解析。
+* `material_texture_slots_have_apply_and_clear_buttons`：材质段绘制出「UV 偏移」
+  「UV 旋转（度）」。
+* 全量门禁 836 测试。
+
+**边界**：仍是**材质级**变换，不是逐贴图 UV 通道；没有 UV 动画/滚动；编辑器没有
+gizmo 拖拽改 UV。
 
 ### 23.83 灯光 gizmo 调试绘制（第 183 轮）
 

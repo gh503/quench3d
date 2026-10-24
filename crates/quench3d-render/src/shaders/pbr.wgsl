@@ -426,7 +426,15 @@ struct FragOut {
 fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut {
     let flags = u32(material.params.w + 0.5);
     let scale = max(material.params.z, 1e-4);
-    let uv = in.uv * scale;
+    // 先绕 (0.5, 0.5) 旋转，再平移，最后按 uv_scale 平铺。
+    let centered = in.uv - vec2<f32>(0.5);
+    let c = material.uv_transform.z;
+    let s = material.uv_transform.w;
+    let rotated = vec2<f32>(
+        centered.x * c - centered.y * s,
+        centered.x * s + centered.y * c,
+    );
+    let uv = (rotated + vec2<f32>(0.5) + material.uv_transform.xy) * scale;
 
     // 无条件采样，随后用标志位选择，保证控制流均匀。
     let base_sample = textureSample(base_color_tex, base_color_sampler, uv);

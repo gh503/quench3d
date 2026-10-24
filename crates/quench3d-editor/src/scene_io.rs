@@ -414,6 +414,8 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             // 以下几项只有从原文档继承时才可能非空。
             emissive_color: None,
             uv_scale: None,
+            uv_offset: None,
+            uv_rotation: None,
             base_color_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,
@@ -612,6 +614,12 @@ fn apply_texture_overrides(material: &mut MaterialDoc, explicit: &TexturePaths) 
     }
     if explicit.uv_scale.is_some() {
         material.uv_scale = explicit.uv_scale;
+    }
+    if explicit.uv_offset.is_some() {
+        material.uv_offset = explicit.uv_offset;
+    }
+    if explicit.uv_rotation.is_some() {
+        material.uv_rotation = explicit.uv_rotation;
     }
     if explicit.normal_scale.is_some() {
         material.normal_scale = explicit.normal_scale;

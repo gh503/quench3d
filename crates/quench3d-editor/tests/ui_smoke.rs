@@ -1041,6 +1041,14 @@ fn material_texture_slots_have_apply_and_clear_buttons() {
         shapes_contain_text(&shapes, "清除基础色贴图"),
         "物体材质面板没有清除基础色贴图按钮"
     );
+    assert!(
+        shapes_contain_text(&shapes, "UV 偏移"),
+        "物体材质面板没有绘制 UV 偏移"
+    );
+    assert!(
+        shapes_contain_text(&shapes, "UV 旋转（度）"),
+        "物体材质面板没有绘制 UV 旋转"
+    );
 }
 
 fn shapes_contain_texture(

@@ -1284,6 +1284,12 @@ pub struct MaterialDoc {
     /// UV 平铺次数（> 0），缺省 1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uv_scale: Option<f32>,
+    /// UV 偏移 `[u, v]`，缺省 `[0, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_offset: Option<[f32; 2]>,
+    /// UV 旋转（度，绕贴图中心），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_rotation: Option<f32>,
     /// 基础色贴图路径（相对场景文件，也支持绝对路径）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_color_texture: Option<String>,
@@ -8768,11 +8774,15 @@ mod tests {
         // 合法值不应产生 error
         let ok = SceneDoc::from_value(json!({
             "materials": { "m": { "color": [1, 1, 1], "alpha": 0.5, "uv_scale": 2.0,
+                                  "uv_offset": [0.25, -0.5], "uv_rotation": 45.0,
                                   "emissive_color": [1.0, 0.5, 0.0], "normal_scale": 0.5,
                                   "alpha_blend": true, "double_sided": true, "unlit": false } }
         }))
         .unwrap();
         assert!(!SceneDoc::has_errors(&ok.validate()), "{:?}", ok.validate());
+        let m = &ok.materials["m"];
+        assert_eq!(m.uv_offset, Some([0.25, -0.5]));
+        assert_eq!(m.uv_rotation, Some(45.0));
 
         // 相机：近/远裁剪面与正交高度
         let cam = SceneDoc::from_value(json!({

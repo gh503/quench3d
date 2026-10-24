@@ -130,6 +130,10 @@ pub struct TexturePaths {
     pub emissive: Option<String>,
     /// UV 平铺次数。
     pub uv_scale: Option<f32>,
+    /// UV 偏移（度/贴图坐标）。
+    pub uv_offset: Option<[f32; 2]>,
+    /// UV 旋转（度）。
+    pub uv_rotation: Option<f32>,
     /// 法线强度。
     pub normal_scale: Option<f32>,
     /// alpha 裁剪阈值。

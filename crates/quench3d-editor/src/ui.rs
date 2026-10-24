@@ -1662,6 +1662,35 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .changed();
             });
             ui.horizontal(|ui| {
+                ui.label("UV 偏移");
+                let mut offset = desc.uv_offset;
+                let sx = ui
+                    .add(egui::DragValue::new(&mut offset[0]).speed(0.01))
+                    .changed();
+                let sy = ui
+                    .add(egui::DragValue::new(&mut offset[1]).speed(0.01))
+                    .changed();
+                if sx || sy {
+                    desc.uv_offset = offset;
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("UV 旋转（度）");
+                let mut degrees = desc.uv_rotation.to_degrees();
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut degrees)
+                            .speed(0.5)
+                            .range(-360.0..=360.0),
+                    )
+                    .changed()
+                {
+                    desc.uv_rotation = degrees.to_radians();
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
                 ui.label("法线强度");
                 changed |= ui
                     .add(
@@ -1822,6 +1851,8 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         .update_material(&engine.gpu, material_id, desc.clone());
     let entry = doc.textures.entry(object_name).or_default();
     entry.uv_scale = Some(desc.uv_scale);
+    entry.uv_offset = Some(desc.uv_offset);
+    entry.uv_rotation = Some(desc.uv_rotation.to_degrees());
     entry.normal_scale = Some(desc.normal_scale);
     entry.alpha_cutoff = Some(desc.alpha_cutoff);
     entry.alpha_blend = Some(desc.alpha_blend);
