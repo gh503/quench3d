@@ -903,6 +903,27 @@ impl Doc {
         true
     }
 
+    /// 在场景 `cameras` 段里前后切换命名视角；`delta` 为正向后、负向前，循环。
+    ///
+    /// 没有命名相机时返回 `None`。当前是「编辑器视角」时，正向选第一台、负向选最后。
+    pub fn cycle_named_camera(&mut self, engine: &mut Engine, delta: i32) -> Option<String> {
+        let names: Vec<String> = self.base_doc.as_ref()?.cameras.keys().cloned().collect();
+        if names.is_empty() {
+            return None;
+        }
+        let current = self
+            .selected_camera
+            .as_ref()
+            .and_then(|name| names.iter().position(|n| n == name));
+        let next = match current {
+            Some(index) => (index as i32 + delta).rem_euclid(names.len() as i32) as usize,
+            None if delta >= 0 => 0,
+            None => names.len() - 1,
+        };
+        let name = names[next].clone();
+        self.select_named_camera(engine, &name).then_some(name)
+    }
+
     /// 编辑完成之后记一步历史（与栈顶相同则自动跳过）。
     pub fn record_edit(&mut self, engine: &Engine) {
         let json = scene_json(engine, self);

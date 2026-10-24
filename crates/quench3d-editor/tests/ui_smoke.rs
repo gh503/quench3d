@@ -693,3 +693,30 @@ fn named_camera_selector_applies_scene_camera() {
     );
     output.textures_delta.clear();
 }
+#[test]
+fn named_camera_cycle_wraps_in_name_order() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let text = r#"{
+        "cameras": {
+            "A": { "position": [5, 5, 0], "look_at": [0, 1, 0] },
+            "B": { "position": [10, 5, 0], "look_at": [0, 1, 0] },
+            "C": { "position": [15, 5, 0], "look_at": [0, 1, 0] }
+        },
+        "objects": [
+            { "name": "箱", "shape": { "type": "box", "size": [1, 1, 1] }, "body": "static" }
+        ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
+    assert_eq!(doc.cycle_named_camera(&mut engine, 1).as_deref(), Some("A"));
+    assert_eq!(doc.cycle_named_camera(&mut engine, 1).as_deref(), Some("B"));
+    assert_eq!(doc.cycle_named_camera(&mut engine, 1).as_deref(), Some("C"));
+    assert_eq!(doc.cycle_named_camera(&mut engine, 1).as_deref(), Some("A"));
+    assert_eq!(
+        doc.cycle_named_camera(&mut engine, -1).as_deref(),
+        Some("C")
+    );
+    assert_eq!(doc.selected_camera.as_deref(), Some("C"));
+}

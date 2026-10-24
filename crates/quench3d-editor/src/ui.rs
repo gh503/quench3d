@@ -482,6 +482,13 @@ fn top_bar(
                     .selected_camera
                     .clone()
                     .unwrap_or_else(|| "编辑器视角".to_string());
+                ui.horizontal(|ui| {
+                if ui.button("◀").on_hover_text("上一台命名相机").clicked() {
+                    doc.cycle_named_camera(engine, -1);
+                }
+                if ui.button("▶").on_hover_text("下一台命名相机").clicked() {
+                    doc.cycle_named_camera(engine, 1);
+                }
                 egui::ComboBox::from_id_salt("named-camera")
                     .selected_text(current)
                     .show_ui(ui, |ui| {
@@ -500,6 +507,7 @@ fn top_bar(
                     })
                     .response
                     .on_hover_text("场景 `cameras` 段里的命名视角；只切换主相机，不做分屏");
+                });
             }
 
             ui.separator();

@@ -63,6 +63,7 @@ tools/verify_all.sh
 | 粒子圆锥形状 | `cargo test -p quench3d --lib particle_cone`、`cargo test -p quench3d-cli --lib particles_parse` | 64 颗、r=2、h=3，全部满足 0≤y≤3 且 x²+z²≤(2y/3)²；shape 接受 cone |
 | 粒子圆盘形状 | `cargo test -p quench3d --lib particle_disc`、`cargo test -p quench3d-cli --lib particles_parse` | 64 颗、r=2 全部 y=0 且 x²+z²≤4；shape 域接受 disc、拒绝 cone |
 | 粒子速度对齐 | `cargo test -p quench3d --lib particle_velocity_alignment`、`cargo test -p quench3d-cli --lib particles_parse` | 速度 +X 时局部 +Z→+X；速度归零退回相机；`alignment` 往返、非法值报错 |
+| 命名相机前后切换 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke named_camera_cycle` | A/B/C 正向 A→B→C→A，负向回 C；`selected_camera` 同步 |
 | 命名相机切换 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke named_camera` | 装载侧视(position 10,5,0 / look_at 0,1,0 / fov 45°)，选择后焦点、√116 距离、fov 全对；下拉框显示「侧视」 |
 | 粒子终点色编辑 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_particle` | 面板排版出「终点色」控件 |
 | 粒子数量编辑 | `cargo test -p quench3d --lib particle_count`、UI smoke | 4→2 保留前两个代理；2→6 新代理在球内；6→1 收缩；面板有「数量」 |
