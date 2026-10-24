@@ -847,7 +847,67 @@ fn viewport_draws_pip_texture_when_selected() {
         shapes_contain_texture(&output.shapes, texture_id),
         "选绘画中画后视口应绘制第二相机纹理"
     );
+    let bottom_right =
+        shapes_texture_rect(&output.shapes, texture_id).expect("画中画纹理 mesh 必须有包围矩形");
+    assert!(
+        bottom_right.center().x > 640.0 && bottom_right.center().y > 450.0,
+        "默认小窗应贴右下角，实际 {bottom_right:?}"
+    );
     output.textures_delta.clear();
+
+    doc.pip_corner = 3;
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    let top_left = shapes_texture_rect(&output.shapes, texture_id)
+        .expect("切换角落后画中画纹理 mesh 仍应存在");
+    assert!(
+        top_left.center().x < 640.0 && top_left.center().y < 450.0,
+        "切到左上后小窗应贴左上角，实际 {top_left:?}"
+    );
+    output.textures_delta.clear();
+}
+
+fn shapes_texture_rect(
+    shapes: &[egui::epaint::ClippedShape],
+    texture_id: egui::TextureId,
+) -> Option<egui::Rect> {
+    for clipped in shapes {
+        if let Some(rect) = shape_texture_rect(&clipped.shape, texture_id) {
+            return Some(rect);
+        }
+    }
+    None
+}
+
+fn shape_texture_rect(shape: &egui::Shape, texture_id: egui::TextureId) -> Option<egui::Rect> {
+    match shape {
+        egui::Shape::Mesh(mesh) if mesh.texture_id == texture_id => {
+            let mut rect = egui::Rect::NOTHING;
+            for vertex in &mesh.vertices {
+                rect.extend_with(vertex.pos);
+            }
+            Some(rect)
+        }
+        egui::Shape::Vec(inner) => inner
+            .iter()
+            .find_map(|shape| shape_texture_rect(shape, texture_id)),
+        _ => None,
+    }
 }
 
 fn shapes_contain_texture(

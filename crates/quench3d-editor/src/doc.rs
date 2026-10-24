@@ -211,6 +211,8 @@ pub struct Doc {
     pub selected_camera: Option<String>,
     /// 画中画使用的命名相机；`None` = 关闭。
     pub pip_camera: Option<String>,
+    /// 画中画角落：0 右下、1 左下、2 右上、3 左上。
+    pub pip_corner: u8,
     /// 画中画最近一帧（CPU 回读后上传的 egui 纹理）；仅在桌面端使用。
     pub pip_texture: Option<egui::TextureHandle>,
     /// 上一次画中画捕获的帧号，用来限制回读频率。
@@ -894,6 +896,7 @@ impl Doc {
             status: "就绪".to_string(),
             selected_camera: None,
             pip_camera: None,
+            pip_corner: 0,
             pip_texture: None,
             pip_last_frame: 0,
             show_help: false,

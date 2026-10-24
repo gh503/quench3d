@@ -534,7 +534,21 @@ fn top_bar(
                             }
                         })
                         .response
-                        .on_hover_text("右下角小窗预览第二台命名相机（约 5 Hz，CPU 回读）");
+                        .on_hover_text("小窗预览第二台命名相机（约 5 Hz，CPU 回读）");
+                    egui::ComboBox::from_id_salt("pip-corner")
+                        .selected_text(match doc.pip_corner {
+                            1 => "左下",
+                            2 => "右上",
+                            3 => "左上",
+                            _ => "右下",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in
+                                [(0, "右下"), (1, "左下"), (2, "右上"), (3, "左上")]
+                            {
+                                ui.selectable_value(&mut doc.pip_corner, value, label);
+                            }
+                        });
                 });
             }
 
@@ -4055,10 +4069,15 @@ fn viewport(
             if let Some(texture) = doc.pip_texture.as_ref() {
                 let width = (rect.width() * 0.28).clamp(160.0, 320.0);
                 let height = width * 9.0 / 16.0;
-                let pip_rect = egui::Rect::from_min_size(
-                    rect.right_bottom() - egui::vec2(width + 12.0, height + 12.0),
-                    egui::vec2(width, height),
-                );
+                let size = egui::vec2(width, height);
+                let margin = egui::vec2(12.0, 12.0);
+                let min = match doc.pip_corner {
+                    1 => egui::pos2(rect.left() + margin.x, rect.bottom() - size.y - margin.y),
+                    2 => egui::pos2(rect.right() - size.x - margin.x, rect.top() + margin.y),
+                    3 => egui::pos2(rect.left() + margin.x, rect.top() + margin.y),
+                    _ => egui::pos2(rect.right() - size.x - margin.x, rect.bottom() - size.y - margin.y),
+                };
+                let pip_rect = egui::Rect::from_min_size(min, size);
                 painter.image(
                     texture.id(),
                     pip_rect,
@@ -4096,7 +4115,7 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.label("右键拖动：平移（飞行模式下是转头）");
             ui.label("滚轮：推近拉远");
             ui.label("Tab：切换轨道 / 飞行相机");
-            ui.label("画中画：相机面板选第二台命名相机（桌面端约 5 Hz 预览）");
+            ui.label("画中画：相机面板选第二台命名相机，并可选右下/左下/右上/左上（桌面端约 5 Hz 预览）");
             ui.label("R：聚焦到整个场景");
             ui.add_space(6.0);
             ui.label(RichText::new("编辑").strong());
