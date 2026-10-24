@@ -4113,6 +4113,7 @@ pub fn taa_options(doc: &SceneDoc) -> quench3d::render::TaaOptions {
     quench3d::render::TaaOptions {
         enabled: t.enabled.unwrap_or(true),
         feedback: t.feedback.unwrap_or(defaults.feedback),
+        motion_vectors: defaults.motion_vectors,
     }
 }
 

@@ -31,6 +31,8 @@ pub struct SceneObject {
     /// 世界变换用 [`Scene::world_transform`] 现算（沿父链把局部变换拼上去），
     /// 所以移动父物体时子物体会自动跟着走，不需要任何"同步"步骤。
     pub transform: Transform,
+    /// **上一帧**的世界变换（TAA 运动向量）；每帧开头 [`Scene::snapshot_previous`] 写入。
+    pub prev_world: Option<Transform>,
     /// 父物体下标（`None` = 根）。
     ///
     /// 用下标而不是名字：场景里的物体本来就是按列表存取的，名字可能重复；
@@ -321,6 +323,7 @@ impl SceneObject {
     /// 生成绘制描述（`world` 是它的**世界**变换，见 [`Scene::world_transform`]）。
     pub fn instance(&self, world: Transform) -> InstanceDesc {
         let mut d = InstanceDesc::new(world)
+            .with_previous(self.prev_world.unwrap_or(world))
             .with_color(self.color)
             .with_cast_shadows(self.cast_shadows)
             .with_receive_shadows(self.receive_shadows);
@@ -1271,6 +1274,7 @@ impl Scene {
             mesh,
             material,
             transform,
+            prev_world: None,
             parent: None,
             owner_part: None,
             body: None,
@@ -2434,6 +2438,17 @@ impl Scene {
         out
     }
 
+    /// 记录当前世界变换为"上一帧"，供 TAA 运动向量使用。
+    ///
+    /// 必须在物理/动画/编辑器改变换**之前**调用；第一帧没有上一帧，留 `None`
+    /// （着色器会把运动向量写成当前 UV，等价于没有历史）。
+    pub fn snapshot_previous(&mut self) {
+        for i in 0..self.objects.len() {
+            let world = self.world_transform(i);
+            self.objects[i].prev_world = Some(world);
+        }
+    }
+
     /// 提交全部可见物体到渲染器。
     pub fn submit(&self, renderer: &mut Renderer) {
         let (palette, skin_plan) = gpu_skin_plan(&self.animations, self.gpu_skinning);
@@ -2844,6 +2859,22 @@ mod tests {
         scene.set_parent(c, Some(p)).expect("挂父物体应当成功");
         assert_eq!(scene.find("父"), Some(p));
         scene
+    }
+
+    #[test]
+    fn snapshot_previous_keeps_last_world_transform_for_taa() {
+        let mut scene = scene_with_chain();
+        let child = scene.find("子").unwrap();
+        let parent = scene.find("父").unwrap();
+        let before = scene.world_transform(child);
+        scene.snapshot_previous();
+        // 移动父物体：子物体的世界位姿跟着变，但 prev_world 必须停在旧世界位姿。
+        scene.objects[parent].transform.position = Vec3::new(30.0, 0.0, 0.0);
+        let after = scene.world_transform(child);
+        assert!((after.position - before.position).length() > 1.0);
+        assert_eq!(scene.objects[child].prev_world, Some(before));
+        let instance = scene.objects[child].instance(after);
+        assert_eq!(instance.prev_transform, Some(before));
     }
 
     #[test]

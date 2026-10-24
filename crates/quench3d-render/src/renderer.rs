@@ -69,6 +69,7 @@ const BLOOM_WGSL: &str = include_str!("shaders/bloom.wgsl");
 const FXAA_WGSL: &str = include_str!("shaders/fxaa.wgsl");
 /// 时域抗锯齿（TAA）着色器。只在能读深度纹理的后端上建管线。
 const TAA_WGSL: &str = include_str!("shaders/taa.wgsl");
+const MOTION_WGSL: &str = include_str!("shaders/motion.wgsl");
 const DEPTH_RESOLVE_WGSL: &str = include_str!("shaders/depth_resolve.wgsl");
 
 /// `post.wgsl` 里"依赖读深度纹理"的区段标记（见 [`post_wgsl_for`]）。
@@ -283,6 +284,10 @@ pub struct InstanceRaw {
     pub params: [f32; 4],
     /// x = 蒙皮调色板起始下标，y = 关节数（0 = 不做 GPU 蒙皮）。
     pub skin: [f32; 4],
+    /// **上一帧**的模型矩阵（TAA 运动向量；存 3 行，底行固定 0,0,0,1）。
+    ///
+    /// 放在最后是为了顶点属性偏移与 `Renderer::instance_layout` 的顺序一致。
+    pub prev_model: [[f32; 4]; 3],
 }
 
 /// 一次绘制请求（面向使用者的实例描述）。
@@ -290,6 +295,8 @@ pub struct InstanceRaw {
 pub struct InstanceDesc {
     /// 世界变换。
     pub transform: Transform,
+    /// **上一帧**的世界变换（TAA 运动向量）；`None` = 与当前相同。
+    pub prev_transform: Option<Transform>,
     /// 颜色倍乘（线性空间）。
     pub color: Vec4,
     /// 覆盖材质的金属度（`None` 用材质自身的值）。
@@ -312,6 +319,7 @@ impl Default for InstanceDesc {
     fn default() -> Self {
         Self {
             transform: Transform::IDENTITY,
+            prev_transform: None,
             color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             metallic: None,
             roughness: None,
@@ -374,6 +382,12 @@ impl InstanceDesc {
     }
 
     /// GPU 蒙皮：本实例用调色板里的 `[base, base+count)` 段关节矩阵。
+    /// 设置上一帧的世界变换（TAA 运动向量）；不设时按当前变换处理。
+    pub fn with_previous(mut self, previous: Transform) -> Self {
+        self.prev_transform = Some(previous);
+        self
+    }
+
     pub fn with_skin(mut self, base: u32, count: u32) -> Self {
         self.skin_base = base;
         self.skin_count = count;
@@ -382,9 +396,14 @@ impl InstanceDesc {
 
     fn to_raw(self) -> InstanceRaw {
         let m = self.transform.matrix();
+        let prev = self.prev_transform.unwrap_or(self.transform).matrix();
         let override_material = self.metallic.is_some() || self.roughness.is_some();
         InstanceRaw {
             model: m.to_cols_arrays(),
+            prev_model: {
+                let rows = prev.transpose().to_cols_arrays();
+                [rows[0], rows[1], rows[2]]
+            },
             color: self.color.to_array(),
             params: [
                 self.metallic.unwrap_or(0.0),
@@ -534,6 +553,14 @@ pub struct PostUniforms {
     pub grade: [f32; 4],
 }
 
+/// 运动向量 pass 的参数：当前帧（含抖动）与上一帧的 view-proj。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct MotionUniform {
+    current_view_proj: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+}
+
 /// TAA 参数（与 `taa.wgsl` 的 `TaaParams` 逐字节一致）。
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -668,6 +695,9 @@ pub struct TaaOptions {
     pub enabled: bool,
     /// 历史权重（0~0.98）：越大越平滑、越容易拖影；0 = 等同关闭。
     pub feedback: f32,
+    /// 是否用运动向量重投影（缺省开）。关掉后 TAA 只用深度反投影，
+    /// 运动物体会靠邻域 clamp 抑制拖影。
+    pub motion_vectors: bool,
 }
 
 impl Default for TaaOptions {
@@ -675,6 +705,7 @@ impl Default for TaaOptions {
         Self {
             enabled: false,
             feedback: 0.9,
+            motion_vectors: true,
         }
     }
 }
@@ -1035,6 +1066,13 @@ pub struct Renderer {
     /// 后处理在 TAA 开启时读 `taa_current`，而不是原始 HDR。
     post_taa_bind_group: Option<wgpu::BindGroup>,
     taa_pipeline: Option<wgpu::RenderPipeline>,
+    /// TAA 运动向量：当前帧与上一帧的屏幕 UV（`Rgba16Float`，单采样）。
+    motion_view: Option<wgpu::TextureView>,
+    motion_pipeline: Option<wgpu::RenderPipeline>,
+    motion_bind_group: Option<wgpu::BindGroup>,
+    motion_uniform: wgpu::Buffer,
+    /// TAA 不可用时的 1×1 占位（后处理绑定组 binding 6 必须存在）。
+    dummy_motion_view: wgpu::TextureView,
     taa_uniform: wgpu::Buffer,
     taa_prev_view_proj: Mat4,
     /// 上一帧的相机位置/朝向，用来识别切镜并丢弃历史。
@@ -1538,8 +1576,29 @@ impl Renderer {
                 },
                 // 水面 mask（r = 1）：屏幕空间水的可见性；与深度无关，GL/WebGL2 也能用。
                 texture_binding(5),
+                // TAA 运动向量（rg = 上一帧 UV；0,0 = 没有可信向量，回退深度）。
+                texture_binding(6),
             ],
         });
+        let motion_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-motion-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let motion_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quench3d-motion-pipeline-layout"),
+                bind_group_layouts: &[Some(&motion_layout)],
+                immediate_size: 0,
+            });
         let bloom_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("quench3d-bloom-layout"),
             entries: &[
@@ -1625,6 +1684,9 @@ impl Renderer {
         // `texture_depth_2d` 在 naga GLSL 后端不可用。
         let taa_module = (depth_texture_read && ctx.msaa_samples <= 1)
             .then(|| ctx.create_shader("quench3d-taa", TAA_WGSL));
+        let motion_module = taa_module
+            .as_ref()
+            .map(|_| ctx.create_shader("quench3d-motion", MOTION_WGSL));
         // 深度解析那一趟同样有 `textureLoad(ms_depth, ..)`：不支持就不建（连模块都不建）。
         let depth_resolve_module = depth_texture_read
             .then(|| ctx.create_shader("quench3d-depth-resolve", DEPTH_RESOLVE_WGSL));
@@ -2129,6 +2191,31 @@ impl Renderer {
             )
         });
 
+        let motion_pipeline = motion_module.as_ref().map(|module| {
+            build_pipeline(
+                device,
+                PipelineSpec {
+                    label: "quench3d-motion",
+                    layout: &motion_pipeline_layout,
+                    module,
+                    vs_entry: "vs_main",
+                    fs_entry: Some("fs_main"),
+                    buffers: vec![mesh_buffer.clone(), Some(Self::motion_instance_layout())],
+                    targets: vec![Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    depth: depth_state(false, wgpu::CompareFunction::LessEqual, 0),
+                    sample_count: 1,
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: Some(wgpu::Face::Back),
+                        ..Default::default()
+                    },
+                },
+            )
+        });
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("quench3d-dummy-depth"),
             size: wgpu::Extent3d {
@@ -2155,6 +2242,38 @@ impl Renderer {
             size: std::mem::size_of::<TaaUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        let motion_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-motion-uniform"),
+            size: std::mem::size_of::<MotionUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let dummy_motion_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("quench3d-dummy-motion"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let motion_bind_group = motion_pipeline.as_ref().map(|_| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quench3d-motion-bind-group"),
+                layout: &motion_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: motion_uniform.as_entire_binding(),
+                }],
+            })
         });
         let post_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("quench3d-post-sampler"),
@@ -2276,6 +2395,11 @@ impl Renderer {
             taa_bind_group: None,
             post_taa_bind_group: None,
             taa_pipeline,
+            motion_view: None,
+            motion_pipeline,
+            motion_bind_group,
+            motion_uniform,
+            dummy_motion_view,
             taa_uniform,
             taa_prev_view_proj: Mat4::IDENTITY,
             taa_prev_camera: None,
@@ -2346,14 +2470,64 @@ impl Renderer {
     }
 
     fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
             4 => Float32x4,
             5 => Float32x4,
             6 => Float32x4,
             7 => Float32x4,
             8 => Float32x4,
             9 => Float32x4,
-            12 => Float32x4
+            12 => Float32x4,
+            13 => Float32x4,
+            14 => Float32x4,
+            15 => Float32x4
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceRaw>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
+    }
+
+    fn motion_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        // 显式写 offset：运动管线只消费模型 + 上一帧模型，不能让"跳过的
+        // 颜色/参数/蒙皮"把后续属性的偏移挤错。
+        const ATTRS: [wgpu::VertexAttribute; 7] = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 5,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 6,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 7,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 112,
+                shader_location: 13,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 128,
+                shader_location: 14,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 144,
+                shader_location: 15,
+            },
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<InstanceRaw>() as u64,
@@ -2935,6 +3109,8 @@ impl Renderer {
                 Some(current.create_view(&wgpu::TextureViewDescriptor::default()));
             self.taa_history_view =
                 Some(history.create_view(&wgpu::TextureViewDescriptor::default()));
+            let motion = make("quench3d-motion");
+            self.motion_view = Some(motion.create_view(&wgpu::TextureViewDescriptor::default()));
             self.taa_current = Some(current);
             self.taa_history = Some(history);
             self.taa_history_valid = false;
@@ -2945,6 +3121,7 @@ impl Renderer {
             self.taa_history_view = None;
             self.taa_bind_group = None;
             self.post_taa_bind_group = None;
+            self.motion_view = None;
         }
 
         // 水面 mask：单采样目标（后处理读）+（MSAA 时）多采样附件。
@@ -3127,6 +3304,12 @@ impl Renderer {
                             self.water_mask_view.as_ref().expect("水面 mask 目标缺失"),
                         ),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.motion_view.as_ref().unwrap_or(&self.dummy_motion_view),
+                        ),
+                    },
                 ],
             }),
         );
@@ -3165,6 +3348,12 @@ impl Renderer {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(water),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.motion_view.as_ref().expect("运动向量目标缺失"),
+                        ),
+                    },
                 ],
             }));
             self.post_taa_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3194,6 +3383,10 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(water),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&self.dummy_motion_view),
                     },
                 ],
             }));
@@ -4059,6 +4252,68 @@ impl Renderer {
             }
         }
 
+        // ---------- TAA 运动向量 ----------
+        // 在主 pass 之后画一遍场景实例，只写"上一帧 UV"。深度只读、不写，
+        // 直接复用主 pass 的深度（TAA 只在单采样后端启用）。
+        if taa_on {
+            if let (Some(pipeline), Some(bind_group), Some(motion_view)) = (
+                &self.motion_pipeline,
+                &self.motion_bind_group,
+                &self.motion_view,
+            ) {
+                let m = MotionUniform {
+                    current_view_proj: view_proj.to_cols_arrays(),
+                    prev_view_proj: self.taa_prev_view_proj.to_cols_arrays(),
+                };
+                ctx.queue
+                    .write_buffer(&self.motion_uniform, 0, bytemuck::bytes_of(&m));
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quench3d-motion-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: motion_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: self.depth_view.as_ref().expect("深度视图缺失"),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                eprintln!(
+                    "MOTION pass batches={} visible={}",
+                    self.batches.len(),
+                    self.visible.len()
+                );
+                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                for (batch_index, batch) in self.batches.iter().enumerate() {
+                    let (first, count) = self.visible_ranges[batch_index];
+                    if count == 0 {
+                        continue;
+                    }
+                    let Some(gm) = self.mesh_for_batch(batch.mesh, &batch.bounds, camera.position)
+                    else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
+                    pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..gm.index_count, 0, first..(first + count));
+                }
+            }
+        }
+
         // ---------- 深度解析（可选：开了 SSAO 且 MSAA > 1） ----------
         // 把多采样深度的第 0 号采样搬到单采样深度贴图，供后处理按像素读取。
         // 三个都要有：绑定组/目标视图（跟着 `ssao_on` 建）与管线（GL 上是 `None`）。
@@ -4155,7 +4410,11 @@ impl Renderer {
                 params: [
                     if self.taa_history_valid { 1.0 } else { 0.0 },
                     self.options.taa.feedback.clamp(0.0, 0.98),
-                    0.0,
+                    if self.options.taa.motion_vectors {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     0.0,
                 ],
                 texel: [
@@ -4769,8 +5028,8 @@ mod tests {
 
     #[test]
     fn instance_raw_layout_is_tight() {
-        // 64 B 模型矩阵 + 16 B 颜色 + 16 B 参数 + 16 B 蒙皮范围。
-        assert_eq!(std::mem::size_of::<InstanceRaw>(), 112);
+        // 64 B 模型矩阵 + 48 B 上一帧模型（3 行）+ 16 B 颜色 + 16 B 参数 + 16 B 蒙皮范围。
+        assert_eq!(std::mem::size_of::<InstanceRaw>(), 160);
         // 48 B 基础顶点 + 8 B 关节下标 + 16 B 权重。
         assert_eq!(std::mem::size_of::<crate::mesh::Vertex>(), 72);
         assert_eq!(std::mem::size_of::<crate::mesh::Vertex>() % 4, 0);
@@ -5458,6 +5717,24 @@ mod tests {
         let (packed_full, n_full) = pack_local_lights(&many, &spots);
         assert_eq!(n_full, MAX_POINT_LIGHTS);
         assert!(packed_full.iter().all(|l| l.dir_outer[3] == 0.0));
+    }
+
+    #[test]
+    fn instance_desc_packs_previous_transform_rows() {
+        let a = Transform::from_trs(
+            Vec3::new(-6.0, 1.0, 2.0),
+            quench3d_math::Quat::IDENTITY,
+            Vec3::new(2.0, 2.0, 2.0),
+        );
+        let b = Transform::from_trs(
+            Vec3::new(6.0, 1.0, 2.0),
+            quench3d_math::Quat::IDENTITY,
+            Vec3::new(2.0, 2.0, 2.0),
+        );
+        let raw = InstanceDesc::new(b).with_previous(a).to_raw();
+        assert_eq!(raw.prev_model[0], [2.0, 0.0, 0.0, -6.0]);
+        assert_eq!(raw.prev_model[1], [0.0, 2.0, 0.0, 1.0]);
+        assert_eq!(raw.prev_model[2], [0.0, 0.0, 2.0, 2.0]);
     }
 
     #[test]

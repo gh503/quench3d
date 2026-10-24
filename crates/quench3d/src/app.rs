@@ -608,6 +608,8 @@ impl Engine {
     /// 想加个 UI 层就得把它抄一遍（抄漏一处就是"物理跑两遍""时间不推进"这类鬼 bug）。
     pub fn tick<G: Game + ?Sized>(&mut self, game: &mut G, dt: f32) {
         self.input.begin_frame();
+        // TAA 运动向量：先记下上一帧的世界变换，再让物理/动画改这一帧的。
+        self.scene.snapshot_previous();
         // 着色器动画时间：与离屏录制路径同源（当前着色器没读这个字段，
         // 但契约放在这里，免得窗口路径永远是 0）。
         self.renderer.set_time(self.time);

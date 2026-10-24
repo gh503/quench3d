@@ -1568,6 +1568,83 @@ fn depth_of_field_blurs_out_of_focus_edges() {
     );
 }
 
+/// TAA 运动向量真的参与重投影：同一个"物体从左跳到右"的两帧序列，
+/// 开/关运动向量必须给出不同的像素（否则运动向量纹理就是没被读到）。
+#[test]
+fn taa_motion_vectors_change_moving_object_pixels() {
+    let Some(mut ctx) = context(1, "TAA 运动向量像素级验证（真的创建 wgpu 上下文）")
+    else {
+        return;
+    };
+    let run = |ctx: &mut GpuContext, motion: bool| -> Option<ImageData> {
+        let mut renderer = Renderer::new(
+            ctx,
+            RendererOptions {
+                grid: false,
+                shadows: false,
+                sky: false,
+                taa: TaaOptions {
+                    enabled: true,
+                    feedback: 0.9,
+                    motion_vectors: motion,
+                },
+                ..Default::default()
+            },
+        );
+        if !renderer.supports_taa() {
+            return None;
+        }
+        let mat = renderer.add_material(ctx, MaterialDesc::from_srgb(1.0, 1.0, 1.0, 1.0).unlit());
+        let cube = renderer.add_mesh(ctx, &MeshData::cube(1.0));
+        let at =
+            |x: f32| Transform::from_trs(vec3(x, 0.0, 0.0), Quat::IDENTITY, vec3(12.0, 12.0, 12.0));
+        let mut camera = Camera::perspective(W as f32 / H as f32);
+        camera.position = vec3(0.0, 0.0, 60.0);
+        camera.look_at(vec3(0.0, 0.0, 0.0));
+        let lighting = Lighting::default();
+
+        renderer.begin_frame();
+        renderer.draw(cube, mat, InstanceDesc::new(at(-6.0)));
+        let _first = renderer.capture(ctx, W, H, &camera, &lighting).ok()?;
+
+        renderer.begin_frame();
+        renderer.draw(
+            cube,
+            mat,
+            InstanceDesc::new(at(6.0)).with_previous(at(-6.0)),
+        );
+        renderer.capture(ctx, W, H, &camera, &lighting).ok()
+    };
+
+    let Some(with_motion) = run(&mut ctx, true) else {
+        eprintln!("跳过：当前后端不支持 TAA");
+        return;
+    };
+    let without_motion = run(&mut ctx, false).expect("同一后端第二次创建 TAA 应当成功");
+    let mut changed = 0usize;
+    let mut changed_right = 0usize;
+    for y in 0..H {
+        for x in 0..W {
+            let a = pixel(&with_motion, x, y);
+            let b = pixel(&without_motion, x, y);
+            if a != b {
+                changed += 1;
+                if x > W / 2 {
+                    changed_right += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        changed > 10,
+        "开/关运动向量后画面几乎相同（{changed} 像素），运动向量纹理可能没被读取"
+    );
+    assert!(
+        changed_right > 0,
+        "运动物体跳到右半边，但右半边没有任何像素受运动向量影响"
+    );
+}
+
 /// TAA 的像素级验证：相机不动时，重复 capture 必须有**历史累积**，
 /// 而关闭 TAA 时同一帧必须逐位稳定。
 #[test]
@@ -1585,6 +1662,7 @@ fn taa_uses_temporal_history_and_off_stays_stable() {
             taa: TaaOptions {
                 enabled: true,
                 feedback: 0.9,
+                motion_vectors: true,
             },
             ..Default::default()
         },
@@ -1649,6 +1727,7 @@ fn taa_uses_temporal_history_and_off_stays_stable() {
             taa: TaaOptions {
                 enabled: true,
                 feedback: 0.0,
+                motion_vectors: true,
             },
             ..Default::default()
         },

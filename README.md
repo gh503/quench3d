@@ -680,7 +680,7 @@ quench3d::write_png(&image, "out.png")?;
 | 能力 | 说明 |
 | --- | --- |
 | 着色 | 前向 Cook–Torrance PBR（金属度/粗糙度）、法线贴图、指数雾；物体写**线性 HDR** |
-| 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 可选 TAA（当前帧 + 历史按深度重投影，`taa.wgsl`）→ 统一色调映射（ACES / Reinhard / 线性三档，**只此一处**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`）。**GL/WebGL2 上 SSAO、深度解析与 TAA 按能力整体关闭**（naga 的 GLSL 后端不支持读深度纹理，见 [production_readiness §12.7](docs/production_readiness.md)）；tonemap / bloom / FXAA 不受影响 |
+| 后处理 | `rgba16float` 中间目标 → 可选 SSAO（深度-only，法线由深度重建，`post.wgsl`）→ 可选 bloom（半分辨率亮度提取 + 可分离高斯）→ 可选 TAA（当前帧 + 历史；优先读运动向量，缺失像素回退深度重投影，`taa.wgsl` + `motion.wgsl`）→ 统一色调映射（ACES / Reinhard / 线性三档，**只此一处**）→ 可选 FXAA（tonemap 之后，见 `fxaa.wgsl`）；混合因此发生在 tonemap 之前。MSAA > 1 且开 SSAO 时多一趟深度解析（`depth_resolve.wgsl`）。**GL/WebGL2 上 SSAO、深度解析与 TAA 按能力整体关闭**（naga 的 GLSL 后端不支持读深度纹理，见 [production_readiness §12.7](docs/production_readiness.md)）；tonemap / bloom / FXAA 不受影响 |
 | LOD | 静态高模自动生成 1/2、1/4 两档（`render.auto_lod`，顶点聚类，非蒙皮），按批次包围盒距离切换；手工 `models[].lods` 仍可用；`O` 开关。蒙皮/动画网格不自动生成，无遮挡剔除 |
 | 阴影 | 太阳：单张（级联时 2×2 图集）`Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段，主 pass 按视空间深度选级。**局部光阴影**：`SpotLight.cast_shadows`（一张透视 2D 深度图，视锥 = 外锥角）与 `PointLight.cast_shadows`（**立方体阴影**：`texture_depth_2d_array` 6 层，每层 90°，面选择 + 面内 uv 是 CPU 纯函数、WGSL 逐字镜像，靠"公式 == 矩阵"的 CPU 测试保证两边一致）；两者**各自整帧只支持一盏**（第一盏要求投影的），缺点都是缺省 `false`（老场景像素逐位不变），两套图互相独立 |
 | 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **IBL 环境贴图**（`lighting.environment_map`，等距柱状 HDR/PNG/JPEG → 64px 7 级预滤波 cubemap，按粗糙度采样）或解析式环境高光（不写贴图时；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。IBL 没有精确 PMREM/GGX、没有屏幕空间反射 |
@@ -1938,8 +1938,9 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
   （`tools/check_web.mjs` 会静态核对）。
 * MCP：只实现 stdio 传输与工具（无 resources / prompts / HTTP SSE）。
 * 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO + 景深 + **TAA**都在；
-  TAA 用上一帧历史 + 当前深度重投影，相机每帧亚像素抖动；**没有运动向量**（运动物体会
-  有轻微拖影），且只在能读深度、未开 MSAA 的原生后端生效。详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
+  TAA 用上一帧历史 + 运动向量重投影，相机每帧亚像素抖动；运动向量由每个实例的
+  `prev_model` 与上一帧 view-proj 生成，静态几何/相机移动/刚体移动都准确；蒙皮/变形
+  只按当前姿态算，仍会有一点拖影；且只在能读深度、未开 MSAA 的原生后端生效。详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
 * SSAO 是**深度-only**：没有法线缓冲（法线由深度重建），AO 直接在后处理里算完就用。
   缺省 16 抽样 + 交错梯度噪声，接触处有轻微颗粒；`lighting.ssao.denoise: true` 可开
   4 邻域双边去噪（按深度差保护边缘，AO 计算量 ×5，实测接触区粗糙度约减半）。

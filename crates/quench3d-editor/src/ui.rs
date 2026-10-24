@@ -669,6 +669,8 @@ fn render_menu(ui: &mut Ui, engine: &mut Engine) {
                         .range(0.0..=0.98),
                 );
             });
+            ui.checkbox(&mut engine.renderer.options.taa.motion_vectors, "运动向量")
+                .on_hover_text("物体的 TAA 重投影；关掉只保留深度反投影，运动物体会更容易拖影");
         });
         ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）");
         ui.checkbox(

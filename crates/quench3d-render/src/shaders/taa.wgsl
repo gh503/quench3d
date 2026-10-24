@@ -1,8 +1,8 @@
 // 时域抗锯齿（TAA）：把当前 HDR 与上一帧历史按重投影混合。
 //
-// 没有运动向量：用当前深度 + 当前逆 view-proj 还原世界位置，再用上一帧的
-// view-proj 投回上一帧屏幕。静态几何/相机移动时是准确的；运动物体会靠邻域
-// clamp 抑制拖影，但不会完全消除（真正的 TAA 需要 velocity buffer）。
+// 优先读运动向量 pass 的上一帧 UV；没有写的像素（天空/网格/线段）回退到
+// "当前深度 + 逆 view-proj → 世界 → 上一帧 view-proj"的反投影。
+// 运动向量只按当前姿态算，蒙皮/变形动画仍会靠邻域 clamp 抑制拖影。
 //
 // 相机每帧有亚像素抖动（见 `Renderer::taa_jitter`），历史样本因此能覆盖
 // 不同的子像素位置，达到抗锯齿；抖动偏移在 CPU 侧乘进 view-proj。
@@ -12,7 +12,7 @@ struct TaaParams {
     inv_view_proj: mat4x4<f32>,
     // 上一帧（含抖动）的世界 → 裁剪空间。
     prev_view_proj: mat4x4<f32>,
-    // x = 历史是否有效（0/1），y = 历史权重（0~0.98），zw = 预留。
+    // x = 历史是否有效（0/1），y = 历史权重（0~0.98），z = 是否用运动向量，w 预留。
     params: vec4<f32>,
     // xy = 1/目标尺寸，zw = 目标尺寸。
     texel: vec4<f32>,
@@ -23,8 +23,9 @@ struct TaaParams {
 @group(0) @binding(2) var<uniform> taa: TaaParams;
 @group(0) @binding(3) var history_tex: texture_2d<f32>;
 @group(0) @binding(4) var depth_texture: texture_depth_2d;
-// 复用 post 布局的最后一个槽（水面 mask）；TAA 不读它。
+// 复用 post 布局的槽：水面 mask（TAA 不读）与运动向量。
 @group(0) @binding(5) var water_mask_texture: texture_2d<f32>;
+@group(0) @binding(6) var motion_texture: texture_2d<f32>;
 
 struct Out {
     @builtin(position) position: vec4<f32>,
@@ -60,18 +61,24 @@ fn fs_main(in: Out) -> @location(0) vec4<f32> {
         return vec4<f32>(current, 1.0);
     }
 
+    let motion = textureLoad(motion_texture, coord, 0);
     let uv = (in.position.xy) * taa.texel.xy;
-    let clip = vec4<f32>(uv * 2.0 - vec2<f32>(1.0), depth, 1.0);
-    let world = taa.inv_view_proj * clip;
-    if (abs(world.w) < 1e-6) {
-        return vec4<f32>(current, 1.0);
+    var prev_uv: vec2<f32>;
+    if (taa.params.z > 0.5 && (motion.x != 0.0 || motion.y != 0.0)) {
+        prev_uv = motion.xy;
+    } else {
+        let clip = vec4<f32>(uv * 2.0 - vec2<f32>(1.0), depth, 1.0);
+        let world = taa.inv_view_proj * clip;
+        if (abs(world.w) < 1e-6) {
+            return vec4<f32>(current, 1.0);
+        }
+        let wp = world.xyz / world.w;
+        let prev_clip = taa.prev_view_proj * vec4<f32>(wp, 1.0);
+        if (prev_clip.w <= 1e-5) {
+            return vec4<f32>(current, 1.0);
+        }
+        prev_uv = prev_clip.xy / prev_clip.w * 0.5 + vec2<f32>(0.5);
     }
-    let wp = world.xyz / world.w;
-    let prev_clip = taa.prev_view_proj * vec4<f32>(wp, 1.0);
-    if (prev_clip.w <= 1e-5) {
-        return vec4<f32>(current, 1.0);
-    }
-    let prev_uv = prev_clip.xy / prev_clip.w * 0.5 + vec2<f32>(0.5);
     if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
         return vec4<f32>(current, 1.0);
     }

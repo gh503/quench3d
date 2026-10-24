@@ -39,7 +39,7 @@
 | 色调映射可选性 | 全部 | 三档可选：ACES（默认）/ Reinhard / 线性，编辑器灯光面板即时切换；曝光仍可调（→ H1） | ✅ |
 | 阴影 | 全部 | 方向光 1~4 级 CSM（2×2 图集，视空间深度选级，`lighting.shadow_quality.cascades`）+ 3×3 PCF；聚光灯一张透视 2D 阴影图、点光源立方体阴影（各自整帧一盏，缺省关闭）。分辨率 512–4096（缺省 2048） | ✅ |
 | 阴影可调参数 | Blender / Unity | `DirectionalLight.shadow_bias`（0~4 纹素，缺省 0.75）公开；编辑器“强度/半径/偏移”滑杆、场景 `lighting.shadow_quality.bias` 都可调；仍有 `cast_shadows` 与全局开关 | ✅ |
-| 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom →[TAA]→ post(SSAO) →[FXAA]），可按开关增减；TAA ✅（第 140 轮，相机抖动 + 深度重投影，无运动向量）、DOF ✅、SSAO 可选 4 邻域双边去噪 ✅（第 143 轮）；**无独立 AO 目标/时域累积、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO、深度解析与 TAA 按能力整体关闭**（§12.7） | 🟡 |
+| 后处理链 | 全部 | 固定链路（阴影 → PBR →[深度解析]→ bloom →[TAA]→ post(SSAO) →[FXAA]），可按开关增减；TAA ✅（第 140 轮相机抖动 + 深度重投影；第 197 轮补运动向量，`motion.wgsl`）、DOF ✅、SSAO 可选 4 邻域双边去噪 ✅（第 143 轮）；**无独立 AO 目标/时域累积、无自定义 pass / render graph**。**GL/WebGL2 上 SSAO、深度解析与 TAA 按能力整体关闭**（§12.7） | 🟡 |
 | 抗锯齿 | 全部 | MSAA 可配 `clamp(1,8)`（`context.rs:69`），场景 `render.msaa` 缺省 4；**GL/WebGL2 上按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧，§12.7） | 🟡 |
 | 网格与顶点属性 | 全部 | position/normal/uv/tangent + **GPU 蒙皮**（glTF `JOINTS_0/WEIGHTS_0` 顶点属性，≤4 关节/顶点，128 关节 uniform 调色板，8 KB；只满足 WebGL2 最低 4 KB uniform 的设备需 CPU 回退；纯蒙皮走 GPU，morph+skin 的 morph CPU 叠加、关节 GPU 乘）+ **morph target**（静态 `models[].morph_weights` + glTF `weights` 动画轨道；双 clip 只取主 clip）；**无顶点色** | 🟡 |
 | 实例化 | 全部 | 不透明有（每实例 model + 颜色 + 材质覆盖，`renderer.rs:1032`） | ✅ |
@@ -802,7 +802,7 @@ gap 表里与资产搜索路径（#11）同源，等那一项一起做；**编�
 **第 143 轮补了可选 4 邻域双边去噪**（`lighting.ssao.denoise`，缺省关）：按深度差加权，
 接触区粗糙度约减半；代价是 AO 计算量 ×5。**没做**：独立 AO 目标 / 可分离双边模糊 /
 时域累积（所以不开去噪时接触处仍有轻微颗粒，16 抽样 + IGN）；
-CSM 已补；TAA 第 140 轮已补（相机抖动 + 深度重投影，无运动向量）；FXAA 是 console 档（无子像素锯齿消除）。
+CSM 已补；TAA 第 140 轮已补（相机抖动 + 深度重投影），第 197 轮补运动向量；FXAA 是 console 档（无子像素锯齿消除）。
 
 ### 8.2 「场景层级（父子变换）+ 格式 v2」怎么落的（第 16 轮，已跑门禁）
 
@@ -3366,6 +3366,44 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：不是完整 root motion 系统——只提取三维位移与绕 Y 偏航，不提取俯仰/滚转，
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
+
+### 23.97 TAA 运动向量（第 197 轮）
+
+**问题**：TAA 只有深度反投影。相机不动、物体移动时，新位置会把"当前世界位置"
+投回上一帧（而不是物体上一帧真正所在的屏幕位置），遮不住运动拖影。
+
+**做了什么**：
+
+* 主 pass 之后多一趟 **motion pass**：
+  - 只画场景实例（天空/网格/线段不画），深度只读、不写；
+  - 实例多带 3 行上一帧模型矩阵（`prev_model`，底行固定 `0,0,0,1`），
+    加 `prev_model` 后 `InstanceRaw` 112 → 160 字节；
+  - 顶点着色器用当前/上一帧 view-proj 投出上一帧 UV，写入 `Rgba16Float` 运动纹理；
+  - 只有 TAA 可用（能读深度且未开 MSAA）时才建这条管线。
+* TAA 优先读运动纹理；`(0,0)` 表示没有可信向量，回退原来的深度反投影。
+  天空继续直接输出当前帧。
+* `Scene::snapshot_previous` 在每帧物理/动画改变换**之前**记录世界位姿；
+  `SceneObject::instance` 把它写进 `InstanceDesc::prev_transform`。
+* 编辑器渲染面板加「运动向量」勾选（默认开）；`TaaOptions.motion_vectors`
+  可在测试里关掉做 A/B。
+
+**验证**：
+
+* CPU：`instance_desc_packs_previous_transform_rows` 检查平移/缩放按行打包；
+  `snapshot_previous_keeps_last_world_transform_for_taa` 检查移动父物体后
+  `prev_world` 停在旧世界位姿。
+* GPU 像素：`taa_motion_vectors_change_moving_object_pixels` 让立方体从 x=-6
+  跳到 x=+6，开/关运动向量的第二帧必须有差异，且右半边（新位置）有差异；
+  同时原有 TAA 历史累积/关闭稳定测试仍通过。
+* 全量门禁 **857** 测试、0 失败（新增 3 个测试）。
+
+**边界**：
+
+* 运动向量按实例刚体位姿算；蒙皮/变形/粒子只按当前姿态，仍有拖影。
+* 运动纹理是屏幕空间 16 位浮点，不支持相机内参逐帧变化之外的畸变/Warp。
+* 关闭 TAA 时 motion pass 仍会跑（管线存在），只是结果不被采样；开销是一趟额外
+  场景绘制，不是零成本。
+* GL/WebGL2 仍然整体关闭 TAA 与 motion pass（不能读深度纹理）。
 
 ### 23.96 STL 导入（二进制 + ASCII，第 196 轮）
 
