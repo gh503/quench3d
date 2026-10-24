@@ -88,6 +88,8 @@ pub struct DebugOptions {
     pub bones: bool,
     /// 画出物理关节的两端锚点、连线与铰链/滑块轴。
     pub joints: bool,
+    /// 画出点光源影响半径与聚光灯锥体。
+    pub lights: bool,
     /// 是否启用（总开关）。
     pub enabled: bool,
 }
@@ -102,6 +104,7 @@ impl Default for DebugOptions {
             query_probe: false,
             bones: false,
             joints: false,
+            lights: false,
             enabled: true,
         }
     }
@@ -111,6 +114,52 @@ impl Default for DebugOptions {
 pub const QUERY_PROBE_MAX: f32 = 500.0;
 
 /// 把关节可视化转成调试线段（纯函数，便于测试）。
+/// 灯光 gizmo：点光画影响半径球，聚光画外锥体与轴向。
+///
+/// 只画、不参与照亮；颜色是固定的调试色，不跟灯光颜色走（否则弱光下看不清）。
+fn push_light_debug_lines(lines: &mut quench3d_render::DebugLines, lighting: &Lighting) {
+    for light in &lighting.point_lights {
+        if light.radius <= 0.0 {
+            continue;
+        }
+        lines.sphere(
+            light.position,
+            light.radius,
+            Vec4::new(1.0, 0.78, 0.25, 0.45),
+            24,
+        );
+        lines.axes(light.position, (light.radius * 0.18).clamp(0.05, 0.5));
+    }
+    for light in &lighting.spot_lights {
+        let dir = light.direction.normalize_or_zero();
+        if dir == Vec3::ZERO || light.radius <= 0.0 {
+            continue;
+        }
+        let outer = light.outer_cos.clamp(-1.0, 1.0).acos();
+        let (t, b) = dir.any_orthonormal_pair();
+        let color = if light.cast_shadows {
+            Vec4::new(1.0, 0.55, 0.2, 0.6)
+        } else {
+            Vec4::new(1.0, 0.9, 0.35, 0.5)
+        };
+        // 从灯位沿外锥边缘画 4 条母线。
+        for i in 0..4 {
+            let a = i as f32 / 4.0 * core::f32::consts::TAU;
+            let (s, c) = a.sin_cos();
+            let edge = (dir * outer.cos() + (t * c + b * s) * outer.sin()).normalize_or_zero()
+                * light.radius;
+            lines.line(light.position, light.position + edge, color);
+        }
+        // 沿轴向画几个不同距离的锥截面，近处小、远处大。
+        for f in [0.25, 0.5, 1.0] {
+            let center = light.position + dir * (light.radius * f * outer.cos());
+            let radius = (light.radius * f * outer.sin()).max(0.01);
+            lines.circle(center, dir, radius, color, 24);
+        }
+        lines.axes(light.position, 0.12);
+    }
+}
+
 fn push_joint_debug_lines(lines: &mut quench3d_render::DebugLines, joints: &[JointVisual]) {
     for joint in joints {
         lines.line(joint.a, joint.b, Vec4::new(0.25, 0.9, 0.95, 1.0));
@@ -477,6 +526,9 @@ impl Engine {
         let lines = &mut self.renderer.lines;
         if self.debug.axes {
             lines.world_axes(3.0, 0.35);
+        }
+        if self.debug.lights {
+            push_light_debug_lines(lines, &self.scene.lighting);
         }
         for (a, b) in skeleton {
             lines.line(a, b, Vec4::new(0.2, 0.95, 0.85, 0.95));
@@ -1672,6 +1724,42 @@ mod tests {
         let last = &lines.vertices[lines.vertices.len() - 1];
         let mid = (a + b) * 0.5;
         assert_eq!(last.position, (mid + Vec3::Z * 0.35).to_array());
+    }
+
+    /// 灯光 gizmo：点光画半径球、聚光画母线 + 锥截面；坐标必须都是有限值。
+    #[test]
+    fn light_debug_lines_draw_radius_and_cone() {
+        let mut lighting = Lighting::default();
+        lighting.point_lights.push(quench3d_render::PointLight {
+            position: Vec3::new(1.0, 2.0, 0.0),
+            color: Vec3::ONE,
+            intensity: 4.0,
+            radius: 3.0,
+            cast_shadows: false,
+        });
+        lighting.spot_lights.push(quench3d_render::SpotLight::new(
+            Vec3::new(-2.0, 3.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::ONE,
+            8.0,
+            6.0,
+            20.0,
+            35.0,
+        ));
+        let mut lines = quench3d_render::DebugLines::new();
+        push_light_debug_lines(&mut lines, &lighting);
+        assert!(
+            lines.line_count() > 40,
+            "半径球 + 4 条母线 + 3 个锥截面至少应有几十条线，实际 {}",
+            lines.line_count()
+        );
+        for v in &lines.vertices {
+            assert!(
+                v.position.iter().all(|c| c.is_finite()),
+                "灯光 gizmo 顶点不能是 NaN/Inf：{:?}",
+                v.position
+            );
+        }
     }
 }
 /// 序列渲染（movie/render_sequence）必须每帧推进粒子；否则 GIF 会逐帧全同。

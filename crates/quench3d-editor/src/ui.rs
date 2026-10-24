@@ -455,6 +455,7 @@ fn top_bar(
             });
             water_section(ui, engine);
             ui.checkbox(&mut engine.debug.axes, "坐标轴");
+            ui.checkbox(&mut engine.debug.lights, "灯光 gizmo");
 
             let mode_label = match engine.camera_mode {
                 CameraMode::Orbit => "轨道相机",
