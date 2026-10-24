@@ -280,6 +280,25 @@ impl Doc {
         self.base_doc.as_mut()
     }
 
+    /// 解析编辑器里输入的贴图路径：绝对路径原样用；相对路径先按场景文件所在目录
+    /// 找，找不到再交给调用方按工作目录处理。
+    ///
+    /// 与 CLI 的 `SceneDoc::resolve_asset` 同一优先级思路，但这里不要求文件已经存在
+    /// （`exists` 只用来决定候选路径），最终是否读得动由解码器报错。
+    pub fn resolve_texture_path(&self, path: &str) -> std::path::PathBuf {
+        let raw = std::path::Path::new(path);
+        if raw.is_absolute() || self.file_path.trim().is_empty() {
+            return raw.to_path_buf();
+        }
+        if let Some(parent) = std::path::Path::new(&self.file_path).parent() {
+            let candidate = parent.join(raw);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        raw.to_path_buf()
+    }
+
     // -----------------------------------------------------------------------
     // 多选
     // -----------------------------------------------------------------------

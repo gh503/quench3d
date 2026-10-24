@@ -1862,17 +1862,23 @@ mod texture_edit_tests {
         }"#;
         crate::scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
 
-        let path = std::env::temp_dir().join(format!(
-            "quench3d-texture-edit-{}-{}.png",
+        let dir = std::env::temp_dir().join(format!(
+            "quench3d-texture-edit-{}-{}",
             std::process::id(),
             line!()
         ));
+        std::fs::create_dir_all(&dir).expect("应能建临时目录");
+        let path = dir.join("tex.png");
+        doc.file_path = dir
+            .join("scene.quench3d.json")
+            .to_string_lossy()
+            .to_string();
         let mut png = Vec::new();
         quench3d::render::ImageData::solid([0, 255, 0, 255])
             .write_png(&mut png)
             .expect("应能编码 PNG");
         std::fs::write(&path, &png).expect("应能写临时 PNG");
-        let path_text = path.to_string_lossy().to_string();
+        let path_text = "tex.png".to_string();
 
         let decal_object = engine
             .scene
@@ -1946,6 +1952,6 @@ mod texture_edit_tests {
             doc.base_doc().and_then(|d| d.particles[0].texture.clone()),
             None
         );
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -44,6 +44,10 @@
 - **CI：无 GPU 的序列测试改为跳过（第 170 轮）**：`sequence_updates_particles_between_frames`
   在找不到适配器时打印跳过；修复 ubuntu CI 的假红。
 
+- **贴图路径相对场景文件解析（第 175 轮）**：贴花/粒子/物体贴图面板先按场景目录
+  解析相对路径，找不到再回退工作目录；正向测试改为场景目录 + `tex.png`。测试总数
+  仍为 832。
+
 - **贴花/粒子贴图可清除（第 174 轮）**：两个面板增加清除按钮，新建无贴图材质并
   写回 `texture = None`。新增 `decal_and_particle_texture_apply_and_clear` 正向测试
   （临时 PNG → 材质/底稿 → 清除），测试总数 832。

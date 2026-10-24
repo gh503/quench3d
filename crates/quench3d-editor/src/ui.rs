@@ -1730,7 +1730,8 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         )
                         .clicked()
                     {
-                        match quench3d::render::ImageData::from_file(&path) {
+                        let resolved = doc.resolve_texture_path(&path);
+                        match quench3d::render::ImageData::from_file(&resolved) {
                             Ok(image) => {
                                 let texture =
                                     engine.renderer.add_texture(&engine.gpu, &image, srgb);
@@ -3039,8 +3040,9 @@ pub(crate) fn replace_decal_texture(
     let texture_id = if path.is_empty() {
         None
     } else {
-        let image = quench3d::render::ImageData::from_file(path)
-            .map_err(|e| format!("贴花贴图读图失败：{e}"))?;
+        let resolved = doc.resolve_texture_path(path);
+        let image = quench3d::render::ImageData::from_file(&resolved)
+            .map_err(|e| format!("贴花贴图读图失败：{e}（{}）", resolved.display()))?;
         Some(engine.renderer.add_texture(&engine.gpu, &image, true))
     };
     let old = engine.scene.objects[object_index].material;
@@ -3088,8 +3090,9 @@ pub(crate) fn replace_particle_texture(
     let texture_id = if path.is_empty() {
         None
     } else {
-        let image = quench3d::render::ImageData::from_file(path)
-            .map_err(|e| format!("粒子贴图读图失败：{e}"))?;
+        let resolved = doc.resolve_texture_path(path);
+        let image = quench3d::render::ImageData::from_file(&resolved)
+            .map_err(|e| format!("粒子贴图读图失败：{e}（{}）", resolved.display()))?;
         Some(engine.renderer.add_texture(&engine.gpu, &image, true))
     };
     let old_material = engine.scene.particles[index].material;
