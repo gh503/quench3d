@@ -3200,6 +3200,7 @@ pub fn setup_visuals(
         if let Some(obj) = engine.scene.objects.get_mut(index) {
             obj.visible = o.visible;
             obj.cast_shadows = o.cast_shadows;
+            obj.receive_shadows = o.receive_shadows;
             // 刚体的位姿来自物理，缩放只影响渲染
             obj.transform.scale = scale;
         }
@@ -3216,6 +3217,7 @@ pub fn setup_visuals(
             engine.scene.objects[child].owner_part = Some(index);
             engine.scene.objects[child].visible = o.visible;
             engine.scene.objects[child].cast_shadows = o.cast_shadows;
+            engine.scene.objects[child].receive_shadows = o.receive_shadows;
         }
         doc_to_scene.push(index);
     }
@@ -5439,6 +5441,14 @@ mod tests {
         assert!(
             !parse(r#", "cast_shadows": false"#).objects[0].cast_shadows,
             "显式 false 应关掉投射阴影"
+        );
+        assert!(
+            parse("").objects[0].receive_shadows,
+            "不写 receive_shadows 时应默认接收阴影"
+        );
+        assert!(
+            !parse(r#", "receive_shadows": false"#).objects[0].receive_shadows,
+            "显式 false 应关掉接收阴影"
         );
     }
 

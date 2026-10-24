@@ -53,6 +53,8 @@ pub struct SceneObject {
     pub visible: bool,
     /// 是否投射阴影（默认 true）；关掉只影响阴影图，不影响主画面。
     pub cast_shadows: bool,
+    /// 是否接收阴影（默认 true）；关掉后这个物体不会被阴影压暗。
+    pub receive_shadows: bool,
     /// 颜色倍乘（线性 RGBA）。
     pub color: Vec4,
     /// 金属度覆盖。
@@ -320,7 +322,8 @@ impl SceneObject {
     pub fn instance(&self, world: Transform) -> InstanceDesc {
         let mut d = InstanceDesc::new(world)
             .with_color(self.color)
-            .with_cast_shadows(self.cast_shadows);
+            .with_cast_shadows(self.cast_shadows)
+            .with_receive_shadows(self.receive_shadows);
         d.emissive_strength = self.emissive_strength;
         if self.metallic.is_some() || self.roughness.is_some() {
             d = d.with_pbr(self.metallic.unwrap_or(0.0), self.roughness.unwrap_or(0.5));
@@ -1273,6 +1276,7 @@ impl Scene {
             body: None,
             visible: true,
             cast_shadows: true,
+            receive_shadows: true,
             color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             metallic: None,
             roughness: None,

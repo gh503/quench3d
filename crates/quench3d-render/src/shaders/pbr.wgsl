@@ -81,6 +81,8 @@ struct VertexOut {
     @location(4) tangent_sign: f32,
     @location(5) albedo: vec4<f32>,
     @location(6) params: vec4<f32>,
+    // 1 = 接收阴影，0 = 这层物体不采样任何阴影图（环境光不受影响）。
+    @location(7) receive_shadows: f32,
 };
 
 // 3x3 逆转置（法线矩阵），避免在 WGSL 里依赖 inverse()。
@@ -123,6 +125,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.tangent_sign = in.tangent.w;
     out.albedo = in.albedo;
     out.params = in.params;
+    out.receive_shadows = in.skin.z;
     return out;
 }
 
@@ -494,7 +497,7 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
         let n_dot_l = dot(n, l);
         if (n_dot_l > 0.0 && frame.light_dir.w > 0.0) {
             var shadow = 1.0;
-            if (frame.light_color.w > 0.5) {
+            if (frame.light_color.w > 0.5 && in.receive_shadows > 0.5) {
                 shadow = sample_shadow(in.world_position, n_dot_l);
                 shadow = mix(1.0, shadow, frame.params.w);
             }
@@ -545,10 +548,10 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
                     // 只有"这一盏就是投影灯"才采样阴影图（点光/聚光各自整帧最多一盏，
                     // 两套资源互不相干，所以两盏灯可以同时投影）
                     var shadow2 = 1.0;
-                    if (i == i32(frame.spot_shadow_params.x + 0.5)) {
+                    if (i == i32(frame.spot_shadow_params.x + 0.5) && in.receive_shadows > 0.5) {
                         shadow2 = sample_spot_shadow(in.world_position, n, n_dot_l2);
                     }
-                    if (i == i32(frame.point_shadow_params.x + 0.5)) {
+                    if (i == i32(frame.point_shadow_params.x + 0.5) && in.receive_shadows > 0.5) {
                         shadow2 = sample_point_shadow(i, in.world_position, n, n_dot_l2);
                     }
                     // 与平行光共用同一个"阴影强度"（0 = 不压暗；shadow2 == 1 时是恒等变换）

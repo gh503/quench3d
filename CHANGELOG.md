@@ -47,6 +47,9 @@
 - **画中画节流测试（第 181 轮）**：`pip_refresh_uploads_a_texture` 增加同帧不重复
   回读、过 12 帧恢复的断言。测试总数仍为 833。
 
+- **逐物体接收阴影（第 189 轮）**：InstanceDesc/SceneObject/ObjectDoc 新增
+  `receive_shadows`，fragment 三条阴影采样都按实例标志跳过；像素级正反验证。
+
 - **逐物体投射阴影（第 188 轮）**：InstanceDesc/SceneObject/ObjectDoc 新增
   `cast_shadows`，编辑器属性面板可关；阴影 pass 按批次过滤。像素级正反验证。
 

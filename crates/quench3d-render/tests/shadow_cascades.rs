@@ -55,7 +55,13 @@ impl Scene {
     }
 
     /// 渲染一帧：深景（60 米外的投射体 + 单级半径只有 10 米）。
-    fn render(&mut self, cascades: u32, shadows: bool, caster_shadows: bool) -> ImageData {
+    fn render(
+        &mut self,
+        cascades: u32,
+        shadows: bool,
+        caster_shadows: bool,
+        receiver_shadows: bool,
+    ) -> ImageData {
         let mut renderer = Renderer::new(
             &self.ctx,
             RendererOptions {
@@ -101,7 +107,11 @@ impl Scene {
         let hover = Transform::new(Vec3::new(0.0, 8.0, -60.0), Quat::IDENTITY, Vec3::ONE);
 
         renderer.begin_frame();
-        renderer.draw(cube, ground_mat, InstanceDesc::new(ground));
+        renderer.draw(
+            cube,
+            ground_mat,
+            InstanceDesc::new(ground).with_receive_shadows(receiver_shadows),
+        );
         renderer.draw(
             cube,
             box_mat,
@@ -147,10 +157,11 @@ fn a_far_caster_only_gets_a_shadow_when_cascades_cover_it() {
     let Some(mut scene) = Scene::new() else {
         return;
     };
-    let without = scene.render(1, false, true);
-    let single = scene.render(1, true, true);
-    let quad = scene.render(4, true, true);
-    let no_caster = scene.render(4, true, false);
+    let without = scene.render(1, false, true, true);
+    let single = scene.render(1, true, true, true);
+    let quad = scene.render(4, true, true, true);
+    let no_caster = scene.render(4, true, false, true);
+    let no_receiver = scene.render(4, true, true, false);
 
     let (n_single, _) = shadow_pixels(&single, &without);
     let (n_quad, centroid) = shadow_pixels(&quad, &without);
@@ -172,6 +183,8 @@ fn a_far_caster_only_gets_a_shadow_when_cascades_cover_it() {
         n_no_caster, 0,
         "关掉投射阴影后，同一个投射体不应在地面留下任何影子像素"
     );
+    let (n_no_receiver, _) = shadow_pixels(&no_receiver, &without);
+    assert_eq!(n_no_receiver, 0, "关掉接收阴影后，地面不应被任何阴影压暗");
 
     // 落点必须与太阳方向推导的解析位置一致（方向不能镜像、不能错级）
     let dir = Vec3::new(0.42, -0.78, 0.46).normalize_or_zero();

@@ -3989,6 +3989,8 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
                 ui.checkbox(&mut object.visible, "可见");
                 ui.checkbox(&mut object.cast_shadows, "投射阴影")
                     .on_hover_text("关掉后这个物体仍然可见，但不写进太阳/聚光/点光的阴影图");
+                ui.checkbox(&mut object.receive_shadows, "接收阴影")
+                    .on_hover_text("关掉后这个物体不会被太阳/聚光/点光的阴影压暗（环境光不变）");
                 if is_model_member {
                     ui.label(
                         RichText::new("模型实例：变换整组联动、缩放是均匀的（写回 models）")

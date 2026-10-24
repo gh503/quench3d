@@ -512,6 +512,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             allow_sleep: body.map(|b| b.can_sleep()),
             visible: object.visible,
             cast_shadows: object.cast_shadows,
+            receive_shadows: object.receive_shadows,
             // 碰撞过滤 / 传感器 / CCD：编辑器目前**没有编辑界面**，但导出时从刚体上读回来，
             // 这样"载入场景 → 保存"不会把这些字段悄悄丢掉。
             collision_layer: body.and_then(|b| {

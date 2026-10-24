@@ -3367,6 +3367,31 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.89 逐物体接收阴影开关（第 189 轮）
+
+**问题**：23.88 只做了「投射」；想让地面/墙面不接收某个物体的影子，或者让
+自发光/描边类物体不被阴影压暗，仍然只能关全局阴影。
+
+**做了什么**：
+
+* `InstanceDesc` 新增 `receive_shadows: bool`（默认 true）+ `with_receive_shadows(false)`；
+  复用 `InstanceRaw.skin.z` 把标志送进顶点着色器（`skin.y` 仍是蒙皮开关，
+  `skin.w` 保留），`VertexOut` 新增 `@location(7)`，fragment 里太阳/聚光/点光
+  三条阴影采样都先看这个标志。
+* `SceneObject` / `ObjectDoc` 新增 `receive_shadows`（JSON 缺省 true）；
+  CLI runner、编辑器保存/载入、schema 都接线。
+* 属性面板「投射阴影」下面新增「接收阴影」。
+* 只影响**阴影压暗**，不影响环境光/IBL/直接光本身；材质自发光也不受影响。
+
+**验证**：
+
+* `shadow_cascades` 像素级：4 级阴影 + 正常投射，地面 `receive_shadows=false`
+  时影子像素 **恰好 0**（与「关太阳投影」的基准图相同）。
+* 变异测试：去掉 fragment 里的 `in.receive_shadows` 判断 → 断言变红（已实测）。
+* JSON：不写默认 true，显式 false 生效。
+* `ui_smoke`：属性面板绘制「接收阴影」。
+* 全量门禁 **838** 测试、0 失败。
+
 ### 23.88 逐物体投射阴影开关（第 188 轮）
 
 **问题**：阴影只有全局 `shadows` 总开关和灯光自己的 `cast_shadows`；单个物体
@@ -3380,7 +3405,7 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 * `SceneObject` / `ObjectDoc` 新增 `cast_shadows`（JSON 缺省 true）；
   CLI runner 与编辑器保存/载入都接线。
 * 属性面板「可见」下面新增「投射阴影」复选框，带说明。
-* 架构边界：只关**投射**，不提供逐物体「接收阴影」；接收仍由全局阴影开关决定。
+* 架构边界：本轮只做**投射**；逐物体「接收阴影」在 23.89 补上。
 
 **验证**：
 

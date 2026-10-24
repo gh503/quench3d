@@ -304,6 +304,8 @@ pub struct InstanceDesc {
     pub skin_count: u32,
     /// 是否把本实例画进阴影图（默认 true）。不影响主画面可见性。
     pub cast_shadows: bool,
+    /// 是否接收太阳/聚光/点光阴影（默认 true）。关掉后本实例只受直接光与环境光。
+    pub receive_shadows: bool,
 }
 
 impl Default for InstanceDesc {
@@ -317,6 +319,7 @@ impl Default for InstanceDesc {
             skin_base: 0,
             skin_count: 0,
             cast_shadows: true,
+            receive_shadows: true,
         }
     }
 }
@@ -364,6 +367,12 @@ impl InstanceDesc {
         self
     }
 
+    /// 是否接收阴影。关掉后这个实例不会被任何阴影图压暗。
+    pub fn with_receive_shadows(mut self, receive_shadows: bool) -> Self {
+        self.receive_shadows = receive_shadows;
+        self
+    }
+
     /// GPU 蒙皮：本实例用调色板里的 `[base, base+count)` 段关节矩阵。
     pub fn with_skin(mut self, base: u32, count: u32) -> Self {
         self.skin_base = base;
@@ -383,7 +392,13 @@ impl InstanceDesc {
                 self.emissive_strength,
                 if override_material { 1.0 } else { 0.0 },
             ],
-            skin: [self.skin_base as f32, self.skin_count as f32, 0.0, 0.0],
+            // skin.z = 是否接收阴影（1/0）；skin.w 保留。
+            skin: [
+                self.skin_base as f32,
+                self.skin_count as f32,
+                if self.receive_shadows { 1.0 } else { 0.0 },
+                0.0,
+            ],
         }
     }
 }
