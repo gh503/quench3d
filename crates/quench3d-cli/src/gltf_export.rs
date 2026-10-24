@@ -1032,15 +1032,12 @@ mod tests {
     fn embeds_texture_bytes_and_maps_material_fields() {
         let dir = std::env::temp_dir().join(format!("quench3d-gltf-tex-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // 1x1 PNG（合法签名/IHDR/IDAT/IEND），只用于验证内嵌结构与 MIME 判断。
-        let png: &[u8] = &[
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
-            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
-            0x00, 0xb5, 0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78,
-            0xda, 0x63, 0xfc, 0xff, 0x1f, 0x00, 0x02, 0xeb, 0x01, 0xf5, 0x8f, 0x59, 0x97, 0x5b,
-            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-        ];
-        std::fs::write(dir.join("tex.png"), png).unwrap();
+        // 合法的 1x1 PNG（RGBA）；导入路径会真的解码，CRC 不能是假的。
+        let png = base64_decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+        )
+        .unwrap();
+        std::fs::write(dir.join("tex.png"), &png).unwrap();
         let doc = SceneDoc::from_json(
             r#"{
                 "materials": {
@@ -1073,6 +1070,17 @@ mod tests {
                 < 1e-6
         );
         assert_eq!(json["materials"][0]["alphaMode"], "MASK");
+
+        // 同一份导出转成 GLB 再从字节流读回来：AO 贴图与强度不能丢。
+        let glb = to_glb(&out).expect("转 GLB");
+        let loaded = quench3d::assets::load_model_from_bytes("ao.glb", &glb).expect("读回 GLB");
+        let m = &loaded.materials[0];
+        assert_eq!(m.ao_texture, Some(0), "glTF 导入的 AO 贴图下标应当保留");
+        assert!(
+            (m.desc.ao_strength - 0.4).abs() < 1e-6,
+            "glTF 导入的 AO 强度应当保留，实际 {}",
+            m.desc.ao_strength
+        );
         assert!((json["materials"][0]["alphaCutoff"].as_f64().unwrap() - 0.4).abs() < 1e-5);
         assert_eq!(json["materials"][0]["doubleSided"], true);
         // 图字节必须真的在同一个 data URI buffer 里（不是只写了个 image 索引）。

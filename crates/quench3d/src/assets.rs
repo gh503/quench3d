@@ -348,6 +348,8 @@ pub struct LoadedMaterial {
     pub metallic_roughness_texture: Option<usize>,
     /// 自发光贴图（图像下标）。
     pub emissive_texture: Option<usize>,
+    /// 环境光遮蔽（AO）贴图（图像下标）。
+    pub ao_texture: Option<usize>,
 }
 
 impl Default for LoadedMaterial {
@@ -359,6 +361,7 @@ impl Default for LoadedMaterial {
             normal_texture: None,
             metallic_roughness_texture: None,
             emissive_texture: None,
+            ao_texture: None,
         }
     }
 }
@@ -843,6 +846,7 @@ impl LoadedModel {
             );
             desc.emissive_texture =
                 upload_image(renderer, ctx, &self.images, mat.emissive_texture, true);
+            desc.ao_texture = upload_image(renderer, ctx, &self.images, mat.ao_texture, false);
             material_ids.push(renderer.add_material_named(ctx, desc, &mat.name));
         }
 
@@ -1296,6 +1300,9 @@ fn model_from_gltf(
         if let Some(scale) = mat.normal_texture().map(|t| t.scale()) {
             desc.normal_scale = scale;
         }
+        if let Some(occlusion) = mat.occlusion_texture() {
+            desc.ao_strength = occlusion.strength();
+        }
         match mat.alpha_mode() {
             gltf::material::AlphaMode::Mask => {
                 desc.alpha_cutoff = mat.alpha_cutoff().unwrap_or(0.5)
@@ -1315,6 +1322,7 @@ fn model_from_gltf(
                 .map(|t| t.texture().index()),
             normal_texture: mat.normal_texture().map(|t| t.texture().index()),
             emissive_texture: mat.emissive_texture().map(|t| t.texture().index()),
+            ao_texture: mat.occlusion_texture().map(|t| t.as_ref().index()),
             desc,
         });
     }

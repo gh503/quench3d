@@ -3382,7 +3382,9 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
   **不压直接光、不压自发光**；`ao_strength = 0` 等于忽略贴图。
 * `MaterialDoc` 新增 `ao_texture` / `ao_strength`；校验器检查强度在 0~1 且贴图文件存在。
 * CLI runner、编辑器 `TexturePaths`/属性面板（第五个贴图槽 + 「AO 强度」）全部接线。
-* glTF 导出写 `occlusionTexture`（`strength` 同步），导入路径本来就有 AO 的话仍按贴图槽处理。
+* glTF **导出**写 `occlusionTexture`（`strength` 同步）；glTF **导入**读回
+  `occlusionTexture` 的贴图下标与 `strength`，装进 `LoadedMaterial.ao_texture` /
+  `desc.ao_strength`，再随 `LoadedModel::upload` 上传。
 
 **验证**：
 
@@ -3390,7 +3392,8 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
   AO 贴图、右边不挂，关掉太阳只留环境光——左边平均红通道比右边低 **>25%**。
 * 单元测试：AO 标志位、强度进 `params2.z`、默认强度 1。
 * 场景校验：`ao_strength` 越界报错；`ao_texture` 缺文件报错（复用贴图路径检查）。
-* glTF 导出测试：`occlusionTexture.index/strength` 正确。
+* glTF 导出+导入往返测试：导出 `occlusionTexture.index/strength`，转 GLB 后
+  `load_model_from_bytes` 读回，AO 贴图下标与强度都保留。
 * UI smoke：属性面板绘制「环境光遮蔽贴图」「AO 强度」。
 * 全量门禁 **840** 测试、0 失败（新增 2 个测试）。
 

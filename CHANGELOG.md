@@ -48,7 +48,7 @@
   回读、过 12 帧恢复的断言。测试总数仍为 833。
 
 - **材质 AO 贴图（第 190 轮）**：第五张贴图槽 + `ao_strength`，只压环境光/IBL；
-  glTF `occlusionTexture` 导出；像素级正反验证。
+  glTF `occlusionTexture` 导入/导出（GLB 往返测试）；像素级正反验证。
 
 - **逐物体接收阴影（第 189 轮）**：InstanceDesc/SceneObject/ObjectDoc 新增
   `receive_shadows`，fragment 三条阴影采样都按实例标志跳过；像素级正反验证。

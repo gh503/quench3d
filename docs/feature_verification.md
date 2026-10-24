@@ -162,7 +162,7 @@ tools/verify_editor_features.sh
 | --- | --- | --- |
 | 材质 UV 偏移/旋转 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test material_pipeline_traits uv_offset` + `...ui_smoke material_texture` | uniform 带 offset/cos/sin；改 offset/rotation 各令 >100 像素变化；材质段绘制两个控件 |
 | 物体材质贴图应用/清除 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib texture_edit` + `...ui_smoke material_texture_slots` | 应用后材质贴图与 `doc.textures` 非空，清除后都为空；有贴图设置时材质段自动展开并绘制两个按钮 |
-| 材质 AO 贴图 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test material_pipeline_traits ao_texture` + `cargo test -p quench3d-render --lib ao_texture` | 黑 AO 贴图把环境光平均红通道压低 >25%；强度进 uniform；UI 有槽位/强度；glTF 导出 occlusionTexture |
+| 材质 AO 贴图 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test material_pipeline_traits ao_texture` + `cargo test -p quench3d-render --lib ao_texture` | 黑 AO 贴图把环境光平均红通道压低 >25%；强度进 uniform；UI 有槽位/强度；glTF 导出并 GLB 往返读回 occlusionTexture |
 | 逐物体投影/受影 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test shadow_cascades` + `cargo test -p quench3d-cli --lib cast_shadows` | 关投射或关接收后影子像素都恰好 0；JSON 默认 true、显式 false 生效；属性面板绘制「投射阴影」「接收阴影」 |
 | 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 菜单栏/场景树/属性/视口/帮助/摄像头窗口产出图元；菜单标签与「相机与画中画」分区可见 |
 | 菜单栏结构 | 同上 | 文件/编辑/添加/变换/播放/视图/渲染/布局 八个菜单标签都绘制；常用工具条仍有播放、撤销、手柄、网格/阴影/关节、相机模式 |
