@@ -144,7 +144,7 @@ tools/verify_editor_features.sh
 | Web 自动保存读/写/恢复 | `tools/probe_web_ui.sh` | 写入 localStorage → reload → `recovery=true`；F9 后 `recovery=false`、`objects` 从默认场景变成 1、截图变化；随后 localStorage 立刻写出 2987 字节的新恢复点；再刷新出现恢复点，F10 丢弃后状态与键都清 |
 | 崩溃恢复提示绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | `doc.recovery=Some(..)` 时绘制图元里出现「发现自动保存」与「丢弃」按钮 |
 | 动画面板控件绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 绘制图元里出现「倍速」「循环」控件文本，而不只是标题 |
-| 灯光 gizmo | `cargo test -p quench3d --lib light_debug_lines` + `...ui_smoke` | 点光半径球 + 聚光母线/锥截面生成有限线段；工具栏绘制「灯光 gizmo」 |
+| 灯光 gizmo | `cargo test -p quench3d --lib light_debug_lines` | 点光半径球 + 聚光母线/锥截面生成有限线段；开关在「视图」菜单 |
 | 动画多轨总览 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 动画面板绘制出「多轨总览（2 条）」；播放头映射沿用 `timeline_scrub_maps_and_clamps` |
 | 编辑器动画面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 注入播放实例后，绘制图元里必须出现「动画（1 个实例）」「idle」「状态机：待机」；整帧不 panic |
 | 双 clip 混合数学 | `cargo test -p quench3d --test model_loading blended_clips_interpolate_skinned_pose` | 局部 TRS 插值：primary y=1、secondary y=2、w=0.5 → 顶点位移 1.5；w=0/1 分别精确取两条 clip |
@@ -162,7 +162,8 @@ tools/verify_editor_features.sh
 | --- | --- | --- |
 | 材质 UV 偏移/旋转 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test material_pipeline_traits uv_offset` + `...ui_smoke material_texture` | uniform 带 offset/cos/sin；改 offset/rotation 各令 >100 像素变化；材质段绘制两个控件 |
 | 物体材质贴图应用/清除 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib texture_edit` + `...ui_smoke material_texture_slots` | 应用后材质贴图与 `doc.textures` 非空，清除后都为空；有贴图设置时材质段自动展开并绘制两个按钮 |
-| 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 工具栏/场景树/属性/视口/帮助/摄像头窗口产出图元 |
+| 全面板同帧绘制 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke` | 菜单栏/场景树/属性/视口/帮助/摄像头窗口产出图元；菜单标签与「相机与画中画」分区可见 |
+| 菜单栏结构 | 同上 | 文件/编辑/添加/变换/播放/视图/渲染/布局 八个菜单标签都绘制；常用工具条仍有播放、撤销、手柄、网格/阴影/关节、相机模式 |
 | 色调映射算子 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test post_pipeline tonemap_operator` | ACES/Reinhard/线性三档渲染像素与 CPU 公式一致、互不相同 |
 | 许可审计/SBOM | `python3 tools/license_audit.py --check` | 380 个外部依赖全部有许可且允许；SBOM 与 Cargo.lock 一致；GPL-only 自测被拒绝 |
 | 场景 v1 迁移 | `cargo test -p quench3d-cli --lib version_one` | v1 自动升 v2、parent 被删、无 Error；v99 仍报错 |

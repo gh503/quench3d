@@ -159,7 +159,14 @@ fn apply_pick(doc: &mut Doc, req: &mut Requests, picked: crate::picker::PickResu
     }
 }
 
-/// 顶部工具栏。
+/// 顶部工具栏：标准菜单栏 + 一行常用操作。
+///
+/// 以前这里是一整条几十个控件的横向工具栏，高级渲染选项和保存按钮混在一起，
+/// 和桌面软件常见的「菜单 + 常用工具条 + 右侧属性面板」差得很远。现在：
+/// * 第一行是文件/编辑/添加/变换/播放/视图/渲染/布局/帮助菜单；
+/// * 第二行只留播放、撤销、手柄、网格/阴影、相机这些高频操作；
+/// * 相机/画中画/裁剪面挪到右侧属性面板的「相机与画中画」；
+/// * 高级渲染项收进「渲染」菜单。
 fn top_bar(
     ui: &mut Ui,
     engine: &mut Engine,
@@ -168,623 +175,560 @@ fn top_bar(
     req: &mut Requests,
     camera: &mut CameraFeed,
 ) {
-    // `horizontal_wrapped` 的 min-size 只报一行；如果面板按这个最小高度布局，
-    // 换行后的控件会被整块裁掉（DoF/SSAO/水的开关曾因此看不见）。显式给一个
-    // 足够容纳多行的最小高度。
     egui::Panel::top("quench3d-toolbar")
-        .min_size(240.0)
+        .min_size(if doc.recovery.is_some() { 100.0 } else { 64.0 })
         .show(ui, |ui| {
-        ui.add_space(2.0);
-        ui.horizontal_wrapped(|ui| {
-            let (play_label, play_hint) = if engine.paused {
-                ("▶ 播放", "继续推进物理")
-            } else {
-                ("⏸ 暂停", "冻结物理与仿真时间")
-            };
-            if ui.button(play_label).on_hover_text(play_hint).clicked() {
-                engine.paused = !engine.paused;
-                doc.status = if engine.paused {
-                    "已暂停".to_string()
-                } else {
-                    "继续运行".to_string()
-                };
-            }
-            if ui
-                .button("⏭ 单步")
-                .on_hover_text("推进一个固定物理步长（暂停时也能用）")
-                .clicked()
-            {
-                doc.step_once(engine);
-            }
-            if ui
-                .button("⟲ 重置")
-                .on_hover_text("所有物体回到基线状态（位置 / 朝向 / 速度）")
-                .clicked()
-            {
-                doc.reset(engine);
-                engine.paused = true;
-                doc.record_edit(engine);
-            }
-            if ui
-                .button("☀ 唤醒全部")
-                .on_hover_text(
-                    "把所有睡着的刚体叫醒（速度保持为零）：\n                     搬动过一批物体、或从快照恢复之后，\n                     免得有东西以睡着的姿态停在半空",
-                )
-                .clicked()
-            {
-                let woken = engine.world.wake_up_all();
-                doc.status = format!("已唤醒 {woken} 个睡着的刚体");
-            }
-
-            ui.separator();
-
-            // 撤销 / 重做：整场景快照，拖拽算一步（见 history.rs 的边界说明）。
-            let can_undo = doc.history.can_undo();
-            let can_redo = doc.history.can_redo();
-            if ui
-                .add_enabled(can_undo, egui::Button::new("↶ 撤销"))
-                .on_hover_text("Ctrl+Z")
-                .clicked()
-            {
-                doc.undo(engine);
-            }
-            if ui
-                .add_enabled(can_redo, egui::Button::new("↷ 重做"))
-                .on_hover_text("Ctrl+Shift+Z / Ctrl+Y")
-                .clicked()
-            {
-                doc.redo(engine);
-            }
-            // 历史列表：点任意一步直接跳过去；被跳过的步骤进入重做链。
-            let history_labels: Vec<String> = (0..doc.history.len())
-                .map(|i| {
-                    format!(
-                        "{}. {}",
-                        i + 1,
-                        doc.history.label(i).unwrap_or("编辑")
-                    )
-                })
-                .collect();
-            let current_step = doc.history.len().saturating_sub(1);
-            ui.menu_button("历史", |ui| {
-                ui.set_min_width(260.0);
-                if history_labels.len() <= 1 {
-                    ui.label(egui::RichText::new("还没有可跳转的步骤").weak());
-                }
-                for (i, label) in history_labels.iter().enumerate() {
-                    if ui
-                        .selectable_label(i == current_step, label)
-                        .clicked()
-                        && i != current_step
-                    {
-                        doc.jump_history(engine, i);
-                        ui.close();
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Quench3D").strong());
+                ui.separator();
+                file_menu(ui, doc, req);
+                edit_menu(ui, engine, doc);
+                add_menu(ui, engine, doc);
+                transform_menu(ui, engine, doc, gizmo);
+                playback_menu(ui, engine, doc);
+                view_menu(ui, engine, gizmo, camera);
+                render_menu(ui, engine);
+                layout_menu(ui, doc);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("？").on_hover_text("快捷键与操作说明").clicked() {
+                        doc.show_help = !doc.show_help;
                     }
-                }
-            })
-            .response
-            .on_hover_text("撤销历史：点一步直接跳回去");
-
+                    let file = std::path::Path::new(&doc.file_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("未命名场景");
+                    ui.label(RichText::new(file).small().weak());
+                });
+            });
             ui.separator();
-
-            ui.label("添加：");
-            for kind in Primitive::ALL {
-                if ui.button(kind.label()).clicked() {
-                    doc.spawn(engine, kind);
+            ui.horizontal_wrapped(|ui| {
+                let (play_label, play_hint) = if engine.paused {
+                    ("▶ 播放", "继续推进物理")
+                } else {
+                    ("⏸ 暂停", "冻结物理与仿真时间")
+                };
+                if ui.button(play_label).on_hover_text(play_hint).clicked() {
+                    engine.paused = !engine.paused;
+                    doc.status = if engine.paused {
+                        "已暂停".to_string()
+                    } else {
+                        "继续运行".to_string()
+                    };
+                }
+                if ui
+                    .button("⏭ 单步")
+                    .on_hover_text("推进一个固定物理步长（暂停时也能用）")
+                    .clicked()
+                {
+                    doc.step_once(engine);
+                }
+                if ui
+                    .button("⟲ 重置")
+                    .on_hover_text("所有物体回到基线状态（位置 / 朝向 / 速度）")
+                    .clicked()
+                {
+                    doc.reset(engine);
                     engine.paused = true;
                     doc.record_edit(engine);
                 }
-            }
-            if ui.button("复制").clicked() {
-                doc.duplicate_selected(engine);
-                engine.paused = true;
-                doc.record_edit(engine);
-            }
-            let has_selection = doc.selected.is_some();
-            if ui
-                .add_enabled(has_selection, egui::Button::new("删除"))
-                .clicked()
-            {
-                doc.delete_selected(engine);
-                doc.record_edit(engine);
-            }
-            if ui.button("清空").clicked() {
-                doc.clear(engine);
-                engine.paused = true;
-                doc.record_edit(engine);
-            }
-
-            ui.separator();
-
-            // 变换 gizmo：模式 + 坐标系（快捷键 W/E/R，L 切坐标系）。
-            ui.label("手柄：");
-            for mode in GizmoMode::ALL {
-                let active = gizmo.mode == mode;
+                ui.separator();
+                let can_undo = doc.history.can_undo();
+                let can_redo = doc.history.can_redo();
                 if ui
-                    .selectable_label(active, mode.label())
-                    .on_hover_text(format!("{}（快捷键 {}）", mode.label(), mode.key_hint()))
+                    .add_enabled(can_undo, egui::Button::new("↶"))
+                    .on_hover_text("撤销（Ctrl+Z）")
                     .clicked()
                 {
-                    gizmo.mode = mode;
+                    doc.undo(engine);
+                }
+                if ui
+                    .add_enabled(can_redo, egui::Button::new("↷"))
+                    .on_hover_text("重做（Ctrl+Shift+Z / Ctrl+Y）")
+                    .clicked()
+                {
+                    doc.redo(engine);
+                }
+                ui.separator();
+                ui.label("手柄");
+                for mode in GizmoMode::ALL {
+                    let active = gizmo.mode == mode;
+                    if ui
+                        .selectable_label(active, mode.label())
+                        .on_hover_text(format!("{}（快捷键 {}）", mode.label(), mode.key_hint()))
+                        .clicked()
+                    {
+                        gizmo.mode = mode;
+                    }
+                }
+                egui::ComboBox::from_id_salt("gizmo-space-quick")
+                    .selected_text(gizmo.space.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut gizmo.space, GizmoSpace::World, "世界");
+                        ui.selectable_value(&mut gizmo.space, GizmoSpace::Local, "局部");
+                    });
+                ui.separator();
+                ui.checkbox(&mut engine.renderer.options.grid, "网格");
+                ui.checkbox(&mut engine.renderer.options.shadows, "阴影");
+                ui.checkbox(&mut engine.debug.joints, "关节");
+                ui.separator();
+                let mode_label = match engine.camera_mode {
+                    CameraMode::Orbit => "轨道相机",
+                    CameraMode::Fly => "飞行相机",
+                };
+                egui::ComboBox::from_id_salt("camera-mode-quick")
+                    .selected_text(mode_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
+                        ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
+                    });
+            });
+            if doc.recovery.is_some() {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("发现自动保存");
+                    if ui
+                        .button("恢复")
+                        .on_hover_text(
+                            "把上次崩溃前的自动保存装回引擎（不覆盖原场景文件）；快捷键 F9",
+                        )
+                        .clicked()
+                    {
+                        req.restore_recovery = true;
+                    }
+                    if ui
+                        .button("丢弃")
+                        .on_hover_text("删掉自动保存，保持当前场景；快捷键 F10")
+                        .clicked()
+                    {
+                        req.discard_recovery = true;
+                    }
+                });
+            }
+            ui.add_space(2.0);
+        });
+}
+
+fn file_menu(ui: &mut Ui, doc: &mut Doc, req: &mut Requests) {
+    // wasm 端没有文件选择器，打开/另存为都走浏览器下载；`doc` 只在原生分支用到。
+    #[cfg(target_arch = "wasm32")]
+    let _ = &doc;
+    ui.menu_button("文件", |ui| {
+        ui.set_min_width(180.0);
+        if ui.button("打开…").clicked() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                doc.picker_action = crate::picker::PickAction::OpenScene;
+                doc.picker = Some(crate::picker::FilePicker::for_open(
+                    std::path::Path::new(&doc.file_path),
+                    &["json"],
+                    "打开场景",
+                ));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                req.load = true;
+            }
+            ui.close();
+        }
+        if ui.button("保存").clicked() {
+            req.save = true;
+            ui.close();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui.button("另存为…").clicked() {
+            let default = std::path::Path::new(&doc.file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("scene.json")
+                .to_string();
+            doc.picker_action = crate::picker::PickAction::SaveScene;
+            doc.picker = Some(crate::picker::FilePicker::for_save(
+                std::path::Path::new(&doc.file_path),
+                &default,
+                &["json"],
+                "场景另存为",
+            ));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("导出 glTF…").clicked() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                doc.picker_action = crate::picker::PickAction::ExportGltf;
+                doc.picker = Some(crate::picker::FilePicker::for_save(
+                    &std::path::Path::new(&doc.file_path).with_extension("gltf"),
+                    "scene.gltf",
+                    &["gltf"],
+                    "导出 glTF",
+                ));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                req.export_gltf = true;
+            }
+            ui.close();
+        }
+        if ui.button("导出 GLB…").clicked() {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                doc.picker_action = crate::picker::PickAction::ExportGlb;
+                doc.picker = Some(crate::picker::FilePicker::for_save(
+                    &std::path::Path::new(&doc.file_path).with_extension("glb"),
+                    "scene.glb",
+                    &["glb"],
+                    "导出 GLB",
+                ));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                req.export_glb = true;
+            }
+            ui.close();
+        }
+        if ui.button("截图").clicked() {
+            req.screenshot = true;
+            ui.close();
+        }
+    });
+}
+
+fn edit_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    ui.menu_button("编辑", |ui| {
+        ui.set_min_width(220.0);
+        let can_undo = doc.history.can_undo();
+        let can_redo = doc.history.can_redo();
+        if ui
+            .add_enabled(can_undo, egui::Button::new("撤销"))
+            .on_hover_text("Ctrl+Z")
+            .clicked()
+        {
+            doc.undo(engine);
+            ui.close();
+        }
+        if ui
+            .add_enabled(can_redo, egui::Button::new("重做"))
+            .on_hover_text("Ctrl+Shift+Z / Ctrl+Y")
+            .clicked()
+        {
+            doc.redo(engine);
+            ui.close();
+        }
+        let history_labels: Vec<String> = (0..doc.history.len())
+            .map(|i| format!("{}. {}", i + 1, doc.history.label(i).unwrap_or("编辑")))
+            .collect();
+        let current_step = doc.history.len().saturating_sub(1);
+        ui.menu_button("历史", |ui| {
+            ui.set_min_width(240.0);
+            if history_labels.len() <= 1 {
+                ui.label(egui::RichText::new("还没有可跳转的步骤").weak());
+            }
+            for (i, label) in history_labels.iter().enumerate() {
+                if ui.selectable_label(i == current_step, label).clicked() && i != current_step {
+                    doc.jump_history(engine, i);
+                    ui.close();
                 }
             }
+        });
+        ui.separator();
+        if ui.button("复制选中").clicked() {
+            doc.duplicate_selected(engine);
+            engine.paused = true;
+            doc.record_edit(engine);
+            ui.close();
+        }
+        let has_selection = doc.selected.is_some();
+        if ui
+            .add_enabled(has_selection, egui::Button::new("删除选中"))
+            .clicked()
+        {
+            doc.delete_selected(engine);
+            doc.record_edit(engine);
+            ui.close();
+        }
+        if ui.button("清空场景").clicked() {
+            doc.clear(engine);
+            engine.paused = true;
+            doc.record_edit(engine);
+            ui.close();
+        }
+    });
+}
+
+fn add_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    ui.menu_button("添加", |ui| {
+        ui.set_min_width(160.0);
+        for kind in Primitive::ALL {
+            if ui.button(kind.label()).clicked() {
+                doc.spawn(engine, kind);
+                engine.paused = true;
+                doc.record_edit(engine);
+                ui.close();
+            }
+        }
+    });
+}
+
+fn transform_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut Gizmo) {
+    ui.menu_button("变换", |ui| {
+        ui.set_min_width(220.0);
+        for mode in GizmoMode::ALL {
+            let active = gizmo.mode == mode;
+            if ui
+                .selectable_label(active, mode.label())
+                .on_hover_text(format!("{}（快捷键 {}）", mode.label(), mode.key_hint()))
+                .clicked()
+            {
+                gizmo.mode = mode;
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("坐标系");
             egui::ComboBox::from_id_salt("gizmo-space")
                 .selected_text(gizmo.space.label())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut gizmo.space, GizmoSpace::World, "世界");
                     ui.selectable_value(&mut gizmo.space, GizmoSpace::Local, "局部");
                 });
+        });
+        ui.horizontal(|ui| {
+            ui.label("轴心");
             egui::ComboBox::from_id_salt("gizmo-pivot")
                 .selected_text(gizmo.pivot.label())
                 .show_ui(ui, |ui| {
                     for pivot in GizmoPivot::ALL {
                         ui.selectable_value(&mut gizmo.pivot, pivot, pivot.label());
                     }
-                })
-                .response
-                .on_hover_text("旋转/缩放的轴心");
-            if gizmo.pivot == GizmoPivot::Cursor {
-                let mut cursor = gizmo.cursor.to_array();
-                ui.horizontal(|ui| {
-                    ui.label("光标");
-                    for (i, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
-                        ui.label(axis);
-                        ui.add(
-                            egui::DragValue::new(&mut cursor[i])
-                                .speed(0.05)
-                                .range(-10_000.0..=10_000.0),
-                        );
-                    }
-                    if ui
-                        .button("到选中中心")
-                        .on_hover_text("把 3D 光标放到当前选中物体的中心（快捷键 K）")
-                        .clicked()
-                    {
-                        if let Some(center) = doc.selection_center(engine) {
-                            gizmo.cursor = center;
-                        }
-                    }
                 });
-                gizmo.cursor = Vec3::new(cursor[0], cursor[1], cursor[2]);
-            }
-            ui.checkbox(&mut gizmo.enabled, "显示")
-                .on_hover_text("关掉后视口里只剩拾取与转视角");
-
-            ui.separator();
-
-            ui.checkbox(&mut engine.renderer.options.grid, "网格");
-            ui.checkbox(&mut engine.renderer.options.shadows, "阴影");
-            ui.checkbox(&mut engine.renderer.options.auto_lod, "自动 LOD")
-                .on_hover_text("高面数网格在载入时生成 1/2、1/4 两档；打开后需重新载入场景才作用于已有网格");
-            ui.checkbox(&mut engine.debug.joints, "关节")
-                .on_hover_text("画出物理关节的锚点、连线与铰链/滑块轴");
-            ui.horizontal(|ui| {
-                ui.label("级联");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.shadow_cascades)
-                        .speed(0.05)
-                        .range(1..=4),
-                )
-                .on_hover_text(
-                    "阴影级联数：1 = 单级（近处最清晰，远处可能没阴影）；\n                     2~4 = 远处也有阴影，但近处的阴影会糊一些。\n                     与 quench3d render 用同一个值。",
-                );
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.shadow_split_lambda)
-                        .speed(0.01)
-                        .range(0.0..=1.0),
-                )
-                .on_hover_text("级联切分系数：0 = 按距离均匀，1 = 对数分布（近处更细）");
-            });
-            ui.checkbox(&mut engine.renderer.options.bloom.enabled, "泛光（bloom）")
-                .on_hover_text(
-                    "让比阈值更亮的部分外溢（太阳、自发光、高光）。\n                     阈值越高越只有真正亮的东西会发光。与 quench3d render 用同一份映射。",
-                );
-            ui.add_enabled_ui(engine.renderer.options.bloom.enabled, |ui| {
+        });
+        if gizmo.pivot == GizmoPivot::Cursor {
+            let mut cursor = gizmo.cursor.to_array();
+            for (i, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label("强度");
+                    ui.label(axis);
                     ui.add(
-                        egui::DragValue::new(&mut engine.renderer.options.bloom.intensity)
-                            .speed(0.01)
-                            .range(0.0..=4.0),
-                    );
-                    ui.label("阈值");
-                    ui.add(
-                        egui::DragValue::new(&mut engine.renderer.options.bloom.threshold)
-                            .speed(0.01)
-                            .range(0.0..=16.0),
-                    );
-                });
-            });
-            ui.checkbox(&mut engine.renderer.options.taa.enabled, "时域抗锯齿（TAA）")
-                .on_hover_text(
-                    "用上一帧历史 + 深度重投影做亚像素累积；相机每帧轻微抖动。\n                     比 FXAA 更平滑，但运动物体会有一点拖影；需要可读深度且未开 MSAA。",
-                );
-            ui.add_enabled_ui(engine.renderer.options.taa.enabled, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("历史权重");
-                    ui.add(
-                        egui::DragValue::new(&mut engine.renderer.options.taa.feedback)
-                            .speed(0.01)
-                            .range(0.0..=0.98),
-                    )
-                    .on_hover_text("越大越平滑、越容易拖影；0 = 不累积");
-                });
-            });
-            ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）")
-                .on_hover_text(
-                    "后处理抗锯齿：在 tonemap 之后的画面上找边缘做定向模糊。\n                     关掉时画面与不开这个功能完全一致；MSAA 与它互不替代，可以同时开。",
-                );
-            ui.checkbox(&mut engine.renderer.options.ssao.enabled, "环境光遮蔽（SSAO）")
-                .on_hover_text(
-                    "屏幕空间环境光遮蔽：让物体与地面接触的缝隙、墙角变暗。\n                     深度-only 实现，只影响间接光的近似；半径/强度在场景文件的 lighting.ssao 里调。",
-                );
-            ui.add_enabled_ui(engine.renderer.options.ssao.enabled, |ui| {
-                ui.checkbox(
-                    &mut engine.renderer.options.ssao.denoise,
-                    "SSAO 去噪（4 邻域双边，5× 采样）",
-                )
-                .on_hover_text("压掉接触处的颗粒；边缘按深度差保护，不会糊墙。");
-            });
-            ui.checkbox(&mut engine.renderer.options.dof.enabled, "景深（DoF）")
-                .on_hover_text(
-                    "按像素到焦平面的距离做圆盘模糊；天空不参与。\n                     只在能读深度的后端（原生 wgpu）生效，GL/WebGL2 会忽略。",
-                );
-            ui.add_enabled_ui(engine.renderer.options.dof.enabled, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("对焦");
-                    ui.add(
-                        egui::DragValue::new(&mut engine.renderer.options.dof.focus)
+                        egui::DragValue::new(&mut cursor[i])
                             .speed(0.05)
-                            .range(0.1..=100.0)
-                            .suffix("m"),
-                    );
-                    ui.label("光圈");
-                    ui.add(
-                        egui::DragValue::new(&mut engine.renderer.options.dof.aperture)
-                            .speed(0.01)
-                            .range(0.0..=4.0),
-                    );
-                    ui.label("模糊");
-                    ui.add(
-                        egui::DragValue::new(&mut engine.renderer.options.dof.max_blur)
-                            .speed(0.1)
-                            .range(0.0..=32.0)
-                            .suffix("px"),
+                            .range(-10_000.0..=10_000.0),
                     );
                 });
-            });
-            water_section(ui, engine);
-            ui.checkbox(&mut engine.debug.axes, "坐标轴");
-            ui.checkbox(&mut engine.debug.lights, "灯光 gizmo");
+            }
+            if ui
+                .button("光标到选中中心")
+                .on_hover_text("把 3D 光标放到当前选中物体的中心（快捷键 K）")
+                .clicked()
+            {
+                if let Some(center) = doc.selection_center(engine) {
+                    cursor = center.to_array();
+                }
+            }
+            gizmo.cursor = Vec3::new(cursor[0], cursor[1], cursor[2]);
+        }
+        ui.checkbox(&mut gizmo.enabled, "显示手柄");
+    });
+}
 
-            let mode_label = match engine.camera_mode {
-                CameraMode::Orbit => "轨道相机",
-                CameraMode::Fly => "飞行相机",
+fn playback_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    ui.menu_button("播放", |ui| {
+        ui.set_min_width(170.0);
+        let (label, hint) = if engine.paused {
+            ("▶ 播放", "继续推进物理")
+        } else {
+            ("⏸ 暂停", "冻结物理与仿真时间")
+        };
+        if ui.button(label).on_hover_text(hint).clicked() {
+            engine.paused = !engine.paused;
+            doc.status = if engine.paused {
+                "已暂停".to_string()
+            } else {
+                "继续运行".to_string()
             };
-            egui::ComboBox::from_id_salt("camera-mode")
-                .selected_text(mode_label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
-                    ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
-                });
+            ui.close();
+        }
+        if ui
+            .button("⏭ 单步")
+            .on_hover_text("推进一个固定物理步长（暂停时也能用）")
+            .clicked()
+        {
+            doc.step_once(engine);
+            ui.close();
+        }
+        if ui
+            .button("⟲ 重置")
+            .on_hover_text("所有物体回到基线状态（位置 / 朝向 / 速度）")
+            .clicked()
+        {
+            doc.reset(engine);
+            engine.paused = true;
+            doc.record_edit(engine);
+            ui.close();
+        }
+        if ui
+            .button("☀ 唤醒全部")
+            .on_hover_text("把所有睡着的刚体叫醒（速度保持为零）")
+            .clicked()
+        {
+            let woken = engine.world.wake_up_all();
+            doc.status = format!("已唤醒 {woken} 个睡着的刚体");
+            ui.close();
+        }
+    });
+}
 
-            // 场景 `cameras` 段的命名视角：只切主相机（不做分屏/多视口）。
-            let named_cameras: Vec<(String, quench3d_cli::scene_doc::CameraDoc)> = doc
-                .base_doc()
-                .map(|base| {
-                    base.cameras
-                        .iter()
-                        .map(|(name, camera)| (name.clone(), camera.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !named_cameras.is_empty() {
-                let current = doc
-                    .selected_camera
-                    .clone()
-                    .unwrap_or_else(|| "编辑器视角".to_string());
-                ui.horizontal(|ui| {
-                if ui.button("◀").on_hover_text("上一台命名相机").clicked() {
-                    doc.cycle_named_camera(engine, -1);
-                }
-                if ui.button("▶").on_hover_text("下一台命名相机").clicked() {
-                    doc.cycle_named_camera(engine, 1);
-                }
-                egui::ComboBox::from_id_salt("named-camera")
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(doc.selected_camera.is_none(), "编辑器视角")
-                            .clicked()
-                        {
-                            doc.selected_camera = None;
-                        }
-                        for (name, _camera) in &named_cameras {
-                            let selected = doc.selected_camera.as_deref() == Some(name.as_str());
-                            if ui.selectable_label(selected, name).clicked() {
-                                doc.select_named_camera(engine, name);
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("场景 `cameras` 段里的命名视角；只切换主相机");
-                });
-                // 画中画：右下角用第二个命名相机做 CPU 回读预览（桌面端）。
-                // 它不是实时 GPU 分屏，频率被限制在约 5 Hz。
-                #[cfg(not(target_arch = "wasm32"))]
-                ui.horizontal(|ui| {
-                    ui.label("画中画");
-                    let current = doc.pip_camera.clone().unwrap_or_else(|| "关闭".into());
-                    egui::ComboBox::from_id_salt("pip-camera")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(doc.pip_camera.is_none(), "关闭")
-                                .clicked()
-                            {
-                                doc.pip_camera = None;
-                                doc.pip_texture = None;
-                            }
-                            for (name, _camera) in &named_cameras {
-                                let selected = doc.pip_camera.as_deref() == Some(name.as_str());
-                                if ui.selectable_label(selected, name).clicked() {
-                                    doc.pip_camera = Some(name.clone());
-                                    doc.pip_texture = None;
-                                    doc.pip_last_frame = 0;
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text("小窗预览第二台命名相机（约 5 Hz，CPU 回读）");
-                    egui::ComboBox::from_id_salt("pip-corner")
-                        .selected_text(match doc.pip_corner {
-                            1 => "左下",
-                            2 => "右上",
-                            3 => "左上",
-                            _ => "右下",
-                        })
-                        .show_ui(ui, |ui| {
-                            for (value, label) in
-                                [(0, "右下"), (1, "左下"), (2, "右上"), (3, "左上")]
-                            {
-                                ui.selectable_value(&mut doc.pip_corner, value, label);
-                            }
-                        });
-                    ui.label("大小");
-                    ui.add(
-                        egui::DragValue::new(&mut doc.pip_scale)
-                            .range(0.15..=0.45)
-                            .speed(0.01)
-                            .fixed_decimals(2),
-                    );
-                    ui.label("分辨率");
-                    let res_label = match doc.pip_resolution {
-                        0 => "160×90",
-                        2 => "480×270",
-                        _ => "320×180",
-                    };
-                    egui::ComboBox::from_id_salt("pip-resolution")
-                        .selected_text(res_label)
-                        .show_ui(ui, |ui| {
-                            for (value, label) in
-                                [(0, "160×90"), (1, "320×180"), (2, "480×270")]
-                            {
-                                if ui
-                                    .selectable_value(&mut doc.pip_resolution, value, label)
-                                    .changed()
-                                {
-                                    doc.pip_last_frame = 0;
-                                }
-                            }
-                        });
-                    ui.label("刷新间隔");
-                    ui.add(
-                        egui::DragValue::new(&mut doc.pip_interval)
-                            .range(1..=120)
-                            .speed(1)
-                            .suffix(" 帧"),
-                    );
-                });
-            }
+fn view_menu(ui: &mut Ui, engine: &mut Engine, gizmo: &mut Gizmo, camera: &mut CameraFeed) {
+    ui.menu_button("视图", |ui| {
+        ui.set_min_width(220.0);
+        ui.checkbox(&mut engine.renderer.options.grid, "网格");
+        ui.checkbox(&mut engine.renderer.options.shadows, "阴影");
+        ui.checkbox(&mut engine.renderer.options.auto_lod, "自动 LOD")
+            .on_hover_text("高面数网格在载入时生成 1/2、1/4 两档；需重新载入场景才作用于已有网格");
+        ui.checkbox(&mut engine.debug.joints, "物理关节")
+            .on_hover_text("画出物理关节的锚点、连线与铰链/滑块轴");
+        ui.checkbox(&mut engine.debug.axes, "坐标轴");
+        ui.checkbox(&mut engine.debug.lights, "灯光 gizmo");
+        ui.separator();
+        ui.label(RichText::new("相机").small().weak());
+        let mode_label = match engine.camera_mode {
+            CameraMode::Orbit => "轨道相机",
+            CameraMode::Fly => "飞行相机",
+        };
+        egui::ComboBox::from_id_salt("camera-mode")
+            .selected_text(mode_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
+                ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
+            });
+        if ui.button("摄像头预览…").clicked() {
+            camera.toolbar(ui);
+        }
+        ui.checkbox(&mut gizmo.enabled, "显示手柄");
+    });
+}
 
-            ui.separator();
-            // 相机投影：视场角 / 裁剪面 / 正交高度。后两项以前只在场景文件里能调，
-            // 而且存盘时会被 `..Default::default()` 悄悄丢掉。
-            let mut ortho = engine.orbit.orthographic_height.is_some();
-            if ui
-                .checkbox(&mut ortho, "正交")
-                .on_hover_text("关 = 透视（近大远小）；开 = 工程制图式正交投影")
-                .changed()
-            {
-                engine.orbit.orthographic_height = if ortho {
-                    Some(engine.orbit.orthographic_height.unwrap_or(12.0))
-                } else {
-                    None
-                };
-            }
-            let mut fov_deg = engine.orbit.fov_y.to_degrees();
-            if ui
-                .add_enabled_ui(!ortho, |ui| {
-                    ui.label("视场角");
-                    ui.add(
-                        egui::DragValue::new(&mut fov_deg)
-                            .speed(0.5)
-                            .range(10.0..=170.0)
-                            .suffix("°"),
-                    )
-                })
-                .inner
-                .changed()
-            {
-                engine.orbit.fov_y = fov_deg.to_radians();
-            }
-            ui.label("近/远");
+fn render_menu(ui: &mut Ui, engine: &mut Engine) {
+    ui.menu_button("渲染", |ui| {
+        ui.set_min_width(280.0);
+        ui.horizontal(|ui| {
+            ui.label("阴影级联");
             ui.add(
-                egui::DragValue::new(&mut engine.orbit.near)
-                    .speed(0.005)
-                    .range(0.001..=10.0),
-            );
+                egui::DragValue::new(&mut engine.renderer.options.shadow_cascades)
+                    .speed(0.05)
+                    .range(1..=4),
+            )
+            .on_hover_text("1 = 单级（近处最清晰）；2~4 = 远处也有阴影，近处会糊一些");
             ui.add(
-                egui::DragValue::new(&mut engine.orbit.far)
-                    .speed(5.0)
-                    .range(10.0..=100000.0),
-            );
-            if let Some(height) = engine.orbit.orthographic_height.as_mut() {
-                ui.label("高度");
+                egui::DragValue::new(&mut engine.renderer.options.shadow_split_lambda)
+                    .speed(0.01)
+                    .range(0.0..=1.0),
+            )
+            .on_hover_text("0 = 按距离均匀，1 = 对数分布（近处更细）");
+        });
+        ui.checkbox(&mut engine.renderer.options.bloom.enabled, "泛光（bloom）");
+        ui.add_enabled_ui(engine.renderer.options.bloom.enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("强度");
                 ui.add(
-                    egui::DragValue::new(height)
-                        .speed(0.1)
-                        .range(0.1..=5000.0)
+                    egui::DragValue::new(&mut engine.renderer.options.bloom.intensity)
+                        .speed(0.01)
+                        .range(0.0..=4.0),
+                );
+                ui.label("阈值");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.bloom.threshold)
+                        .speed(0.01)
+                        .range(0.0..=16.0),
+                );
+            });
+        });
+        ui.checkbox(
+            &mut engine.renderer.options.taa.enabled,
+            "时域抗锯齿（TAA）",
+        );
+        ui.add_enabled_ui(engine.renderer.options.taa.enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("历史权重");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.taa.feedback)
+                        .speed(0.01)
+                        .range(0.0..=0.98),
+                );
+            });
+        });
+        ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）");
+        ui.checkbox(
+            &mut engine.renderer.options.ssao.enabled,
+            "环境光遮蔽（SSAO）",
+        );
+        ui.add_enabled_ui(engine.renderer.options.ssao.enabled, |ui| {
+            ui.checkbox(
+                &mut engine.renderer.options.ssao.denoise,
+                "SSAO 去噪（4 邻域双边，5× 采样）",
+            );
+        });
+        ui.checkbox(&mut engine.renderer.options.dof.enabled, "景深（DoF）");
+        ui.add_enabled_ui(engine.renderer.options.dof.enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("对焦");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.dof.focus)
+                        .speed(0.05)
+                        .range(0.1..=100.0)
                         .suffix("m"),
                 );
-            }
-
-            ui.separator();
-
-            if doc.recovery.is_some() {
-                ui.label("发现自动保存");
-                if ui
-                    .button("恢复")
-                    .on_hover_text("把上次崩溃前的自动保存装回引擎（不覆盖原场景文件）；快捷键 F9")
-                    .clicked()
-                {
-                    req.restore_recovery = true;
-                }
-                if ui
-                    .button("丢弃")
-                    .on_hover_text("删掉自动保存，保持当前场景；快捷键 F10")
-                    .clicked()
-                {
-                    req.discard_recovery = true;
-                }
-            }
-            camera.toolbar(ui);
-            if ui.button("打开").on_hover_text("选择并读入 scene.json").clicked() {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    doc.picker_action = crate::picker::PickAction::OpenScene;
-                    doc.picker = Some(crate::picker::FilePicker::for_open(
-                        std::path::Path::new(&doc.file_path),
-                        &["json"],
-                        "打开场景",
-                    ));
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    req.load = true;
-                }
-            }
-            let save = ui
-                .button("保存")
-                .on_hover_text("写出 scene.json（右键：另存为）");
-            if save.clicked() {
-                req.save = true;
-            }
-            // 「另存为」放在保存按钮的右键菜单里：主工具栏已经排得很满，再加一个
-            // 按钮会把「导出 GLB」挤到 min_size 之外被裁掉（UI 冒烟测试抓过）。
-            #[cfg(not(target_arch = "wasm32"))]
-            save.context_menu(|ui| {
-                if ui.button("另存为…").clicked() {
-                    let default = std::path::Path::new(&doc.file_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("scene.json")
-                        .to_string();
-                    doc.picker_action = crate::picker::PickAction::SaveScene;
-                    doc.picker = Some(crate::picker::FilePicker::for_save(
-                        std::path::Path::new(&doc.file_path),
-                        &default,
-                        &["json"],
-                        "场景另存为",
-                    ));
-                    ui.close();
-                }
+                ui.label("光圈");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.dof.aperture)
+                        .speed(0.01)
+                        .range(0.0..=4.0),
+                );
+                ui.label("模糊");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.dof.max_blur)
+                        .speed(0.1)
+                        .range(0.0..=32.0)
+                        .suffix("px"),
+                );
             });
-            if ui
-                .button("导出 glTF")
-                .on_hover_text("把当前场景的图元导出成单文件 glTF 2.0（base64 几何/贴图）")
-                .clicked()
-            {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    doc.picker_action = crate::picker::PickAction::ExportGltf;
-                    doc.picker = Some(crate::picker::FilePicker::for_save(
-                        &std::path::Path::new(&doc.file_path).with_extension("gltf"),
-                        "scene.gltf",
-                        &["gltf"],
-                        "导出 glTF",
-                    ));
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    req.export_gltf = true;
-                }
-            }
-            if ui
-                .button("导出 GLB")
-                .on_hover_text("把当前场景的图元导出成二进制 GLB（JSON + BIN chunk）")
-                .clicked()
-            {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    doc.picker_action = crate::picker::PickAction::ExportGlb;
-                    doc.picker = Some(crate::picker::FilePicker::for_save(
-                        &std::path::Path::new(&doc.file_path).with_extension("glb"),
-                        "scene.glb",
-                        &["glb"],
-                        "导出 GLB",
-                    ));
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    req.export_glb = true;
-                }
-            }
-            if ui
-                .button("截图")
-                .on_hover_text("把当前画面存成 PNG")
-                .clicked()
-            {
-                req.screenshot = true;
-            }
-            ui.menu_button("布局", |ui| {
-                ui.set_min_width(220.0);
-                ui.label(RichText::new("面板宽度（逻辑像素）").small().weak());
-                let mut changed = false;
-                changed |= ui
-                    .add(
-                        egui::Slider::new(
-                            &mut doc.layout.outliner_width,
-                            crate::layout::OUTLINER_MIN..=crate::layout::OUTLINER_MAX,
-                        )
-                        .text("左栏"),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(
-                            &mut doc.layout.inspector_width,
-                            crate::layout::INSPECTOR_MIN..=crate::layout::INSPECTOR_MAX,
-                        )
-                        .text("右栏"),
-                    )
-                    .changed();
-                if ui.button("恢复默认").clicked() {
-                    doc.layout = crate::layout::Layout::default();
-                    changed = true;
-                }
-                if changed {
-                    doc.layout.clamp();
-                    if let Err(e) = doc.layout.save() {
-                        doc.status = format!("布局保存失败：{e}");
-                    }
-                }
-            });
-            if ui.button("？").on_hover_text("快捷键与操作说明").clicked() {
-                doc.show_help = !doc.show_help;
-            }
         });
-        ui.add_space(2.0);
+        ui.separator();
+        water_section(ui, engine);
+    });
+}
+
+fn layout_menu(ui: &mut Ui, doc: &mut Doc) {
+    ui.menu_button("布局", |ui| {
+        ui.set_min_width(230.0);
+        ui.label(RichText::new("面板宽度（逻辑像素）").small().weak());
+        let mut changed = false;
+        changed |= ui
+            .add(
+                egui::Slider::new(
+                    &mut doc.layout.outliner_width,
+                    crate::layout::OUTLINER_MIN..=crate::layout::OUTLINER_MAX,
+                )
+                .text("左栏"),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::Slider::new(
+                    &mut doc.layout.inspector_width,
+                    crate::layout::INSPECTOR_MIN..=crate::layout::INSPECTOR_MAX,
+                )
+                .text("右栏"),
+            )
+            .changed();
+        if ui.button("恢复默认").clicked() {
+            doc.layout = crate::layout::Layout::default();
+            changed = true;
+        }
+        if changed {
+            doc.layout.clamp();
+            if let Err(e) = doc.layout.save() {
+                doc.status = format!("布局保存失败：{e}");
+            }
+        }
     });
 }
 
@@ -1471,6 +1415,195 @@ fn water_section(ui: &mut Ui, engine: &mut Engine) {
                     .prefix("折射 "),
             )
             .on_hover_text("屏幕空间折射偏移；0 = 不扰动背景");
+        });
+}
+
+/// 右侧属性面板的「相机与画中画」：主相机模式、命名视角、画中画参数、裁剪面。
+fn camera_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    egui::CollapsingHeader::new("相机与画中画")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mode_label = match engine.camera_mode {
+                CameraMode::Orbit => "轨道相机",
+                CameraMode::Fly => "飞行相机",
+            };
+            egui::ComboBox::from_id_salt("camera-mode-panel")
+                .selected_text(mode_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
+                    ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
+                });
+
+            let names: Vec<String> = doc
+                .base_doc()
+                .map(|base| base.cameras.keys().cloned().collect())
+                .unwrap_or_default();
+            if !names.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label("命名视角");
+                    if ui.button("◀").on_hover_text("上一台（循环）").clicked() {
+                        doc.cycle_named_camera(engine, -1);
+                    }
+                    let current = doc
+                        .selected_camera
+                        .clone()
+                        .unwrap_or_else(|| "编辑器视角".to_string());
+                    egui::ComboBox::from_id_salt("named-camera-panel")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(doc.selected_camera.is_none(), "编辑器视角")
+                                .clicked()
+                            {
+                                doc.selected_camera = None;
+                            }
+                            for name in &names {
+                                let selected =
+                                    doc.selected_camera.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(selected, name).clicked() {
+                                    doc.select_named_camera(engine, name);
+                                }
+                            }
+                        });
+                    if ui.button("▶").on_hover_text("下一台（循环）").clicked() {
+                        doc.cycle_named_camera(engine, 1);
+                    }
+                });
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                ui.separator();
+                ui.label(
+                    RichText::new("画中画（第二台命名相机，CPU 回读）")
+                        .small()
+                        .weak(),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("相机");
+                    let current = doc.pip_camera.clone().unwrap_or_else(|| "关闭".into());
+                    egui::ComboBox::from_id_salt("pip-camera-panel")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(doc.pip_camera.is_none(), "关闭")
+                                .clicked()
+                            {
+                                doc.pip_camera = None;
+                                doc.pip_texture = None;
+                            }
+                            for name in &names {
+                                let selected = doc.pip_camera.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(selected, name).clicked() {
+                                    doc.pip_camera = Some(name.clone());
+                                    doc.pip_texture = None;
+                                    doc.pip_last_frame = 0;
+                                }
+                            }
+                        });
+                    egui::ComboBox::from_id_salt("pip-corner-panel")
+                        .selected_text(match doc.pip_corner {
+                            1 => "左下",
+                            2 => "右上",
+                            3 => "左上",
+                            _ => "右下",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in
+                                [(0, "右下"), (1, "左下"), (2, "右上"), (3, "左上")]
+                            {
+                                ui.selectable_value(&mut doc.pip_corner, value, label);
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("大小");
+                    ui.add(
+                        egui::DragValue::new(&mut doc.pip_scale)
+                            .range(0.15..=0.45)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    );
+                    ui.label("分辨率");
+                    let res_label = match doc.pip_resolution {
+                        0 => "160×90",
+                        2 => "480×270",
+                        _ => "320×180",
+                    };
+                    egui::ComboBox::from_id_salt("pip-resolution-panel")
+                        .selected_text(res_label)
+                        .show_ui(ui, |ui| {
+                            for (value, label) in [(0, "160×90"), (1, "320×180"), (2, "480×270")]
+                            {
+                                if ui
+                                    .selectable_value(&mut doc.pip_resolution, value, label)
+                                    .changed()
+                                {
+                                    doc.pip_last_frame = 0;
+                                }
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("刷新间隔");
+                    ui.add(
+                        egui::DragValue::new(&mut doc.pip_interval)
+                            .range(1..=120)
+                            .speed(1)
+                            .suffix(" 帧"),
+                    );
+                });
+            }
+
+            ui.separator();
+            let mut ortho = engine.orbit.orthographic_height.is_some();
+            if ui
+                .checkbox(&mut ortho, "正交")
+                .on_hover_text("关 = 透视（近大远小）；开 = 工程制图式正交投影")
+                .changed()
+            {
+                engine.orbit.orthographic_height = if ortho {
+                    Some(engine.orbit.orthographic_height.unwrap_or(12.0))
+                } else {
+                    None
+                };
+            }
+            let mut fov_deg = engine.orbit.fov_y.to_degrees();
+            ui.add_enabled_ui(!ortho, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("视场角");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut fov_deg)
+                                .speed(0.5)
+                                .range(10.0..=120.0),
+                        )
+                        .changed()
+                    {
+                        engine.orbit.fov_y = fov_deg.to_radians();
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label("近");
+                ui.add(
+                    egui::DragValue::new(&mut engine.orbit.near)
+                        .speed(0.01)
+                        .range(0.01..=10.0),
+                );
+                ui.label("远");
+                ui.add(
+                    egui::DragValue::new(&mut engine.orbit.far)
+                        .speed(1.0)
+                        .range(10.0..=10_000.0),
+                );
+            });
+            if let Some(height) = engine.orbit.orthographic_height.as_mut() {
+                ui.horizontal(|ui| {
+                    ui.label("正交高度");
+                    ui.add(egui::DragValue::new(height).speed(0.1).range(0.5..=500.0));
+                });
+            }
         });
 }
 
@@ -3804,8 +3937,14 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
         .min_size(width)
         .max_size(width)
         .show(ui, |ui| {
+            // 属性内容比一屏高（尤其展开相机/材质之后）；固定面板必须能滚，
+            // 否则小窗口里下半截控件根本够不到。
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
             ui.heading("属性");
             ui.separator();
+            camera_section(ui, engine, doc);
             light_section(ui, engine, doc);
             models_section(ui, engine, doc);
             animations_section(ui, engine, doc);
@@ -4127,6 +4266,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
                     doc.record_edit(engine);
                 }
             });
+                });
         });
     req.inspector_width = response.response.rect.width();
 }

@@ -305,7 +305,7 @@ fn all_editor_panels_draw_in_one_frame() {
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(1280.0, 1100.0),
+            egui::vec2(1280.0, 1600.0),
         )),
         ..Default::default()
     };
@@ -324,33 +324,21 @@ fn all_editor_panels_draw_in_one_frame() {
         !output.shapes.is_empty(),
         "整块 UI 一帧没产出任何绘制图元：面板没画出来"
     );
-    assert!(
-        shapes_contain_text(&output.shapes, "导出 glTF"),
-        "工具栏没有画出「导出 glTF」按钮"
-    );
-    assert!(
-        shapes_contain_text(&output.shapes, "历史"),
-        "工具栏没有画出「历史」菜单"
-    );
-    assert!(
-        shapes_contain_text(&output.shapes, "选中中心"),
-        "工具栏没有画出轴心选择"
-    );
+    for label in [
+        "文件", "编辑", "添加", "变换", "播放", "视图", "渲染", "布局",
+    ] {
+        assert!(
+            shapes_contain_text(&output.shapes, label),
+            "菜单栏没有画出「{label}」菜单"
+        );
+    }
     assert!(
         shapes_contain_text(&output.shapes, "关节"),
-        "工具栏没有画出关节调试开关"
+        "常用工具条没有画出关节调试开关"
     );
     assert!(
-        shapes_contain_text(&output.shapes, "灯光 gizmo"),
-        "工具栏没有画出灯光 gizmo 调试开关"
-    );
-    assert!(
-        shapes_contain_text(&output.shapes, "导出 GLB"),
-        "工具栏没有画出「导出 GLB」按钮"
-    );
-    assert!(
-        shapes_contain_text(&output.shapes, "布局"),
-        "工具栏没有画出「布局」菜单"
+        shapes_contain_text(&output.shapes, "相机与画中画"),
+        "属性面板没有画出「相机与画中画」分区"
     );
     assert!(
         shapes_contain_text(&output.shapes, "时间轴"),
@@ -377,16 +365,8 @@ fn all_editor_panels_draw_in_one_frame() {
         "动画面板没有显示事件标记编辑器"
     );
     assert!(
-        shapes_contain_text(&output.shapes, "时域抗锯齿（TAA）"),
-        "渲染面板没有显示 TAA 开关"
-    );
-    assert!(
         shapes_contain_text(&output.shapes, "负载"),
         "事件行没有显示负载输入框"
-    );
-    assert!(
-        shapes_contain_text(&output.shapes, "SSAO 去噪"),
-        "渲染面板没有显示 SSAO 去噪开关"
     );
     assert!(
         shapes_contain_text(&output.shapes, "事件窗口"),
@@ -446,10 +426,6 @@ fn all_editor_panels_draw_in_one_frame() {
     assert!(
         shapes_contain_text(&output.shapes, "#0 待机"),
         "状态机状态行没有出现在面板内容里"
-    );
-    assert!(
-        shapes_contain_text(&output.shapes, "景深（DoF）"),
-        "景深开关没有出现在面板内容里"
     );
     assert!(
         shapes_contain_text(&output.shapes, "正交"),
