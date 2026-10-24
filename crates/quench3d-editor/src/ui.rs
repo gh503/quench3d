@@ -893,6 +893,18 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
         .max_size(width)
         .show(ui, |ui| {
             ui.heading("场景");
+            ui.horizontal(|ui| {
+                ui.label("搜索");
+                ui.add(
+                    egui::TextEdit::singleline(&mut doc.outliner_filter)
+                        .hint_text("物体名…")
+                        .desired_width((width - 110.0).max(80.0)),
+                )
+                .on_hover_text("按物体名过滤（不区分大小写；父物体因有匹配的子物体也会保留）");
+                if !doc.outliner_filter.is_empty() && ui.small_button("×").clicked() {
+                    doc.outliner_filter.clear();
+                }
+            });
             let selected = doc.selection().len();
             if selected > 1 {
                 ui.label(
@@ -903,6 +915,7 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
             }
             ui.label(RichText::new(doc.status.clone()).small().weak());
             ui.separator();
+            let query = doc.outliner_filter.trim().to_lowercase();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let count = engine.scene.objects.len();
                 // "分组标题该画在哪个下标上"：模型实例的第一个成员所在的行。
@@ -932,9 +945,47 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
                     }
                 }
 
+                // 过滤：先按名字匹配，再把"有匹配后代"的父物体标回来，
+                // 否则搜一个子物体时父链被藏掉、结果树是断的。
+                let mut matches = vec![true; count];
+                if !query.is_empty() {
+                    let mut own = vec![false; count];
+                    for (index, object) in engine.scene.objects.iter().enumerate() {
+                        if object.fluid_particle.is_some()
+                            || object.fluid_surface.is_some()
+                            || engine.scene.is_particle_object(index)
+                        {
+                            continue;
+                        }
+                        own[index] = crate::doc::outliner_query_matches(&object.name, &query);
+                    }
+                    matches.fill(false);
+                    for index in 0..count {
+                        mark_filtered_subtree(index, &children, &own, &mut matches, 0);
+                    }
+                    // 模型分组的成员是平级根物体。只匹配到其中一个子网格时，
+                    // 仍要保留整组，否则分组标题会消失、成员散成独立行。
+                    for instance in &doc.model_instances {
+                        if instance
+                            .objects
+                            .iter()
+                            .any(|&i| matches.get(i).copied().unwrap_or(false))
+                        {
+                            for &i in &instance.objects {
+                                if let Some(slot) = matches.get_mut(i) {
+                                    *slot = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let mut focus_request: Option<Vec<usize>> = None;
                 let mut drawn = vec![false; count];
                 for index in roots {
+                    if !matches.get(index).copied().unwrap_or(true) {
+                        continue;
+                    }
                     draw_subtree(
                         ui,
                         engine,
@@ -942,6 +993,7 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
                         index,
                         &children,
                         &header_at,
+                        &matches,
                         &mut drawn,
                         &mut focus_request,
                     );
@@ -958,6 +1010,9 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
                     {
                         continue;
                     }
+                    if !matches.get(index).copied().unwrap_or(true) {
+                        continue;
+                    }
                     draw_subtree(
                         ui,
                         engine,
@@ -965,6 +1020,7 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
                         index,
                         &children,
                         &header_at,
+                        &matches,
                         &mut drawn,
                         &mut focus_request,
                     );
@@ -1008,6 +1064,28 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
     req.outliner_width = response.response.rect.width();
 }
 
+/// 搜索过滤的"后代向上传播"：自己匹配或任一后代匹配，就保留这一行。
+/// 深度上限防御坏场景里的父链成环。
+fn mark_filtered_subtree(
+    index: usize,
+    children: &[Vec<usize>],
+    own: &[bool],
+    out: &mut [bool],
+    depth: u32,
+) -> bool {
+    if depth > 64 || index >= own.len() {
+        return own.get(index).copied().unwrap_or(false);
+    }
+    let mut matched = own[index];
+    for &child in children.get(index).map(|c| c.as_slice()).unwrap_or(&[]) {
+        if mark_filtered_subtree(child, children, own, out, depth + 1) {
+            matched = true;
+        }
+    }
+    out[index] = matched;
+    matched
+}
+
 /// 画一棵子树（父物体 + 缩进的子物体），并在模型实例的第一个成员处插入分组标题。
 ///
 /// `drawn` 保证每个物体只画一次：模型分组的成员会在这里被"提前画掉"，
@@ -1020,9 +1098,13 @@ fn draw_subtree(
     index: usize,
     children: &[Vec<usize>],
     header_at: &[Option<usize>],
+    matches: &[bool],
     drawn: &mut [bool],
     focus_request: &mut Option<Vec<usize>>,
 ) {
+    if !matches.get(index).copied().unwrap_or(true) {
+        return;
+    }
     if drawn.get(index).copied().unwrap_or(true) {
         return;
     }
@@ -1056,6 +1138,7 @@ fn draw_subtree(
                     object,
                     children,
                     header_at,
+                    matches,
                     drawn,
                     focus_request,
                 );
@@ -1080,6 +1163,7 @@ fn draw_subtree(
                 child,
                 children,
                 header_at,
+                matches,
                 drawn,
                 focus_request,
             );

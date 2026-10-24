@@ -207,6 +207,8 @@ pub struct Doc {
     pub extra_selected: Vec<usize>,
     /// 场景文件路径（桌面用真实路径；浏览器里当下载文件名）。
     pub file_path: String,
+    /// 场景树搜索框（只影响界面过滤，不写进场景文件）。
+    pub outliner_filter: String,
     /// 桌面端打开的文件选择器（Web 用浏览器原生文件输入，不用它）。
     pub picker: Option<crate::picker::FilePicker>,
     /// 选择器选完后要执行的动作。
@@ -276,6 +278,17 @@ fn scene_json(engine: &Engine, doc: &Doc) -> Option<String> {
     crate::scene_io::scene_to_json(engine, doc)
         .ok()
         .map(|saved| saved.json)
+}
+
+/// 场景树搜索：空查询匹配全部；否则大小写不敏感的子串匹配。
+///
+/// 抽成纯函数是为了让"搜索到底匹配什么"可以单测，而不是只能靠点界面。
+pub fn outliner_query_matches(name: &str, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    name.to_lowercase().contains(&query.to_lowercase())
 }
 
 impl Default for Doc {
@@ -928,6 +941,7 @@ impl Doc {
             selected: None,
             extra_selected: Vec::new(),
             file_path: "scene.json".to_string(),
+            outliner_filter: String::new(),
             picker: None,
             picker_action: crate::picker::PickAction::OpenScene,
             export_path: None,
@@ -2251,5 +2265,20 @@ mod tests {
         assert!(doc.set_animator_initial(&[8], "nope").is_none());
         assert!(doc.set_animator_initial(&[99], "walk").is_none());
         assert!(doc.animator_initial(&[99]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod outliner_filter_tests {
+    use super::outliner_query_matches;
+
+    #[test]
+    fn outliner_query_matches_case_insensitively() {
+        assert!(outliner_query_matches("Box A", ""));
+        assert!(outliner_query_matches("Box A", "  "));
+        assert!(outliner_query_matches("Box A", "box"));
+        assert!(outliner_query_matches("箱子", "箱"));
+        assert!(!outliner_query_matches("Box A", "sphere"));
+        assert!(!outliner_query_matches("Box A", "box b"));
     }
 }

@@ -348,6 +348,10 @@ fn all_editor_panels_draw_in_one_frame() {
         );
     }
     assert!(
+        shapes_contain_text(&output.shapes, "搜索"),
+        "场景树没有搜索框"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "关节"),
         "常用工具条没有画出关节调试开关"
     );
@@ -978,6 +982,48 @@ fn shape_texture_rect(shape: &egui::Shape, texture_id: egui::TextureId) -> Optio
             .find_map(|shape| shape_texture_rect(shape, texture_id)),
         _ => None,
     }
+}
+
+/// 场景树搜索真的在过滤，而不只是画了一个输入框。
+#[test]
+fn outliner_search_hides_non_matching_objects() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    doc.outliner_filter = "地面".to_string();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    let shapes = std::mem::take(&mut output.shapes);
+    output.textures_delta.clear();
+    assert!(
+        shapes_contain_text(&shapes, "地面"),
+        "过滤条件命中的物体应当保留"
+    );
+    assert!(
+        !shapes_contain_text(&shapes, "斜面"),
+        "过滤条件没命中的物体（斜面）不应出现在场景树里"
+    );
 }
 
 /// 光照分区默认折叠；点一下标题后，调色与太阳/环境光颜色控件必须真的画出来。

@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **845** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **847** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -162,6 +162,7 @@ tools/verify_editor_features.sh
 | --- | --- | --- |
 | 材质 UV 偏移/旋转 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test material_pipeline_traits uv_offset` + `...ui_smoke material_texture` | uniform 带 offset/cos/sin；改 offset/rotation 各令 >100 像素变化；材质段绘制两个控件 |
 | 物体材质贴图应用/清除 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib texture_edit` + `...ui_smoke material_texture_slots` | 应用后材质贴图与 `doc.textures` 非空，清除后都为空；有贴图设置时材质段自动展开并绘制两个按钮 |
+| 场景树搜索 | `cargo test -p quench3d-editor --lib outliner` + `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke outliner_search` | 空/大小写/中文匹配；过滤「地面」后「斜面」行不出现 |
 | 阴影贴图分辨率 | `cargo test -p quench3d-render --lib shadow_sizes` + `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test shadow_cascades shadow_map_resolution` | 派生尺寸 2048→(2048,1024,1024,512)、夹取/取偶；1024 运行时重建后阴影像素仍出现 |
 | 太阳/环境光颜色 | `cargo test -p quench3d-cli --lib newly_wired` + `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke lighting_header` | JSON 颜色解析保留；点开「光照」后调色与两个取色器都画出 |
 | 后处理调色 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test material_pipeline_traits color_grade` + `cargo test -p quench3d-render --lib color_grade` | 中性红盒 R>G；饱和度 0 后 R≈G；场景范围校验；编辑器三个滑杆 |
