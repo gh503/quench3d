@@ -3386,7 +3386,9 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 * `newly_wired_fields_are_validated`：场景 JSON 的 `uv_offset/uv_rotation` 能解析。
 * `material_texture_slots_have_apply_and_clear_buttons`：材质段绘制出「UV 偏移」
   「UV 旋转（度）」。
-* 全量门禁 836 测试。
+* `uv_offset_and_rotation_change_pixels`：同一立方体、同一相机，仅改 `uv_offset`
+  后像素差 > 100；再仅改 `uv_rotation` 后又有 > 100 个像素变化。
+* 全量门禁 837 测试。
 
 **边界**：仍是**材质级**变换，不是逐贴图 UV 通道；没有 UV 动画/滚动；编辑器没有
 gizmo 拖拽改 UV。

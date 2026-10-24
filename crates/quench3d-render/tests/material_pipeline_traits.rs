@@ -227,3 +227,86 @@ fn double_sided_flag_renders_back_faces() {
         "单面材质不该画出背面：左 {left_pixels} vs 右 {right_pixels}"
     );
 }
+
+/// UV 偏移/旋转必须真的改变采样结果，而不是只写进 uniform。
+#[test]
+fn uv_offset_and_rotation_change_pixels() {
+    let Some((mut ctx, mut renderer)) = setup() else {
+        return;
+    };
+    // 2x2 高对比棋盘：偏移半个贴图后，采样到的颜色必然换一批。
+    let rgba = vec![
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+    ];
+    let tex = renderer.add_texture(
+        &ctx,
+        &ImageData {
+            width: 2,
+            height: 2,
+            rgba,
+        },
+        true,
+    );
+    let base = MaterialDesc::default().with_base_color_texture(tex).unlit();
+    let material = renderer.add_material(&ctx, base.clone());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        material,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 3.0),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 5.0);
+    camera.look_at(Vec3::ZERO);
+
+    let before = renderer
+        .capture(&mut ctx, W, H, &camera, &Lighting::studio())
+        .expect("离屏渲染");
+
+    let shifted = MaterialDesc {
+        uv_offset: [0.5, 0.0],
+        ..base.clone()
+    };
+    renderer.update_material(&ctx, material, shifted);
+    let after_offset = renderer
+        .capture(&mut ctx, W, H, &camera, &Lighting::studio())
+        .expect("离屏渲染");
+
+    let mut offset_diff = 0u32;
+    for (a, b) in before.rgba.chunks(4).zip(after_offset.rgba.chunks(4)) {
+        let d: u32 =
+            a[0].abs_diff(b[0]) as u32 + a[1].abs_diff(b[1]) as u32 + a[2].abs_diff(b[2]) as u32;
+        if d > 24 {
+            offset_diff += 1;
+        }
+    }
+    assert!(
+        offset_diff > 100,
+        "UV 偏移没有改变采样：只有 {offset_diff} 个像素不同"
+    );
+
+    let rotated = MaterialDesc {
+        uv_rotation: std::f32::consts::FRAC_PI_4,
+        ..base.clone()
+    };
+    renderer.update_material(&ctx, material, rotated);
+    let after_rotation = renderer
+        .capture(&mut ctx, W, H, &camera, &Lighting::studio())
+        .expect("离屏渲染");
+    let mut rotation_diff = 0u32;
+    for (a, b) in after_offset
+        .rgba
+        .chunks(4)
+        .zip(after_rotation.rgba.chunks(4))
+    {
+        let d: u32 =
+            a[0].abs_diff(b[0]) as u32 + a[1].abs_diff(b[1]) as u32 + a[2].abs_diff(b[2]) as u32;
+        if d > 24 {
+            rotation_diff += 1;
+        }
+    }
+    assert!(
+        rotation_diff > 100,
+        "UV 旋转没有改变采样：只有 {rotation_diff} 个像素不同"
+    );
+}
