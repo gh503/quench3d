@@ -4189,8 +4189,16 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) -> Result<(), RunErro
             sun.intensity = intensity;
         }
     }
+    if let Some(color) = l.sun_color {
+        if let Some(sun) = lighting.sun.as_mut() {
+            sun.color = v3(color);
+        }
+    }
     if let Some(a) = l.ambient {
         lighting.ambient_intensity = a;
+    }
+    if let Some(color) = l.ambient_color {
+        lighting.ambient_color = v3(color);
     }
     if let Some(e) = l.exposure {
         lighting.exposure = e;

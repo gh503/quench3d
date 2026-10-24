@@ -1644,6 +1644,11 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .map(|s| [s.direction.x, s.direction.y, s.direction.z])
                     .unwrap_or([-0.4, -1.0, -0.35]);
                 let mut intensity = light.sun.as_ref().map(|s| s.intensity).unwrap_or(3.0);
+                let mut sun_color = light
+                    .sun
+                    .as_ref()
+                    .map(|s| s.color.to_array())
+                    .unwrap_or([1.0, 0.97, 0.9]);
                 let mut shadows = light.sun.as_ref().map(|s| s.cast_shadows).unwrap_or(true);
                 ui.horizontal(|ui| {
                     ui.label("太阳方向");
@@ -1669,14 +1674,25 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .changed();
                 });
                 changed |= ui.checkbox(&mut shadows, "投射阴影").changed();
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut light.ambient_intensity)
-                            .speed(0.01)
-                            .range(0.0..=2.0)
-                            .prefix("环境光 "),
-                    )
-                    .changed();
+                ui.horizontal(|ui| {
+                    ui.label("太阳颜色");
+                    changed |= ui.color_edit_button_rgb(&mut sun_color).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("环境光 强度/颜色");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut light.ambient_intensity)
+                                .speed(0.01)
+                                .range(0.0..=2.0),
+                        )
+                        .changed();
+                    let mut ambient = light.ambient_color.to_array();
+                    if ui.color_edit_button_rgb(&mut ambient).changed() {
+                        light.ambient_color = Vec3::new(ambient[0], ambient[1], ambient[2]);
+                        changed = true;
+                    }
+                });
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut light.exposure)
@@ -1710,6 +1726,9 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         )
                         .changed();
                 });
+                if let Some(sun) = light.sun.as_mut() {
+                    sun.color = Vec3::new(sun_color[0], sun_color[1], sun_color[2]);
+                }
                 let mut tonemap = engine.renderer.options.tonemap;
                 egui::ComboBox::from_id_salt("tonemap")
                     .selected_text(tonemap.label())

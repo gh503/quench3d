@@ -2375,9 +2375,15 @@ pub struct LightingDoc {
     /// 太阳强度倍率。缺省跟随预设（`studio` 为 2.9，`day` 为 3.0，`night` 无太阳）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sun_intensity: Option<f32>,
+    /// 太阳颜色（**线性空间 RGB**），缺省跟随预设（studio/day 是暖白）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sun_color: Option<[f32; 3]>,
     /// 环境光强度。缺省跟随预设（`studio` 为 0.38，`day` 为 0.55，`night` 为 0.35）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ambient: Option<f32>,
+    /// 环境光颜色（**线性空间 RGB**），缺省跟随预设。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambient_color: Option<[f32; 3]>,
     /// 曝光，缺省 1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposure: Option<f32>,
@@ -8856,6 +8862,16 @@ mod tests {
         assert_eq!(m.uv_offset, Some([0.25, -0.5]));
         assert_eq!(m.uv_rotation, Some(45.0));
         assert_eq!(m.ao_strength, Some(0.6));
+
+        let colored = SceneDoc::from_value(json!({
+            "lighting": {
+                "sun_color": [1.0, 0.8, 0.6],
+                "ambient_color": [0.2, 0.3, 0.5]
+            }
+        }))
+        .unwrap();
+        assert_eq!(colored.lighting.sun_color, Some([1.0, 0.8, 0.6]));
+        assert_eq!(colored.lighting.ambient_color, Some([0.2, 0.3, 0.5]));
 
         let graded = SceneDoc::from_value(json!({
             "lighting": { "grade": { "saturation": 0.0, "contrast": 1.4, "temperature": -0.3 } }

@@ -208,6 +208,21 @@ fn fake_plain_animation_instance() -> ModelAnimationInstance {
 
 /// 在 egui 的绘制图元里递归找一段文字，证明面板的**内容**真的被排版了，
 /// 而不只是"没 panic"。
+fn text_shape_rect(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<egui::Rect> {
+    fn walk(shape: &egui::Shape, needle: &str) -> Option<egui::Rect> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.text().contains(needle) => {
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+            }
+            egui::Shape::Vec(inner) => inner.iter().find_map(|s| walk(s, needle)),
+            _ => None,
+        }
+    }
+    shapes
+        .iter()
+        .find_map(|clipped| walk(&clipped.shape, needle))
+}
+
 fn shapes_contain_text(shapes: &[egui::epaint::ClippedShape], needle: &str) -> bool {
     fn walk(shape: &egui::Shape, needle: &str) -> bool {
         match shape {
@@ -962,6 +977,81 @@ fn shape_texture_rect(shape: &egui::Shape, texture_id: egui::TextureId) -> Optio
             .iter()
             .find_map(|shape| shape_texture_rect(shape, texture_id)),
         _ => None,
+    }
+}
+
+/// 光照分区默认折叠；点一下标题后，调色与太阳/环境光颜色控件必须真的画出来。
+#[test]
+fn lighting_header_opens_and_shows_color_grade_controls() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 900.0));
+
+    let mut run = |events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            focused: true,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let _ = ui::panels(
+                ui,
+                &mut engine,
+                &mut doc,
+                &mut view,
+                &mut gizmo,
+                &mut camera,
+            );
+        });
+        output.textures_delta.clear();
+        output.shapes
+    };
+
+    let first = run(Vec::new());
+    let header = text_shape_rect(&first, "光照").expect("光照分区标题没画出来");
+    let mut third = Vec::new();
+    // 折叠标题的箭头在文字左侧；egui 的命中区随主题/字号变，这里扫几个
+    // 可能的位置，点开就停（同时避免点到文字外导致测试假绿）。
+    for dx in [-22.0, -18.0, -14.0, -10.0, -6.0, 0.0, 6.0] {
+        let pos = header.left_center() + egui::vec2(dx, 0.0);
+        let events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        let second = run(events);
+        third = if shapes_contain_text(&second, "调色 饱和/对比/色温") {
+            second
+        } else {
+            run(Vec::new())
+        };
+        if shapes_contain_text(&third, "调色 饱和/对比/色温") {
+            break;
+        }
+    }
+    for needle in ["调色 饱和/对比/色温", "太阳颜色", "环境光 强度/颜色"] {
+        assert!(
+            shapes_contain_text(&third, needle),
+            "点开光照分区后没有画出「{needle}」"
+        );
     }
 }
 

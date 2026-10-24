@@ -195,9 +195,15 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     if let Some(sun) = &light.sun {
         lighting.sun_direction = Some([sun.direction.x, sun.direction.y, sun.direction.z]);
         lighting.sun_intensity = Some(sun.intensity);
+        lighting.sun_color = Some([sun.color.x, sun.color.y, sun.color.z]);
         lighting.shadows = Some(sun.cast_shadows);
     }
     lighting.ambient = Some(light.ambient_intensity);
+    lighting.ambient_color = Some([
+        light.ambient_color.x,
+        light.ambient_color.y,
+        light.ambient_color.z,
+    ]);
     lighting.exposure = Some(light.exposure);
     lighting.sky = Some(light.sky.enabled);
     lighting.grid = Some(light.sky.show_grid);
