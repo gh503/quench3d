@@ -97,6 +97,16 @@ pub struct FluidSurfaceSpec {
     pub level: f32,
 }
 
+/// 粒子初始位置的分布形状。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ParticleShape {
+    /// 半径 `radius` 的球内均匀分布。
+    #[default]
+    Sphere,
+    /// 半边长 `box_size * 0.5` 的长方体内均匀分布（忽略 `radius`）。
+    Box,
+}
+
 /// 一个 CPU 粒子发射器的参数。
 ///
 /// 粒子是**公告板**：每个粒子是一个面向相机的四边形（`MeshData::quad`），
@@ -107,8 +117,12 @@ pub struct ParticleDesc {
     pub count: usize,
     /// 发射器中心（世界坐标）。
     pub position: Vec3,
-    /// 初始位置在中心周围的球形半径（米）。
+    /// 初始位置在中心周围的球形半径（米）；`shape = Box` 时忽略。
     pub radius: f32,
+    /// 初始分布形状。
+    pub shape: ParticleShape,
+    /// 长方体分布的全尺寸 `[x, y, z]`（米）；只在 `shape = Box` 时使用，必须 > 0。
+    pub box_size: Vec3,
     /// 粒子初速度（米/秒）。
     pub velocity: Vec3,
     /// 初速度的随机扰动幅度（米/秒）。
@@ -135,6 +149,8 @@ impl Default for ParticleDesc {
             count: 64,
             position: Vec3::new(0.0, 1.0, 0.0),
             radius: 0.1,
+            shape: ParticleShape::Sphere,
+            box_size: Vec3::ONE,
             velocity: Vec3::new(0.0, 1.2, 0.0),
             spread: 0.4,
             lifetime: 2.0,
@@ -155,6 +171,10 @@ pub struct ParticleSystem {
     pub position: Vec3,
     /// 初始位置球形半径。
     pub radius: f32,
+    /// 初始分布形状。
+    pub shape: ParticleShape,
+    /// 长方体分布的全尺寸。
+    pub box_size: Vec3,
     /// 初速度。
     pub velocity: Vec3,
     /// 速度扰动。
@@ -203,6 +223,21 @@ fn particle_point(seed: &mut u64, radius: f32) -> Vec3 {
         p /= len;
     }
     p * (radius * particle_rand(seed).cbrt())
+}
+
+/// 按发射器形状取一个初始偏移。
+fn particle_offset(seed: &mut u64, shape: ParticleShape, radius: f32, box_size: Vec3) -> Vec3 {
+    match shape {
+        ParticleShape::Sphere => particle_point(seed, radius),
+        ParticleShape::Box => {
+            let half = box_size * 0.5;
+            Vec3::new(
+                (particle_rand(seed) * 2.0 - 1.0) * half.x,
+                (particle_rand(seed) * 2.0 - 1.0) * half.y,
+                (particle_rand(seed) * 2.0 - 1.0) * half.z,
+            )
+        }
+    }
 }
 
 /// 一个粒子可视绑定：第 `fluid` 个流体的第 `particle` 颗粒子。
@@ -1221,12 +1256,31 @@ impl Scene {
         } else {
             0.0
         };
+        let box_size = Vec3::new(
+            if desc.box_size.x.is_finite() && desc.box_size.x > 0.0 {
+                desc.box_size.x
+            } else {
+                1.0
+            },
+            if desc.box_size.y.is_finite() && desc.box_size.y > 0.0 {
+                desc.box_size.y
+            } else {
+                1.0
+            },
+            if desc.box_size.z.is_finite() && desc.box_size.z > 0.0 {
+                desc.box_size.z
+            } else {
+                1.0
+            },
+        );
         let system = self.particles.len();
         let seed = 0x9E37_79B9_7F4A_7C15u64 ^ (system as u64 + 1);
         let mut system_state = ParticleSystem {
             objects: Vec::with_capacity(count),
             position: desc.position,
             radius,
+            shape: desc.shape,
+            box_size,
             velocity: desc.velocity,
             spread,
             lifetime,
@@ -1239,7 +1293,7 @@ impl Scene {
             seed,
         };
         for i in 0..count {
-            let mut offset = particle_point(&mut system_state.seed, radius);
+            let mut offset = particle_offset(&mut system_state.seed, desc.shape, radius, box_size);
             offset += desc.position;
             let index = self.add_named(
                 mesh,
@@ -4122,6 +4176,8 @@ mod particle_tests {
             count: 8,
             position: Vec3::new(1.0, 2.0, 3.0),
             radius: 0.0,
+            shape: ParticleShape::Sphere,
+            box_size: Vec3::ONE,
             velocity: Vec3::new(0.0, 1.0, 0.0),
             spread: 0.0,
             lifetime: 1.0,
@@ -4134,12 +4190,32 @@ mod particle_tests {
     }
 
     #[test]
+    fn particle_box_shape_stays_inside_extents() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 64;
+        desc.shape = ParticleShape::Box;
+        desc.box_size = Vec3::new(2.0, 1.0, 4.0);
+        desc.velocity = Vec3::ZERO;
+        desc.gravity = Vec3::ZERO;
+        let system = scene.add_particle_system(0, 0, desc);
+        for &object in &scene.particles[system].objects {
+            let offset = scene.objects[object].transform.position - desc.position;
+            assert!(offset.x.abs() <= 1.0 + 1e-5, "x 越界：{offset:?}");
+            assert!(offset.y.abs() <= 0.5 + 1e-5, "y 越界：{offset:?}");
+            assert!(offset.z.abs() <= 2.0 + 1e-5, "z 越界：{offset:?}");
+        }
+    }
+
+    #[test]
     fn particle_color_gradient_lerps_with_lifetime() {
         let mut scene = Scene::new();
         let desc = ParticleDesc {
             count: 1,
             position: Vec3::ZERO,
             radius: 0.0,
+            shape: ParticleShape::Sphere,
+            box_size: Vec3::ONE,
             velocity: Vec3::ZERO,
             spread: 0.0,
             lifetime: 2.0,

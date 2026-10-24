@@ -3367,6 +3367,26 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.51 粒子的长方体发射形状（第 150 轮）
+
+**做了什么**：
+
+* `particles[].shape`：`"sphere"`（缺省，用 `radius`）或 `"box"`。
+* `particles[].box_size`：`box` 的**全尺寸** `[x, y, z]`，缺省 `[1, 1, 1]`；
+  每轴必须 > 0，非法在 `particles[i].box_size[x|y|z]` 报错。
+* 初始位置在盒内均匀分布；重生也回到盒内。`ParticleShape` / `ParticleDesc.shape` /
+  `ParticleSystem.shape` 公开。
+* `radius` 在 box 形状下被忽略；球形状行为不变。
+
+**验证**：
+
+* `particle_box_shape_stays_inside_extents`：64 颗、`box_size = [2, 1, 4]`，
+  所有初始位置都落在 `x ∈ [-1,1]`、`y ∈ [-0.5,0.5]`、`z ∈ [-2,2]`。
+* `particles_parse_validate_and_roundtrip`：`shape`/`box_size` 往返保留；
+  `shape="cone"` 与 `box_size` 含 0 轴都报错。
+
+**边界**：只有球/盒两种初始分布，没有锥形/网格/沿路径发射；仍是 CPU 公告板。
+
 ### 23.50 粒子的尺寸随寿命变化（第 149 轮）
 
 **做了什么**：

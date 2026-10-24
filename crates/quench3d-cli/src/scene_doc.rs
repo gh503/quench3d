@@ -1125,9 +1125,15 @@ pub struct ParticleDoc {
     /// 发射器中心 `[x, y, z]`，缺省 `[0, 1, 0]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f32; 3]>,
-    /// 初始位置球形半径（米），缺省 0.1。
+    /// 初始位置球形半径（米），缺省 0.1；`shape = "box"` 时忽略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
+    /// 初始分布形状：`"sphere"`（缺省）或 `"box"`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// 长方体分布的全尺寸 `[x, y, z]`（米），缺省 `[1, 1, 1]`；每轴必须 > 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_size: Option<[f32; 3]>,
     /// 初速度 `[x, y, z]`（米/秒），缺省 `[0, 1.2, 0]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velocity: Option<[f32; 3]>,
@@ -4101,13 +4107,37 @@ impl SceneDoc {
                     }
                 }
             }
-            for (name, v) in [("lifetime", p.lifetime), ("size", p.size)] {
+            for (name, v) in [
+                ("lifetime", p.lifetime),
+                ("size", p.size),
+                ("size_end", p.size_end),
+            ] {
                 if let Some(v) = v {
                     if !(v.is_finite() && v > 0.0) {
                         cam_diags.push(Diagnostic::error_code(
                             ErrorCode::OutOfRange,
                             format!("{path}.{name}"),
                             "必须是有限正数",
+                        ));
+                    }
+                }
+            }
+            if let Some(shape) = &p.shape {
+                if shape != "sphere" && shape != "box" {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.shape"),
+                        "粒子形状只支持 \"sphere\" 或 \"box\"",
+                    ));
+                }
+            }
+            if let Some(extents) = p.box_size {
+                for (axis, value) in ["x", "y", "z"].iter().zip(extents) {
+                    if !value.is_finite() || value <= 0.0 {
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.box_size[{axis}]"),
+                            "粒子长方体尺寸每轴必须 > 0",
                         ));
                     }
                 }
@@ -8083,7 +8113,8 @@ mod tests {
             "particles": [
                 { "count": 12, "position": [0, 2, 0], "color": [1, 0.5, 0.2, 0.7] },
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
-                  "size_end": 0.5, "velocity": [0, 2, 0], "gravity": [0, -3, 0],
+                  "size_end": 0.5, "shape": "box", "box_size": [2, 1, 4],
+                  "velocity": [0, 2, 0], "gravity": [0, -3, 0],
                   "color_end": [0, 0, 1, 0.2] },
                 { "count": 2, "texture": texture_path.clone() }
             ]
@@ -8102,6 +8133,8 @@ mod tests {
         assert_eq!(again.particles.len(), 3);
         assert_eq!(again.particles[1].size, Some(0.2));
         assert_eq!(again.particles[1].size_end, Some(0.5));
+        assert_eq!(again.particles[1].shape.as_deref(), Some("box"));
+        assert_eq!(again.particles[1].box_size, Some([2.0, 1.0, 4.0]));
         assert_eq!(again.particles[1].color_end, Some([0.0, 0.0, 1.0, 0.2]));
         assert_eq!(
             again.particles[2].texture.as_deref(),
@@ -8126,6 +8159,9 @@ mod tests {
             (json!({"count": 5000}), "particles[0].count"),
             (json!({"lifetime": 0}), "particles[0].lifetime"),
             (json!({"size": 0}), "particles[0].size"),
+            (json!({"size_end": 0}), "particles[0].size_end"),
+            (json!({"shape": "cone"}), "particles[0].shape"),
+            (json!({"box_size": [1, 0, 1]}), "particles[0].box_size[y]"),
             (json!({"radius": -1}), "particles[0].radius"),
             (json!({"spread": -1}), "particles[0].spread"),
             (json!({"color": [1, 1, 1, 2]}), "particles[0].color"),

@@ -3700,6 +3700,14 @@ fn add_particle_visuals(
                 count: p.count.unwrap_or(64),
                 position: Vec3::new(position[0], position[1], position[2]),
                 radius: p.radius.unwrap_or(0.1),
+                shape: match p.shape.as_deref() {
+                    Some("box") => quench3d::scene::ParticleShape::Box,
+                    _ => quench3d::scene::ParticleShape::Sphere,
+                },
+                box_size: {
+                    let box_size = p.box_size.unwrap_or([1.0, 1.0, 1.0]);
+                    Vec3::new(box_size[0], box_size[1], box_size[2])
+                },
                 velocity: Vec3::new(velocity[0], velocity[1], velocity[2]),
                 spread: p.spread.unwrap_or(0.4),
                 lifetime: p.lifetime.unwrap_or(2.0),

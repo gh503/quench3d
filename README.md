@@ -1083,15 +1083,18 @@ NaN 刚体  : 0
 * `particles` 是 **CPU 公告板粒子**（纯视觉，不参与物理）：`{ "count": 64,
   "position": [0, 1, 0], "radius": 0.1, "velocity": [0, 1.2, 0], "spread": 0.4,
   "lifetime": 2.0, "size": 0.12, "size_end": 0.4, "gravity": [0, -1, 0],
+  "shape": "box", "box_size": [2, 0.2, 2],
   "color": [1, 0.65, 0.2, 0.8], "color_end": [0.3, 0.05, 0.02, 0.0],
-  "texture": "tex/smoke.png" }`（`size_end`/`color_end`/`texture` 可省略）。
+  "texture": "tex/smoke.png" }`（`size_end`/`shape`/`box_size`/`color_end`/`texture`
+  可省略）。
   每颗粒子是一个面向相机的四边形（`MeshData::quad`），按寿命二次淡出，寿命到点回到
   发射器附近重生；`update_particles` 每帧做老化/重力/速度积分/朝向。没有贴图的发射器
   共用一个白色 unlit、alpha 混合、双面材质；写 `texture` 时按贴图 id 各建一份材质，
   颜色仍作为实例色乘上去（适合烟/火/光斑 sprite）。`color_end` 让 RGB/alpha 随寿命
   线性插值到寿命终点，再乘二次淡出；`size_end` 让四边形边长从 `size` 线性缩放到
-  寿命终点。**边界**：没有软粒子；粒子按实例 AABB 中心到相机的距离参与全局透明排序，
-  不是逐像素深度排序；没有 GPU 粒子/发射器形状/曲线编辑；编辑器不创建也不编辑粒子，
+  寿命终点；`shape` 选 `"sphere"`（默认，半径 `radius`）或 `"box"`（全尺寸
+  `box_size`），决定初始位置分布。**边界**：没有软粒子；粒子按实例 AABB 中心到相机的距离参与全局透明排序，
+  不是逐像素深度排序；没有 GPU 粒子/曲线编辑；编辑器不创建也不编辑粒子，
   只显示并原样保存场景 JSON 里的 `particles`。
 * `decals` 是**平面贴花**（纯视觉）：`{ "position": [0, 0.01, 0], "normal": [0, 1, 0],
   "size": [2, 1.5], "rotation": 90, "color": [1, 0.2, 0.1, 0.8], "texture": "tex/logo.png" }`。
