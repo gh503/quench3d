@@ -2949,7 +2949,8 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     }
 }
 
-/// 只读的粒子发射器列表：粒子代理在场景树里是隐藏的，没有这块面板就完全看不见。
+/// 粒子发射器面板。粒子代理在场景树里是隐藏的，没有这块面板就完全看不见；
+/// 参数可直接改，并写回底稿的 `particles[i]`，保存后保持。
 fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     if engine.scene.particles.is_empty() {
         return;
@@ -2960,58 +2961,192 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         engine.scene.particles.len()
     )));
     for i in 0..engine.scene.particles.len() {
-        let system = &engine.scene.particles[i];
-        ui.label(
-            RichText::new(format!(
-                "#{i} · {} 颗 · 寿命 {:.1}s",
+        // 先取快照，避免在画控件时长期借用 engine.scene。
+        let (
+            objects,
+            lifetime,
+            size,
+            size_end,
+            drag,
+            rotation,
+            rotation_end,
+            enabled,
+            shape,
+            radius,
+            box_size,
+            alignment,
+        ) = {
+            let system = &engine.scene.particles[i];
+            (
                 system.objects.len(),
-                system.lifetime
-            ))
-            .small(),
-        );
-        let shape = match system.shape {
-            quench3d::scene::ParticleShape::Sphere => {
-                format!("球 r={:.2}", system.radius)
+                system.lifetime,
+                system.size,
+                system.size_end,
+                system.drag,
+                system.rotation,
+                system.rotation_end,
+                system.enabled,
+                system.shape,
+                system.radius,
+                system.box_size,
+                system.alignment,
+            )
+        };
+        ui.label(RichText::new(format!("#{i} · {objects} 颗")).small());
+        let shape_text = match shape {
+            quench3d::scene::ParticleShape::Sphere => format!("球 r={radius:.2}"),
+            quench3d::scene::ParticleShape::Box => {
+                format!("盒 {:.1}×{:.1}×{:.1}", box_size.x, box_size.y, box_size.z)
             }
-            quench3d::scene::ParticleShape::Box => format!(
-                "盒 {:.1}×{:.1}×{:.1}",
-                system.box_size.x, system.box_size.y, system.box_size.z
-            ),
-            quench3d::scene::ParticleShape::Disc => format!("圆盘 r={:.2}", system.radius),
+            quench3d::scene::ParticleShape::Disc => format!("圆盘 r={radius:.2}"),
             quench3d::scene::ParticleShape::Cone => {
-                format!("锥 h={:.1} r={:.2}", system.box_size.y, system.radius)
+                format!("锥 h={:.1} r={radius:.2}", box_size.y)
             }
         };
-        let mut extra = Vec::new();
-        if system.alignment == quench3d::scene::ParticleAlignment::Velocity {
-            extra.push("速度对齐".into());
+        let mut suffix = Vec::new();
+        if alignment == quench3d::scene::ParticleAlignment::Velocity {
+            suffix.push("速度对齐".to_string());
         }
-        if system.drag > 0.0 {
-            extra.push(format!("阻尼 {:.2}/s", system.drag));
+        if drag > 0.0 {
+            suffix.push(format!("阻尼 {drag:.2}/s"));
         }
-        if system.rotation.abs() > 1e-6 || system.rotation_end.abs() > 1e-6 {
-            extra.push(format!(
+        if rotation.abs() > 1e-6 || rotation_end.abs() > 1e-6 {
+            suffix.push(format!(
                 "自转 {:.0}°→{:.0}°",
-                system.rotation.to_degrees(),
-                system.rotation_end.to_degrees()
+                rotation.to_degrees(),
+                rotation_end.to_degrees()
             ));
         }
-        let suffix = if extra.is_empty() {
-            String::new()
+        if !suffix.is_empty() {
+            ui.label(RichText::new(format!("{shape_text} · {}", suffix.join(" · "))).small());
         } else {
-            format!(" · {}", extra.join(" · "))
-        };
-        ui.label(RichText::new(format!("{shape}{suffix}")).small());
-        let mut enabled = system.enabled;
-        if ui.checkbox(&mut enabled, "启用").changed() {
-            engine.scene.set_particle_enabled(i, enabled);
+            ui.label(RichText::new(shape_text).small());
+        }
+
+        let mut new_enabled = enabled;
+        let mut new_lifetime = lifetime;
+        let mut new_size = size;
+        let mut new_size_end = size_end;
+        let mut new_drag = drag;
+        let mut new_rotation = rotation.to_degrees();
+        let mut new_rotation_end = rotation_end.to_degrees();
+        let mut new_radius = radius;
+        let mut new_box_y = box_size.y;
+        let mut changed = false;
+        changed |= ui.checkbox(&mut new_enabled, "启用").changed();
+        ui.horizontal(|ui| {
+            ui.label("寿命");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut new_lifetime)
+                        .range(0.05..=60.0)
+                        .speed(0.1),
+                )
+                .changed();
+            ui.label("尺寸");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut new_size)
+                        .range(0.001..=10.0)
+                        .speed(0.01),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("收束");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut new_size_end)
+                        .range(0.001..=10.0)
+                        .speed(0.01),
+                )
+                .changed();
+            ui.label("阻尼");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut new_drag)
+                        .range(0.0..=20.0)
+                        .speed(0.05),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("自转");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut new_rotation)
+                        .range(-360.0..=360.0)
+                        .speed(1.0)
+                        .suffix("°"),
+                )
+                .changed();
+            ui.label("到");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut new_rotation_end)
+                        .range(-360.0..=360.0)
+                        .speed(1.0)
+                        .suffix("°"),
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("半径");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut new_radius)
+                        .range(0.0..=20.0)
+                        .speed(0.05),
+                )
+                .changed();
+            if matches!(
+                shape,
+                quench3d::scene::ParticleShape::Box | quench3d::scene::ParticleShape::Cone
+            ) {
+                ui.label("高");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut new_box_y)
+                            .range(0.01..=20.0)
+                            .speed(0.05),
+                    )
+                    .changed();
+            }
+        });
+        if changed {
+            engine.scene.set_particle_enabled(i, new_enabled);
+            let system = &mut engine.scene.particles[i];
+            system.lifetime = new_lifetime.max(0.05);
+            system.size = new_size.max(0.001);
+            system.size_end = new_size_end.max(0.001);
+            system.drag = new_drag.max(0.0);
+            system.rotation = new_rotation.to_radians();
+            system.rotation_end = new_rotation_end.to_radians();
+            system.radius = new_radius.max(0.0);
+            system.box_size.y = new_box_y.max(0.01);
             if let Some(base) = doc.base_doc_mut() {
                 if let Some(particle) = base.particles.get_mut(i) {
-                    particle.enabled = Some(enabled);
+                    particle.enabled = Some(new_enabled);
+                    particle.lifetime = Some(system.lifetime);
+                    particle.size = Some(system.size);
+                    particle.size_end = Some(system.size_end);
+                    particle.drag = Some(system.drag);
+                    particle.rotation = Some(system.rotation.to_degrees());
+                    particle.rotation_end = Some(system.rotation_end.to_degrees());
+                    particle.radius = Some(system.radius);
+                    particle.box_size = Some(resolve_box_size(system.box_size));
                 }
+            }
+            if doc.base_doc().is_some() {
+                doc.record_edit(engine);
             }
         }
     }
+}
+
+/// 保证写回的 box_size 每轴都是正数（UI 只改 Y，X/Z 保持原值）。
+fn resolve_box_size(value: Vec3) -> [f32; 3] {
+    [value.x.max(0.01), value.y.max(0.01), value.z.max(0.01)]
 }
 
 fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {

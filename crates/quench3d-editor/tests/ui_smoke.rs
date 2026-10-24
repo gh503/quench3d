@@ -581,8 +581,12 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
         "粒子面板没有显示发射器组数"
     );
     assert!(
-        shapes_contain_text(&output.shapes, "7 颗 · 寿命 3.5s"),
-        "粒子面板没有显示数量和寿命"
+        shapes_contain_text(&output.shapes, "#0 · 7 颗"),
+        "粒子面板没有显示编号和数量"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "寿命"),
+        "粒子面板没有寿命编辑控件"
     );
     assert!(
         shapes_contain_text(&output.shapes, "盒 2.0×1.0×4.0"),
@@ -599,6 +603,14 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
     assert!(
         shapes_contain_text(&output.shapes, "启用"),
         "粒子面板没有启用开关"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "收束"),
+        "粒子面板没有 size_end 编辑控件"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "半径"),
+        "粒子面板没有半径编辑控件"
     );
     output.textures_delta.clear();
 }
