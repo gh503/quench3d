@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 一条命令跑完**当前可自动化**的正向验证：
-#   1. 全量门禁（fmt / clippy 原生+wasm / doc / 768 个测试 / wasm 构建 / 产物检查）
+#   1. 全量门禁（fmt / clippy 原生+wasm / doc / 837 个测试 / wasm 构建 / 产物检查）
 #   2. 真实 WebGL2 启动探针（headless Chrome + SwiftShader）
 #   3. Web UI 按键探针（F3/F4/R：状态 + 中央视口截图都必须变）
 #   4. Web 摄像头预览探针（Chrome 假摄像头，两帧必须有运动）

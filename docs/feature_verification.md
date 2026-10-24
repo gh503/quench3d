@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **788** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **837** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -11,6 +11,15 @@
 ```bash
 tools/verify_all.sh
 ```
+
+只想重跑编辑器近期功能（比全量门禁快很多）：
+
+```bash
+tools/verify_editor_features.sh
+```
+
+它覆盖：UI 绘制/交互、贴图应用/清除/资源搜索路径、画中画回读/节流/统计保持、
+材质 UV 变换像素级、灯光 gizmo；每项打印 `PASS`/`FAIL`，最后汇总。
 
 它依次跑：`tools/gate.sh` → `tools/probe_webgl2.sh` → `tools/probe_web_ui.sh` →
 `python -m unittest discover -s tools/camera_mocap` → `tools/probe_deployed.sh`。没有 Chrome 的机器上前两条会
