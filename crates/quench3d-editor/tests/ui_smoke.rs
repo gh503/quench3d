@@ -629,6 +629,10 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
         shapes_contain_text(&output.shapes, "颜色"),
         "粒子面板没有颜色控件"
     );
+    assert!(
+        shapes_contain_text(&output.shapes, "终点色"),
+        "粒子面板没有终点色控件"
+    );
     output.textures_delta.clear();
 }
 #[test]

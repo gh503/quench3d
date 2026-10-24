@@ -3011,6 +3011,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             box_size,
             alignment,
             color,
+            color_end,
         ) = {
             let system = &engine.scene.particles[i];
             (
@@ -3027,6 +3028,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 system.box_size,
                 system.alignment,
                 system.color,
+                system.color_end,
             )
         };
         ui.label(RichText::new(format!("#{i} · {objects} 颗")).small());
@@ -3073,6 +3075,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         let mut new_shape = shape;
         let mut new_alignment = alignment;
         let mut new_color = [color.x, color.y, color.z, color.w];
+        let mut new_color_end = [color_end.x, color_end.y, color_end.z, color_end.w];
         let mut changed = false;
         changed |= ui.checkbox(&mut new_enabled, "启用").changed();
         ui.horizontal(|ui| {
@@ -3117,6 +3120,12 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.label("颜色");
             changed |= ui
                 .color_edit_button_rgba_unmultiplied(&mut new_color)
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("终点色");
+            changed |= ui
+                .color_edit_button_rgba_unmultiplied(&mut new_color_end)
                 .changed();
         });
         ui.horizontal(|ui| {
@@ -3215,6 +3224,12 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             system.shape = new_shape;
             system.alignment = new_alignment;
             system.color = Vec4::new(new_color[0], new_color[1], new_color[2], new_color[3]);
+            system.color_end = Vec4::new(
+                new_color_end[0],
+                new_color_end[1],
+                new_color_end[2],
+                new_color_end[3],
+            );
             if let Some(base) = doc.base_doc_mut() {
                 if let Some(particle) = base.particles.get_mut(i) {
                     particle.enabled = Some(new_enabled);
@@ -3230,6 +3245,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     particle.shape = Some(particle_shape_json(new_shape).to_string());
                     particle.alignment = Some(particle_alignment_json(new_alignment).to_string());
                     particle.color = Some(new_color);
+                    particle.color_end = Some(new_color_end);
                 }
             }
             if doc.base_doc().is_some() {
