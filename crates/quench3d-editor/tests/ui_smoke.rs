@@ -763,6 +763,14 @@ fn inspector_lists_decals_from_base_doc() {
         "属性面板没有贴花组"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "位置"),
+        "属性面板没有贴花位置控件"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "法线"),
+        "属性面板没有贴花法线控件"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "尺寸"),
         "属性面板没有贴花尺寸控件"
     );

@@ -3349,6 +3349,8 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     ui.separator();
     ui.label(RichText::new(format!("贴花（{} 个）", decals.len())));
     for (i, decal) in decals {
+        let mut position = decal.position.unwrap_or([0.0, 0.0, 0.0]);
+        let mut normal = decal.normal.unwrap_or([0.0, 1.0, 0.0]);
         let mut size = decal.size.unwrap_or([1.0, 1.0]);
         let mut rotation = decal.rotation.unwrap_or(0.0);
         let mut color = decal.color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
@@ -3361,6 +3363,18 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ))
             .small(),
         );
+        ui.horizontal(|ui| {
+            ui.label("位置");
+            for value in &mut position {
+                changed |= ui.add(egui::DragValue::new(value).speed(0.05)).changed();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("法线");
+            for value in &mut normal {
+                changed |= ui.add(egui::DragValue::new(value).speed(0.05)).changed();
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("尺寸");
             changed |= ui
@@ -3397,6 +3411,8 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         color = color.map(|c| c.clamp(0.0, 1.0));
         if let Some(base) = doc.base_doc_mut() {
             if let Some(decal) = base.decals.get_mut(i) {
+                decal.position = Some(position);
+                decal.normal = Some(normal);
                 decal.size = Some(size);
                 decal.rotation = Some(rotation);
                 decal.color = Some(color);
@@ -3404,12 +3420,12 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         }
         let name = format!("贴花{i}");
         if let Some(index) = engine.scene.objects.iter().position(|o| o.name == name) {
-            let mut normal = Vec3::from_array(decal.normal.unwrap_or([0.0, 1.0, 0.0]));
+            let mut normal = Vec3::from_array(normal);
             if normal.length_squared() <= 1e-12 {
                 normal = Vec3::Y;
             }
             let normal = normal.normalize_or_zero();
-            let position = Vec3::from_array(decal.position.unwrap_or([0.0, 0.0, 0.0]));
+            let position = Vec3::from_array(position);
             let roll = rotation.to_radians();
             let quat =
                 Quat::from_rotation_arc(Vec3::Z, normal) * Quat::from_axis_angle(Vec3::Z, roll);
