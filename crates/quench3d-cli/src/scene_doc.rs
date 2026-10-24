@@ -1143,6 +1143,12 @@ pub struct ParticleDoc {
     /// 线性阻尼（1/s），缺省 0 = 无阻尼；必须 >= 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drag: Option<f32>,
+    /// 初始公告板自转角（度），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f32>,
+    /// 寿命结束时的自转角（度），缺省同 `rotation` = 不转。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_end: Option<f32>,
     /// 寿命（秒），缺省 2.0；必须 > 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<f32>,
@@ -4121,6 +4127,17 @@ impl SceneDoc {
                             ErrorCode::OutOfRange,
                             format!("{path}.{name}"),
                             "必须是有限正数",
+                        ));
+                    }
+                }
+            }
+            for (name, v) in [("rotation", p.rotation), ("rotation_end", p.rotation_end)] {
+                if let Some(v) = v {
+                    if !v.is_finite() {
+                        cam_diags.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{path}.{name}"),
+                            "粒子自转角必须是有限数",
                         ));
                     }
                 }
@@ -8117,7 +8134,8 @@ mod tests {
                 { "count": 12, "position": [0, 2, 0], "color": [1, 0.5, 0.2, 0.7] },
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
                   "size_end": 0.5, "shape": "box", "box_size": [2, 1, 4],
-                  "drag": 0.5, "velocity": [0, 2, 0], "gravity": [0, -3, 0],
+                  "drag": 0.5, "rotation": 10, "rotation_end": 190,
+                  "velocity": [0, 2, 0], "gravity": [0, -3, 0],
                   "color_end": [0, 0, 1, 0.2] },
                 { "count": 2, "texture": texture_path.clone() }
             ]
@@ -8139,6 +8157,8 @@ mod tests {
         assert_eq!(again.particles[1].shape.as_deref(), Some("box"));
         assert_eq!(again.particles[1].box_size, Some([2.0, 1.0, 4.0]));
         assert_eq!(again.particles[1].drag, Some(0.5));
+        assert_eq!(again.particles[1].rotation, Some(10.0));
+        assert_eq!(again.particles[1].rotation_end, Some(190.0));
         assert_eq!(again.particles[1].color_end, Some([0.0, 0.0, 1.0, 0.2]));
         assert_eq!(
             again.particles[2].texture.as_deref(),
@@ -8168,6 +8188,7 @@ mod tests {
             (json!({"box_size": [1, 0, 1]}), "particles[0].box_size[y]"),
             (json!({"radius": -1}), "particles[0].radius"),
             (json!({"drag": -1}), "particles[0].drag"),
+            (json!({"rotation": "x"}), "particles"),
             (json!({"spread": -1}), "particles[0].spread"),
             (json!({"color": [1, 1, 1, 2]}), "particles[0].color"),
             (

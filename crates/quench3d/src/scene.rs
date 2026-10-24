@@ -129,6 +129,10 @@ pub struct ParticleDesc {
     pub spread: f32,
     /// 线性阻尼（1/s）：速度按 `exp(-drag * dt)` 衰减；0 = 无阻尼。
     pub drag: f32,
+    /// 初始公告板自转角（弧度，绕朝向相机的轴）。
+    pub rotation: f32,
+    /// 寿命结束时的自转角（弧度）；与 `rotation` 相同 = 不转。
+    pub rotation_end: f32,
     /// 寿命（秒，必须 > 0）。
     pub lifetime: f32,
     /// 初始四边形边长（米，必须 > 0）。
@@ -156,6 +160,8 @@ impl Default for ParticleDesc {
             velocity: Vec3::new(0.0, 1.2, 0.0),
             spread: 0.4,
             drag: 0.0,
+            rotation: 0.0,
+            rotation_end: 0.0,
             lifetime: 2.0,
             size: 0.12,
             size_end: 0.12,
@@ -184,6 +190,10 @@ pub struct ParticleSystem {
     pub spread: f32,
     /// 线性阻尼（1/s）。
     pub drag: f32,
+    /// 初始公告板自转角（弧度）。
+    pub rotation: f32,
+    /// 寿命结束时的自转角（弧度）。
+    pub rotation_end: f32,
     /// 寿命（秒）。
     pub lifetime: f32,
     /// 初始四边形边长。
@@ -1294,6 +1304,8 @@ impl Scene {
             velocity: desc.velocity,
             spread,
             drag,
+            rotation: desc.rotation,
+            rotation_end: desc.rotation_end,
             lifetime,
             size,
             size_end: desc.size_end,
@@ -1374,12 +1386,18 @@ impl Scene {
                     object.transform.position += state.velocity * dt;
                     state.velocity += system.gravity * dt;
                 }
+                let t = (state.age / system.lifetime).clamp(0.0, 1.0);
                 let to_camera = camera - object.transform.position;
                 if to_camera.length_squared() > 1e-8 {
-                    object.transform.rotation =
-                        Quat::from_rotation_arc(Vec3::Z, to_camera.normalize());
+                    let dir = to_camera.normalize();
+                    let face = Quat::from_rotation_arc(Vec3::Z, dir);
+                    let spin = system.rotation + (system.rotation_end - system.rotation) * t;
+                    object.transform.rotation = if spin.abs() > 1e-8 {
+                        Quat::from_axis_angle(dir, spin) * face
+                    } else {
+                        face
+                    };
                 }
-                let t = (state.age / system.lifetime).clamp(0.0, 1.0);
                 let size = system.size + (system.size_end - system.size) * t;
                 object.transform.scale = Vec3::splat(size.max(1e-4));
                 let fade = (1.0 - t).powi(2);
@@ -4200,6 +4218,8 @@ mod particle_tests {
             velocity: Vec3::new(0.0, 1.0, 0.0),
             spread: 0.0,
             drag: 0.0,
+            rotation: 0.0,
+            rotation_end: 0.0,
             lifetime: 1.0,
             size: 0.25,
             size_end: 0.25,
@@ -4239,6 +4259,8 @@ mod particle_tests {
             velocity: Vec3::ZERO,
             spread: 0.0,
             drag: 0.0,
+            rotation: 0.0,
+            rotation_end: 0.0,
             lifetime: 2.0,
             size: 0.1,
             size_end: 0.5,
@@ -4321,6 +4343,34 @@ mod particle_tests {
             object.transform.position
         );
         assert!(object.color.w > 0.4, "重生后 alpha 应当恢复");
+    }
+
+    #[test]
+    fn particle_rotation_spins_around_the_billboard_normal() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 1;
+        desc.position = Vec3::ZERO;
+        desc.velocity = Vec3::ZERO;
+        desc.spread = 0.0;
+        desc.gravity = Vec3::ZERO;
+        desc.lifetime = 2.0;
+        desc.rotation = 0.0;
+        desc.rotation_end = std::f32::consts::PI;
+        let system = scene.add_particle_system(0, 0, desc);
+        scene.particles[system].state[0].age = 0.0;
+        let index = scene.particles[system].objects[0];
+        // 相机在 +Z：朝向就是单位四元数，自转 90° 应把局部 +X 转到 +Y。
+        scene.update_particles(Vec3::new(0.0, 0.0, 5.0), 1.0);
+        let x_axis = scene.objects[index].transform.rotation * Vec3::X;
+        assert!(
+            x_axis.y > 0.99 && x_axis.x.abs() < 1e-3,
+            "寿命中点应自转 90°：{x_axis:?}"
+        );
+        assert!(
+            (scene.objects[index].transform.rotation * Vec3::Z - Vec3::Z).length() < 1e-3,
+            "自转不能改变朝向相机的法线"
+        );
     }
 
     #[test]

@@ -3367,6 +3367,23 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.53 粒子的公告板自转（第 152 轮）
+
+**做了什么**：
+
+* `particles[].rotation` / `rotation_end`（度，缺省 0/同 rotation）：公告板在寿命内
+  绕**朝向相机的轴**从 `rotation` 线性转到 `rotation_end`。
+* 自转叠加在朝向相机之后，不改变法线；`ParticleDesc.rotation/rotation_end` 用弧度公开。
+* 校验必须是有限数；schema/README 同步。
+
+**验证**：
+
+* `particle_rotation_spins_around_the_billboard_normal`：相机在 +Z、0° → 180°，
+  寿命中点局部 +X 转到 +Y（90°），局部 +Z 仍指向 +Z。
+* `particles_parse_validate_and_roundtrip` 增补 `rotation`/`rotation_end` 往返与非有限值报错。
+
+**边界**：单一线性自转，不是曲线/随机相位；只影响公告板朝向，不影响位置/尺寸。
+
 ### 23.52 粒子的线性阻尼（第 151 轮）
 
 **做了什么**：

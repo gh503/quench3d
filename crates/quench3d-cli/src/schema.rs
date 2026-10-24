@@ -370,7 +370,7 @@ pub fn scene_grammar() -> Value {
             "materials": "名字 → 材质对象",
             "particles": [
                 "CPU 公告板粒子发射器数组（纯视觉，不参与物理）",
-                "每项字段：count（1~4096，缺省 64）、position（缺省 [0,1,0]）、radius（初始球形半径，缺省 0.1）、velocity（缺省 [0,1.2,0]）、spread（速度扰动，缺省 0.4）、drag（线性阻尼 1/s，缺省 0）、lifetime（秒，必须 >0，缺省 2）、size（初始四边形边长米，必须 >0，缺省 0.12）、size_end（寿命结束时边长，缺省同 size）、shape（初始分布 sphere/box，缺省 sphere）、box_size（box 的全尺寸 [x,y,z]，缺省 [1,1,1]）、gravity（缺省 [0,-1,0]）、color（线性 RGBA，alpha 0~1，缺省 [1,0.65,0.2,0.8]）、color_end（寿命结束时颜色，缺省同 color）、texture（可选 PNG/JPEG 公告板贴图，颜色仍乘上去）",
+                "每项字段：count（1~4096，缺省 64）、position（缺省 [0,1,0]）、radius（初始球形半径，缺省 0.1）、velocity（缺省 [0,1.2,0]）、spread（速度扰动，缺省 0.4）、drag（线性阻尼 1/s，缺省 0）、rotation/rotation_end（公告板自转角，度，缺省 0）、lifetime（秒，必须 >0，缺省 2）、size（初始四边形边长米，必须 >0，缺省 0.12）、size_end（寿命结束时边长，缺省同 size）、shape（初始分布 sphere/box，缺省 sphere）、box_size（box 的全尺寸 [x,y,z]，缺省 [1,1,1]）、gravity（缺省 [0,-1,0]）、color（线性 RGBA，alpha 0~1，缺省 [1,0.65,0.2,0.8]）、color_end（寿命结束时颜色，缺省同 color）、texture（可选 PNG/JPEG 公告板贴图，颜色仍乘上去）",
                 "粒子是面向相机的四边形；按寿命淡出/缩放后回到发射器重生。初始位置可在球内或长方体内分布；有可选贴图；按实例 AABB 中心距离参与全局透明排序，但没有逐像素排序/软粒子/GPU 粒子",
             ],
             "decals": [
@@ -798,6 +798,8 @@ pub fn json_schema() -> Value {
             "velocity",
             "spread",
             "drag",
+            "rotation",
+            "rotation_end",
             "lifetime",
             "size",
             "size_end",
@@ -819,6 +821,9 @@ pub fn json_schema() -> Value {
         }
         for name in ["lifetime", "size", "size_end"] {
             d["properties"][name] = json!({ "type": "number", "exclusiveMinimum": 0 });
+        }
+        for name in ["rotation", "rotation_end"] {
+            d["properties"][name] = json!({ "type": "number" });
         }
         d["properties"]["color"] = json!({
             "type": "array", "items": { "type": "number", "minimum": 0, "maximum": 1 },
