@@ -3387,6 +3387,8 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
   `set_material_texture(None)` 的底层行为。
 * `material_texture_slots_have_apply_and_clear_buttons`：给物体写入基础色贴图路径后，
   材质段自动展开，绘制列表里出现「应用基础色贴图（从磁盘读取）」和「清除基础色贴图」。
+* `decal_and_particle_texture_apply_and_clear` 同时覆盖物体贴图：应用后材质句柄
+  `base_color_texture` 与 `doc.textures` 都非空，清除后都为空。
 * 全量门禁 833 测试。
 
 **边界**：物体材质可能被多个物体共享；清除只影响当前材质句柄。仍在 Web 端隐藏

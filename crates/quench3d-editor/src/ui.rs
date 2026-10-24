@@ -1746,87 +1746,47 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         )
                         .clicked()
                     {
-                        let resolved = doc.resolve_texture_path(&path);
-                        match quench3d::render::ImageData::from_file(&resolved) {
-                            Ok(image) => {
-                                let texture =
-                                    engine.renderer.add_texture(&engine.gpu, &image, srgb);
-                                let ok = engine.renderer.set_material_texture(
-                                    &engine.gpu,
-                                    material_id,
-                                    slot,
-                                    Some(texture),
-                                );
-                                doc.status = if ok {
-                                    format!("已应用{label}：{path}")
-                                } else {
-                                    format!("{label}应用失败（材质或贴图句柄无效）：{path}")
-                                };
-                                if ok {
-                                    match slot {
-                                        quench3d::render::MaterialTextureSlot::BaseColor => {
-                                            desc.base_color_texture = Some(texture)
-                                        }
-                                        quench3d::render::MaterialTextureSlot::Normal => {
-                                            desc.normal_texture = Some(texture)
-                                        }
-                                        quench3d::render::MaterialTextureSlot::MetallicRoughness => {
-                                            desc.metallic_roughness_texture = Some(texture)
-                                        }
-                                        quench3d::render::MaterialTextureSlot::Emissive => {
-                                            desc.emissive_texture = Some(texture)
-                                        }
+                        match apply_object_texture(engine, doc, &object_name, slot, srgb, &path) {
+                            Ok(texture) => {
+                                match slot {
+                                    quench3d::render::MaterialTextureSlot::BaseColor => {
+                                        desc.base_color_texture = texture
                                     }
-                                    doc.record_edit(engine);
+                                    quench3d::render::MaterialTextureSlot::Normal => {
+                                        desc.normal_texture = texture
+                                    }
+                                    quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+                                        desc.metallic_roughness_texture = texture
+                                    }
+                                    quench3d::render::MaterialTextureSlot::Emissive => {
+                                        desc.emissive_texture = texture
+                                    }
                                 }
+                                doc.status = format!("已应用{label}：{path}");
                             }
-                            Err(error) => {
-                                // 场景校验器要求贴图文件存在；失败必须说清原因，不能静默留旧图。
-                                doc.status = format!("读图失败：{error}（{path}）");
-                            }
+                            Err(error) => doc.status = error,
                         }
                     }
                     if ui.button(format!("清除{label}")).clicked() {
-                        let ok = engine.renderer.set_material_texture(
-                            &engine.gpu,
-                            material_id,
-                            slot,
-                            None,
-                        );
-                        if ok {
-                            match slot {
-                                quench3d::render::MaterialTextureSlot::BaseColor => {
-                                    desc.base_color_texture = None
+                        match apply_object_texture(engine, doc, &object_name, slot, srgb, "") {
+                            Ok(_) => {
+                                match slot {
+                                    quench3d::render::MaterialTextureSlot::BaseColor => {
+                                        desc.base_color_texture = None
+                                    }
+                                    quench3d::render::MaterialTextureSlot::Normal => {
+                                        desc.normal_texture = None
+                                    }
+                                    quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+                                        desc.metallic_roughness_texture = None
+                                    }
+                                    quench3d::render::MaterialTextureSlot::Emissive => {
+                                        desc.emissive_texture = None
+                                    }
                                 }
-                                quench3d::render::MaterialTextureSlot::Normal => {
-                                    desc.normal_texture = None
-                                }
-                                quench3d::render::MaterialTextureSlot::MetallicRoughness => {
-                                    desc.metallic_roughness_texture = None
-                                }
-                                quench3d::render::MaterialTextureSlot::Emissive => {
-                                    desc.emissive_texture = None
-                                }
+                                doc.status = format!("已清除{label}");
                             }
-                            let entry = doc.textures.entry(object_name.clone()).or_default();
-                            match slot {
-                                quench3d::render::MaterialTextureSlot::BaseColor => {
-                                    entry.base_color = None
-                                }
-                                quench3d::render::MaterialTextureSlot::Normal => {
-                                    entry.normal = None
-                                }
-                                quench3d::render::MaterialTextureSlot::MetallicRoughness => {
-                                    entry.metallic_roughness = None
-                                }
-                                quench3d::render::MaterialTextureSlot::Emissive => {
-                                    entry.emissive = None
-                                }
-                            }
-                            doc.status = format!("已清除{label}");
-                            doc.record_edit(engine);
-                        } else {
-                            doc.status = format!("{label}清除失败（材质句柄无效）");
+                            Err(error) => doc.status = error,
                         }
                     }
                 }
@@ -3096,6 +3056,55 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
 
 /// 粒子发射器面板。粒子代理在场景树里是隐藏的，没有这块面板就完全看不见；
 /// 参数可直接改，并写回底稿的 `particles[i]`，保存后保持。
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn apply_object_texture(
+    engine: &mut Engine,
+    doc: &mut Doc,
+    object_name: &str,
+    slot: quench3d::render::MaterialTextureSlot,
+    srgb: bool,
+    path: &str,
+) -> Result<Option<quench3d::render::TextureId>, String> {
+    let index = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == object_name)
+        .ok_or_else(|| format!("找不到物体 {object_name}"))?;
+    let material_id = engine.scene.objects[index].material;
+    let path = path.trim();
+    let texture = if path.is_empty() {
+        None
+    } else {
+        let resolved = doc.resolve_texture_path(path);
+        let image = quench3d::render::ImageData::from_file(&resolved)
+            .map_err(|e| format!("读图失败：{e}（{}）", resolved.display()))?;
+        Some(engine.renderer.add_texture(&engine.gpu, &image, srgb))
+    };
+    if !engine
+        .renderer
+        .set_material_texture(&engine.gpu, material_id, slot, texture)
+    {
+        return Err("应用失败（材质或贴图句柄无效）".into());
+    }
+    let entry = doc.textures.entry(object_name.to_string()).or_default();
+    let value = if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    };
+    match slot {
+        quench3d::render::MaterialTextureSlot::BaseColor => entry.base_color = value,
+        quench3d::render::MaterialTextureSlot::Normal => entry.normal = value,
+        quench3d::render::MaterialTextureSlot::MetallicRoughness => {
+            entry.metallic_roughness = value
+        }
+        quench3d::render::MaterialTextureSlot::Emissive => entry.emissive = value,
+    }
+    doc.record_edit(engine);
+    Ok(texture)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn replace_decal_texture(
     engine: &mut Engine,

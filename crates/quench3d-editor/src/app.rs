@@ -1880,6 +1880,47 @@ mod texture_edit_tests {
         std::fs::write(&path, &png).expect("应能写临时 PNG");
         let path_text = "tex.png".to_string();
 
+        let ground_material = engine.scene.objects[0].material;
+        let ground_texture = crate::ui::apply_object_texture(
+            &mut engine,
+            &mut doc,
+            "地面",
+            quench3d::render::MaterialTextureSlot::BaseColor,
+            true,
+            &path_text,
+        )
+        .expect("物体基础色贴图应应用成功");
+        assert!(ground_texture.is_some());
+        assert_eq!(
+            engine
+                .renderer
+                .material(ground_material)
+                .and_then(|m| m.base_color_texture),
+            ground_texture
+        );
+        assert_eq!(
+            doc.textures.get("地面").and_then(|t| t.base_color.clone()),
+            Some(path_text.clone())
+        );
+        crate::ui::apply_object_texture(
+            &mut engine,
+            &mut doc,
+            "地面",
+            quench3d::render::MaterialTextureSlot::BaseColor,
+            true,
+            "",
+        )
+        .expect("物体基础色贴图应清除");
+        assert!(engine
+            .renderer
+            .material(ground_material)
+            .and_then(|m| m.base_color_texture)
+            .is_none());
+        assert_eq!(
+            doc.textures.get("地面").and_then(|t| t.base_color.clone()),
+            None
+        );
+
         let decal_object = engine
             .scene
             .objects
