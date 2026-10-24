@@ -918,6 +918,8 @@ pub struct Renderer {
     /// GPU 蒙皮调色板的 buffer / 绑定组（所有 PBR 与阴影管线共用 group 3 / 1）。
     skin_buffer: wgpu::Buffer,
     skin_bind_group: wgpu::BindGroup,
+    /// 上一帧调色板（仅运动向量 pass 用）。
+    prev_skin_buffer: wgpu::Buffer,
     opaque_pipeline: wgpu::RenderPipeline,
     alpha_pipeline: wgpu::RenderPipeline,
     /// 不剔除背面（材质的 `double_sided` 为真时使用）。
@@ -1023,6 +1025,8 @@ pub struct Renderer {
     // 每帧状态
     /// 本帧的关节矩阵（列主序）；场景每帧通过 [`Renderer::set_skin_palette`] 写入。
     skin_palette: Vec<[[f32; 4]; 4]>,
+    /// 上一帧的关节矩阵：TAA 运动向量对蒙皮网格也要用上一帧姿态。
+    prev_skin_palette: Vec<[[f32; 4]; 4]>,
     staging: Vec<(InstanceRaw, Aabb)>,
     visible: Vec<InstanceRaw>,
     /// 每个批次在可见实例缓冲中的 `(起始, 数量)`。
@@ -1500,6 +1504,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let prev_skin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-prev-skin-palette"),
+            size: SKIN_PALETTE_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let skin_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quench3d-skin-bind-group"),
             layout: &skin_layout,
@@ -1582,16 +1592,38 @@ impl Renderer {
         });
         let motion_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("quench3d-motion-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(SKIN_PALETTE_BYTES),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(SKIN_PALETTE_BYTES),
+                    },
+                    count: None,
+                },
+            ],
         });
         let motion_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2269,10 +2301,20 @@ impl Renderer {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("quench3d-motion-bind-group"),
                 layout: &motion_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: motion_uniform.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: motion_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: prev_skin_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: skin_buffer.as_entire_binding(),
+                    },
+                ],
             })
         });
         let post_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -2315,6 +2357,7 @@ impl Renderer {
             material_layout,
             skin_buffer,
             skin_bind_group,
+            prev_skin_buffer,
             opaque_pipeline,
             alpha_pipeline,
             opaque_double_pipeline,
@@ -2352,6 +2395,7 @@ impl Renderer {
             flat_normal_texture,
             black_texture,
             skin_palette: Vec::new(),
+            prev_skin_palette: Vec::new(),
             staging: Vec::new(),
             visible: Vec::new(),
             visible_ranges: Vec::new(),
@@ -2492,7 +2536,7 @@ impl Renderer {
     fn motion_instance_layout() -> wgpu::VertexBufferLayout<'static> {
         // 显式写 offset：运动管线只消费模型 + 上一帧模型，不能让"跳过的
         // 颜色/参数/蒙皮"把后续属性的偏移挤错。
-        const ATTRS: [wgpu::VertexAttribute; 7] = [
+        const ATTRS: [wgpu::VertexAttribute; 8] = [
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 0,
@@ -2512,6 +2556,11 @@ impl Renderer {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 48,
                 shader_location: 7,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 96,
+                shader_location: 12,
             },
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
@@ -2668,6 +2717,7 @@ impl Renderer {
     /// 场景每帧把所有蒙皮实例的关节矩阵拼进来；实例只带 `(base, count)`。
     /// 超过容量的部分应被调用方提前退回 CPU 蒙皮（这里截断，避免越界）。
     pub fn set_skin_palette(&mut self, matrices: &[Mat4]) {
+        self.prev_skin_palette = self.skin_palette.clone();
         self.skin_palette = matrices
             .iter()
             .take(MAX_SKIN_JOINTS as usize)
@@ -3950,6 +4000,13 @@ impl Renderer {
                 &self.skin_buffer,
                 0,
                 bytemuck::cast_slice(&self.skin_palette),
+            );
+        }
+        if !self.prev_skin_palette.is_empty() {
+            ctx.queue.write_buffer(
+                &self.prev_skin_buffer,
+                0,
+                bytemuck::cast_slice(&self.prev_skin_palette),
             );
         }
         if !self.visible.is_empty() {

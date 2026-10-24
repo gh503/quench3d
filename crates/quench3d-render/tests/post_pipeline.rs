@@ -1645,6 +1645,74 @@ fn taa_motion_vectors_change_moving_object_pixels() {
     );
 }
 
+/// 蒙皮网格的 TAA 运动向量：上一帧调色板必须参与重投影，否则只能按当前姿态算。
+#[test]
+fn taa_motion_vectors_follow_skinned_vertices() {
+    let Some(mut ctx) = context(1, "蒙皮 TAA 运动向量（真的创建 wgpu 上下文）")
+    else {
+        return;
+    };
+    let run = |ctx: &mut GpuContext, motion: bool| -> Option<ImageData> {
+        let mut renderer = Renderer::new(
+            ctx,
+            RendererOptions {
+                grid: false,
+                shadows: false,
+                sky: false,
+                taa: TaaOptions {
+                    enabled: true,
+                    feedback: 0.9,
+                    motion_vectors: motion,
+                },
+                ..Default::default()
+            },
+        );
+        if !renderer.supports_taa() {
+            return None;
+        }
+        let mat = renderer.add_material(ctx, MaterialDesc::from_srgb(1.0, 1.0, 1.0, 1.0).unlit());
+        let mut verts = vec![
+            quench3d_render::Vertex::new(vec3(-10.0, -10.0, 0.0), Vec3::Z, Vec2::ZERO),
+            quench3d_render::Vertex::new(vec3(10.0, -10.0, 0.0), Vec3::Z, Vec2::ZERO),
+            quench3d_render::Vertex::new(vec3(0.0, 10.0, 0.0), Vec3::Z, Vec2::ZERO),
+        ];
+        for v in &mut verts {
+            v.joints = [0, 0, 0, 0];
+            v.weights = [1.0, 0.0, 0.0, 0.0];
+        }
+        let mesh = renderer.add_mesh(ctx, &MeshData::from_parts(verts, vec![0, 1, 2]));
+        let mut camera = Camera::perspective(W as f32 / H as f32);
+        camera.position = vec3(0.0, 0.0, 60.0);
+        camera.look_at(Vec3::ZERO);
+        let lighting = Lighting::default();
+        let instance = || InstanceDesc::new(Transform::IDENTITY).with_skin(0, 1);
+
+        renderer.set_skin_palette(&[Mat4::IDENTITY]);
+        renderer.begin_frame();
+        renderer.draw(mesh, mat, instance());
+        let _first = renderer.capture(ctx, W, H, &camera, &lighting).ok()?;
+
+        renderer.set_skin_palette(&[Mat4::from_translation(vec3(20.0, 0.0, 0.0))]);
+        renderer.begin_frame();
+        renderer.draw(mesh, mat, instance());
+        renderer.capture(ctx, W, H, &camera, &lighting).ok()
+    };
+
+    let Some(with_motion) = run(&mut ctx, true) else {
+        eprintln!("跳过：当前后端不支持 TAA");
+        return;
+    };
+    let without_motion = run(&mut ctx, false).expect("同一后端第二次创建 TAA 应当成功");
+    let changed = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel(&with_motion, x, y) != pixel(&without_motion, x, y))
+        .count();
+    assert!(
+        changed > 10,
+        "蒙皮移动后开/关运动向量差异只有 {changed} 像素，上一帧调色板可能没参与"
+    );
+}
+
 /// TAA 的像素级验证：相机不动时，重复 capture 必须有**历史累积**，
 /// 而关闭 TAA 时同一帧必须逐位稳定。
 #[test]

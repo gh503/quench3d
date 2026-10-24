@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **857** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **858** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -35,7 +35,7 @@ tools/verify_editor_features.sh
 | 点光 / 聚光阴影 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test point_lights` | 有/无投影的像素差 |
 | Bloom | `cargo test -p quench3d-render --test post_pipeline bloom` | 亮区外溢、关闭时参数无效 |
 | FXAA | `cargo test -p quench3d-render --test post_pipeline fxaa` | 边缘变平滑、平面不变 |
-| TAA 运动向量 | `cargo test -p quench3d-render --test post_pipeline taa_motion_vectors_change_moving_object_pixels` + `cargo test -p quench3d-render --lib instance_desc_packs_previous` + `cargo test -p quench3d --lib snapshot_previous` | 立方体从左跳到右，开/关运动向量的第二帧像素不同且右半边有差异；CPU 上一帧矩阵/场景快照正确；原 TAA 历史测试仍过 |
+| TAA 运动向量 | `cargo test -p quench3d-render --test post_pipeline taa_motion_vectors` + `cargo test -p quench3d-render --lib instance_desc_packs_previous` + `cargo test -p quench3d --lib snapshot_previous` | 刚体立方体从左跳到右、蒙皮三角形由调色板平移，开/关运动向量第二帧像素不同且新位置有差异；CPU 上一帧矩阵/场景快照正确；原 TAA 历史测试仍过 |
 | TAA | `cargo test -p quench3d-render --test post_pipeline taa` | 相机不动时第 1→2 帧变化（历史被消费）；feedback 0.9 与 feedback 0 的第 2 帧不同；关闭 TAA 重复 capture 逐位相同；切镜（位置 >2m/朝向 >60°）丢弃历史；GL/MSAA 跳过 |
 | SSAO | `cargo test -p quench3d-render --test post_pipeline ssao` | 接触处变暗、远平面不变；可选去噪至少改 20 像素、接缝仍暗 ≥2.5/255、接触区粗糙度 5.10→2.38 |
 | 水面后处理 | `cargo test -p quench3d-render --test post_pipeline water` | 开/关、波强/泡沫/折射都改变像素 |
