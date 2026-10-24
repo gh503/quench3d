@@ -80,6 +80,7 @@ tools/verify_all.sh
 | 粒子阻尼 | `cargo test -p quench3d --lib particle_drag`、`cargo test -p quench3d-cli --lib particles_parse` | 初速 1、drag=1 一秒位移≈0.368、速度<0.4；`drag` 往返、负数报错 |
 | 粒子发射形状 | `cargo test -p quench3d --lib particle_box`、`cargo test -p quench3d-cli --lib particles_parse` | 64 颗粒子全部落在 `[2,1,4]` 盒内；`shape`/`box_size` 往返、非法形状/0 轴报错 |
 | 粒子颜色/尺寸渐变 | `cargo test -p quench3d --lib particle_color_gradient`、`cargo test -p quench3d-cli --lib particles_parse` | 红→蓝、寿命 2s 推进 1s 后 (0.5,0,0.5)、alpha 0.2；尺寸 0.1→0.5 中点 0.3；`color_end`/`size_end` 往返、越界报错 |
+| 粒子贴图面板应用 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_particle` | 粒子面板排版出「发射器贴图」与「应用粒子贴图」按钮 |
 | 粒子贴图 | `cargo test -p quench3d-cli --test cli_e2e particle_texture`、`cargo test -p quench3d-cli --lib particles_parse` | 白色实例色 + 绿色贴图：无贴图中心≈白，贴图后 G 比 R/B 高 60/255；贴图路径往返、缺文件报错 |
 | 状态机输入窗口 | `cargo test -p quench3d --lib animator_event_window`、`cargo test -p quench3d-cli --lib animator_parameters` | 1 秒淡入期间入队的 `b` 0.1s 还在、0.3s（窗口 0.25s）后为 0；窗口 0 时保留；`event_window: 0.35` 往返、`11.0` 报错 |
 | 动画事件负载 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib event_payload` | 带 `payload` 的标记跨过后原样带出；1025 字节/NUL 在 `models[0].events[0].payload` 报错；JSON 往返保留负载 |
