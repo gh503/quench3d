@@ -68,6 +68,7 @@ tools/verify_all.sh
 | 粒子终点色编辑 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_particle` | 面板排版出「终点色」控件 |
 | 粒子数量编辑 | `cargo test -p quench3d --lib particle_count`、UI smoke | 4→2 保留前两个代理；2→6 新代理在球内；6→1 收缩；面板有「数量」 |
 | 画中画统计保持 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib pip_capture_preserves` | 主视图 capture 后 stats 与画中画回读后完全一致 |
+| 画中画分辨率/间隔 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib pip_refresh` | 160×90 纹理生效；24 帧间隔先拒后收；1 帧间隔立即重拍 |
 | 画中画 5 Hz 节流 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib pip_refresh` | 同帧第二次不捕获，过 12 帧后恢复 |
 | 画中画角落/大小/点击切换 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke viewport_draws_pip` | 默认右下、切左上后在左上；0.40 比默认 0.28 宽；点小窗中心后主相机切到「侧视」 |
 | 命名相机画中画 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --lib second_camera_capture`；`pip_refresh_uploads`；`--test ui_smoke viewport_draws_pip_texture_when_selected` | 正/侧两台相机回读的 320×180 图像不同且非空背景；选绘画中画生成 320×180 纹理；视口绘制该纹理 mesh |

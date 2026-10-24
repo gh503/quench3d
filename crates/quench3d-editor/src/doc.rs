@@ -219,6 +219,10 @@ pub struct Doc {
     pub pip_corner: u8,
     /// 画中画宽度占视口宽度的比例（0.15~0.45）。
     pub pip_scale: f32,
+    /// 画中画回读分辨率：0 = 160×90，1 = 320×180，2 = 480×270。
+    pub pip_resolution: u8,
+    /// 画中画刷新间隔（帧）；默认 12 ≈ 5 Hz。
+    pub pip_interval: u64,
     /// 画中画最近一帧（CPU 回读后上传的 egui 纹理）；仅在桌面端使用。
     pub pip_texture: Option<egui::TextureHandle>,
     /// 上一次画中画捕获的帧号，用来限制回读频率。
@@ -288,8 +292,17 @@ impl Doc {
         self.base_doc.as_mut()
     }
 
+    /// 画中画回读尺寸（宽，高）。
+    pub fn pip_size(&self) -> (u32, u32) {
+        match self.pip_resolution {
+            0 => (160, 90),
+            2 => (480, 270),
+            _ => (320, 180),
+        }
+    }
+
     /// 解析编辑器里输入的贴图路径：绝对路径原样用；相对路径先按场景文件所在目录
-    /// 找，找不到再交给调用方按工作目录处理。
+    /// 找，找不到再按场景声明的 `assets.search_paths`，最后交给调用方按工作目录处理。
     ///
     /// 与 CLI 的 `SceneDoc::resolve_asset` 同一优先级思路，但这里不要求文件已经存在
     /// （`exists` 只用来决定候选路径），最终是否读得动由解码器报错。
@@ -919,6 +932,8 @@ impl Doc {
             pip_camera: None,
             pip_corner: 0,
             pip_scale: 0.28,
+            pip_resolution: 1,
+            pip_interval: 12,
             pip_texture: None,
             pip_last_frame: 0,
             show_help: false,

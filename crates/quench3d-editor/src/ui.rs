@@ -557,6 +557,33 @@ fn top_bar(
                             .speed(0.01)
                             .fixed_decimals(2),
                     );
+                    ui.label("分辨率");
+                    let res_label = match doc.pip_resolution {
+                        0 => "160×90",
+                        2 => "480×270",
+                        _ => "320×180",
+                    };
+                    egui::ComboBox::from_id_salt("pip-resolution")
+                        .selected_text(res_label)
+                        .show_ui(ui, |ui| {
+                            for (value, label) in
+                                [(0, "160×90"), (1, "320×180"), (2, "480×270")]
+                            {
+                                if ui
+                                    .selectable_value(&mut doc.pip_resolution, value, label)
+                                    .changed()
+                                {
+                                    doc.pip_last_frame = 0;
+                                }
+                            }
+                        });
+                    ui.label("刷新间隔");
+                    ui.add(
+                        egui::DragValue::new(&mut doc.pip_interval)
+                            .range(1..=120)
+                            .speed(1)
+                            .suffix(" 帧"),
+                    );
                 });
             }
 

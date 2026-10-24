@@ -194,10 +194,12 @@ fn preview_camera(current: Camera, camera_doc: &quench3d_cli::scene_doc::CameraD
 fn capture_preview(
     engine: &mut Engine,
     camera: &Camera,
+    width: u32,
+    height: u32,
 ) -> Result<quench3d::render::ImageData, String> {
     let lighting = engine.scene.lighting.clone();
     let Engine { renderer, gpu, .. } = engine;
-    renderer.capture_preserving_stats(gpu, 320, 180, camera, &lighting)
+    renderer.capture_preserving_stats(gpu, width, height, camera, &lighting)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -205,7 +207,7 @@ fn refresh_pip(engine: &mut Engine, doc: &mut Doc, ctx: &egui::Context) -> bool 
     let Some(name) = doc.pip_camera.clone() else {
         return false;
     };
-    if engine.frame_count < doc.pip_last_frame.saturating_add(12) {
+    if engine.frame_count < doc.pip_last_frame.saturating_add(doc.pip_interval.max(1)) {
         return false;
     }
     let Some(camera_doc) = doc
@@ -216,7 +218,8 @@ fn refresh_pip(engine: &mut Engine, doc: &mut Doc, ctx: &egui::Context) -> bool 
     };
     doc.pip_last_frame = engine.frame_count;
     let camera = preview_camera(engine.camera(), &camera_doc);
-    let image = match capture_preview(engine, &camera) {
+    let (width, height) = doc.pip_size();
+    let image = match capture_preview(engine, &camera, width, height) {
         Ok(image) => image,
         Err(e) => {
             log::warn!("画中画捕获失败：{e}");
@@ -1706,8 +1709,32 @@ mod preview_camera_tests {
             "过 12 帧后应允许下一次回读"
         );
         let texture = doc.pip_texture.as_ref().expect("应生成画中画纹理");
-        assert_eq!(texture.size(), [320, 180], "画中画纹理尺寸固定 320×180");
-        let texture_id = texture.id();
+        assert_eq!(texture.size(), [320, 180], "默认画中画纹理应为 320×180");
+        // 低分辨率：160×90；间隔改成 1 帧，下一帧就应重拍。
+        doc.pip_resolution = 0;
+        doc.pip_interval = 24;
+        engine.frame_count += 12;
+        assert!(
+            !refresh_pip(&mut engine, &mut doc, &ctx),
+            "24 帧间隔下只过 12 帧不应重拍"
+        );
+        engine.frame_count += 12;
+        assert!(
+            refresh_pip(&mut engine, &mut doc, &ctx),
+            "满 24 帧应允许重拍"
+        );
+        assert_eq!(
+            doc.pip_texture.as_ref().expect("低分辨率纹理").size(),
+            [160, 90],
+            "低分辨率画中画应为 160×90"
+        );
+        doc.pip_interval = 1;
+        engine.frame_count += 1;
+        assert!(
+            refresh_pip(&mut engine, &mut doc, &ctx),
+            "1 帧间隔下一帧重拍"
+        );
+        let texture_id = doc.pip_texture.as_ref().expect("应生成画中画纹理").id();
         let mut view = crate::ui::Viewport::default();
         let mut gizmo = crate::gizmo::Gizmo::default();
         let mut camera = crate::camera::CameraFeed::default();
@@ -1788,7 +1815,7 @@ mod preview_camera_tests {
             .capture(gpu, 64, 64, &camera, &lighting)
             .expect("主视图回读应成功");
         let before = format!("{:?}", engine.renderer.stats());
-        let preview = capture_preview(&mut engine, &camera).expect("画中画回读应成功");
+        let preview = capture_preview(&mut engine, &camera, 320, 180).expect("画中画回读应成功");
         assert_eq!(preview.width, 320);
         assert_eq!(
             before,
@@ -1858,8 +1885,8 @@ mod preview_camera_tests {
                 ..Default::default()
             },
         );
-        let a = capture_preview(&mut engine, &front).expect("正面相机应能回读");
-        let b = capture_preview(&mut engine, &side).expect("侧面相机应能回读");
+        let a = capture_preview(&mut engine, &front, 320, 180).expect("正面相机应能回读");
+        let b = capture_preview(&mut engine, &side, 320, 180).expect("侧面相机应能回读");
         assert_eq!((a.width, a.height), (320, 180));
         let px = |img: &quench3d::render::ImageData, x: usize, y: usize| {
             let i = (y * img.width as usize + x) * 4;
