@@ -3698,6 +3698,7 @@ fn add_particle_visuals(
             material,
             quench3d::scene::ParticleDesc {
                 count: p.count.unwrap_or(64),
+                enabled: p.enabled.unwrap_or(true),
                 position: Vec3::new(position[0], position[1], position[2]),
                 radius: p.radius.unwrap_or(0.1),
                 shape: match p.shape.as_deref() {

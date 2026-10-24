@@ -59,6 +59,7 @@ tools/verify_all.sh
 | 动画事件标记/队列 | `cargo test -p quench3d --lib animation_events`、`cargo test -p quench3d-cli --lib model_events`、`cargo test -p quench3d-editor --lib set_animation_events` | 半开区间不重复、循环回到开头再触发、非循环结尾补触发、clip 过滤、Scene 队列取空、无 animation/animator warning；编辑器写入/清空 `models[].events`、空数组不留空段 |
 | 平面贴花 | `cargo test -p quench3d-cli --test cli_e2e decal_quad`、`cargo test -p quench3d-cli --lib decals_parse`、`include_rebases_particle` | 无光照下红色贴花让中心 R 高 80/255、R 比 G/B 高 60/255；size/rotation/color 往返；零法线/0 尺寸/越界 alpha/缺贴图报错 |
 | 模型根运动 | `cargo test -p quench3d --lib root_motion`、`cargo test -p quench3d-cli --test cli_e2e model_root_motion`、`cargo test -p quench3d-cli --lib root_motion_roundtrips` | 0.5s 物体前移 1m/上升 1m、网格不双移；1s 偏航 90°、网格不双转；真实 GLB 报告 found；错节点 found=false；loop/blend 组合校验失败；UI 显示根运动节点 |
+| 粒子启用开关 | `cargo test -p quench3d --lib disabled_particle`、`cargo test -p quench3d-cli --lib particles_parse`、UI smoke | 禁用时代理隐藏且位置冻结；重启用后继续；`enabled=false` 往返；面板有「启用」 |
 | 粒子圆盘形状 | `cargo test -p quench3d --lib particle_disc`、`cargo test -p quench3d-cli --lib particles_parse` | 64 颗、r=2 全部 y=0 且 x²+z²≤4；shape 域接受 disc、拒绝 cone |
 | 粒子速度对齐 | `cargo test -p quench3d --lib particle_velocity_alignment`、`cargo test -p quench3d-cli --lib particles_parse` | 速度 +X 时局部 +Z→+X；速度归零退回相机；`alignment` 往返、非法值报错 |
 | 粒子只读 UI | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_particle` | 7 颗/3.5s/盒 2×1×4/drag 0.5/自转 0→180° 全部排版进属性面板 |

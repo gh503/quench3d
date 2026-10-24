@@ -127,6 +127,8 @@ pub enum ParticleAlignment {
 pub struct ParticleDesc {
     /// 粒子数（会 clamp 到 `1..=4096`，避免误写成十万个物体）。
     pub count: usize,
+    /// 是否启用；禁用后代理立即隐藏，`update_particles` 不再推进。
+    pub enabled: bool,
     /// 发射器中心（世界坐标）。
     pub position: Vec3,
     /// 初始位置在中心周围的球形半径（米）；`shape = Box` 时忽略。
@@ -167,6 +169,7 @@ impl Default for ParticleDesc {
     fn default() -> Self {
         Self {
             count: 64,
+            enabled: true,
             position: Vec3::new(0.0, 1.0, 0.0),
             radius: 0.1,
             shape: ParticleShape::Sphere,
@@ -191,6 +194,8 @@ impl Default for ParticleDesc {
 pub struct ParticleSystem {
     /// 每个粒子对应的场景物体下标。
     pub objects: Vec<usize>,
+    /// 是否启用。
+    pub enabled: bool,
     /// 发射器中心。
     pub position: Vec3,
     /// 初始位置球形半径。
@@ -1318,6 +1323,7 @@ impl Scene {
         let seed = 0x9E37_79B9_7F4A_7C15u64 ^ (system as u64 + 1);
         let mut system_state = ParticleSystem {
             objects: Vec::with_capacity(count),
+            enabled: desc.enabled,
             position: desc.position,
             radius,
             shape: desc.shape,
@@ -1347,7 +1353,7 @@ impl Scene {
                 &format!("$particles/{system}/{i}"),
             );
             self.objects[index].color = desc.color;
-            self.objects[index].visible = true;
+            self.objects[index].visible = desc.enabled;
             system_state.objects.push(index);
             system_state.state.push(ParticleState {
                 age: particle_rand(&mut system_state.seed) * lifetime,
@@ -1356,6 +1362,19 @@ impl Scene {
         }
         self.particles.push(system_state);
         system
+    }
+
+    /// 启用/禁用一个发射器：禁用时立即隐藏所有代理，启用后从当前年龄继续。
+    pub fn set_particle_enabled(&mut self, system: usize, enabled: bool) {
+        let Some(system) = self.particles.get_mut(system) else {
+            return;
+        };
+        system.enabled = enabled;
+        for &index in &system.objects {
+            if let Some(object) = self.objects.get_mut(index) {
+                object.visible = enabled;
+            }
+        }
     }
 
     /// 这个物体是不是粒子发射器生成的公告板（决定场景树/拾取/导出是否忽略它）。
@@ -1373,6 +1392,9 @@ impl Scene {
     pub fn update_particles(&mut self, camera: Vec3, dt: f32) {
         let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         for system in &mut self.particles {
+            if !system.enabled {
+                continue;
+            }
             for i in 0..system.objects.len() {
                 let object_index = system.objects[i];
                 let Some(state) = system.state.get_mut(i) else {
@@ -4242,6 +4264,7 @@ mod particle_tests {
     fn emitter() -> ParticleDesc {
         ParticleDesc {
             count: 8,
+            enabled: true,
             position: Vec3::new(1.0, 2.0, 3.0),
             radius: 0.0,
             shape: ParticleShape::Sphere,
@@ -4284,6 +4307,7 @@ mod particle_tests {
         let mut scene = Scene::new();
         let desc = ParticleDesc {
             count: 1,
+            enabled: true,
             position: Vec3::ZERO,
             radius: 0.0,
             shape: ParticleShape::Sphere,
@@ -4376,6 +4400,32 @@ mod particle_tests {
             object.transform.position
         );
         assert!(object.color.w > 0.4, "重生后 alpha 应当恢复");
+    }
+
+    #[test]
+    fn disabled_particle_system_hides_proxies_and_stops_time() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.enabled = false;
+        let system = scene.add_particle_system(0, 0, desc);
+        assert!(scene.particles[system]
+            .objects
+            .iter()
+            .all(|&i| !scene.objects[i].visible));
+        let index = scene.particles[system].objects[0];
+        let before = scene.objects[index].transform.position;
+        scene.update_particles(Vec3::new(0.0, 0.0, 5.0), 1.0);
+        assert_eq!(
+            scene.objects[index].transform.position, before,
+            "禁用后不能继续积分"
+        );
+        scene.set_particle_enabled(system, true);
+        assert!(scene.objects[index].visible);
+        scene.update_particles(Vec3::new(0.0, 0.0, 5.0), 0.1);
+        assert!(
+            (scene.objects[index].transform.position - before).length() > 1e-4,
+            "重新启用后应继续运动"
+        );
     }
 
     #[test]

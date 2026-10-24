@@ -1122,6 +1122,9 @@ pub struct ParticleDoc {
     /// 粒子数（1~4096），缺省 64。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
+    /// 是否启用，缺省 true；false 时代理隐藏、不推进。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// 发射器中心 `[x, y, z]`，缺省 `[0, 1, 0]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<[f32; 3]>,
@@ -8147,7 +8150,7 @@ mod tests {
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
                   "size_end": 0.5, "shape": "box", "box_size": [2, 1, 4],
                   "drag": 0.5, "rotation": 10, "rotation_end": 190,
-                  "alignment": "velocity",
+                  "enabled": false, "alignment": "velocity",
                   "velocity": [0, 2, 0], "gravity": [0, -3, 0],
                   "color_end": [0, 0, 1, 0.2] },
                 { "count": 2, "texture": texture_path.clone() }
@@ -8176,6 +8179,7 @@ mod tests {
         assert_eq!(again.particles[1].rotation, Some(10.0));
         assert_eq!(again.particles[1].rotation_end, Some(190.0));
         assert_eq!(again.particles[1].alignment.as_deref(), Some("velocity"));
+        assert_eq!(again.particles[1].enabled, Some(false));
         assert_eq!(again.particles[1].color_end, Some([0.0, 0.0, 1.0, 0.2]));
         assert_eq!(
             again.particles[2].texture.as_deref(),

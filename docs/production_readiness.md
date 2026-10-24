@@ -3367,6 +3367,26 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.57 粒子发射器的启用开关（第 156 轮）
+
+**做了什么**：
+
+* `particles[].enabled`（缺省 true）：false 时所有代理立即隐藏，`update_particles`
+  完全跳过该发射器（年龄/位置冻结），重新启用后从当前年龄继续。
+* `Scene::set_particle_enabled(system, bool)` 公开；`ParticleDesc.enabled` /
+  `ParticleSystem.enabled` 公开。
+* 编辑器只读面板增加「启用」复选框：切换运行时并写回底稿
+  `particles[i].enabled`，保存后保持。
+
+**验证**：
+
+* `disabled_particle_system_hides_proxies_and_stops_time`：禁用时代理不可见、
+  推进 1 秒位置不变；重新启用后可见且继续运动。
+* `particles_parse_validate_and_roundtrip`：`enabled=false` 往返保留。
+* UI smoke：面板排版出「启用」开关。
+
+**边界**：只控制发射器整体开关；不能暂停单个粒子，也不能在禁用时保留淡出/旋转更新。
+
 ### 23.56 粒子的圆盘发射形状（第 155 轮）
 
 **做了什么**：

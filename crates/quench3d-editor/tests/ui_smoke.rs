@@ -596,5 +596,9 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
         shapes_contain_text(&output.shapes, "自转 0°→180°"),
         "粒子面板没有显示自转"
     );
+    assert!(
+        shapes_contain_text(&output.shapes, "启用"),
+        "粒子面板没有启用开关"
+    );
     output.textures_delta.clear();
 }

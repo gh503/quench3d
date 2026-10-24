@@ -2950,7 +2950,7 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
 }
 
 /// 只读的粒子发射器列表：粒子代理在场景树里是隐藏的，没有这块面板就完全看不见。
-fn particles_section(ui: &mut Ui, engine: &Engine) {
+fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     if engine.scene.particles.is_empty() {
         return;
     }
@@ -2959,7 +2959,8 @@ fn particles_section(ui: &mut Ui, engine: &Engine) {
         "粒子发射器（{} 组）",
         engine.scene.particles.len()
     )));
-    for (i, system) in engine.scene.particles.iter().enumerate() {
+    for i in 0..engine.scene.particles.len() {
+        let system = &engine.scene.particles[i];
         ui.label(
             RichText::new(format!(
                 "#{i} · {} 颗 · 寿命 {:.1}s",
@@ -2998,6 +2999,15 @@ fn particles_section(ui: &mut Ui, engine: &Engine) {
             format!(" · {}", extra.join(" · "))
         };
         ui.label(RichText::new(format!("{shape}{suffix}")).small());
+        let mut enabled = system.enabled;
+        if ui.checkbox(&mut enabled, "启用").changed() {
+            engine.scene.set_particle_enabled(i, enabled);
+            if let Some(base) = doc.base_doc_mut() {
+                if let Some(particle) = base.particles.get_mut(i) {
+                    particle.enabled = Some(enabled);
+                }
+            }
+        }
     }
 }
 
@@ -3016,7 +3026,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
             light_section(ui, engine, doc);
             models_section(ui, engine, doc);
             animations_section(ui, engine, doc);
-            particles_section(ui, engine);
+            particles_section(ui, engine, doc);
             ui.separator();
             let Some(index) = doc.selected else {
                 ui.label("在场景树或视口里点一个物体。");
