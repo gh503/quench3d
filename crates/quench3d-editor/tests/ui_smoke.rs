@@ -880,6 +880,49 @@ fn viewport_draws_pip_texture_when_selected() {
         "切到左上后小窗应贴左上角，实际 {top_left:?}"
     );
     output.textures_delta.clear();
+
+    // 点小窗应把主相机切到小窗相机；这个点击不能再触发主视口拾取。
+    doc.pip_corner = 0;
+    doc.selected_camera = None;
+    let click = bottom_right.center();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        events: vec![
+            egui::Event::PointerMoved(click),
+            egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    output.textures_delta.clear();
+    assert_eq!(
+        doc.selected_camera.as_deref(),
+        Some("侧视"),
+        "点画中画应把主相机切到小窗相机"
+    );
 }
 
 fn shapes_texture_rect(

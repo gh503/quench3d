@@ -4167,6 +4167,35 @@ fn viewport(
                         egui::Color32::from_rgb(255, 255, 255),
                     );
                 }
+                let _ = ui
+                    .interact(
+                        pip_rect,
+                        ui.make_persistent_id("quench3d-pip"),
+                        egui::Sense::hover(),
+                    )
+                    .on_hover_text("点击把主相机切到这台命名相机");
+                // 主视口整块已经拿走了 click_and_drag；这里按指针位置判定小窗点击，
+                // 不跟 egui 的命中测试抢，随后清掉 `view.click` 阻止主视口拾取。
+                let pip_clicked = ui.input(|i| {
+                    i.pointer.primary_clicked()
+                        && i.pointer
+                            .interact_pos()
+                            .is_some_and(|pos| pip_rect.contains(pos))
+                });
+                if pip_clicked {
+                    if let Some(name) = doc.pip_camera.clone() {
+                        if let Some(camera_doc) = doc
+                            .base_doc()
+                            .and_then(|base| base.cameras.get(&name).cloned())
+                        {
+                            crate::scene_io::apply_camera(engine, &camera_doc);
+                            doc.selected_camera = Some(name.clone());
+                            doc.status = format!("主相机已切到「{name}」");
+                            view.click = None;
+                            view.dragging = false;
+                        }
+                    }
+                }
             }
         });
 }
@@ -4183,7 +4212,7 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.label("右键拖动：平移（飞行模式下是转头）");
             ui.label("滚轮：推近拉远");
             ui.label("Tab：切换轨道 / 飞行相机");
-            ui.label("画中画：相机面板选第二台命名相机，并可选右下/左下/右上/左上（桌面端约 5 Hz 预览）");
+            ui.label("画中画：相机面板选第二台命名相机，并可选右下/左下/右上/左上；点小窗可把主相机切过去（桌面端约 5 Hz 预览）");
             ui.label("R：聚焦到整个场景");
             ui.add_space(6.0);
             ui.label(RichText::new("编辑").strong());
