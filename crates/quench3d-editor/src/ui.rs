@@ -467,6 +467,41 @@ fn top_bar(
                     ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
                 });
 
+            // 场景 `cameras` 段的命名视角：只切主相机（不做分屏/多视口）。
+            let named_cameras: Vec<(String, quench3d_cli::scene_doc::CameraDoc)> = doc
+                .base_doc()
+                .map(|base| {
+                    base.cameras
+                        .iter()
+                        .map(|(name, camera)| (name.clone(), camera.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !named_cameras.is_empty() {
+                let current = doc
+                    .selected_camera
+                    .clone()
+                    .unwrap_or_else(|| "编辑器视角".to_string());
+                egui::ComboBox::from_id_salt("named-camera")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(doc.selected_camera.is_none(), "编辑器视角")
+                            .clicked()
+                        {
+                            doc.selected_camera = None;
+                        }
+                        for (name, _camera) in &named_cameras {
+                            let selected = doc.selected_camera.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(selected, name).clicked() {
+                                doc.select_named_camera(engine, name);
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("场景 `cameras` 段里的命名视角；只切换主相机，不做分屏");
+            }
+
             ui.separator();
             // 相机投影：视场角 / 裁剪面 / 正交高度。后两项以前只在场景文件里能调，
             // 而且存盘时会被 `..Default::default()` 悄悄丢掉。

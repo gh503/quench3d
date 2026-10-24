@@ -207,6 +207,8 @@ pub struct Doc {
     pub export_path: Option<std::path::PathBuf>,
     /// 最近一条给用户看的状态提示。
     pub status: String,
+    /// 最近一次从 `cameras` 段套用的命名相机（只作界面状态，不写进场景）。
+    pub selected_camera: Option<String>,
     /// 是否显示帮助窗口。
     pub show_help: bool,
     /// 左/右面板宽度（使用偏好，不写进场景文件）。
@@ -864,6 +866,7 @@ impl Doc {
             picker_action: crate::picker::PickAction::OpenScene,
             export_path: None,
             status: "就绪".to_string(),
+            selected_camera: None,
             show_help: false,
             layout: crate::layout::Layout::default(),
             recovery: None,
@@ -878,6 +881,26 @@ impl Doc {
             reparent_request: None,
             spawn_counter: 0,
         }
+    }
+
+    /// 套用场景 `cameras` 段里的命名视角（只切主相机，不重建场景）。
+    ///
+    /// 返回 false 表示没有底稿或名字不存在；成功时把视角写进 `engine.orbit`，
+    /// 并记下 `selected_camera` 供界面显示。物理/场景对象不受影响。
+    pub fn select_named_camera(&mut self, engine: &mut Engine, name: &str) -> bool {
+        let Some(camera) = self
+            .base_doc
+            .as_ref()
+            .and_then(|base| base.cameras.get(name))
+            .cloned()
+        else {
+            return false;
+        };
+        crate::scene_io::apply_camera(engine, &camera);
+        engine.camera_mode = quench3d::app::CameraMode::Orbit;
+        self.selected_camera = Some(name.to_string());
+        self.status = format!("相机：{name}");
+        true
     }
 
     /// 编辑完成之后记一步历史（与栈顶相同则自动跳过）。

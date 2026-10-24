@@ -852,6 +852,7 @@ pub fn load_text_into_doc(
         .map_err(|e| e.to_string())?;
     let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
+    doc.selected_camera = None;
     doc.set_model_instances(installed.instances);
     Ok((installed.objects, installed.name))
 }
@@ -869,6 +870,7 @@ pub fn load_file_into_doc(
         .map_err(|e| e.to_string())?;
     let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
+    doc.selected_camera = None;
     doc.set_model_instances(installed.instances);
     Ok((installed.objects, installed.name))
 }
@@ -926,7 +928,7 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
 ///
 /// 只认两种写法：给了 `position` + `look_at` 就反解出距离与角度；
 /// 只给了 `yaw/pitch/distance` 就直接用。这样 CLI 写的场景打开后视角一致。
-fn apply_camera(engine: &mut Engine, camera: &CameraDoc) {
+pub(crate) fn apply_camera(engine: &mut Engine, camera: &CameraDoc) {
     if let Some(target) = camera.look_at {
         engine.orbit.focus = Vec3::new(target[0], target[1], target[2]);
     }

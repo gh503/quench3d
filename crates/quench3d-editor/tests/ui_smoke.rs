@@ -16,6 +16,7 @@ use quench3d::scene::{ModelAnimationInstance, ModelAnimatorRuntime, ModelAnimato
 use quench3d_editor::camera::CameraFeed;
 use quench3d_editor::doc::Doc;
 use quench3d_editor::gizmo::Gizmo;
+use quench3d_editor::scene_io;
 use quench3d_editor::ui::{self, Viewport};
 
 fn headless_engine() -> Option<Engine> {
@@ -611,6 +612,64 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
     assert!(
         shapes_contain_text(&output.shapes, "半径"),
         "粒子面板没有半径编辑控件"
+    );
+    output.textures_delta.clear();
+}
+#[test]
+fn named_camera_selector_applies_scene_camera() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let text = r#"{
+        "cameras": {
+            "侧视": { "position": [10, 5, 0], "look_at": [0, 1, 0], "fov_deg": 45 }
+        },
+        "objects": [
+            { "name": "箱", "shape": { "type": "box", "size": [1, 1, 1] }, "body": "static" }
+        ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
+    assert!(
+        doc.select_named_camera(&mut engine, "侧视"),
+        "命名相机应能被选中"
+    );
+    assert_eq!(
+        engine.orbit.focus,
+        Vec3::new(0.0, 1.0, 0.0),
+        "look_at 应写进轨道焦点"
+    );
+    assert!(
+        (engine.orbit.distance - (100.0f32 + 16.0).sqrt()).abs() < 1e-4,
+        "距离应由 position-look_at 反解"
+    );
+    assert!((engine.orbit.fov_y.to_degrees() - 45.0).abs() < 1e-4);
+    assert_eq!(doc.selected_camera.as_deref(), Some("侧视"));
+
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    assert!(
+        shapes_contain_text(&output.shapes, "侧视"),
+        "相机下拉框没有显示当前命名相机"
     );
     output.textures_delta.clear();
 }
