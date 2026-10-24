@@ -610,6 +610,10 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
         "粒子面板没有贴图控件"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "清除粒子贴图"),
+        "粒子面板没有清除贴图按钮"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "收束"),
         "粒子面板没有 size_end 编辑控件"
     );
@@ -781,6 +785,10 @@ fn inspector_lists_decals_from_base_doc() {
     assert!(
         shapes_contain_text(&output.shapes, "贴图"),
         "属性面板没有贴花贴图控件"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "清除贴图"),
+        "属性面板没有清除贴花贴图按钮"
     );
     assert!(
         shapes_contain_text(&output.shapes, "旋转"),

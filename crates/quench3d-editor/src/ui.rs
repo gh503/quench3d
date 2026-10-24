@@ -3303,6 +3303,46 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 Err(error) => doc.status = format!("粒子贴图读图失败：{error}"),
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui
+            .add_enabled(
+                doc.base_doc()
+                    .and_then(|base| base.particles.get(i))
+                    .and_then(|p| p.texture.as_ref())
+                    .is_some(),
+                egui::Button::new("清除粒子贴图"),
+            )
+            .clicked()
+        {
+            let old_material = engine.scene.particles[i].material;
+            let objects = engine.scene.particles[i].objects.clone();
+            let mut desc = engine
+                .renderer
+                .material(old_material)
+                .cloned()
+                .unwrap_or_default();
+            desc.base_color_texture = None;
+            let name = format!(
+                "$particle_ui_clear_{i}_{}",
+                engine.renderer.material_count()
+            );
+            let material = engine
+                .assets
+                .material(&mut engine.renderer, &engine.gpu, &name, desc);
+            engine.scene.particles[i].material = material;
+            for object in objects {
+                if let Some(obj) = engine.scene.objects.get_mut(object) {
+                    obj.material = material;
+                }
+            }
+            if let Some(base) = doc.base_doc_mut() {
+                if let Some(particle) = base.particles.get_mut(i) {
+                    particle.texture = None;
+                }
+            }
+            doc.record_edit(engine);
+            doc.status = "粒子贴图已清除".into();
+        }
         if changed {
             engine.scene.set_particle_enabled(i, new_enabled);
             if new_count != objects {
@@ -3514,6 +3554,35 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     }
                 }
                 Err(error) => doc.status = format!("贴花贴图读图失败：{error}"),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui
+            .add_enabled(decal.texture.is_some(), egui::Button::new("清除贴图"))
+            .clicked()
+        {
+            if let Some(index) = engine
+                .scene
+                .objects
+                .iter()
+                .position(|o| o.name == format!("贴花{i}"))
+            {
+                let old = engine.scene.objects[index].material;
+                let mut desc = engine.renderer.material(old).cloned().unwrap_or_default();
+                desc.base_color_texture = None;
+                let name = format!("$decal_ui_clear_{i}_{}", engine.renderer.material_count());
+                let material =
+                    engine
+                        .assets
+                        .material(&mut engine.renderer, &engine.gpu, &name, desc);
+                engine.scene.objects[index].material = material;
+                if let Some(base) = doc.base_doc_mut() {
+                    if let Some(decal) = base.decals.get_mut(i) {
+                        decal.texture = None;
+                    }
+                }
+                doc.record_edit(engine);
+                doc.status = "贴花贴图已清除".into();
             }
         }
         if !changed {
