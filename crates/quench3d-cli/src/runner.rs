@@ -3702,6 +3702,7 @@ fn add_particle_visuals(
                 radius: p.radius.unwrap_or(0.1),
                 shape: match p.shape.as_deref() {
                     Some("box") => quench3d::scene::ParticleShape::Box,
+                    Some("disc") => quench3d::scene::ParticleShape::Disc,
                     _ => quench3d::scene::ParticleShape::Sphere,
                 },
                 box_size: {

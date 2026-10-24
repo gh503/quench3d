@@ -105,6 +105,8 @@ pub enum ParticleShape {
     Sphere,
     /// 半边长 `box_size * 0.5` 的长方体内均匀分布（忽略 `radius`）。
     Box,
+    /// XZ 平面上的圆盘内均匀分布（`radius`，Y 固定为 0）：地面雾/爆炸环。
+    Disc,
 }
 
 /// 公告板朝向模式。
@@ -266,6 +268,10 @@ fn particle_offset(seed: &mut u64, shape: ParticleShape, radius: f32, box_size: 
                 (particle_rand(seed) * 2.0 - 1.0) * half.y,
                 (particle_rand(seed) * 2.0 - 1.0) * half.z,
             )
+        }
+        ParticleShape::Disc => {
+            let p = particle_point(seed, radius);
+            Vec3::new(p.x, 0.0, p.z)
         }
     }
 }
@@ -4370,6 +4376,29 @@ mod particle_tests {
             object.transform.position
         );
         assert!(object.color.w > 0.4, "重生后 alpha 应当恢复");
+    }
+
+    #[test]
+    fn particle_disc_shape_lies_flat_on_xz_plane() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 64;
+        desc.shape = ParticleShape::Disc;
+        desc.radius = 2.0;
+        desc.velocity = Vec3::ZERO;
+        desc.gravity = Vec3::ZERO;
+        let system = scene.add_particle_system(0, 0, desc);
+        for &object in &scene.particles[system].objects {
+            let offset = scene.objects[object].transform.position - desc.position;
+            assert!(
+                offset.y.abs() < 1e-5,
+                "圆盘粒子不能离开 XZ 平面：{offset:?}"
+            );
+            assert!(
+                offset.x * offset.x + offset.z * offset.z <= 4.0 + 1e-5,
+                "圆盘粒子不能超出半径：{offset:?}"
+            );
+        }
     }
 
     #[test]
