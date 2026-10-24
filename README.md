@@ -1019,6 +1019,8 @@ NaN 刚体  : 0
 * `lighting.grade` 是 tonemap **之后**的调色：`saturation` / `contrast` 缺省 1（0~4），
   `temperature` 缺省 0（-1 偏冷、+1 偏暖）；不写 = 全中性、像素与旧版一致。
 * `lighting.sun_color` / `ambient_color` 是**线性空间** RGB；不写 = 跟随 preset。
+* `lighting.shadow_quality.resolution` 是阴影贴图边长（512~4096，缺省 2048，取偶数）；
+  聚光图取一半、点光每面再取一半。显存约为 `resolution² × 4 B` 的量级。
 * `objects[].static_friction` 缺省**跟随 `friction`**（只管动摩擦的老场景行为逐位不变）；
   想表达"推得动、但推住之后不会慢慢滑"就把它写得比 `friction` 大。
 * `models[].animation` 是**视觉**动画：`{ "name": "走路", "start": 0, "speed": 1, "loop": true,

@@ -623,6 +623,21 @@ fn render_menu(ui: &mut Ui, engine: &mut Engine) {
                     .range(0.0..=1.0),
             )
             .on_hover_text("0 = 按距离均匀，1 = 对数分布（近处更细）");
+            let mut resolution = engine.renderer.options.shadow_map_size;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut resolution)
+                        .speed(64.0)
+                        .range(512..=4096)
+                        .prefix("阴影 "),
+                )
+                .on_hover_text("阴影贴图边长（像素）；聚光取一半、点光每面再取一半")
+                .changed()
+            {
+                engine
+                    .renderer
+                    .set_shadow_map_size(&engine.gpu.device, resolution);
+            }
         });
         ui.checkbox(&mut engine.renderer.options.bloom.enabled, "泛光（bloom）");
         ui.add_enabled_ui(engine.renderer.options.bloom.enabled, |ui| {

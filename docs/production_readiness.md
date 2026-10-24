@@ -3367,6 +3367,30 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.93 阴影贴图分辨率可运行时调整（第 193 轮）
+
+**问题**：阴影贴图边长是 `RendererOptions` 的构造参数，场景文件改不了，编辑器也没有
+入口。想降显存/提性能只能重开程序改代码；场景 JSON 里写 `shadow_quality` 也不会影响它。
+
+**做了什么**：
+
+* `ShadowQualityDoc.resolution`（512~4096，内部取偶数）；校验越界报
+  `lighting.shadow_quality.resolution`，奇数给警告（会被向下取偶）。
+* `Renderer::set_shadow_map_size(device, size)`：重建平行光图集、聚光灯深度图、
+  点光源 6 面深度图与采样 bind group；返回 `false` = 尺寸没变。
+  聚光/点光尺寸仍按 `图集/2`、`/4` 派生，**同一份 `shadow_sizes_for` 构造与热改共用**。
+* CLI `apply_lighting` 载入场景后应用；编辑器载入同样重建，渲染菜单加「阴影」分辨率滑杆。
+* 编辑器存盘写回实际 `options.shadow_map_size`。
+
+**验证**：
+
+* 纯函数 `shadow_sizes_are_even_and_scale_together`：默认 2048→(2048,1024,1024,512)；
+  1024/4096、越界夹取、奇数向下取偶。
+* GPU `shadow_map_resolution_can_change_at_runtime`：在真实渲染器上改成 1024，
+  断言聚光 512、点光每面 256，并且阴影像素仍然出现（bind group 没跟丢）。
+* 场景解析/校验：`resolution: 1024` 保留；`128` 报路径错误。
+* 全量门禁 **845** 测试、0 失败（新增 2 个测试）。
+
 ### 23.92 太阳/环境光颜色 + 光照分区 UI 验证（第 192 轮）
 
 **问题**：场景只能改太阳方向/强度和环境光强度，颜色固定跟随预设；编辑器虽然能改

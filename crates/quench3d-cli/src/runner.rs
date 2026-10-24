@@ -4276,6 +4276,10 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) -> Result<(), RunErro
     engine
         .renderer
         .set_environment_map(&engine.gpu, environment.as_deref());
+    // 阴影贴图分辨率是渲染器构造参数之外少数能安全热改的资源；场景里写了就重建。
+    if let Some(res) = l.shadow_quality.as_ref().and_then(|q| q.resolution) {
+        engine.renderer.set_shadow_map_size(&engine.gpu.device, res);
+    }
     Ok(())
 }
 

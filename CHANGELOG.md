@@ -47,6 +47,9 @@
 - **画中画节流测试（第 181 轮）**：`pip_refresh_uploads_a_texture` 增加同帧不重复
   回读、过 12 帧恢复的断言。测试总数仍为 833。
 
+- **阴影贴图分辨率（第 193 轮）**：`lighting.shadow_quality.resolution` + 渲染器热重建，
+  聚光/点光尺寸同步派生；GPU 测试验证换尺寸后阴影仍在。
+
 - **太阳/环境光颜色（第 192 轮）**：`lighting.sun_color` / `ambient_color` 进场景与编辑器，
   线性 RGB 取色器；新增点开光照分区的 UI 交互测试。
 

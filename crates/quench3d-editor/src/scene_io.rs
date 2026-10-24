@@ -220,6 +220,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         strength: Some(light.shadow_strength),
         bias: light.sun.as_ref().map(|s| s.shadow_bias),
         radius: light.sun.as_ref().map(|s| s.shadow_radius),
+        resolution: Some(engine.renderer.options.shadow_map_size),
         cascades: Some(engine.renderer.options.shadow_cascades),
         split_lambda: Some(engine.renderer.options.shadow_split_lambda),
     });
@@ -947,6 +948,15 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     // （以前这里什么也没设：载入一个 `cascades: 4` 的场景，编辑器预览仍是引擎默认的单级。）
     engine.renderer.options.shadow_cascades = runner::shadow_cascades(&doc);
     engine.renderer.options.shadow_split_lambda = runner::shadow_split_lambda(&doc);
+    // 分辨率不能只改 options：纹理/bind group 必须按新尺寸重建。
+    if let Some(res) = doc
+        .lighting
+        .shadow_quality
+        .as_ref()
+        .and_then(|q| q.resolution)
+    {
+        engine.renderer.set_shadow_map_size(&engine.gpu.device, res);
+    }
     // 后处理三项也走同一份映射：以前编辑器**完全不应用**它们——载入一个开了 bloom 与 SSAO
     // 的场景，预览里这两样都不在，而 CLI 渲出来是有的。
     engine.renderer.options.bloom = runner::bloom_options(&doc);

@@ -1650,8 +1650,7 @@ impl Renderer {
             }],
         });
 
-        let shadow_size = (options.shadow_map_size.clamp(512, 4096) / 2) * 2;
-        let shadow_tile_size = shadow_size / 2;
+        let (shadow_size, shadow_tile_size, _, _) = shadow_sizes_for(options.shadow_map_size);
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("quench3d-shadow-map"),
             size: wgpu::Extent3d {
@@ -1706,7 +1705,8 @@ impl Renderer {
             shadow_frame_bind_groups.try_into().expect("正好 4 个");
 
         // 聚光灯阴影图：第二张同样格式的深度图，边长是平行光那张的一半
-        let spot_shadow_map_size = shadow_tile_size.max(256);
+        let (_, _, spot_shadow_map_size, point_shadow_map_size) =
+            shadow_sizes_for(options.shadow_map_size);
         let spot_shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("quench3d-spot-shadow-map"),
             size: wgpu::Extent3d {
@@ -1742,7 +1742,6 @@ impl Renderer {
         });
 
         // 点光源阴影图：6 个层，面序 `+X, -X, +Y, -Y, +Z, -Z`（`point_shadow.rs` 的约定）
-        let point_shadow_map_size = (spot_shadow_map_size / 2).max(128);
         let point_shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("quench3d-point-shadow-map"),
             size: wgpu::Extent3d {
@@ -4602,6 +4601,126 @@ impl Renderer {
         &self.spot_shadow_texture
     }
 
+    /// 运行时改阴影贴图分辨率（512~4096，内部取偶数）。
+    ///
+    /// 会一并重建平行光图集、聚光灯深度图与点光源 6 面深度图，以及采样用 bind group。
+    /// 返回 `false` 表示解析后的尺寸与当前一致、没有重建。必须在帧与帧之间调用；
+    /// 帧内已编码的 pass 不能引用已销毁的视图。
+    pub fn set_shadow_map_size(&mut self, device: &wgpu::Device, size: u32) -> bool {
+        let (size, tile_size, spot_size, point_size) = shadow_sizes_for(size);
+        if size == self.options.shadow_map_size {
+            return false;
+        }
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-shadow-map"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let spot_shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-spot-shadow-map"),
+            size: wgpu::Extent3d {
+                width: spot_size,
+                height: spot_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let spot_shadow_view =
+            spot_shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let point_shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("quench3d-point-shadow-map"),
+            size: wgpu::Extent3d {
+                width: point_size,
+                height: point_size,
+                depth_or_array_layers: POINT_SHADOW_TEXTURE_LAYERS,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let point_shadow_array_view =
+            point_shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("quench3d-point-shadow-array-view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                array_layer_count: Some(POINT_SHADOW_FACES as u32),
+                ..Default::default()
+            });
+        let mut point_shadow_face_views = Vec::with_capacity(POINT_SHADOW_FACES);
+        for face in 0..POINT_SHADOW_FACES {
+            point_shadow_face_views.push(point_shadow_texture.create_view(
+                &wgpu::TextureViewDescriptor {
+                    label: Some("quench3d-point-shadow-face-view"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: face as u32,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                },
+            ));
+        }
+        let point_shadow_face_views: [wgpu::TextureView; POINT_SHADOW_FACES] =
+            point_shadow_face_views.try_into().expect("正好 6 个");
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-shadow-bind-group"),
+            layout: &self.shadow_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&spot_shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&point_shadow_array_view),
+                },
+            ],
+        });
+
+        self.options.shadow_map_size = size;
+        self.shadow_texture = shadow_texture;
+        self.shadow_view = shadow_view;
+        self.shadow_tile_size = tile_size;
+        self.spot_shadow_texture = spot_shadow_texture;
+        self.spot_shadow_view = spot_shadow_view;
+        self.spot_shadow_map_size = spot_size;
+        self.point_shadow_texture = point_shadow_texture;
+        self.point_shadow_array_view = point_shadow_array_view;
+        self.point_shadow_face_views = point_shadow_face_views;
+        self.point_shadow_map_size = point_size;
+        self.shadow_bind_group = shadow_bind_group;
+        true
+    }
+
     /// 聚光灯阴影贴图的边长（像素）。
     pub fn spot_shadow_map_size(&self) -> u32 {
         self.spot_shadow_map_size
@@ -4631,6 +4750,17 @@ impl Renderer {
     pub fn white_view(&self) -> &wgpu::TextureView {
         &self.white_texture.view
     }
+}
+
+/// 阴影贴图尺寸的推导：平行光图集取偶数并夹在 512~4096；聚光取图集的一半
+/// （至少 256），点光再取聚光的一半（至少 128）。构造与运行时重建共用这一份，
+/// 避免"构造时 2048、改完 1024"这种两套算法。
+fn shadow_sizes_for(size: u32) -> (u32, u32, u32, u32) {
+    let size = (size.clamp(512, 4096) / 2) * 2;
+    let tile = size / 2;
+    let spot = tile.max(256);
+    let point = (spot / 2).max(128);
+    (size, tile, spot, point)
 }
 
 #[cfg(test)]
@@ -4683,6 +4813,17 @@ mod tests {
             Tonemap::Aces.apply_rgb([f32::NAN, -1.0, f32::INFINITY]),
             [0.0, 0.0, 0.0]
         );
+    }
+
+    #[test]
+    fn shadow_sizes_are_even_and_scale_together() {
+        assert_eq!(shadow_sizes_for(2048), (2048, 1024, 1024, 512));
+        assert_eq!(shadow_sizes_for(1024), (1024, 512, 512, 256));
+        assert_eq!(shadow_sizes_for(4096), (4096, 2048, 2048, 1024));
+        // 低于/高于范围夹住；奇数向下取偶数。
+        assert_eq!(shadow_sizes_for(1), (512, 256, 256, 128));
+        assert_eq!(shadow_sizes_for(9999), (4096, 2048, 2048, 1024));
+        assert_eq!(shadow_sizes_for(1025), (1024, 512, 512, 256));
     }
 
     #[test]

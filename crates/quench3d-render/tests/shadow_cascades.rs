@@ -61,6 +61,7 @@ impl Scene {
         shadows: bool,
         caster_shadows: bool,
         receiver_shadows: bool,
+        shadow_size: Option<u32>,
     ) -> ImageData {
         let mut renderer = Renderer::new(
             &self.ctx,
@@ -71,6 +72,15 @@ impl Scene {
                 ..Default::default()
             },
         );
+        if let Some(size) = shadow_size {
+            assert!(
+                renderer.set_shadow_map_size(&self.ctx.device, size),
+                "请求的尺寸与缺省不同，必须真的重建"
+            );
+            assert_eq!(renderer.options.shadow_map_size, size);
+            assert_eq!(renderer.spot_shadow_map_size(), size / 2);
+            assert_eq!(renderer.point_shadow_map_size(), size / 4);
+        }
         let cube = renderer.add_mesh(&self.ctx, &MeshData::cube(1.0));
         let ground_mat = renderer.add_material(
             &self.ctx,
@@ -157,11 +167,11 @@ fn a_far_caster_only_gets_a_shadow_when_cascades_cover_it() {
     let Some(mut scene) = Scene::new() else {
         return;
     };
-    let without = scene.render(1, false, true, true);
-    let single = scene.render(1, true, true, true);
-    let quad = scene.render(4, true, true, true);
-    let no_caster = scene.render(4, true, false, true);
-    let no_receiver = scene.render(4, true, true, false);
+    let without = scene.render(1, false, true, true, None);
+    let single = scene.render(1, true, true, true, None);
+    let quad = scene.render(4, true, true, true, None);
+    let no_caster = scene.render(4, true, false, true, None);
+    let no_receiver = scene.render(4, true, true, false, None);
 
     let (n_single, _) = shadow_pixels(&single, &without);
     let (n_quad, centroid) = shadow_pixels(&quad, &without);
@@ -217,4 +227,16 @@ fn a_far_caster_only_gets_a_shadow_when_cascades_cover_it() {
         expect.x,
         expect.z
     );
+}
+
+/// 运行时改分辨率后，阴影仍然画得出来（不是只换了尺寸、bind group 没跟上）。
+#[test]
+fn shadow_map_resolution_can_change_at_runtime() {
+    let Some(mut scene) = Scene::new() else {
+        return;
+    };
+    let without = scene.render(4, false, true, true, Some(1024));
+    let with = scene.render(4, true, true, true, Some(1024));
+    let (shaded, _) = shadow_pixels(&with, &without);
+    assert!(shaded > 0, "1024 阴影贴图下阴影消失了（shaded={shaded}）");
 }

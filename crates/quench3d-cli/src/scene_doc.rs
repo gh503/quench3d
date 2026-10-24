@@ -2545,6 +2545,12 @@ pub struct ShadowQualityDoc {
     /// `shadow_map_size`，而不是一味加级数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascades: Option<u32>,
+    /// 阴影贴图分辨率（512~4096，缺省 2048；内部取偶数）。
+    ///
+    /// 加一级：显存 ×4。2048 在桌面够用；移动/集成显卡可以降到 1024。
+    /// 聚光灯图取它的一半、点光源每面再取一半（见渲染器文档）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<u32>,
     /// 级联切分的"对数 ↔ 均匀"混合系数（0~1，缺省 0.5），只在 `cascades > 1` 时有意义。
     ///
     /// 1 = 全对数切分（近处最细，远处跨度大）；0 = 均匀切分（每级跨度一样）。
@@ -5031,6 +5037,24 @@ impl SceneDoc {
                         "lighting.shadow_quality.cascades",
                         "cascades 必须在 1~4 之间（1 = 单级；4 是 2x2 图集的上限）",
                     ));
+                }
+            }
+            if let Some(res) = q.resolution {
+                if !(512..=4096).contains(&res) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.shadow_quality.resolution",
+                        "resolution 必须在 512~4096 之间（像素）",
+                    ));
+                } else if res % 2 != 0 {
+                    out.push(
+                        Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
+                            "lighting.shadow_quality.resolution",
+                            "resolution 是奇数，渲染器会向下取偶数",
+                        )
+                        .with_hint("用 1024 / 2048 / 4096 这类偶数"),
+                    );
                 }
             }
             if let Some(l) = q.split_lambda {
@@ -9929,6 +9953,7 @@ mod tests {
                     strength: Some(1.0),
                     bias: None,
                     radius: None,
+                    resolution: None,
                     cascades: Some(shadow_cascades(&doc)),
                     split_lambda: Some(shadow_split_lambda(&doc)),
                 };
@@ -9936,6 +9961,27 @@ mod tests {
                 assert_eq!(written.split_lambda, Some(lambda));
             }
         }
+        // 分辨率是可写字段：解析保留，越界报错。
+        let sized = SceneDoc::from_value(json!({ "lighting": { "shadow_quality": {
+            "resolution": 1024 } } }))
+        .unwrap();
+        assert_eq!(
+            sized
+                .lighting
+                .shadow_quality
+                .as_ref()
+                .and_then(|q| q.resolution),
+            Some(1024)
+        );
+        assert!(sized.validate().is_empty());
+        let too_small = SceneDoc::from_value(json!({ "lighting": { "shadow_quality": {
+            "resolution": 128 } } }))
+        .unwrap();
+        assert!(too_small
+            .validate()
+            .iter()
+            .any(|d| d.path == "lighting.shadow_quality.resolution"));
+
         // 不写 = 单级 + 0.5（老场景逐像素不变）
         let plain = SceneDoc::from_value(json!({})).unwrap();
         assert_eq!(shadow_cascades(&plain), 1);
