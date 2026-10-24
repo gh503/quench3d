@@ -1696,6 +1696,15 @@ mod preview_camera_tests {
         engine.scene.submit(&mut engine.renderer);
         let ctx = egui::Context::default();
         assert!(refresh_pip(&mut engine, &mut doc, &ctx), "画中画应捕获成功");
+        assert!(
+            !refresh_pip(&mut engine, &mut doc, &ctx),
+            "同一帧不应重复回读（5 Hz 节流）"
+        );
+        engine.frame_count += 12;
+        assert!(
+            refresh_pip(&mut engine, &mut doc, &ctx),
+            "过 12 帧后应允许下一次回读"
+        );
         let texture = doc.pip_texture.as_ref().expect("应生成画中画纹理");
         assert_eq!(texture.size(), [320, 180], "画中画纹理尺寸固定 320×180");
         let texture_id = texture.id();
@@ -1735,6 +1744,57 @@ mod preview_camera_tests {
             }),
             _ => false,
         })
+    }
+
+    /// 画中画回读不能改写主视图的状态栏统计。
+    #[test]
+    fn pip_capture_preserves_main_stats() {
+        if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+            return;
+        }
+        let gpu = match pollster::block_on(GpuContext::headless(
+            64,
+            64,
+            quench3d::render::GpuOptions::default(),
+        )) {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("跳过：没有可用的 wgpu 适配器（{e}）");
+                return;
+            }
+        };
+        let mut engine = Engine::new(
+            gpu,
+            &EngineConfig {
+                width: 64,
+                height: 64,
+                msaa_samples: 1,
+                ..Default::default()
+            },
+        );
+        let mut doc = Doc::new();
+        let text = r#"{
+            "objects": [
+                { "name": "箱", "shape": { "type": "box", "size": [1, 1, 1] } }
+            ]
+        }"#;
+        crate::scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
+        engine.renderer.begin_frame();
+        engine.scene.submit(&mut engine.renderer);
+        let camera = engine.camera();
+        let lighting = engine.scene.lighting.clone();
+        let Engine { renderer, gpu, .. } = &mut engine;
+        renderer
+            .capture(gpu, 64, 64, &camera, &lighting)
+            .expect("主视图回读应成功");
+        let before = format!("{:?}", engine.renderer.stats());
+        let preview = capture_preview(&mut engine, &camera).expect("画中画回读应成功");
+        assert_eq!(preview.width, 320);
+        assert_eq!(
+            before,
+            format!("{:?}", engine.renderer.stats()),
+            "画中画回读后主视图 RenderStats 必须原样保留"
+        );
     }
 
     /// 第二相机不是摆设：同一帧里正面与侧面必须拍到不同画面，且不是空背景。

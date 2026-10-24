@@ -3367,6 +3367,23 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.81 画中画统计保持 / 节流测试（第 181 轮）
+
+**做了什么**：
+
+* 补两条画中画回归断言，不改产品逻辑：
+  * 同一帧第二次 `refresh_pip` 必须返回 false；`frame_count += 12` 后恢复 true。
+  * 先做一次主视图 `capture` 拿到 `RenderStats`，再做 320×180 画中画回读；回读后
+    `RenderStats` 必须逐字段不变（`capture_preserving_stats` 的实际效果）。
+
+**验证**：
+
+* `pip_refresh_uploads_a_texture`：节流断言。
+* `pip_capture_preserves_main_stats`：主视图统计在画中画回读后保持。
+* 全量门禁 834 测试。
+
+**边界**：只验证统计不被覆盖，不验证 TAA 历史不被画中画推进（目前会推进）。
+
 ### 23.80 动画多轨总览（第 180 轮）
 
 **做了什么**：
@@ -3381,7 +3398,7 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 
 * `ui_smoke` 的动画面板用例断言绘制图元里出现「多轨总览（2 条）」。
 * 时间轴映射的边界仍由 `timeline_scrub_maps_and_clamps` 覆盖。
-* 全量门禁 833 测试。
+* 全量门禁 834 测试。
 
 **边界**：总览只负责定位播放头；没有轨道重排、裁剪、吸附、混合权重曲线，
 也没有"一次拖动同步所有轨"。所以它缩小了"多轨时间线"的缺口，但没有关闭混合器缺口。
@@ -3463,6 +3480,8 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 * `named_camera_selector_applies_scene_camera` 排版出「小窗位置」。
 * `viewport_draws_pip_texture_when_selected`：默认小窗 mesh 中心在右下象限；
   切到左上后同一纹理的中心落在左上象限。
+* `pip_refresh_uploads_a_texture`：同一帧第二次调用返回 false（5 Hz 节流），
+  `frame_count += 12` 后下一次捕获返回 true。
 * 全量门禁 832 测试（扩展现有 UI overlay 测试）。
 
 **边界**：不能拖拽小窗、不能改大小；小窗仍不拦截拾取；Web 端没有。
