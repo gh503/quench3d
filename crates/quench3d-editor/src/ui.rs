@@ -549,6 +549,13 @@ fn top_bar(
                                 ui.selectable_value(&mut doc.pip_corner, value, label);
                             }
                         });
+                    ui.label("大小");
+                    ui.add(
+                        egui::DragValue::new(&mut doc.pip_scale)
+                            .range(0.15..=0.45)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    );
                 });
             }
 
@@ -4135,7 +4142,7 @@ fn viewport(
             }
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(texture) = doc.pip_texture.as_ref() {
-                let width = (rect.width() * 0.28).clamp(160.0, 320.0);
+                let width = (rect.width() * doc.pip_scale).clamp(160.0, 320.0);
                 let height = width * 9.0 / 16.0;
                 let size = egui::vec2(width, height);
                 let margin = egui::vec2(12.0, 12.0);

@@ -213,6 +213,8 @@ pub struct Doc {
     pub pip_camera: Option<String>,
     /// 画中画角落：0 右下、1 左下、2 右上、3 左上。
     pub pip_corner: u8,
+    /// 画中画宽度占视口宽度的比例（0.15~0.45）。
+    pub pip_scale: f32,
     /// 画中画最近一帧（CPU 回读后上传的 egui 纹理）；仅在桌面端使用。
     pub pip_texture: Option<egui::TextureHandle>,
     /// 上一次画中画捕获的帧号，用来限制回读频率。
@@ -897,6 +899,7 @@ impl Doc {
             selected_camera: None,
             pip_camera: None,
             pip_corner: 0,
+            pip_scale: 0.28,
             pip_texture: None,
             pip_last_frame: 0,
             show_help: false,

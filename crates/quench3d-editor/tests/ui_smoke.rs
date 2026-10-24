@@ -853,6 +853,34 @@ fn viewport_draws_pip_texture_when_selected() {
         bottom_right.center().x > 640.0 && bottom_right.center().y > 450.0,
         "默认小窗应贴右下角，实际 {bottom_right:?}"
     );
+    let default_width = bottom_right.width();
+    output.textures_delta.clear();
+
+    doc.pip_scale = 0.4;
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    let bigger =
+        shapes_texture_rect(&output.shapes, texture_id).expect("放大后画中画纹理 mesh 仍应存在");
+    assert!(
+        bigger.width() > default_width,
+        "0.40 的小窗应比默认 0.28 宽：{default_width} -> {}",
+        bigger.width()
+    );
     output.textures_delta.clear();
 
     doc.pip_corner = 3;
