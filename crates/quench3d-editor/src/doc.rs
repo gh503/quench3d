@@ -209,6 +209,13 @@ pub struct Doc {
     pub status: String,
     /// 最近一次从 `cameras` 段套用的命名相机（只作界面状态，不写进场景）。
     pub selected_camera: Option<String>,
+    /// 画中画使用的命名相机；`None` = 关闭。
+    pub pip_camera: Option<String>,
+    /// 画中画最近一帧（CPU 回读后上传的 egui 纹理）；仅在桌面端使用。
+    pub pip_texture: Option<egui::TextureHandle>,
+    /// 上一次画中画捕获的帧号，用来限制回读频率。
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) pip_last_frame: u64,
     /// 是否显示帮助窗口。
     pub show_help: bool,
     /// 左/右面板宽度（使用偏好，不写进场景文件）。
@@ -867,6 +874,9 @@ impl Doc {
             export_path: None,
             status: "就绪".to_string(),
             selected_camera: None,
+            pip_camera: None,
+            pip_texture: None,
+            pip_last_frame: 0,
             show_help: false,
             layout: crate::layout::Layout::default(),
             recovery: None,

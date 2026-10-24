@@ -506,7 +506,35 @@ fn top_bar(
                         }
                     })
                     .response
-                    .on_hover_text("场景 `cameras` 段里的命名视角；只切换主相机，不做分屏");
+                    .on_hover_text("场景 `cameras` 段里的命名视角；只切换主相机");
+                });
+                // 画中画：右下角用第二个命名相机做 CPU 回读预览（桌面端）。
+                // 它不是实时 GPU 分屏，频率被限制在约 5 Hz。
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.horizontal(|ui| {
+                    ui.label("画中画");
+                    let current = doc.pip_camera.clone().unwrap_or_else(|| "关闭".into());
+                    egui::ComboBox::from_id_salt("pip-camera")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(doc.pip_camera.is_none(), "关闭")
+                                .clicked()
+                            {
+                                doc.pip_camera = None;
+                                doc.pip_texture = None;
+                            }
+                            for (name, _camera) in &named_cameras {
+                                let selected = doc.pip_camera.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(selected, name).clicked() {
+                                    doc.pip_camera = Some(name.clone());
+                                    doc.pip_texture = None;
+                                    doc.pip_last_frame = 0;
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("右下角小窗预览第二台命名相机（约 5 Hz，CPU 回读）");
                 });
             }
 
@@ -3825,7 +3853,36 @@ fn viewport(
                     egui::Color32::from_rgb(255, 196, 0),
                 );
             }
-            let _ = doc;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(texture) = doc.pip_texture.as_ref() {
+                let width = (rect.width() * 0.28).clamp(160.0, 320.0);
+                let height = width * 9.0 / 16.0;
+                let pip_rect = egui::Rect::from_min_size(
+                    rect.right_bottom() - egui::vec2(width + 12.0, height + 12.0),
+                    egui::vec2(width, height),
+                );
+                painter.image(
+                    texture.id(),
+                    pip_rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                painter.rect_stroke(
+                    pip_rect,
+                    2.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 160, 255)),
+                    egui::StrokeKind::Inside,
+                );
+                if let Some(name) = doc.pip_camera.as_deref() {
+                    painter.text(
+                        pip_rect.left_top() + egui::vec2(6.0, 4.0),
+                        egui::Align2::LEFT_TOP,
+                        name,
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::from_rgb(255, 255, 255),
+                    );
+                }
+            }
         });
 }
 
@@ -3841,6 +3898,7 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.label("右键拖动：平移（飞行模式下是转头）");
             ui.label("滚轮：推近拉远");
             ui.label("Tab：切换轨道 / 飞行相机");
+            ui.label("画中画：相机面板选第二台命名相机（桌面端约 5 Hz 预览）");
             ui.label("R：聚焦到整个场景");
             ui.add_space(6.0);
             ui.label(RichText::new("编辑").strong());

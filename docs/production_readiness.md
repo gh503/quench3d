@@ -3367,6 +3367,34 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.70 命名相机画中画（第 170 轮）
+
+**做了什么**：
+
+* 属性面板相机区新增「画中画」下拉：关闭 / 任一命名相机。
+* 桌面端每 12 帧用第二台相机在 320×180 下重画一帧，CPU 回读后上传成 egui
+  纹理，画在视口右下角（约 5 Hz）；Web 端不提供（`wasm32` 编译时整段移除）。
+* 相机参数（position / look_at / fov / near / far / 正交高度）按命名相机套用，
+  宽高比固定 16:9。
+* 回读走 `capture_preserving_stats`，不会把主视图状态栏的 draw calls / 实例数
+  换成小窗的数字。
+* 复用同一个 egui 纹理（`TextureHandle::set`），不会每次捕获都新建纹理。
+
+**验证**：
+
+* `second_camera_capture_differs_from_main`：同一份场景、同一份 staging，正面与侧面
+  两台相机各回读一帧 320×180；正面不是纯背景，两张图像的 RGBA 必须不同。
+* `pip_refresh_uploads_a_texture`：装载带命名相机的场景，选画中画 → 捕获 → 上传，
+  得到 320×180 的 egui 纹理。
+* `viewport_draws_pip_texture_when_selected`：选绘画中画并给一张 2×2 纹理后，视口
+  的绘制列表里出现该纹理 ID 的 mesh。
+* `named_camera_selector_applies_scene_camera`：属性面板排版出「画中画」入口。
+* 全量门禁 831 测试。
+
+**边界**：这是 CPU 回读预览，不是 GPU 实时分屏，也不支持多窗口；约 5 Hz、回读会
+阻塞当前帧；小窗不能单独转视角/拾取；捕获会推进渲染器 TAA 状态，下一帧主视图可能
+重置历史。没有四视图/小地图/画中画位置选择。
+
 ### 23.69 贴花颜色可编辑（第 169 轮）
 
 **做了什么**：

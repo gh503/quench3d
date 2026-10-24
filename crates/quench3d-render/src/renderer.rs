@@ -4269,6 +4269,24 @@ impl Renderer {
     }
 
     /// 离屏渲染并回读为图像（无头截图 / 自动化测试）。
+    /// 画中画/第二视角用：回读一帧，但**不覆盖主视图的统计**。
+    ///
+    /// `capture` 会把 `stats` 换成这次回读的尺寸/绘制数；如果紧接着还要给主视图
+    /// 显示状态栏，那些数字就会莫名其妙变小。这里在返回前恢复调用前的 `stats`。
+    pub fn capture_preserving_stats(
+        &mut self,
+        ctx: &mut GpuContext,
+        width: u32,
+        height: u32,
+        camera: &Camera,
+        lighting: &Lighting,
+    ) -> Result<ImageData, String> {
+        let stats = self.stats;
+        let result = self.capture(ctx, width, height, camera, lighting);
+        self.stats = stats;
+        result
+    }
+
     pub fn capture(
         &mut self,
         ctx: &mut GpuContext,

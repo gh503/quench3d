@@ -691,6 +691,10 @@ fn named_camera_selector_applies_scene_camera() {
         shapes_contain_text(&output.shapes, "侧视"),
         "相机下拉框没有显示当前命名相机"
     );
+    assert!(
+        shapes_contain_text(&output.shapes, "画中画"),
+        "相机面板没有画中画入口"
+    );
     output.textures_delta.clear();
 }
 #[test]
@@ -771,4 +775,72 @@ fn inspector_lists_decals_from_base_doc() {
         "属性面板没有贴花贴图占位"
     );
     output.textures_delta.clear();
+}
+
+#[test]
+fn viewport_draws_pip_texture_when_selected() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let text = r#"{
+        "cameras": {
+            "侧视": { "position": [10, 5, 0], "look_at": [0, 1, 0] }
+        }
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
+    let ctx = egui::Context::default();
+    let pixels = vec![
+        255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+    ];
+    let image = egui::ColorImage::from_rgba_unmultiplied([2, 2], &pixels);
+    let texture = ctx.load_texture("pip-test", image, egui::TextureOptions::NEAREST);
+    let texture_id = texture.id();
+    doc.pip_texture = Some(texture);
+    doc.pip_camera = Some("侧视".to_string());
+
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    assert!(
+        shapes_contain_texture(&output.shapes, texture_id),
+        "选绘画中画后视口应绘制第二相机纹理"
+    );
+    output.textures_delta.clear();
+}
+
+fn shapes_contain_texture(
+    shapes: &[egui::epaint::ClippedShape],
+    texture_id: egui::TextureId,
+) -> bool {
+    shapes
+        .iter()
+        .any(|clipped| shape_contains_texture(&clipped.shape, texture_id))
+}
+
+fn shape_contains_texture(shape: &egui::Shape, texture_id: egui::TextureId) -> bool {
+    match shape {
+        egui::Shape::Mesh(mesh) => mesh.texture_id == texture_id,
+        egui::Shape::Vec(inner) => inner
+            .iter()
+            .any(|shape| shape_contains_texture(shape, texture_id)),
+        _ => false,
+    }
 }

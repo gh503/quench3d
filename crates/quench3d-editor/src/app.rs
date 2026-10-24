@@ -16,6 +16,8 @@ use crate::ui::{self, Viewport};
 use egui_wgpu::ScreenDescriptor;
 use quench3d::prelude::*;
 use quench3d::render::wgpu;
+#[cfg(not(target_arch = "wasm32"))]
+use quench3d::render::Projection;
 use quench3d::winit::application::ApplicationHandler;
 #[cfg(not(target_arch = "wasm32"))]
 use quench3d::winit::dpi::LogicalPosition;
@@ -158,9 +160,89 @@ struct Inner {
     /// 上次写布局文件的时间（移动窗口时节流，避免每个像素都写盘）。
     #[cfg(not(target_arch = "wasm32"))]
     last_layout_save: std::time::Instant,
+    /// 测试/演示钩子：跑到第 N 帧自动点一次「截图」（`QUENCH3D_EDITOR_SCREENSHOT_AFTER_FRAMES`）。
+    #[cfg(not(target_arch = "wasm32"))]
+    screenshot_at_frame: Option<u64>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn preview_camera(current: Camera, camera_doc: &quench3d_cli::scene_doc::CameraDoc) -> Camera {
+    let mut camera = current;
+    camera.set_aspect(16.0 / 9.0);
+    if let Some(fov) = camera_doc.fov_deg {
+        camera.fov_y = fov.to_radians();
+    }
+    if let Some(near) = camera_doc.near {
+        camera.near = near;
+    }
+    if let Some(far) = camera_doc.far {
+        camera.far = far;
+    }
+    if let Some(position) = camera_doc.position {
+        camera.position = Vec3::new(position[0], position[1], position[2]);
+    }
+    if let Some(target) = camera_doc.look_at {
+        camera.look_at(Vec3::new(target[0], target[1], target[2]));
+    }
+    if let Some(height) = camera_doc.orthographic_height {
+        camera.projection = Projection::Orthographic { height };
+    }
+    camera
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn capture_preview(
+    engine: &mut Engine,
+    camera: &Camera,
+) -> Result<quench3d::render::ImageData, String> {
+    let lighting = engine.scene.lighting.clone();
+    let Engine { renderer, gpu, .. } = engine;
+    renderer.capture_preserving_stats(gpu, 320, 180, camera, &lighting)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn refresh_pip(engine: &mut Engine, doc: &mut Doc, ctx: &egui::Context) -> bool {
+    let Some(name) = doc.pip_camera.clone() else {
+        return false;
+    };
+    if engine.frame_count < doc.pip_last_frame.saturating_add(12) {
+        return false;
+    }
+    let Some(camera_doc) = doc
+        .base_doc()
+        .and_then(|base| base.cameras.get(&name).cloned())
+    else {
+        return false;
+    };
+    doc.pip_last_frame = engine.frame_count;
+    let camera = preview_camera(engine.camera(), &camera_doc);
+    let image = match capture_preview(engine, &camera) {
+        Ok(image) => image,
+        Err(e) => {
+            log::warn!("画中画捕获失败：{e}");
+            return false;
+        }
+    };
+    let color = egui::ColorImage::from_rgba_unmultiplied(
+        [image.width as usize, image.height as usize],
+        &image.rgba,
+    );
+    if let Some(texture) = doc.pip_texture.as_mut() {
+        texture.set(color, egui::TextureOptions::LINEAR);
+    } else {
+        doc.pip_texture =
+            Some(ctx.load_texture("quench3d-pip", color, egui::TextureOptions::LINEAR));
+    }
+    true
 }
 
 impl Inner {
+    /// 画中画：用第二台命名相机在 320×180 下重画一遍并回读成 egui 纹理。
+    #[cfg(not(target_arch = "wasm32"))]
+    fn capture_pip(&mut self) {
+        let _ = refresh_pip(&mut self.engine, &mut self.doc, &self.egui_ctx);
+    }
+
     fn new(window: Arc<Window>, gpu: GpuContext, config: &EditorConfig) -> Self {
         let engine_config = EngineConfig {
             title: config.title.clone(),
@@ -198,6 +280,13 @@ impl Inner {
         #[cfg(target_arch = "wasm32")]
         if config.demo_scene {
             doc.build_default_scene(&mut engine);
+        }
+        // 无头验收/演示用：启动时直接选一台命名相机做画中画。普通用户仍从下拉框选。
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(name) = std::env::var("QUENCH3D_EDITOR_PIP_CAMERA") {
+            if !name.trim().is_empty() {
+                doc.pip_camera = Some(name);
+            }
         }
         doc.reset_history(&engine);
         // 上次崩溃留下的自动保存：先挂出来，等用户点「恢复 / 丢弃」。
@@ -254,6 +343,11 @@ impl Inner {
             window_pos_dirty: false,
             #[cfg(not(target_arch = "wasm32"))]
             last_layout_save: std::time::Instant::now(),
+            #[cfg(not(target_arch = "wasm32"))]
+            screenshot_at_frame: std::env::var("QUENCH3D_EDITOR_SCREENSHOT_AFTER_FRAMES")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|n| *n > 0),
         }
     }
 
@@ -425,6 +519,8 @@ impl Inner {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let size = (frame.texture.width(), frame.texture.height());
         self.engine.render_to(&texture_view, size);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.capture_pip();
 
         // 拾取：用这一帧的相机与视口矩形。
         if let Some(local) = self.viewport.click {
@@ -495,6 +591,14 @@ impl Inner {
         // panic（epaint 的 debug_assert）。上面已经逐条交给渲染器了，这里按约定
         // 把它标记为已处理 —— 少了这一行，编辑器能画出一帧然后立刻崩。
         full_output.textures_delta.clear();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(frame) = self.screenshot_at_frame {
+            if self.engine.frame_count >= frame {
+                self.screenshot_at_frame = None;
+                self.screenshot();
+            }
+        }
 
         if !self.first_frame_done {
             self.first_frame_done = true;
@@ -1544,5 +1648,174 @@ mod export_path_tests {
             export_path_for("scene.json", &mut once, "gltf"),
             std::path::PathBuf::from("scene.gltf")
         );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod preview_camera_tests {
+    use super::*;
+
+    /// 画中画完整链路：选相机 → 捕获 → 上传成 320×180 的 egui 纹理。
+    #[test]
+    fn pip_refresh_uploads_a_texture() {
+        if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+            return;
+        }
+        let gpu = match pollster::block_on(GpuContext::headless(
+            64,
+            64,
+            quench3d::render::GpuOptions::default(),
+        )) {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("跳过：没有可用的 wgpu 适配器（{e}）");
+                return;
+            }
+        };
+        let config = EngineConfig {
+            width: 64,
+            height: 64,
+            msaa_samples: 1,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(gpu, &config);
+        let mut doc = Doc::new();
+        let text = r#"{
+            "cameras": {
+                "侧视": { "position": [6, 1, 0], "look_at": [0, 0, 0] }
+            },
+            "objects": [
+                { "name": "箱", "shape": { "type": "box", "size": [1, 1, 1] } }
+            ]
+        }"#;
+        crate::scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("场景应能装载");
+        doc.pip_camera = Some("侧视".to_string());
+        doc.pip_last_frame = 0;
+        engine.frame_count = 100;
+        engine.renderer.begin_frame();
+        engine.scene.submit(&mut engine.renderer);
+        let ctx = egui::Context::default();
+        assert!(refresh_pip(&mut engine, &mut doc, &ctx), "画中画应捕获成功");
+        let texture = doc.pip_texture.as_ref().expect("应生成画中画纹理");
+        assert_eq!(texture.size(), [320, 180], "画中画纹理尺寸固定 320×180");
+        let texture_id = texture.id();
+        let mut view = crate::ui::Viewport::default();
+        let mut gizmo = crate::gizmo::Gizmo::default();
+        let mut camera = crate::camera::CameraFeed::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let _ = crate::ui::panels(
+                ui,
+                &mut engine,
+                &mut doc,
+                &mut view,
+                &mut gizmo,
+                &mut camera,
+            );
+        });
+        assert!(
+            has_texture(&output.shapes, texture_id),
+            "画中画纹理必须真的进入视口绘制列表"
+        );
+        output.textures_delta.clear();
+    }
+
+    fn has_texture(shapes: &[egui::epaint::ClippedShape], id: egui::TextureId) -> bool {
+        shapes.iter().any(|clipped| match &clipped.shape {
+            egui::Shape::Mesh(mesh) => mesh.texture_id == id,
+            egui::Shape::Vec(inner) => inner.iter().any(|shape| match shape {
+                egui::Shape::Mesh(mesh) => mesh.texture_id == id,
+                _ => false,
+            }),
+            _ => false,
+        })
+    }
+
+    /// 第二相机不是摆设：同一帧里正面与侧面必须拍到不同画面，且不是空背景。
+    #[test]
+    fn second_camera_capture_differs_from_main() {
+        if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+            return;
+        }
+        let gpu = match pollster::block_on(GpuContext::headless(
+            64,
+            64,
+            quench3d::render::GpuOptions::default(),
+        )) {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("跳过：没有可用的 wgpu 适配器（{e}）");
+                return;
+            }
+        };
+        let config = EngineConfig {
+            width: 64,
+            height: 64,
+            msaa_samples: 1,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(gpu, &config);
+        let mesh = engine.assets.mesh(
+            &mut engine.renderer,
+            &engine.gpu,
+            "$pip_box",
+            &quench3d::render::mesh::MeshData::box_sized(Vec3::new(3.0, 0.5, 0.4)),
+        );
+        let material = engine.assets.material(
+            &mut engine.renderer,
+            &engine.gpu,
+            "$pip_red",
+            quench3d::render::material::MaterialDesc {
+                base_color: Vec4::new(1.0, 0.0, 0.0, 1.0),
+                unlit: true,
+                ..Default::default()
+            },
+        );
+        engine.scene.add(mesh, material, Transform::default());
+        engine.renderer.begin_frame();
+        engine.scene.submit(&mut engine.renderer);
+
+        let current = engine.camera();
+        let front = preview_camera(
+            current,
+            &quench3d_cli::scene_doc::CameraDoc {
+                position: Some([0.0, 0.0, 6.0]),
+                look_at: Some([0.0, 0.0, 0.0]),
+                ..Default::default()
+            },
+        );
+        let side = preview_camera(
+            current,
+            &quench3d_cli::scene_doc::CameraDoc {
+                position: Some([6.0, 0.0, 0.0]),
+                look_at: Some([0.0, 0.0, 0.0]),
+                ..Default::default()
+            },
+        );
+        let a = capture_preview(&mut engine, &front).expect("正面相机应能回读");
+        let b = capture_preview(&mut engine, &side).expect("侧面相机应能回读");
+        assert_eq!((a.width, a.height), (320, 180));
+        let px = |img: &quench3d::render::ImageData, x: usize, y: usize| {
+            let i = (y * img.width as usize + x) * 4;
+            [
+                img.rgba[i],
+                img.rgba[i + 1],
+                img.rgba[i + 2],
+                img.rgba[i + 3],
+            ]
+        };
+        let corner = px(&a, 0, 0);
+        let a_diff = (0..a.rgba.len() / 4).any(|i| {
+            let p = &a.rgba[i * 4..i * 4 + 4];
+            p != corner
+        });
+        assert!(a_diff, "正面相机不该是纯背景");
+        assert!(a.rgba != b.rgba, "正面与侧面必须是不同的画面");
     }
 }

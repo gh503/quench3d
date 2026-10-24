@@ -853,6 +853,8 @@ pub fn load_text_into_doc(
     let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
     doc.selected_camera = None;
+    doc.pip_camera = None;
+    doc.pip_texture = None;
     doc.set_model_instances(installed.instances);
     Ok((installed.objects, installed.name))
 }
@@ -871,6 +873,8 @@ pub fn load_file_into_doc(
     let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
     doc.selected_camera = None;
+    doc.pip_camera = None;
+    doc.pip_texture = None;
     doc.set_model_instances(installed.instances);
     Ok((installed.objects, installed.name))
 }
