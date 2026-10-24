@@ -207,6 +207,8 @@ async function main() {
   await toggle("骨骼 F8", "F8", "F8", 119, false);
   // 默认场景没有关节，F11 只验状态切换；线段绘制有 Rust 单测。
   await toggle("关节 F11", "F11", "F11", 122, false);
+  // 默认场景没有探针；B 只要求显示开关状态变化，线框绘制有 Rust 单测。
+  await toggle("场景探针 B", "b", "KeyB", 66, false);
   // 默认场景的亮度足够区分 ACES/Reinhard：要求状态与画面都变。
   await toggle("色调 T", "t", "KeyT", 84);
   // K 只移动 3D 光标/切轴心；默认选中物可能正好在原点，所以只验状态。

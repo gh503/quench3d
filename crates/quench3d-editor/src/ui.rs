@@ -187,7 +187,7 @@ fn top_bar(
                 add_menu(ui, engine, doc);
                 transform_menu(ui, engine, doc, gizmo);
                 playback_menu(ui, engine, doc);
-                view_menu(ui, engine, gizmo, camera);
+                view_menu(ui, engine, doc, gizmo, camera);
                 render_menu(ui, engine);
                 layout_menu(ui, doc);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -576,7 +576,13 @@ fn playback_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     });
 }
 
-fn view_menu(ui: &mut Ui, engine: &mut Engine, gizmo: &mut Gizmo, camera: &mut CameraFeed) {
+fn view_menu(
+    ui: &mut Ui,
+    engine: &mut Engine,
+    doc: &mut Doc,
+    gizmo: &mut Gizmo,
+    camera: &mut CameraFeed,
+) {
     ui.menu_button("视图", |ui| {
         ui.set_min_width(220.0);
         ui.checkbox(&mut engine.renderer.options.grid, "网格");
@@ -585,6 +591,8 @@ fn view_menu(ui: &mut Ui, engine: &mut Engine, gizmo: &mut Gizmo, camera: &mut C
             .on_hover_text("高面数网格在载入时生成 1/2、1/4 两档；需重新载入场景才作用于已有网格");
         ui.checkbox(&mut engine.debug.joints, "物理关节")
             .on_hover_text("画出物理关节的锚点、连线与铰链/滑块轴");
+        ui.checkbox(&mut doc.show_probes, "场景探针")
+            .on_hover_text("画出 probes[] 的球形/盒形区域线框；探针本身只读，不碰物理");
         ui.checkbox(&mut engine.debug.axes, "坐标轴");
         ui.checkbox(&mut engine.debug.lights, "灯光 gizmo");
         ui.separator();

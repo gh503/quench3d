@@ -28,6 +28,7 @@ use quench3d::winit::event::{
 use quench3d::winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use quench3d::winit::keyboard::PhysicalKey;
 use quench3d::winit::window::{Window, WindowId};
+use quench3d_cli::scene_doc::{ProbeDoc, ProbeShapeDoc};
 use std::sync::Arc;
 
 /// 自动退出钩子的环境变量名（**测试/调试专用**）。
@@ -133,6 +134,47 @@ impl Game for EditorGame {
 
     fn fixed_update(&mut self, engine: &mut Engine, dt: f32) {
         engine.world.step(dt);
+    }
+}
+
+/// 把场景探针画成线框：球 = 三个正交圆，盒 = 12 条边。
+///
+/// 纯函数（只碰 `DebugLines` 与文档数据），不依赖 GPU，方便单测线段数量。
+fn draw_probes(lines: &mut quench3d::render::DebugLines, probes: &[ProbeDoc]) {
+    let color = quench3d::prelude::Vec4::new(0.2, 0.9, 0.9, 1.0);
+    const SEGMENTS: usize = 24;
+    for probe in probes {
+        let center =
+            quench3d::prelude::Vec3::new(probe.position[0], probe.position[1], probe.position[2]);
+        match probe.shape {
+            ProbeShapeDoc::Sphere => {
+                let r = probe.radius.max(0.01);
+                for axis in 0..3 {
+                    let mut points = Vec::with_capacity(SEGMENTS);
+                    for i in 0..SEGMENTS {
+                        let t = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+                        let (s, c) = (t.sin(), t.cos());
+                        points.push(
+                            center
+                                + match axis {
+                                    0 => quench3d::prelude::Vec3::new(0.0, c * r, s * r),
+                                    1 => quench3d::prelude::Vec3::new(c * r, 0.0, s * r),
+                                    _ => quench3d::prelude::Vec3::new(c * r, s * r, 0.0),
+                                },
+                        );
+                    }
+                    lines.closed_polyline(&points, color);
+                }
+            }
+            ProbeShapeDoc::Box => {
+                let size = probe.size.unwrap_or([1.0, 1.0, 1.0]);
+                let half = quench3d::prelude::Vec3::new(size[0], size[1], size[2]) * 0.5;
+                lines.aabb(
+                    &quench3d::prelude::Aabb::from_center_half_extents(center, half),
+                    color,
+                );
+            }
+        }
     }
 }
 
@@ -452,6 +494,11 @@ impl Inner {
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
         // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
         self.camera.add_lines(&mut self.engine.renderer.lines);
+        if self.doc.show_probes {
+            if let Some(base) = self.doc.base_doc() {
+                draw_probes(&mut self.engine.renderer.lines, &base.probes);
+            }
+        }
         if self.gizmo.pivot == GizmoPivot::Cursor {
             let c = self.gizmo.cursor;
             let color = quench3d::prelude::Vec4::new(1.0, 0.75, 0.2, 1.0);
@@ -497,6 +544,7 @@ impl Inner {
             query: self.engine.debug.query_probe,
             bones: self.engine.debug.bones,
             joints: self.engine.debug.joints,
+            probes: self.doc.show_probes,
             tonemap: self.engine.renderer.options.tonemap.label(),
             recovery: self.doc.recovery.is_some(),
             objects: self.engine.scene.len(),
@@ -969,6 +1017,8 @@ struct UiDebugState {
     query: bool,
     bones: bool,
     joints: bool,
+    /// 场景探针线框开关。
+    probes: bool,
     /// 当前色调映射算子的标签。
     tonemap: &'static str,
     /// 是否挂着自动保存恢复点（Web 端 localStorage / 桌面文件）。
@@ -1005,6 +1055,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         query,
         bones,
         joints,
+        probes,
         tonemap,
         recovery,
         objects,
@@ -1025,7 +1076,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
@@ -1202,6 +1253,16 @@ impl EditorApp {
                         }
                         if code == KeyCode::KeyF {
                             inner.doc.focus_selected(engine);
+                            return;
+                        }
+                        // B：场景探针线框（编辑器自己的显示开关，不写回场景）。
+                        if code == KeyCode::KeyB && !engine.input.ctrl {
+                            inner.doc.show_probes = !inner.doc.show_probes;
+                            inner.doc.status = if inner.doc.show_probes {
+                                "场景探针：显示".to_string()
+                            } else {
+                                "场景探针：隐藏".to_string()
+                            };
                             return;
                         }
                         // 正在拖手柄时 Esc = 取消这次拖拽，不能让引擎把它当成"退出"。
@@ -1627,6 +1688,36 @@ mod tests {
             &crate::layout::Layout::default(),
         );
         assert_eq!(none.position, None, "没有记录位置时不要硬塞 (0,0)");
+    }
+}
+
+#[cfg(test)]
+mod probe_draw_tests {
+    use super::*;
+
+    #[test]
+    fn probes_draw_three_circles_and_one_box() {
+        let probes = vec![
+            ProbeDoc {
+                name: "门".to_string(),
+                shape: ProbeShapeDoc::Sphere,
+                position: [0.0, 1.0, 0.0],
+                radius: 2.0,
+                size: None,
+                watch: Vec::new(),
+            },
+            ProbeDoc {
+                name: "房间".to_string(),
+                shape: ProbeShapeDoc::Box,
+                position: [5.0, 0.0, 0.0],
+                radius: 1.0,
+                size: Some([2.0, 3.0, 4.0]),
+                watch: Vec::new(),
+            },
+        ];
+        let mut lines = quench3d::render::DebugLines::new();
+        draw_probes(&mut lines, &probes);
+        assert_eq!(lines.line_count(), 3 * 24 + 12);
     }
 }
 

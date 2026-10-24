@@ -236,6 +236,8 @@ pub struct Doc {
     pub(crate) pip_last_frame: u64,
     /// 是否显示帮助窗口。
     pub show_help: bool,
+    /// 是否在视口里画出场景探针（球形/盒形区域）。
+    pub show_probes: bool,
     /// 左/右面板宽度（使用偏好，不写进场景文件）。
     pub layout: crate::layout::Layout,
     /// 崩溃恢复文件的内容（`Some` = 工具栏显示"恢复 / 丢弃"）。
@@ -955,6 +957,7 @@ impl Doc {
             pip_texture: None,
             pip_last_frame: 0,
             show_help: false,
+            show_probes: false,
             layout: crate::layout::Layout::default(),
             recovery: None,
             needs_autosave: false,
