@@ -3433,7 +3433,8 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **验证**：
 
 * `sequence_updates_particles_between_frames`：3 帧、dt=0.2、速度 +X，位置逐帧递增
-  > 0.1（修复前三条完全相同）。
+  > 0.1（修复前三条完全相同）；没有 wgpu 适配器时打印跳过，而不是把无 GPU 的
+  ubuntu CI 判红。
 * 重录 640×400 / 60 帧 GIF：帧间平均绝对差 **0.432**（min 0.365、max 0.497），
   digest 从 `fnv1a64:cd6d03ea8a14cbdd` 变为 `fnv1a64:44b098ff750fa252`。
 * 全量门禁 827 测试。

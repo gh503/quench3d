@@ -41,6 +41,9 @@
 
 ### 新增
 
+- **CI：无 GPU 的序列测试改为跳过（第 170 轮）**：`sequence_updates_particles_between_frames`
+  在找不到适配器时打印跳过；修复 ubuntu CI 的假红。
+
 - **贴花颜色可编辑（第 169 轮）**：面板颜色写回底稿并同步物体颜色。
   测试总数仍为 828（扩展现有 UI smoke）。
 
