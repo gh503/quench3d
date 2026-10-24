@@ -3403,6 +3403,59 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.label("颜色");
             changed |= ui.color_edit_button_rgba_unmultiplied(&mut color).changed();
         });
+        let mut texture = decal.texture.clone().unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("贴图");
+            ui.text_edit_singleline(&mut texture);
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui
+            .add_enabled(
+                !texture.trim().is_empty(),
+                egui::Button::new("应用贴图（从磁盘读取）"),
+            )
+            .clicked()
+        {
+            match quench3d::render::ImageData::from_file(texture.trim()) {
+                Ok(image) => {
+                    let texture_id = engine.renderer.add_texture(&engine.gpu, &image, true);
+                    if let Some(index) = engine
+                        .scene
+                        .objects
+                        .iter()
+                        .position(|o| o.name == format!("贴花{i}"))
+                    {
+                        let old = engine.scene.objects[index].material;
+                        let mut desc = engine.renderer.material(old).cloned().unwrap_or_default();
+                        desc.base_color_texture = None;
+                        let name = format!("$decal_ui_{i}_{}", engine.renderer.material_count());
+                        let material =
+                            engine
+                                .assets
+                                .material(&mut engine.renderer, &engine.gpu, &name, desc);
+                        engine.scene.objects[index].material = material;
+                        let ok = engine.renderer.set_material_texture(
+                            &engine.gpu,
+                            material,
+                            quench3d::render::MaterialTextureSlot::BaseColor,
+                            Some(texture_id),
+                        );
+                        if ok {
+                            if let Some(base) = doc.base_doc_mut() {
+                                if let Some(decal) = base.decals.get_mut(i) {
+                                    decal.texture = Some(texture.trim().to_string());
+                                }
+                            }
+                            doc.record_edit(engine);
+                            doc.status = format!("贴花贴图已应用：{}", texture.trim());
+                        } else {
+                            doc.status = "贴花贴图应用失败（材质或贴图句柄无效）".into();
+                        }
+                    }
+                }
+                Err(error) => doc.status = format!("贴花贴图读图失败：{error}"),
+            }
+        }
         if !changed {
             continue;
         }
