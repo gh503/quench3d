@@ -613,6 +613,18 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
         shapes_contain_text(&output.shapes, "半径"),
         "粒子面板没有半径编辑控件"
     );
+    assert!(
+        shapes_contain_text(&output.shapes, "形状"),
+        "粒子面板没有形状下拉框"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "朝向"),
+        "粒子面板没有朝向下拉框"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "颜色"),
+        "粒子面板没有颜色控件"
+    );
     output.textures_delta.clear();
 }
 #[test]

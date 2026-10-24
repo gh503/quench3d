@@ -3010,6 +3010,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             radius,
             box_size,
             alignment,
+            color,
         ) = {
             let system = &engine.scene.particles[i];
             (
@@ -3025,6 +3026,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 system.radius,
                 system.box_size,
                 system.alignment,
+                system.color,
             )
         };
         ui.label(RichText::new(format!("#{i} · {objects} 颗")).small());
@@ -3067,8 +3069,51 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         let mut new_rotation_end = rotation_end.to_degrees();
         let mut new_radius = radius;
         let mut new_box_y = box_size.y;
+        let mut new_shape = shape;
+        let mut new_alignment = alignment;
+        let mut new_color = [color.x, color.y, color.z, color.w];
         let mut changed = false;
         changed |= ui.checkbox(&mut new_enabled, "启用").changed();
+        ui.horizontal(|ui| {
+            ui.label("形状");
+            egui::ComboBox::from_id_salt(("particle-shape", i))
+                .selected_text(particle_shape_name(new_shape))
+                .show_ui(ui, |ui| {
+                    for shape in [
+                        quench3d::scene::ParticleShape::Sphere,
+                        quench3d::scene::ParticleShape::Box,
+                        quench3d::scene::ParticleShape::Disc,
+                        quench3d::scene::ParticleShape::Cone,
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut new_shape, shape, particle_shape_name(shape))
+                            .changed();
+                    }
+                });
+            ui.label("朝向");
+            egui::ComboBox::from_id_salt(("particle-alignment", i))
+                .selected_text(particle_alignment_name(new_alignment))
+                .show_ui(ui, |ui| {
+                    for alignment in [
+                        quench3d::scene::ParticleAlignment::Billboard,
+                        quench3d::scene::ParticleAlignment::Velocity,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut new_alignment,
+                                alignment,
+                                particle_alignment_name(alignment),
+                            )
+                            .changed();
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("颜色");
+            changed |= ui
+                .color_edit_button_rgba_unmultiplied(&mut new_color)
+                .changed();
+        });
         ui.horizontal(|ui| {
             ui.label("寿命");
             changed |= ui
@@ -3159,6 +3204,9 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             system.rotation_end = new_rotation_end.to_radians();
             system.radius = new_radius.max(0.0);
             system.box_size.y = new_box_y.max(0.01);
+            system.shape = new_shape;
+            system.alignment = new_alignment;
+            system.color = Vec4::new(new_color[0], new_color[1], new_color[2], new_color[3]);
             if let Some(base) = doc.base_doc_mut() {
                 if let Some(particle) = base.particles.get_mut(i) {
                     particle.enabled = Some(new_enabled);
@@ -3170,12 +3218,51 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     particle.rotation_end = Some(system.rotation_end.to_degrees());
                     particle.radius = Some(system.radius);
                     particle.box_size = Some(resolve_box_size(system.box_size));
+                    particle.shape = Some(particle_shape_json(new_shape).to_string());
+                    particle.alignment = Some(particle_alignment_json(new_alignment).to_string());
+                    particle.color = Some(new_color);
                 }
             }
             if doc.base_doc().is_some() {
                 doc.record_edit(engine);
             }
         }
+    }
+}
+
+/// 形状在界面/JSON 里的名字。
+fn particle_shape_json(shape: quench3d::scene::ParticleShape) -> &'static str {
+    match shape {
+        quench3d::scene::ParticleShape::Sphere => "sphere",
+        quench3d::scene::ParticleShape::Box => "box",
+        quench3d::scene::ParticleShape::Disc => "disc",
+        quench3d::scene::ParticleShape::Cone => "cone",
+    }
+}
+
+/// 形状的界面标签。
+fn particle_shape_name(shape: quench3d::scene::ParticleShape) -> &'static str {
+    match shape {
+        quench3d::scene::ParticleShape::Sphere => "球",
+        quench3d::scene::ParticleShape::Box => "盒",
+        quench3d::scene::ParticleShape::Disc => "圆盘",
+        quench3d::scene::ParticleShape::Cone => "锥",
+    }
+}
+
+/// 朝向模式在界面/JSON 里的名字。
+fn particle_alignment_json(alignment: quench3d::scene::ParticleAlignment) -> &'static str {
+    match alignment {
+        quench3d::scene::ParticleAlignment::Billboard => "billboard",
+        quench3d::scene::ParticleAlignment::Velocity => "velocity",
+    }
+}
+
+/// 朝向的界面标签。
+fn particle_alignment_name(alignment: quench3d::scene::ParticleAlignment) -> &'static str {
+    match alignment {
+        quench3d::scene::ParticleAlignment::Billboard => "公告板",
+        quench3d::scene::ParticleAlignment::Velocity => "速度",
     }
 }
 
@@ -3662,6 +3749,25 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
 #[cfg(test)]
 mod timeline_tests {
     use super::*;
+
+    #[test]
+    fn particle_json_names_match_scene_schema() {
+        use quench3d::scene::{ParticleAlignment, ParticleShape};
+        assert_eq!(particle_shape_json(ParticleShape::Sphere), "sphere");
+        assert_eq!(particle_shape_json(ParticleShape::Box), "box");
+        assert_eq!(particle_shape_json(ParticleShape::Disc), "disc");
+        assert_eq!(particle_shape_json(ParticleShape::Cone), "cone");
+        assert_eq!(
+            particle_alignment_json(ParticleAlignment::Billboard),
+            "billboard"
+        );
+        assert_eq!(
+            particle_alignment_json(ParticleAlignment::Velocity),
+            "velocity"
+        );
+        assert_eq!(particle_shape_name(ParticleShape::Cone), "锥");
+        assert_eq!(particle_alignment_name(ParticleAlignment::Velocity), "速度");
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
