@@ -1641,7 +1641,8 @@ pub struct ModelAnimationDoc {
     /// 可选根运动：把 glTF 里这个**节点名**的水平位移提取到整个物体上。
     ///
     /// 只支持单 clip、`"loop": false`、无 `blend`、无 `animator`、无两骨 IK 的模型；
-    /// 只取 XZ，Y 与旋转不提取。节点名不存在时报告 `root_motion.found = false`。
+    /// 只取 XZ 与绕 Y 偏航，Y/俯仰/滚转不提取。节点名不存在时报告
+    /// `root_motion.found = false`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_motion: Option<String>,
 }

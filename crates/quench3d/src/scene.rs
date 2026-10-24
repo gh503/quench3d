@@ -514,6 +514,8 @@ pub struct ModelRootMotion {
     pub node: usize,
     /// 设置根运动时该节点的世界位置；只取 XZ 差值。
     pub origin: Vec3,
+    /// 设置根运动时该节点的世界朝向；只取绕 Y 的偏航差。
+    pub origin_rotation: Quat,
 }
 
 /// 与 `ModelAnimationPlayer::advance` 相同的倍速兜底：非正/非有限按 1 倍速。
@@ -623,10 +625,18 @@ fn animation_worlds(a: &ModelAnimationInstance) -> Option<Vec<Mat4>> {
     // 这样蒙皮/刚性片段的可见结果与没提取时**逐像素一致**，但外层的场景物体
     // 真的往前走了（摄像机/物理/编辑器选择都跟着）。
     if let Some(rm) = a.root_motion {
+        // 先扣平移，再扣偏航；两步都只影响模型内部，最后物体变换补回来。
         let delta = root_motion_delta(a, &worlds);
         let local = root_motion_local(a, delta);
         if local.length_squared() > 1e-16 {
             shift_worlds(&mut worlds, local);
+        }
+        let yaw = root_motion_yaw(a, &worlds);
+        if yaw.abs() > 1e-8 {
+            let inv = Mat4::from_quat(Quat::from_rotation_y(-yaw));
+            for world in worlds.iter_mut() {
+                *world = inv * *world;
+            }
         }
         let _ = rm;
     }
@@ -673,6 +683,22 @@ fn root_motion_local(a: &ModelAnimationInstance, world: Vec3) -> Vec3 {
             local.z
         },
     )
+}
+
+/// 根节点相对设置时的绕 Y 偏航差（弧度）。
+fn root_motion_yaw(a: &ModelAnimationInstance, worlds: &[Mat4]) -> f32 {
+    let Some(rm) = a.root_motion else {
+        return 0.0;
+    };
+    let Some(world) = worlds.get(rm.node) else {
+        return 0.0;
+    };
+    let rotation = Quat::from_mat4(*world) * rm.origin_rotation.inverse();
+    if rotation.is_finite() {
+        rotation.to_euler_yxz().0
+    } else {
+        0.0
+    }
 }
 
 /// 从所有节点世界矩阵里扣掉一个局部平移（根运动提取的第二步）。
@@ -1383,7 +1409,7 @@ impl Scene {
         player: &crate::assets::ModelAnimationPlayer,
     ) -> usize {
         let mats = player.mesh_matrices(model);
-        apply_matrices(&mut self.objects, objects, base, &mats, Vec3::ZERO)
+        apply_matrices(&mut self.objects, objects, base, &mats, Vec3::ZERO, 0.0)
     }
 
     /// 登记一个会播放的模型动画，返回登记序号。
@@ -1548,11 +1574,11 @@ impl Scene {
         Some(index)
     }
 
-    /// 启用**根运动提取**：把 `node` 的水平位移移到整个物体上。
+    /// 启用**根运动提取**：把 `node` 的水平位移与绕 Y 偏航移到整个物体上。
     ///
     /// 只支持单 clip、非循环、无副 clip、无状态机、无 IK 的实例；任一条件不满足
-    /// 返回 `false`（不改变实例）。设置成功时以**当前播放时间**的根节点世界位置为零点；
-    /// 只提取 XZ，Y 与旋转仍留在模型内部（跳/转身动画不会把角色整体抬走/转向）。
+    /// 返回 `false`（不改变实例）。设置成功时以**当前播放时间**的根节点世界位置/朝向
+    /// 为零点；只提取 XZ 与偏航，Y/俯仰/滚转仍留在模型内部。
     pub fn set_model_root_motion(&mut self, animation_index: usize, node: &str) -> bool {
         let Some(a) = self.animations.get_mut(animation_index) else {
             return false;
@@ -1569,7 +1595,12 @@ impl Scene {
         let Some(origin) = worlds.get(node).map(Mat4::translation) else {
             return false;
         };
-        a.root_motion = Some(ModelRootMotion { node, origin });
+        let origin_rotation = Quat::from_mat4(worlds[node]);
+        a.root_motion = Some(ModelRootMotion {
+            node,
+            origin,
+            origin_rotation,
+        });
         true
     }
 
@@ -1895,8 +1926,10 @@ impl Scene {
             fired_animation_events.extend(primary_events);
             fired_animation_events.extend(secondary_events);
             let mats = animation_matrices(a);
-            let offset = root_motion_delta(a, &a.player.node_worlds(&a.model).unwrap_or_default());
-            updated += apply_matrices(objects, &a.objects, &a.base, &mats, offset);
+            let raw = a.player.node_worlds(&a.model).unwrap_or_default();
+            let offset = root_motion_delta(a, &raw);
+            let yaw = root_motion_yaw(a, &raw);
+            updated += apply_matrices(objects, &a.objects, &a.base, &mats, offset, yaw);
         }
         // 极端 dt 下事件可能超过上限：保留最新的 1024 条，避免队列无限增长。
         if fired_animation_events.len() > 1024 {
@@ -1922,8 +1955,10 @@ impl Scene {
         let mut updated = 0;
         for a in animations.iter() {
             let mats = animation_matrices(a);
-            let offset = root_motion_delta(a, &a.player.node_worlds(&a.model).unwrap_or_default());
-            updated += apply_matrices(objects, &a.objects, &a.base, &mats, offset);
+            let raw = a.player.node_worlds(&a.model).unwrap_or_default();
+            let offset = root_motion_delta(a, &raw);
+            let yaw = root_motion_yaw(a, &raw);
+            updated += apply_matrices(objects, &a.objects, &a.base, &mats, offset, yaw);
         }
         updated
     }
@@ -2734,6 +2769,7 @@ fn apply_matrices(
     base: &[Transform],
     mats: &[Mat4],
     world_offset: Vec3,
+    world_yaw: f32,
 ) -> usize {
     let mut updated = 0;
     for (mesh_index, &object) in object_indices.iter().enumerate() {
@@ -2743,6 +2779,9 @@ fn apply_matrices(
         let m = mats.get(mesh_index).copied().unwrap_or(Mat4::IDENTITY);
         let mut base = base.get(mesh_index).copied().unwrap_or(obj.transform);
         base.position += world_offset;
+        if world_yaw.abs() > 1e-8 {
+            base.rotation = Quat::from_rotation_y(world_yaw) * base.rotation;
+        }
         obj.transform = compose(base, &m);
         updated += 1;
     }
@@ -2816,6 +2855,48 @@ mod anim_tests {
         }
     }
 
+    /// 单节点、绕 Y 从 0° 转到 90° 的模型（用于根运动偏航）。
+    fn turning_model() -> LoadedModel {
+        let half = std::f32::consts::FRAC_PI_4;
+        LoadedModel {
+            nodes: vec![
+                LoadedNode::default(),
+                LoadedNode {
+                    name: "转轴".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            meshes: vec![
+                LoadedMesh {
+                    node: Some(0),
+                    bind_inverse: Mat4::IDENTITY,
+                    ..Default::default()
+                },
+                LoadedMesh {
+                    node: Some(1),
+                    bind_inverse: Mat4::IDENTITY,
+                    ..Default::default()
+                },
+            ],
+            animations: vec![LoadedAnimation {
+                name: "转身".into(),
+                duration: 1.0,
+                tracks: vec![AnimationTrack {
+                    node: 1,
+                    property: AnimatedProperty::Rotation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0, 1.0],
+                    values: vec![[0.0, 0.0, 0.0, 1.0], [0.0, half.sin(), 0.0, half.cos()]],
+                    in_tangents: Vec::new(),
+                    out_tangents: Vec::new(),
+                }],
+                morph_tracks: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
     fn marker(time: f32, name: &str) -> SceneAnimationEvent {
         SceneAnimationEvent {
             name: name.into(),
@@ -2873,6 +2954,36 @@ mod anim_tests {
             player,
         );
         assert!(!scene.set_model_root_motion(index, "滑轮"));
+    }
+
+    #[test]
+    fn root_motion_extracts_yaw_to_the_object() {
+        let model = std::sync::Arc::new(turning_model());
+        let mut scene = Scene::new();
+        let dummy = scene.add_named(0, 0, Transform::default(), "根");
+        let object = scene.add_named(1, 0, Transform::default(), "转轴");
+        let mut player = model.player("转身").expect("有动画");
+        player.looping = false;
+        let index = scene.play_model_animation(
+            std::sync::Arc::clone(&model),
+            vec![dummy, object],
+            vec![Transform::default(), Transform::default()],
+            player,
+        );
+        assert!(scene.set_model_root_motion(index, "转轴"));
+        scene.advance_animations(1.0);
+        let (yaw, _, _) = scene.objects[object].transform.rotation.to_euler_yxz();
+        assert!(
+            (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "物体应当整体转 90°：{yaw}"
+        );
+        // 节点世界矩阵已经扣掉偏航，网格矩阵回到绑定姿态，不会转两遍。
+        let worlds = animation_worlds(&scene.animations[index]).unwrap();
+        let still = model.mesh_matrices_from_worlds(&worlds)[1];
+        assert!(
+            (Quat::from_mat3(still.to_mat3()).to_euler_yxz().0).abs() < 1e-3,
+            "网格不应再转一次：{still:?}"
+        );
     }
 
     #[test]

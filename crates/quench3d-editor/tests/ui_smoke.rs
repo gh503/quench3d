@@ -200,6 +200,7 @@ fn fake_plain_animation_instance() -> ModelAnimationInstance {
         root_motion: Some(quench3d::scene::ModelRootMotion {
             node: 0,
             origin: Vec3::ZERO,
+            origin_rotation: Quat::IDENTITY,
         }),
     }
 }
