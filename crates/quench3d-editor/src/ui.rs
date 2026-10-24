@@ -3304,6 +3304,30 @@ fn resolve_box_size(value: Vec3) -> [f32; 3] {
     [value.x.max(0.01), value.y.max(0.01), value.z.max(0.01)]
 }
 
+/// 底稿里的贴花列表；贴花在场景树里显示成普通物体，这里汇总尺寸/旋转/贴图。
+fn decals_section(ui: &mut Ui, doc: &Doc) {
+    let Some(base) = doc.base_doc() else {
+        return;
+    };
+    if base.decals.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.label(RichText::new(format!("贴花（{} 个）", base.decals.len())));
+    for (i, decal) in base.decals.iter().enumerate() {
+        let size = decal.size.unwrap_or([1.0, 1.0]);
+        let rotation = decal.rotation.unwrap_or(0.0);
+        let texture = decal.texture.as_deref().unwrap_or("纯色");
+        ui.label(
+            RichText::new(format!(
+                "#{i} · {:.1}×{:.1} · {:.0}° · {texture}",
+                size[0], size[1], rotation
+            ))
+            .small(),
+        );
+    }
+}
+
 fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
     let width = doc
         .layout
@@ -3320,6 +3344,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
             models_section(ui, engine, doc);
             animations_section(ui, engine, doc);
             particles_section(ui, engine, doc);
+            decals_section(ui, doc);
             ui.separator();
             let Some(index) = doc.selected else {
                 ui.label("在场景树或视口里点一个物体。");

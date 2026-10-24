@@ -720,3 +720,51 @@ fn named_camera_cycle_wraps_in_name_order() {
     );
     assert_eq!(doc.selected_camera.as_deref(), Some("C"));
 }
+
+#[test]
+fn inspector_lists_decals_from_base_doc() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let text = r#"{
+        "decals": [
+            { "position": [0, 0.01, 0], "size": [2, 1], "rotation": 45 }
+        ]
+    }"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, text).expect("贴花场景应能装载");
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    assert!(
+        shapes_contain_text(&output.shapes, "贴花（1 个）"),
+        "属性面板没有贴花组"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "2.0×1.0"),
+        "属性面板没有贴花尺寸"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "纯色"),
+        "属性面板没有贴花贴图占位"
+    );
+    output.textures_delta.clear();
+}
