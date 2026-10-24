@@ -3365,6 +3365,24 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.50 粒子的尺寸随寿命变化（第 149 轮）
+
+**做了什么**：
+
+* `particles[].size_end`（可选）：四边形边长从 `size` 线性插值到 `size_end`，
+  再与颜色/alpha 的二次淡出独立叠加；不写 = 同尺寸（旧场景逐像素不变）。
+* `ParticleDesc.size_end` / `ParticleSystem.size_end` 公开；校验 > 0；
+  schema/README 同步。
+
+**验证**：
+
+* `particle_color_gradient_lerps_with_lifetime` 同时断言尺寸：0.1 → 0.5、寿命 2s
+  推进 1s 后边长 0.3。
+* `particles_parse_validate_and_roundtrip`：`size_end` 往返保留；0/负值在
+  `particles[0].size_end` 报错。
+
+**边界**：单一线性缩放，不是曲线/关键帧；只影响公告板四边形，不影响物理或粒子数量。
+
 ## 24. 第 67 轮：摄像头动捕第一阶段 —— 文件协议 + 2D 轮廓 + 3D 骨骼
 
 **做了什么**：

@@ -1137,9 +1137,12 @@ pub struct ParticleDoc {
     /// 寿命（秒），缺省 2.0；必须 > 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<f32>,
-    /// 四边形边长（米），缺省 0.12；必须 > 0。
+    /// 初始四边形边长（米），缺省 0.12；必须 > 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
+    /// 寿命结束时的四边形边长（米）；不写 = 与 `size` 相同（不缩放），必须 > 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_end: Option<f32>,
     /// 重力 `[x, y, z]`（米/秒²），缺省 `[0, -1, 0]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gravity: Option<[f32; 3]>,
@@ -8080,7 +8083,7 @@ mod tests {
             "particles": [
                 { "count": 12, "position": [0, 2, 0], "color": [1, 0.5, 0.2, 0.7] },
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
-                  "velocity": [0, 2, 0], "gravity": [0, -3, 0],
+                  "size_end": 0.5, "velocity": [0, 2, 0], "gravity": [0, -3, 0],
                   "color_end": [0, 0, 1, 0.2] },
                 { "count": 2, "texture": texture_path.clone() }
             ]
@@ -8098,6 +8101,7 @@ mod tests {
         let again = SceneDoc::from_json(&text).expect("往返");
         assert_eq!(again.particles.len(), 3);
         assert_eq!(again.particles[1].size, Some(0.2));
+        assert_eq!(again.particles[1].size_end, Some(0.5));
         assert_eq!(again.particles[1].color_end, Some([0.0, 0.0, 1.0, 0.2]));
         assert_eq!(
             again.particles[2].texture.as_deref(),

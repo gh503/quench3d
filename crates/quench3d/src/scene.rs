@@ -115,8 +115,10 @@ pub struct ParticleDesc {
     pub spread: f32,
     /// 寿命（秒，必须 > 0）。
     pub lifetime: f32,
-    /// 四边形边长（米，必须 > 0）。
+    /// 初始四边形边长（米，必须 > 0）。
     pub size: f32,
+    /// 寿命结束时的四边形边长（米，必须 > 0）；缺省与 `size` 相同 = 不缩放。
+    pub size_end: f32,
     /// 重力加速度（米/秒²）。
     pub gravity: Vec3,
     /// 颜色（线性 RGBA；alpha 再乘寿命淡出）。
@@ -137,6 +139,7 @@ impl Default for ParticleDesc {
             spread: 0.4,
             lifetime: 2.0,
             size: 0.12,
+            size_end: 0.12,
             gravity: Vec3::new(0.0, -1.0, 0.0),
             color: Vec4::new(1.0, 0.65, 0.2, 0.8),
             color_end: Vec4::new(1.0, 0.65, 0.2, 0.8),
@@ -158,8 +161,10 @@ pub struct ParticleSystem {
     pub spread: f32,
     /// 寿命（秒）。
     pub lifetime: f32,
-    /// 四边形边长。
+    /// 初始四边形边长。
     pub size: f32,
+    /// 寿命结束时的四边形边长。
+    pub size_end: f32,
     /// 重力。
     pub gravity: Vec3,
     /// 基础颜色（alpha 在运行时乘淡出）。
@@ -1226,6 +1231,7 @@ impl Scene {
             spread,
             lifetime,
             size,
+            size_end: desc.size_end,
             gravity: desc.gravity,
             color: desc.color,
             color_end: desc.color_end,
@@ -1300,8 +1306,9 @@ impl Scene {
                     object.transform.rotation =
                         Quat::from_rotation_arc(Vec3::Z, to_camera.normalize());
                 }
-                object.transform.scale = Vec3::splat(system.size);
                 let t = (state.age / system.lifetime).clamp(0.0, 1.0);
+                let size = system.size + (system.size_end - system.size) * t;
+                object.transform.scale = Vec3::splat(size.max(1e-4));
                 let fade = (1.0 - t).powi(2);
                 let color = system.color.lerp(system.color_end, t);
                 object.color = Vec4::new(color.x, color.y, color.z, color.w * fade);
@@ -4119,6 +4126,7 @@ mod particle_tests {
             spread: 0.0,
             lifetime: 1.0,
             size: 0.25,
+            size_end: 0.25,
             gravity: Vec3::new(0.0, -2.0, 0.0),
             color: Vec4::new(0.2, 0.4, 0.8, 0.6),
             color_end: Vec4::new(0.2, 0.4, 0.8, 0.6),
@@ -4136,6 +4144,7 @@ mod particle_tests {
             spread: 0.0,
             lifetime: 2.0,
             size: 0.1,
+            size_end: 0.5,
             gravity: Vec3::ZERO,
             color: Vec4::new(1.0, 0.0, 0.0, 0.8),
             color_end: Vec4::new(0.0, 0.0, 1.0, 0.8),
@@ -4149,6 +4158,14 @@ mod particle_tests {
         assert!((color.z - 0.5).abs() < 1e-5, "蓝应线性升到 0.5：{color:?}");
         // alpha：两个端点都是 0.8，寿命中点 fade = 0.25。
         assert!((color.w - 0.2).abs() < 1e-5, "alpha 应为 0.2：{color:?}");
+        let scale = scene.objects[scene.particles[0].objects[0]]
+            .transform
+            .scale
+            .x;
+        assert!(
+            (scale - 0.3).abs() < 1e-5,
+            "边长应从 0.1 线性长到 0.5，寿命中点 0.3：{scale}"
+        );
 
         // 不写 color_end（= 同色）时颜色不变，只按寿命淡出。
         let mut scene = Scene::new();

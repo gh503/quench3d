@@ -3704,6 +3704,7 @@ fn add_particle_visuals(
                 spread: p.spread.unwrap_or(0.4),
                 lifetime: p.lifetime.unwrap_or(2.0),
                 size: p.size.unwrap_or(0.12),
+                size_end: p.size_end.unwrap_or(p.size.unwrap_or(0.12)),
                 gravity: Vec3::new(gravity[0], gravity[1], gravity[2]),
                 color: Vec4::new(color[0], color[1], color[2], color[3]),
                 color_end: Vec4::new(color_end[0], color_end[1], color_end[2], color_end[3]),

@@ -41,6 +41,9 @@
 
 ### 新增
 
+- **粒子尺寸渐变（第 149 轮）**：`particles[].size_end` 让四边形边长随寿命线性缩放；
+  不写保持同尺寸。测试总数仍为 813（扩展现有渐变/往返用例）。
+
 - **模型根运动（第 148 轮）**：`models[].animation.root_motion` 提取指定 glTF 节点的
   三维位移与绕 Y 偏航到模型物体上（单 clip/非循环/无 blend/animator/IK；只取位移+偏航）。
   报告 `root_motion.{node,found}`，编辑器显示节点。测试总数 808 → 813。
