@@ -194,6 +194,10 @@ impl Default for ParticleDesc {
 
 /// 一个 CPU 粒子发射器的运行时状态。
 pub struct ParticleSystem {
+    /// 代理用的网格（扩缩容时复用）。
+    pub mesh: MeshId,
+    /// 代理用的材质（扩缩容时复用）。
+    pub material: MaterialId,
     /// 每个粒子对应的场景物体下标。
     pub objects: Vec<usize>,
     /// 是否启用。
@@ -1330,6 +1334,8 @@ impl Scene {
         let system = self.particles.len();
         let seed = 0x9E37_79B9_7F4A_7C15u64 ^ (system as u64 + 1);
         let mut system_state = ParticleSystem {
+            mesh,
+            material,
             objects: Vec::with_capacity(count),
             enabled: desc.enabled,
             position: desc.position,
@@ -1383,6 +1389,80 @@ impl Scene {
                 object.visible = enabled;
             }
         }
+    }
+
+    /// 调整发射器的粒子数（1..=4096）。增删最后几个代理；已有的粒子和年龄保留。
+    ///
+    /// 减容通过 `Scene::remove` 删除代理，索引/状态由它统一维护；扩容新建代理，
+    /// 年龄从 0 开始。没有代理的发射器不会存在（`remove` 会清掉空系统）。
+    pub fn set_particle_count(&mut self, system: usize, count: usize) {
+        let target = count.clamp(1, 4096);
+        let Some(current) = self.particles.get(system).map(|s| s.objects.len()) else {
+            return;
+        };
+        if target == current {
+            return;
+        }
+        if target < current {
+            while self.particles[system].objects.len() > target {
+                let index = *self.particles[system]
+                    .objects
+                    .last()
+                    .expect("非空系统才有 last");
+                self.remove(index);
+            }
+            return;
+        }
+        let (
+            mesh,
+            material,
+            position,
+            radius,
+            shape,
+            box_size,
+            velocity,
+            spread,
+            size,
+            color,
+            enabled,
+            lifetime,
+        ) = {
+            let system = &self.particles[system];
+            (
+                system.mesh,
+                system.material,
+                system.position,
+                system.radius,
+                system.shape,
+                system.box_size,
+                system.velocity,
+                system.spread,
+                system.size,
+                system.color,
+                system.enabled,
+                system.lifetime,
+            )
+        };
+        let mut seed = self.particles[system].seed;
+        for i in current..target {
+            let mut offset = particle_offset(&mut seed, shape, radius, box_size);
+            offset += position;
+            let index = self.add_named(
+                mesh,
+                material,
+                Transform::new(offset, Quat::IDENTITY, Vec3::splat(size)),
+                &format!("$particles/{system}/{i}"),
+            );
+            self.objects[index].color = color;
+            self.objects[index].visible = enabled;
+            let velocity = velocity + particle_point(&mut seed, spread);
+            self.particles[system].objects.push(index);
+            self.particles[system].state.push(ParticleState {
+                age: particle_rand(&mut seed) * lifetime,
+                velocity,
+            });
+        }
+        self.particles[system].seed = seed;
     }
 
     /// 这个物体是不是粒子发射器生成的公告板（决定场景树/拾取/导出是否忽略它）。
@@ -4408,6 +4488,43 @@ mod particle_tests {
             object.transform.position
         );
         assert!(object.color.w > 0.4, "重生后 alpha 应当恢复");
+    }
+
+    #[test]
+    fn particle_count_changes_add_and_remove_proxies() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 4;
+        desc.radius = 1.0;
+        desc.velocity = Vec3::ZERO;
+        desc.gravity = Vec3::ZERO;
+        let system = scene.add_particle_system(0, 0, desc);
+        let before: Vec<usize> = scene.particles[system].objects.clone();
+        assert_eq!(before.len(), 4);
+
+        scene.set_particle_count(system, 2);
+        assert_eq!(scene.particles[system].objects.len(), 2);
+        assert!(scene.particles[system]
+            .objects
+            .iter()
+            .all(|&i| i < scene.objects.len()));
+        assert_eq!(scene.particles[system].objects, before[..2]);
+
+        scene.set_particle_count(system, 6);
+        assert_eq!(scene.particles[system].objects.len(), 6);
+        assert!(scene.particles[system]
+            .objects
+            .iter()
+            .all(|&i| i < scene.objects.len()));
+        for &index in &scene.particles[system].objects {
+            let offset = scene.objects[index].transform.position - desc.position;
+            assert!(
+                offset.length() <= desc.radius + 1e-4,
+                "扩容后的粒子应仍在球内：{offset:?}"
+            );
+        }
+        scene.set_particle_count(system, 1);
+        assert_eq!(scene.particles[system].objects.len(), 1);
     }
 
     #[test]

@@ -64,6 +64,7 @@ tools/verify_all.sh
 | 粒子圆盘形状 | `cargo test -p quench3d --lib particle_disc`、`cargo test -p quench3d-cli --lib particles_parse` | 64 颗、r=2 全部 y=0 且 x²+z²≤4；shape 域接受 disc、拒绝 cone |
 | 粒子速度对齐 | `cargo test -p quench3d --lib particle_velocity_alignment`、`cargo test -p quench3d-cli --lib particles_parse` | 速度 +X 时局部 +Z→+X；速度归零退回相机；`alignment` 往返、非法值报错 |
 | 命名相机切换 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke named_camera` | 装载侧视(position 10,5,0 / look_at 0,1,0 / fov 45°)，选择后焦点、√116 距离、fov 全对；下拉框显示「侧视」 |
+| 粒子数量编辑 | `cargo test -p quench3d --lib particle_count`、UI smoke | 4→2 保留前两个代理；2→6 新代理在球内；6→1 收缩；面板有「数量」 |
 | 粒子展示场景 | `cargo test -p quench3d-cli --lib particles_showcase_example`；`cargo run -p quench3d-cli -- render examples/particles_showcase.json --out … --json` | 4 个发射器 shape=sphere/box/disc/cone 且校验无错；渲染 ok=true、304 实例、0 剔除 |
 | 粒子形状/朝向/颜色 UI | `cargo test -p quench3d-editor --lib particle_json_names`、UI smoke | 四种 shape 与两种 alignment 的 JSON 值/中文标签逐项匹配；面板排版出「形状/朝向/颜色」 |
 | 粒子 UI | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_particle` | 7 颗、盒 2×1×4、drag 0.5、自转 0→180° 全部排版；寿命/收束/半径编辑控件与「启用」开关存在 |

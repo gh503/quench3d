@@ -614,6 +614,10 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
         "粒子面板没有半径编辑控件"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "数量"),
+        "粒子面板没有数量编辑控件"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "形状"),
         "粒子面板没有形状下拉框"
     );

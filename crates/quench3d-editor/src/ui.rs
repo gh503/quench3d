@@ -3061,6 +3061,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         }
 
         let mut new_enabled = enabled;
+        let mut new_count = objects;
         let mut new_lifetime = lifetime;
         let mut new_size = size;
         let mut new_size_end = size_end;
@@ -3075,6 +3076,10 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         let mut changed = false;
         changed |= ui.checkbox(&mut new_enabled, "启用").changed();
         ui.horizontal(|ui| {
+            ui.label("数量");
+            changed |= ui
+                .add(egui::DragValue::new(&mut new_count).range(1..=256).speed(1))
+                .changed();
             ui.label("形状");
             egui::ComboBox::from_id_salt(("particle-shape", i))
                 .selected_text(particle_shape_name(new_shape))
@@ -3195,6 +3200,9 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         });
         if changed {
             engine.scene.set_particle_enabled(i, new_enabled);
+            if new_count != objects {
+                engine.scene.set_particle_count(i, new_count);
+            }
             let system = &mut engine.scene.particles[i];
             system.lifetime = new_lifetime.max(0.05);
             system.size = new_size.max(0.001);
@@ -3210,6 +3218,7 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             if let Some(base) = doc.base_doc_mut() {
                 if let Some(particle) = base.particles.get_mut(i) {
                     particle.enabled = Some(new_enabled);
+                    particle.count = Some(system.objects.len());
                     particle.lifetime = Some(system.lifetime);
                     particle.size = Some(system.size);
                     particle.size_end = Some(system.size_end);
