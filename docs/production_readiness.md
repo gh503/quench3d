@@ -3367,6 +3367,27 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.62 粒子展示场景（第 162 轮）
+
+**做了什么**：
+
+* 新增 `examples/particles_showcase.json`：球内火花（速度对齐）、盒内烟（放大淡出）、
+  圆盘雾（自转）、锥形喷泉（速度对齐）四种发射器 + 地面 + 相机。
+* README 给出一条 `quench3d render` 命令；CLI 实测 1280×800 出图 372 KB、
+  304 个实例、0 剔除。
+
+**验证**：
+
+* `particles_showcase_example_is_valid`：读仓库里的示例，校验通过，4 个发射器的
+  shape 依次为 sphere/box/disc/cone。
+* 手工渲染：`cargo run -p quench3d-cli -- render examples/particles_showcase.json
+  --out target/tmp/particles_showcase.png --width 1280 --height 800 --json` →
+  `ok=true`、`instances=304`、`draw_calls=304`。
+* 全量门禁 824 测试。
+
+**边界**：示例是静态单帧；`render` 只推进到第一帧的粒子年龄，动态效果请用
+`quench3d movie`。
+
 ### 23.61 粒子形状/朝向/颜色可编辑（第 161 轮）
 
 **做了什么**：

@@ -1067,6 +1067,8 @@ NaN 刚体  : 0
   `fluids[]` 的 `particles` / `avg_density_ratio` / `max_speed` / `y` 范围。
   **边界**：没有表面张力/涡量/粒子间碰撞，敞开的平地上水会摊成薄层（这是"液体在无限
   平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
+  四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：
+  `quench3d render examples/particles_showcase.json --out particles.png`。
   `TriMesh` 碰撞体目前不挡粒子（`closest_surface` 返回 `None`），凸包/圆锥用 AABB 近似。
   粒子**渲染**（M4）：每颗粒子画成低模球（8×6），速度越快颜色越偏青白；另加一张
   跟着最高粒子走的半透明水面。

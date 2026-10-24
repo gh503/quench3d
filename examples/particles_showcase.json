@@ -1,0 +1,194 @@
+{
+  "name": "particles_showcase",
+  "camera": {
+    "position": [
+      0,
+      7,
+      16
+    ],
+    "look_at": [
+      0,
+      2.2,
+      0
+    ],
+    "fov_deg": 50
+  },
+  "materials": {
+    "地面": {
+      "color": [
+        0.18,
+        0.19,
+        0.21
+      ],
+      "roughness": 0.92
+    }
+  },
+  "objects": [
+    {
+      "name": "地面",
+      "shape": {
+        "type": "plane",
+        "size": [
+          40,
+          1,
+          40
+        ]
+      },
+      "body": "static",
+      "material": "地面"
+    }
+  ],
+  "particles": [
+    {
+      "count": 96,
+      "position": [
+        -5.5,
+        2.0,
+        0
+      ],
+      "radius": 0.9,
+      "shape": "sphere",
+      "velocity": [
+        0,
+        2.4,
+        0
+      ],
+      "spread": 0.7,
+      "lifetime": 2.4,
+      "size": 0.1,
+      "size_end": 0.02,
+      "drag": 0.4,
+      "gravity": [
+        0,
+        -2.2,
+        0
+      ],
+      "rotation": 0,
+      "rotation_end": 180,
+      "alignment": "velocity",
+      "color": [
+        1.0,
+        0.75,
+        0.2,
+        0.95
+      ]
+    },
+    {
+      "count": 64,
+      "position": [
+        -1.5,
+        1.2,
+        0
+      ],
+      "shape": "box",
+      "box_size": [
+        3.2,
+        1.2,
+        2.0
+      ],
+      "velocity": [
+        0,
+        0.8,
+        0
+      ],
+      "spread": 0.25,
+      "lifetime": 3.5,
+      "size": 0.35,
+      "size_end": 1.1,
+      "drag": 0.8,
+      "gravity": [
+        0,
+        0.25,
+        0
+      ],
+      "color": [
+        0.55,
+        0.62,
+        0.72,
+        0.3
+      ],
+      "color_end": [
+        0.85,
+        0.88,
+        0.95,
+        0.05
+      ]
+    },
+    {
+      "count": 80,
+      "position": [
+        2.0,
+        0.12,
+        0
+      ],
+      "radius": 2.8,
+      "shape": "disc",
+      "velocity": [
+        0,
+        0.45,
+        0
+      ],
+      "spread": 0.18,
+      "lifetime": 4.0,
+      "size": 0.45,
+      "size_end": 1.4,
+      "drag": 1.2,
+      "gravity": [
+        0,
+        0.05,
+        0
+      ],
+      "rotation": 0,
+      "rotation_end": 90,
+      "color": [
+        0.35,
+        0.75,
+        0.9,
+        0.22
+      ],
+      "color_end": [
+        0.4,
+        0.9,
+        1.0,
+        0.02
+      ]
+    },
+    {
+      "count": 72,
+      "position": [
+        5.5,
+        0.2,
+        0
+      ],
+      "radius": 1.3,
+      "shape": "cone",
+      "box_size": [
+        1,
+        3.2,
+        1
+      ],
+      "velocity": [
+        0,
+        3.2,
+        0
+      ],
+      "spread": 0.35,
+      "lifetime": 2.8,
+      "size": 0.09,
+      "size_end": 0.03,
+      "drag": 0.2,
+      "gravity": [
+        0,
+        -3.4,
+        0
+      ],
+      "alignment": "velocity",
+      "color": [
+        0.4,
+        0.9,
+        0.55,
+        0.9
+      ]
+    }
+  ]
+}

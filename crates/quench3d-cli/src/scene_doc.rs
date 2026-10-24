@@ -8136,6 +8136,25 @@ mod tests {
     }
 
     #[test]
+    fn particles_showcase_example_is_valid() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/particles_showcase.json");
+        let doc = SceneDoc::from_file(&path).expect("粒子展示场景应能解析");
+        let diags = doc.validate();
+        assert!(
+            !SceneDoc::has_errors(&diags),
+            "粒子展示场景应通过校验：{diags:?}"
+        );
+        assert_eq!(doc.particles.len(), 4);
+        let shapes: Vec<_> = doc
+            .particles
+            .iter()
+            .map(|p| p.shape.as_deref().unwrap_or("sphere"))
+            .collect();
+        assert_eq!(shapes, ["sphere", "box", "disc", "cone"]);
+    }
+
+    #[test]
     fn particles_parse_validate_and_roundtrip() {
         let dir =
             std::env::temp_dir().join(format!("quench3d_particle_tex_{}", std::process::id()));
