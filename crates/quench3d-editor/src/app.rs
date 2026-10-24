@@ -1940,6 +1940,19 @@ mod texture_edit_tests {
         std::fs::write(&path, &png).expect("应能写临时 PNG");
         let path_text = "tex.png".to_string();
 
+        let assets_dir = dir.join("assets");
+        std::fs::create_dir_all(&assets_dir).expect("资源目录应可建");
+        std::fs::copy(dir.join("tex.png"), assets_dir.join("tex2.png"))
+            .expect("资源目录里的贴图应可复制");
+        doc.base_doc_mut().expect("应有底稿").assets = Some(quench3d_cli::scene_doc::AssetsDoc {
+            search_paths: vec![std::path::PathBuf::from("assets")],
+        });
+        assert_eq!(
+            doc.resolve_texture_path("tex2.png"),
+            assets_dir.join("tex2.png"),
+            "assets.search_paths 里的相对路径应以场景目录为基准解析"
+        );
+
         let ground_material = engine.scene.objects[0].material;
         let ground_texture = crate::ui::apply_object_texture(
             &mut engine,

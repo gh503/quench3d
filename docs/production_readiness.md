@@ -3367,6 +3367,28 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.82 贴图解析支持场景资源搜索路径（第 182 轮）
+
+**做了什么**：
+
+* `Doc::resolve_texture_path` 在「场景目录」之后、工作目录之前，增加
+  `assets.search_paths` 候选；相对搜索路径以场景目录为基准。
+* 顺序与 CLI 的 `SceneDoc::asset_candidates` 对齐：场景目录 → 场景声明的资源库
+  → 工作目录。这样编辑器里给物体/贴花/粒子应用贴图时，和 CLI 渲染/校验看到的是
+  同一套路径。
+* 绝对搜索路径直接使用；不存在的候选继续往后找。
+
+**验证**：
+
+* `decal_and_particle_texture_apply_and_clear` 新增：在临时场景目录下建 `assets/`，
+  把贴图复制成 `assets/tex2.png`，底稿写 `assets.search_paths = ["assets"]`；
+  断言 `resolve_texture_path("tex2.png")` 返回 `assets/tex2.png`。
+* 同一用例继续覆盖贴花/粒子/物体贴图的应用与清除。
+* 全量门禁 834 测试。
+
+**边界**：只覆盖编辑器 UI 的手动贴图路径解析；CLI 已有同一顺序。`--asset-path`
+是进程级 CLI 旗标，编辑器没有对应 UI。
+
 ### 23.81 画中画统计保持 / 节流测试（第 181 轮）
 
 **做了什么**：

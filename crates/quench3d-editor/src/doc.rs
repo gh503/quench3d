@@ -299,6 +299,21 @@ impl Doc {
             if candidate.exists() {
                 return candidate;
             }
+            // 场景自己声明的资源库：与 CLI `asset_candidates` 同序（场景目录之后、
+            // 工作目录之前），相对路径以场景目录为基准。
+            if let Some(assets) = self.base_doc().and_then(|base| base.assets.as_ref()) {
+                for search in &assets.search_paths {
+                    let dir = if search.is_absolute() {
+                        search.clone()
+                    } else {
+                        parent.join(search)
+                    };
+                    let candidate = dir.join(raw);
+                    if candidate.exists() {
+                        return candidate;
+                    }
+                }
+            }
         }
         raw.to_path_buf()
     }
