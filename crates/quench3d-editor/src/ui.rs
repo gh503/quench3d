@@ -2949,6 +2949,54 @@ fn models_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     }
 }
 
+/// 只读的粒子发射器列表：粒子代理在场景树里是隐藏的，没有这块面板就完全看不见。
+fn particles_section(ui: &mut Ui, engine: &Engine) {
+    if engine.scene.particles.is_empty() {
+        return;
+    }
+    ui.separator();
+    ui.label(RichText::new(format!(
+        "粒子发射器（{} 组）",
+        engine.scene.particles.len()
+    )));
+    for (i, system) in engine.scene.particles.iter().enumerate() {
+        ui.label(
+            RichText::new(format!(
+                "#{i} · {} 颗 · 寿命 {:.1}s",
+                system.objects.len(),
+                system.lifetime
+            ))
+            .small(),
+        );
+        let shape = match system.shape {
+            quench3d::scene::ParticleShape::Sphere => {
+                format!("球 r={:.2}", system.radius)
+            }
+            quench3d::scene::ParticleShape::Box => format!(
+                "盒 {:.1}×{:.1}×{:.1}",
+                system.box_size.x, system.box_size.y, system.box_size.z
+            ),
+        };
+        let mut extra = Vec::new();
+        if system.drag > 0.0 {
+            extra.push(format!("阻尼 {:.2}/s", system.drag));
+        }
+        if system.rotation.abs() > 1e-6 || system.rotation_end.abs() > 1e-6 {
+            extra.push(format!(
+                "自转 {:.0}°→{:.0}°",
+                system.rotation.to_degrees(),
+                system.rotation_end.to_degrees()
+            ));
+        }
+        let suffix = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", extra.join(" · "))
+        };
+        ui.label(RichText::new(format!("{shape}{suffix}")).small());
+    }
+}
+
 fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
     let width = doc
         .layout
@@ -2964,6 +3012,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
             light_section(ui, engine, doc);
             models_section(ui, engine, doc);
             animations_section(ui, engine, doc);
+            particles_section(ui, engine);
             ui.separator();
             let Some(index) = doc.selected else {
                 ui.label("在场景树或视口里点一个物体。");

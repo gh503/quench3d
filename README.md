@@ -1096,8 +1096,9 @@ NaN 刚体  : 0
   寿命终点；`shape` 选 `"sphere"`（默认，半径 `radius`）或 `"box"`（全尺寸
   `box_size`），决定初始位置分布；`drag`（1/s）让速度按 `exp(-drag·dt)` 衰减；
   `rotation`/`rotation_end`（度）让公告板绕朝向相机的轴自转，寿命内线性插值。**边界**：没有软粒子；粒子按实例 AABB 中心到相机的距离参与全局透明排序，
-  不是逐像素深度排序；没有 GPU 粒子/曲线编辑；编辑器不创建也不编辑粒子，
-  只显示并原样保存场景 JSON 里的 `particles`。
+  不是逐像素深度排序；没有 GPU 粒子/曲线编辑；编辑器的属性面板**只读**列出粒子
+  发射器的数量/寿命/形状/阻尼/自转，不创建也不编辑，保存时原样保留 JSON 里的
+  `particles`。
 * `decals` 是**平面贴花**（纯视觉）：`{ "position": [0, 0.01, 0], "normal": [0, 1, 0],
   "size": [2, 1.5], "rotation": 90, "color": [1, 0.2, 0.1, 0.8], "texture": "tex/logo.png" }`。
   四边形按 `normal` 朝向、沿法线抬 1cm 防 z-fight；unlit、alpha 混合、双面，颜色/贴图

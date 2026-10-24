@@ -525,3 +525,76 @@ fn all_editor_panels_draw_in_one_frame() {
     // 状态栏/属性面板会写 `doc.status`，不该被 UI 清空。
     assert!(!doc.status.is_empty(), "默认场景的状态提示不该为空");
 }
+
+#[test]
+fn inspector_lists_particle_emitters_with_live_parameters() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    let material = engine.assets.solid_material(
+        &mut engine.renderer,
+        &engine.gpu,
+        Vec4::new(0.9, 0.4, 0.1, 1.0),
+        0.0,
+        0.5,
+    );
+    engine.scene.add_particle_system(
+        engine.assets.unit_cube,
+        material,
+        quench3d::scene::ParticleDesc {
+            count: 7,
+            lifetime: 3.5,
+            shape: quench3d::scene::ParticleShape::Box,
+            box_size: Vec3::new(2.0, 1.0, 4.0),
+            drag: 0.5,
+            rotation: 0.0,
+            rotation_end: std::f32::consts::PI,
+            ..Default::default()
+        },
+    );
+
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        )),
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        let _ = ui::panels(
+            ui,
+            &mut engine,
+            &mut doc,
+            &mut view,
+            &mut gizmo,
+            &mut camera,
+        );
+    });
+    assert!(
+        shapes_contain_text(&output.shapes, "粒子发射器（1 组）"),
+        "粒子面板没有显示发射器组数"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "7 颗 · 寿命 3.5s"),
+        "粒子面板没有显示数量和寿命"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "盒 2.0×1.0×4.0"),
+        "粒子面板没有显示盒尺寸"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "阻尼 0.50/s"),
+        "粒子面板没有显示阻尼"
+    );
+    assert!(
+        shapes_contain_text(&output.shapes, "自转 0°→180°"),
+        "粒子面板没有显示自转"
+    );
+    output.textures_delta.clear();
+}
