@@ -73,6 +73,8 @@ struct PostParams {
     water_sun: vec4<f32>,
     // 景深：x = 开关（0/1），y = 对焦距离（视空间米），z = 光圈，w = 最大模糊像素
     dof: vec4<f32>,
+    // 调色：x = 饱和度，y = 对比度，z = 色温，w = 开关（0 = 完全跳过）
+    grade: vec4<f32>,
 };
 
 /// Narkowicz 2015 的 ACES 近似。
@@ -353,5 +355,16 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
     }
     //@gl-depth-end
 
-    return vec4<f32>(tonemap(hdr), 1.0);
+    var color = tonemap(hdr);
+    // 调色在 tonemap 之后：用户调的是"最终画面"的饱和度/对比度/色温。
+    // 中性值（w=0）完全跳过，保证旧场景像素不变。
+    if (post.grade.w > 0.5) {
+        let t = post.grade.z;
+        color = color * vec3<f32>(1.0 + 0.15 * t, 1.0, 1.0 - 0.15 * t);
+        let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+        color = mix(vec3<f32>(luma), color, post.grade.x);
+        color = (color - vec3<f32>(0.5)) * post.grade.y + vec3<f32>(0.5);
+        color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return vec4<f32>(color, 1.0);
 }

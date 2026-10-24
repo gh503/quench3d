@@ -2470,6 +2470,27 @@ pub struct LightingDoc {
     /// **只在能读深度纹理的后端生效**（原生 wgpu）；GL/WebGL2 会忽略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dof: Option<DofDoc>,
+    /// 色调映射之后的调色（饱和度/对比度/色温）。
+    ///
+    /// **不写 = 全中性**（像素与加这个功能之前逐位相同）；只在 tonemap 之后生效，
+    /// 不改变光照本身。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<ColorGradeDoc>,
+}
+
+/// 调色配置（tonemap 之后应用）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ColorGradeDoc {
+    /// 饱和度：0 = 灰度，1 = 不变，最大 4。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saturation: Option<f32>,
+    /// 对比度：以 0.5 为轴，1 = 不变，最大 4。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contrast: Option<f32>,
+    /// 色温：-1 偏冷、0 不变、+1 偏暖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
 }
 
 /// 指数距离雾配置。
@@ -7022,6 +7043,30 @@ impl SceneDoc {
             }
         }
 
+        // 调色：饱和/对比必须非负（0~4），色温在 -1~1；NaN 一律拦下。
+        if let Some(g) = &self.lighting.grade {
+            for (name, value) in [("saturation", g.saturation), ("contrast", g.contrast)] {
+                if let Some(v) = value {
+                    if !v.is_finite() || !(0.0..=4.0).contains(&v) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("lighting.grade.{name}"),
+                            format!("调色 {name} 必须在 0~4 之间，当前为 {v}"),
+                        ));
+                    }
+                }
+            }
+            if let Some(t) = g.temperature {
+                if !t.is_finite() || !(-1.0..=1.0).contains(&t) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.grade.temperature",
+                        format!("色温必须在 -1~1 之间，当前为 {t}"),
+                    ));
+                }
+            }
+        }
+
         // TAA：历史权重必须落在 [0, 0.98]；超出会要么完全不累积要么无限拖影。
         if let Some(t) = &self.lighting.taa {
             if let Some(feedback) = t.feedback {
@@ -8811,6 +8856,27 @@ mod tests {
         assert_eq!(m.uv_offset, Some([0.25, -0.5]));
         assert_eq!(m.uv_rotation, Some(45.0));
         assert_eq!(m.ao_strength, Some(0.6));
+
+        let graded = SceneDoc::from_value(json!({
+            "lighting": { "grade": { "saturation": 0.0, "contrast": 1.4, "temperature": -0.3 } }
+        }))
+        .unwrap();
+        let g = graded.lighting.grade.expect("调色节应当解析");
+        assert_eq!(g.saturation, Some(0.0));
+        assert_eq!(g.contrast, Some(1.4));
+        assert_eq!(g.temperature, Some(-0.3));
+        let bad_grade = SceneDoc::from_value(json!({
+            "lighting": { "grade": { "saturation": -1.0, "contrast": 9.0, "temperature": 2.0 } }
+        }))
+        .unwrap();
+        let paths: Vec<String> = bad_grade
+            .validate()
+            .iter()
+            .map(|d| d.path.clone())
+            .collect();
+        assert!(paths.contains(&"lighting.grade.saturation".to_string()));
+        assert!(paths.contains(&"lighting.grade.contrast".to_string()));
+        assert!(paths.contains(&"lighting.grade.temperature".to_string()));
 
         let bad_ao = SceneDoc::from_value(json!({
             "materials": { "m": { "color": [1, 1, 1], "ao_strength": 1.5 } }

@@ -219,6 +219,72 @@ fn ao_texture_darkens_only_the_ambient_term() {
 }
 
 #[test]
+fn color_grade_saturation_removes_color() {
+    let Some((mut ctx, mut renderer)) = setup() else {
+        return;
+    };
+
+    let red = renderer.add_material(
+        &ctx,
+        MaterialDesc::from_srgb(1.0, 0.05, 0.05, 1.0).pbr(0.0, 0.7),
+    );
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        red,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 2.0),
+    );
+
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 4.5);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+
+    let base = Lighting {
+        sun: Some(DirectionalLight {
+            direction: vec3(0.0, -0.4, -1.0).normalize(),
+            color: vec3(1.0, 1.0, 1.0),
+            intensity: 4.0,
+            ..DirectionalLight::default()
+        }),
+        ambient_intensity: 0.0,
+        ..Lighting::default()
+    };
+    let neutral = renderer
+        .capture(&mut ctx, W, H, &camera, &base)
+        .expect("离屏渲染");
+
+    let mut graded_lighting = base;
+    graded_lighting.grade.saturation = 0.0;
+    let graded = renderer
+        .capture(&mut ctx, W, H, &camera, &graded_lighting)
+        .expect("离屏渲染");
+
+    // 取画面中心区域（立方体正面）的平均色。
+    let mean = |image: &ImageData| {
+        let (mut r, mut g, mut n) = (0.0f64, 0.0f64, 0.0f64);
+        for y in H / 3..H * 2 / 3 {
+            for x in W / 3..W * 2 / 3 {
+                let i = ((y * image.width + x) * 4) as usize;
+                r += image.rgba[i] as f64 / 255.0;
+                g += image.rgba[i + 1] as f64 / 255.0;
+                n += 1.0;
+            }
+        }
+        (r / n, g / n)
+    };
+    let (nr, ng) = mean(&neutral);
+    let (gr, gg) = mean(&graded);
+    assert!(
+        nr > ng + 0.08,
+        "中性调色下红盒应当明显偏红：R={nr:.3} G={ng:.3}"
+    );
+    assert!(
+        (gr - gg).abs() < 0.03,
+        "饱和度 0 应当把红盒变成灰：R={gr:.3} G={gg:.3}"
+    );
+}
+
+#[test]
 fn double_sided_flag_renders_back_faces() {
     let Some((mut ctx, mut renderer)) = setup() else {
         return;

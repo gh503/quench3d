@@ -3367,6 +3367,31 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.91 后处理调色（饱和度/对比度/色温，第 191 轮）
+
+**问题**：tonemap 之后只有曝光和三种 tonemap 算子；想让画面更艳、更硬或偏暖/偏冷，
+只能改灯光颜色或后期软件再处理，场景文件表达不了。
+
+**做了什么**：
+
+* `Lighting` 新增 `ColorGrade { saturation, contrast, temperature }`，缺省全中性；
+  渲染器把它写进 `PostUniforms.grade`（w = 开关，中性时 0）。
+* `post.wgsl` 在 `tonemap()` **之后**应用：色温 → 饱和度（Rec.709 亮度）→ 对比度
+  （以 0.5 为轴），最后 clamp。中性时整段分支跳过，旧场景像素逐位不变。
+* 场景 `lighting.grade: { saturation?, contrast?, temperature? }`；校验范围
+  饱和/对比 0~4、色温 -1~1。
+* 编辑器「光照」面板新增三个滑杆；存盘时全中性写“不写这一节”，动过才写回。
+* 只改颜色，不改光照/阴影/透明排序；FXAA 作用在调色后的画面上。
+
+**验证**：
+
+* 像素级 `color_grade_saturation_removes_color`：同一红盒，中性调色 R 明显高于 G；
+  `saturation = 0` 后 R≈G（灰），差异 <0.03。
+* 单元测试：`ColorGrade` 缺省中性；改任一参数 `is_neutral()` 为假。
+* 场景校验：三个参数越界分别报 `OutOfRange`；合法值正确解析。
+* UI：光照面板三个 `DragValue`（`调色 饱和/对比/色温`）。
+* 全量门禁 **842** 测试、0 失败（新增 2 个测试）。
+
 ### 23.90 材质环境光遮蔽（AO）贴图（第 190 轮）
 
 **问题**：PBR 材质只有基础色/法线/金属度-粗糙度/自发光四张贴图；`MaterialUniform`

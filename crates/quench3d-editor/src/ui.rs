@@ -1685,6 +1685,31 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             .prefix("曝光 "),
                     )
                     .changed();
+                // 调色（tonemap 之后）：三个滑杆默认全中性，拖动才改变画面。
+                ui.horizontal(|ui| {
+                    ui.label("调色 饱和/对比/色温");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut light.grade.saturation)
+                                .speed(0.01)
+                                .range(0.0..=4.0),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut light.grade.contrast)
+                                .speed(0.01)
+                                .range(0.0..=4.0),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut light.grade.temperature)
+                                .speed(0.01)
+                                .range(-1.0..=1.0),
+                        )
+                        .changed();
+                });
                 let mut tonemap = engine.renderer.options.tonemap;
                 egui::ComboBox::from_id_salt("tonemap")
                     .selected_text(tonemap.label())

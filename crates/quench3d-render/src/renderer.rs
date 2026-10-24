@@ -530,6 +530,8 @@ pub struct PostUniforms {
     pub water_sun: [f32; 4],
     /// 景深：x = 开关（0/1），y = 对焦距离（米），z = 光圈，w = 最大模糊像素。
     pub dof: [f32; 4],
+    /// 调色：x = 饱和度，y = 对比度，z = 色温，w = 开关（0 = 完全跳过）。
+    pub grade: [f32; 4],
 }
 
 /// TAA 参数（与 `taa.wgsl` 的 `TaaParams` 逐字节一致）。
@@ -3650,6 +3652,16 @@ impl Renderer {
                 self.options.dof.aperture.max(0.0),
                 self.options.dof.max_blur.max(0.0),
             ],
+            grade: [
+                lighting.grade.saturation.clamp(0.0, 4.0),
+                lighting.grade.contrast.clamp(0.0, 4.0),
+                lighting.grade.temperature.clamp(-1.0, 1.0),
+                if lighting.grade.is_neutral() {
+                    0.0
+                } else {
+                    1.0
+                },
+            ],
         };
         ctx.queue
             .write_buffer(&self.post_uniform, 0, bytemuck::bytes_of(&post));
@@ -4675,7 +4687,7 @@ mod tests {
 
     #[test]
     fn post_uniforms_size_matches_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<PostUniforms>(), 368);
+        assert_eq!(std::mem::size_of::<PostUniforms>(), 384);
         assert_eq!(std::mem::size_of::<PostUniforms>() % 16, 0);
     }
 

@@ -47,6 +47,9 @@
 - **画中画节流测试（第 181 轮）**：`pip_refresh_uploads_a_texture` 增加同帧不重复
   回读、过 12 帧恢复的断言。测试总数仍为 833。
 
+- **后处理调色（第 191 轮）**：`lighting.grade` 饱和度/对比度/色温，tonemap 之后应用；
+  像素级正反验证，编辑器三个滑杆。
+
 - **材质 AO 贴图（第 190 轮）**：第五张贴图槽 + `ao_strength`，只压环境光/IBL；
   glTF `occlusionTexture` 导入/导出（GLB 往返测试）；像素级正反验证。
 

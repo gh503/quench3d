@@ -255,6 +255,16 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         aperture: Some(opts.dof.aperture),
         max_blur: Some(opts.dof.max_blur),
     });
+    // 调色：全中性时写“不写这一节”，保持旧场景存盘干净；动过任何一项才写回。
+    lighting.grade = if light.grade.is_neutral() {
+        None
+    } else {
+        Some(quench3d_cli::scene_doc::ColorGradeDoc {
+            saturation: Some(light.grade.saturation),
+            contrast: Some(light.grade.contrast),
+            temperature: Some(light.grade.temperature),
+        })
+    };
     lighting.sky_colors = Some(quench3d_cli::scene_doc::SkyColorsDoc {
         zenith: Some([light.sky.zenith.x, light.sky.zenith.y, light.sky.zenith.z]),
         horizon: Some([

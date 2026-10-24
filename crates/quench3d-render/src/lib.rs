@@ -60,7 +60,8 @@ pub use camera::{Camera, CameraInput, FlyCamera, Frustum, OrbitCamera, Projectio
 pub use wgpu;
 
 pub use crate::light::{
-    DirectionalLight, FogParams, Lighting, PointLight, SkyParams, SpotLight, MAX_POINT_LIGHTS,
+    ColorGrade, DirectionalLight, FogParams, Lighting, PointLight, SkyParams, SpotLight,
+    MAX_POINT_LIGHTS,
 };
 pub use context::{FrameError, GpuContext, GpuInitError, GpuOptions, OffscreenTarget};
 pub use lines::{DebugLines, LineVertex};
@@ -86,7 +87,9 @@ pub mod prelude {
     pub use crate::color;
     pub use crate::context::{FrameError, GpuContext, GpuOptions};
     pub use crate::light::SpotLight;
-    pub use crate::light::{DirectionalLight, FogParams, Lighting, PointLight, SkyParams};
+    pub use crate::light::{
+        ColorGrade, DirectionalLight, FogParams, Lighting, PointLight, SkyParams,
+    };
     pub use crate::lines::DebugLines;
     pub use crate::material::MaterialDesc;
     pub use crate::mesh::MeshData;

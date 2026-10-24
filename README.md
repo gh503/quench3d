@@ -1016,6 +1016,8 @@ NaN 刚体  : 0
 * `lighting.point_lights` 最多 8 盏生效，**不写这个字段 = 保留预设自带的补光**，写 `[]` 才是显式清空。
 * `lighting.bloom` / `lighting.fog` **不写 = 关闭**（像素与关闭时逐位相同）；写了就是打开
   （fog 的 `density` 缺省 0.02，写 0 等于关）。
+* `lighting.grade` 是 tonemap **之后**的调色：`saturation` / `contrast` 缺省 1（0~4），
+  `temperature` 缺省 0（-1 偏冷、+1 偏暖）；不写 = 全中性、像素与旧版一致。
 * `objects[].static_friction` 缺省**跟随 `friction`**（只管动摩擦的老场景行为逐位不变）；
   想表达"推得动、但推住之后不会慢慢滑"就把它写得比 `friction` 大。
 * `models[].animation` 是**视觉**动画：`{ "name": "走路", "start": 0, "speed": 1, "loop": true,

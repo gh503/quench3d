@@ -4222,6 +4222,18 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) -> Result<(), RunErro
             }
         }
     }
+    // 调色：不写这一节 = 全中性（默认值本来就是中性）。
+    if let Some(g) = &l.grade {
+        if let Some(v) = g.saturation {
+            lighting.grade.saturation = v;
+        }
+        if let Some(v) = g.contrast {
+            lighting.grade.contrast = v;
+        }
+        if let Some(v) = g.temperature {
+            lighting.grade.temperature = v;
+        }
+    }
     // 天空颜色：只覆盖写了的那几个通道（没写 = 跟随预设）
     if let Some(sky) = &l.sky_colors {
         if let Some(z) = sky.zenith {

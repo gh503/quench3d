@@ -301,6 +301,38 @@ pub struct Lighting {
     pub shadow_strength: f32,
     /// IBL 环境贴图（CPU 副本；渲染器另有 GPU cubemap）。
     pub environment: Option<std::sync::Arc<crate::environment::EnvironmentMap>>,
+    /// 色调映射之后的调色（饱和度/对比度/色温）。
+    pub grade: ColorGrade,
+}
+
+/// 后处理调色参数（都在 tonemap **之后**应用；默认全中性，像素与旧版一致）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorGrade {
+    /// 饱和度：0 = 灰度，1 = 不变，> 1 更艳。
+    pub saturation: f32,
+    /// 对比度：以 0.5 为轴；1 = 不变。
+    pub contrast: f32,
+    /// 色温：-1 偏冷（加蓝减红），0 = 不变，+1 偏暖（加红减蓝）。
+    pub temperature: f32,
+}
+
+impl Default for ColorGrade {
+    fn default() -> Self {
+        Self {
+            saturation: 1.0,
+            contrast: 1.0,
+            temperature: 0.0,
+        }
+    }
+}
+
+impl ColorGrade {
+    /// 三个参数是否都在中性值；渲染器据此完全跳过调色分支。
+    pub fn is_neutral(&self) -> bool {
+        (self.saturation - 1.0).abs() < 1e-6
+            && (self.contrast - 1.0).abs() < 1e-6
+            && self.temperature.abs() < 1e-6
+    }
 }
 
 impl Default for Lighting {
@@ -316,6 +348,7 @@ impl Default for Lighting {
             exposure: 1.0,
             shadow_strength: 0.85,
             environment: None,
+            grade: ColorGrade::default(),
         }
     }
 }
@@ -407,6 +440,25 @@ impl Lighting {
 mod tests {
     use super::*;
     use quench3d_math::vec3;
+
+    #[test]
+    fn color_grade_defaults_are_neutral() {
+        let g = ColorGrade::default();
+        assert!(g.is_neutral(), "缺省调色必须是中性");
+        assert_eq!(g.saturation, 1.0);
+        assert_eq!(g.contrast, 1.0);
+        assert_eq!(g.temperature, 0.0);
+        assert!(!ColorGrade {
+            saturation: 0.0,
+            ..g
+        }
+        .is_neutral());
+        assert!(!ColorGrade {
+            temperature: 0.2,
+            ..g
+        }
+        .is_neutral());
+    }
 
     /// 与聚光灯同一条底线：**缺省不投影**必须是构造器的行为。
     ///
