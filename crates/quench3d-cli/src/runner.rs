@@ -3199,6 +3199,7 @@ pub fn setup_visuals(
         };
         if let Some(obj) = engine.scene.objects.get_mut(index) {
             obj.visible = o.visible;
+            obj.cast_shadows = o.cast_shadows;
             // 刚体的位姿来自物理，缩放只影响渲染
             obj.transform.scale = scale;
         }
@@ -3214,6 +3215,7 @@ pub fn setup_visuals(
             engine.scene.objects[child].parent = Some(index);
             engine.scene.objects[child].owner_part = Some(index);
             engine.scene.objects[child].visible = o.visible;
+            engine.scene.objects[child].cast_shadows = o.cast_shadows;
         }
         doc_to_scene.push(index);
     }
@@ -5421,6 +5423,24 @@ pub fn run_doctor() -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cast_shadows_defaults_true_and_can_be_disabled() {
+        let parse = |extra: &str| {
+            SceneDoc::from_json(&format!(
+                r#"{{ "objects": [ {{ "name": "箱", "shape": {{ "type": "box" }}{extra} }} ] }}"#
+            ))
+            .unwrap_or_else(|e| panic!("要能解析：{e:?}"))
+        };
+        assert!(
+            parse("").objects[0].cast_shadows,
+            "不写 cast_shadows 时应默认投射阴影"
+        );
+        assert!(
+            !parse(r#", "cast_shadows": false"#).objects[0].cast_shadows,
+            "显式 false 应关掉投射阴影"
+        );
+    }
 
     /// Z-up 资产必须先转成 Y-up，再套用户旋转；顺序反了物体会"躺"在错误方向。
     #[test]

@@ -51,6 +51,8 @@ pub struct SceneObject {
     pub body: Option<BodyHandle>,
     /// 是否可见。
     pub visible: bool,
+    /// 是否投射阴影（默认 true）；关掉只影响阴影图，不影响主画面。
+    pub cast_shadows: bool,
     /// 颜色倍乘（线性 RGBA）。
     pub color: Vec4,
     /// 金属度覆盖。
@@ -316,7 +318,9 @@ pub struct FluidSurfaceVisual {
 impl SceneObject {
     /// 生成绘制描述（`world` 是它的**世界**变换，见 [`Scene::world_transform`]）。
     pub fn instance(&self, world: Transform) -> InstanceDesc {
-        let mut d = InstanceDesc::new(world).with_color(self.color);
+        let mut d = InstanceDesc::new(world)
+            .with_color(self.color)
+            .with_cast_shadows(self.cast_shadows);
         d.emissive_strength = self.emissive_strength;
         if self.metallic.is_some() || self.roughness.is_some() {
             d = d.with_pbr(self.metallic.unwrap_or(0.0), self.roughness.unwrap_or(0.5));
@@ -1268,6 +1272,7 @@ impl Scene {
             owner_part: None,
             body: None,
             visible: true,
+            cast_shadows: true,
             color: Vec4::new(1.0, 1.0, 1.0, 1.0),
             metallic: None,
             roughness: None,

@@ -302,6 +302,8 @@ pub struct InstanceDesc {
     pub skin_base: u32,
     /// GPU 蒙皮：关节数（0 = 不做蒙皮）。
     pub skin_count: u32,
+    /// 是否把本实例画进阴影图（默认 true）。不影响主画面可见性。
+    pub cast_shadows: bool,
 }
 
 impl Default for InstanceDesc {
@@ -314,6 +316,7 @@ impl Default for InstanceDesc {
             emissive_strength: 1.0,
             skin_base: 0,
             skin_count: 0,
+            cast_shadows: true,
         }
     }
 }
@@ -355,6 +358,12 @@ impl InstanceDesc {
         self
     }
 
+    /// 是否投射阴影。关掉后这个实例仍正常渲染，只是不写进任何阴影图。
+    pub fn with_cast_shadows(mut self, cast_shadows: bool) -> Self {
+        self.cast_shadows = cast_shadows;
+        self
+    }
+
     /// GPU 蒙皮：本实例用调色板里的 `[base, base+count)` 段关节矩阵。
     pub fn with_skin(mut self, base: u32, count: u32) -> Self {
         self.skin_base = base;
@@ -387,6 +396,9 @@ struct Batch {
     first: u32,
     count: u32,
     bounds: Aabb,
+    /// 本批次是否进阴影图；`draw` 合批时按它拆开，避免一个不投影的实例
+    /// 把同网格/同材质的其他实例一起拖进阴影 pass。
+    cast_shadows: bool,
 }
 
 /// GPU 网格。
@@ -2750,7 +2762,11 @@ impl Renderer {
             Some(m) => m.bounds.transformed(&instance.transform.matrix()),
             None => return,
         };
-        let key = ((mesh as u64) << 32) | material as u64;
+        // bit 63 存"是否投影"：不合批时两个实例的阴影行为必须分开，
+        // 否则关掉一个物体的阴影会连带改变同材质其他物体的影子。
+        let key = ((mesh as u64) << 32)
+            | material as u64
+            | if instance.cast_shadows { 0 } else { 1 << 63 };
         let raw = instance.to_raw();
         let index = match self.batch_index.get(&key) {
             Some(i) => *i,
@@ -2762,6 +2778,7 @@ impl Renderer {
                     first: self.staging.len() as u32,
                     count: 0,
                     bounds: Aabb::EMPTY,
+                    cast_shadows: instance.cast_shadows,
                 });
                 self.batch_index.insert(key, i);
                 i
@@ -3684,7 +3701,7 @@ impl Renderer {
                 self.draw_order
                     .push((0, u8::from(double), batch.material, batch.mesh, i));
             }
-            if shadow_any && !alpha && !unlit {
+            if shadow_any && !alpha && !unlit && batch.cast_shadows {
                 shadow_batches.push((batch.mesh, batch_first, batch_count));
                 stats.shadow_instances += batch_count;
             }

@@ -1010,6 +1010,10 @@ fn material_texture_slots_have_apply_and_clear_buttons() {
     let shapes = std::mem::take(&mut output.shapes);
     output.textures_delta.clear();
     assert!(
+        shapes_contain_text(&shapes, "投射阴影"),
+        "属性面板没有「投射阴影」开关"
+    );
+    assert!(
         shapes_contain_text(&shapes, "应用基础色贴图（从磁盘读取）"),
         "物体材质面板没有应用基础色贴图按钮"
     );

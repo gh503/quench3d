@@ -787,6 +787,7 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         allow_sleep: o.allow_sleep.or(t.allow_sleep),
         // 可见性取"与"：模板说不可见就不会被物体默认的 true 翻回来
         visible: o.visible && t.visible,
+        cast_shadows: o.cast_shadows && t.cast_shadows,
         scale: o.scale.or(t.scale),
         collision_layer: o.collision_layer.or(t.collision_layer),
         collides_with: o.collides_with.clone().or_else(|| t.collides_with.clone()),
@@ -1585,6 +1586,9 @@ pub struct ObjectDoc {
     /// 是否可见，缺省 true。
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// 是否投射阴影，缺省 true。关掉只影响阴影图，不影响主画面。
+    #[serde(default = "default_true")]
+    pub cast_shadows: bool,
     /// 碰撞层（0~31），缺省 0。
     ///
     /// 一层是一个位；只有**双方都愿意**才会产生碰撞（见 `collides_with`）。
@@ -2956,6 +2960,7 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     check_field::<f32>(map, "mass", path, out);
     check_field::<bool>(map, "allow_sleep", path, out);
     check_field::<bool>(map, "visible", path, out);
+    check_field::<bool>(map, "cast_shadows", path, out);
     check_field::<String>(map, "template", path, out);
     if let Some(instances) = map.get("instances") {
         if let Some(list) = instances.as_array() {
