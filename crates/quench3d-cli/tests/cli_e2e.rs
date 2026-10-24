@@ -7590,6 +7590,25 @@ fn export_writes_binary_stl_with_matching_triangle_count() {
         assert!(len < 1e-6 || (len - 1.0).abs() < 1e-4, "法线长度 {len}");
     }
     assert!(!dir.join("model.mtl").exists(), "STL 不应产生 MTL");
+
+    // 再导入回来：三角形数与包围盒必须和场景一致（STL 导入器走 load_model）。
+    let info = run(&["info", stl.to_str().unwrap(), "--json"]);
+    assert_eq!(
+        info.code, 0,
+        "stderr={}\nstdout={}",
+        info.stderr, info.stdout
+    );
+    let info = info.json();
+    assert_eq!(
+        info["data"]["triangles"].as_u64().unwrap(),
+        triangles,
+        "STL 导入的三角形数必须与导出报告一致"
+    );
+    assert_eq!(info["data"]["meshes"].as_u64().unwrap(), 1);
+    let size = info["data"]["bounds_size"].as_array().unwrap();
+    assert!((size[0].as_f64().unwrap() - 4.5).abs() < 1e-5, "{size:?}");
+    assert!((size[1].as_f64().unwrap() - 1.0).abs() < 1e-5, "{size:?}");
+    assert!((size[2].as_f64().unwrap() - 3.0).abs() < 1e-5, "{size:?}");
 }
 
 #[test]

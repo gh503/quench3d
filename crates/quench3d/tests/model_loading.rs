@@ -936,9 +936,12 @@ fn obj_bytes_load_geometry() {
 #[test]
 fn byte_loading_reports_actionable_errors() {
     // 未知扩展名：要说清楚支持什么
-    let err = load_model_from_bytes("chair.stl", b"solid x").unwrap_err();
+    let err = load_model_from_bytes("chair.ply", b"solid x").unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("glb") && msg.contains("obj"), "{msg}");
+    assert!(
+        msg.contains("glb") && msg.contains("obj") && msg.contains("stl"),
+        "{msg}"
+    );
 
     // 不是 glTF 的字节：报解析错误，并提示 .glb 才是自包含的
     let err = load_model_from_bytes("broken.glb", b"not a glb at all").unwrap_err();

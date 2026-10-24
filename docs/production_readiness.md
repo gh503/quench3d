@@ -128,7 +128,7 @@
 |---|---|---|---|
 | 自有场景格式 | 全部 | `quench3d.scene`（JSON，`FORMAT`/`VERSION`，15 个顶层段，CLI/编辑器/MCP 共用，`scene_doc.rs:110-168`） | ✅ |
 | 格式迁移器（版本升级） | 全部 | **没有**：版本不符直接报错（`scene_doc.rs:1325`） | ❌ |
-| 模型导入 | 全部 | glTF/GLB（`assets.rs:261`）与 OBJ（`assets.rs:500`，**只解析几何、不读 mtllib**）；STL/FBX/USD/DAE/PLY 全无 | 🟠 |
+| 模型导入 | 全部 | glTF/GLB（`assets.rs:261`）、OBJ（`assets.rs:500`，**只解析几何、不读 mtllib**）、**STL（第 196 轮，二进制/ASCII）**；FBX/USD/DAE/PLY 无 | 🟠 |
 | 贴图随模型导入 | 全部 | glTF 贴图能进来（4 槽 + 解码 + 上传，`assets.rs:341-352/394/102`）；OBJ 不带 | 🟡 |
 | 场景里的贴图引用 | 全部 | 字符串路径 + 相对场景目录解析（`scene_doc.rs:1279`）；serde 往返保留 | ✅ |
 | **编辑器存盘的无损性** | 全部 | **本轮修复**：以前 `scene_to_json` 从 `SceneDoc::default()` 起头，会把 `lighting`/`simulate`/`render`/`models`/`probes` 与材质的 4 个贴图槽 + 7 个开关**静默清零**（`scene_io.rs`）；现在以载入的原文档为底稿，只覆盖编辑器管得着的字段 | ✅（本轮） |
@@ -223,7 +223,7 @@
 | 场景格式 | USD / glTF / FBX | 自有 `quench3d.scene`（JSON，15 段，CLI/编辑器/MCP 共用） | 有 | **已达标** | ✅ |
 | 模型**导入** | 全部 | glTF/GLB + OBJ（OBJ 不带材质，`assets.rs:456`） | 有 | **部分** | 🟡 |
 | 模型**导出** | Blender / 引擎 | **部分**：CLI `quench3d export` 写 OBJ + MTL，或按扩展名 `.gltf`/`.glb` 写**单文件 glTF 2.0 / GLB**；编辑器顶部「导出 glTF」「导出 GLB」按钮走同一个导出器（Web 下载、桌面写同名 `.gltf`/`.glb`）。几何/材质标量/alpha/自发光/四类贴图（PNG/JPEG 内嵌）；base64 内嵌；凸包、`models[]` 跳过并报告 → 都能被本引擎重新导入 | `quench3d export scene.json model.gltf` 后再 `info model.gltf`，三角形数与包围盒对得上；编辑器导出后 JSON 节点数 = 物体数 | 已落地 OBJ + glTF/GLB（CLI + 编辑器，含贴图、节点树、位置/旋转动画）；骨骼/morph 动画未导出 | ✅（OBJ/glTF 几何） |
-| 格式覆盖 | 全部 | **STL 导出已做**（二进制，CLI）；STL 导入 / FBX / USD / USDZ / DAE / PLY 无 | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | 🟡（导出半边） |
+| 格式覆盖 | 全部 | **STL 导入/导出已做**（二进制 + ASCII 导入、二进制导出）；FBX / USD / USDZ / DAE / PLY 无 | 至少 STL（3D 打印）与 FBX（美术主流） | **2–3 人月/格式** | 🟡（STL 闭环） |
 | 图像/视频交换 | 全部 | PNG 序列 + 内置 GIF/APNG；`--encoder mp4` 可选调用外部 ffmpeg 直接封装 MP4，PNG 路线仍给建议命令 | 直接产出 H.265/无 ffmpeg 的 MP4 | **1 人月**（纯 Rust 编码器） | 🟠 |
 | 图像 I/O 色彩空间 | 全部 | 只按 sRGB 标志区分；无 EXR/HDR 读写 | 读写 32 位 EXR 不丢线性 | **1–2 人月** | ❌ |
 | 版本升级路径 | 全部 | **无迁移器**（版本不符直接报错，`scene_doc.rs:1325`） | 旧文件能一键升到新版本并留备份 | **0.5–1 人月** | ❌ |
@@ -3366,6 +3366,29 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **边界**：不是完整 root motion 系统——只提取三维位移与绕 Y 偏航，不提取俯仰/滚转，
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
+
+### 23.96 STL 导入（二进制 + ASCII，第 196 轮）
+
+**问题**：上一轮只做了 STL 导出；`info`/编辑器/模型查看器都读不回来，3D 打印闭环缺一半。
+
+**做了什么**：
+
+* `assets::parse_stl` / `load_stl`：
+  - **二进制优先**：长度必须满足 `84 + 50×count`（否则回退 ASCII，避免把恰好以
+    `solid` 开头的二进制 STL 误判）；
+  - ASCII：解析 `facet normal` / 三条 `vertex` / `endfacet`，facet 顶点不足 3 个报行号；
+  - 法线优先用文件 facet normal（单位化）；零/退化法线用三角形叉积补；
+  - STL 没有材质/UV/节点/动画：导入为单个网格，材质用缺省值。
+* `load_model` / `load_model_from_bytes` 识别 `.stl`；`info` 与模型查看器自动可用。
+* 报错信息区分"二进制不自洽"与"没有 facet 记录"。
+
+**验证**：
+
+* 单元：二进制两三角形 → 1 网格/6 顶点，文件法线保留；ASCII 零法线 → 叉积补单位法线；
+  垃圾字节报 STL 格式错误。
+* e2e：`export model.stl` 后再 `info model.stl`，三角形数 780 与导出报告一致，
+  包围盒 [4.5, 1, 3] 与场景一致 → **导出/导入闭环**。
+* 全量门禁 **854** 测试、0 失败（新增 3 个测试）。
 
 ### 23.95 二进制 STL 导出（第 195 轮）
 

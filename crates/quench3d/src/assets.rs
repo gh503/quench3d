@@ -1718,7 +1718,7 @@ fn gltf_image_to_rgba(img: &gltf::image::Data) -> Result<ImageData, AssetError> 
 // OBJ / MTL
 // ---------------------------------------------------------------------------
 
-/// 按扩展名自动选择解析器加载模型（`.gltf` / `.glb` → glTF，`.obj` → OBJ）。
+/// 按扩展名自动选择解析器加载模型（`.gltf` / `.glb` → glTF，`.obj` → OBJ，`.stl` → STL）。
 pub fn load_model(path: impl AsRef<Path>) -> Result<LoadedModel, AssetError> {
     ensure_filesystem_available()?;
     let path = resolve_path(path)?;
@@ -1729,8 +1729,9 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<LoadedModel, AssetError> {
     match ext.as_str() {
         "gltf" | "glb" => load_gltf(&path),
         "obj" => load_obj(&path),
+        "stl" => load_stl(&path),
         other => Err(AssetError::Parse(format!(
-            "不支持的模型格式 \"{other}\"（支持 gltf / glb / obj）"
+            "不支持的模型格式 \"{other}\"（支持 gltf / glb / obj / stl）"
         ))),
     }
 }
@@ -1741,7 +1742,8 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<LoadedModel, AssetError> {
 /// * **`.glb` 是自包含的**，任何来源的字节都能直接解析（推荐的 Web 格式）；
 ///   `.gltf` 若用 `uri` 引用外部 `.bin`/贴图，内存里无从解析 → 报错，请改用 `.glb`
 ///   或把资源内联成 `data:` URI；
-/// * `.obj` 只解析几何：`mtllib` 不会被读取（没有目录可查），材质用缺省值。
+/// * `.obj` 只解析几何：`mtllib` 不会被读取（没有目录可查），材质用缺省值；
+/// * `.stl` 支持二进制与 ASCII，导入为单个网格（没有材质/UV/节点树）。
 ///
 /// Web 端用法（JS 侧 fetch，字节交给 wasm）：
 ///
@@ -1778,10 +1780,152 @@ pub fn load_model_from_bytes(name: &str, bytes: &[u8]) -> Result<LoadedModel, As
             }
             Ok(model)
         }
+        "stl" => parse_stl(bytes, &stem),
         other => Err(AssetError::Parse(format!(
-            "不支持的模型格式 \"{other}\"（支持 glb / gltf / obj）"
+            "不支持的模型格式 \"{other}\"（支持 glb / gltf / obj / stl）"
         ))),
     }
+}
+
+/// 加载二进制或 ASCII STL。
+///
+/// STL 没有材质、UV、节点树或动画，导入后是一个居中的单网格模型；
+/// 法线优先用文件里的 facet normal（单位化），退化/零法线再由三角形叉积补。
+pub fn load_stl(path: impl AsRef<Path>) -> Result<LoadedModel, AssetError> {
+    ensure_filesystem_available()?;
+    let path = resolve_path(path)?;
+    let bytes = std::fs::read(&path)?;
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "model".into());
+    parse_stl(&bytes, &name)
+}
+
+/// 解析 STL 字节（二进制优先；不以二进制长度自洽时按 ASCII 解析）。
+pub fn parse_stl(bytes: &[u8], name: &str) -> Result<LoadedModel, AssetError> {
+    if bytes.len() >= 84 {
+        let count = u32::from_le_bytes(bytes[80..84].try_into().expect("4 字节"));
+        if let Some(expected) = (count as usize)
+            .checked_mul(50)
+            .and_then(|n| n.checked_add(84))
+        {
+            if expected == bytes.len() {
+                return parse_binary_stl(bytes, name, count as usize);
+            }
+        }
+    }
+    let text = std::str::from_utf8(bytes).map_err(|e| {
+        AssetError::Parse(format!("STL 不是合法 UTF-8（也不是自洽的二进制 STL）: {e}"))
+    })?;
+    parse_ascii_stl(text, name)
+}
+
+fn stl_model(name: &str, triangles: Vec<([f32; 3], [[f32; 3]; 3])>) -> LoadedModel {
+    let mut vertices = Vec::with_capacity(triangles.len() * 3);
+    let mut indices = Vec::with_capacity(triangles.len() * 3);
+    for (normal, points) in triangles {
+        let a = Vec3::from_array(points[0]);
+        let b = Vec3::from_array(points[1]);
+        let c = Vec3::from_array(points[2]);
+        let stored = Vec3::from_array(normal);
+        let n = if stored.is_finite() && stored.length() > 1e-4 {
+            stored.normalize()
+        } else {
+            (b - a).cross(c - a).normalize_or_zero()
+        };
+        for p in points {
+            indices.push(vertices.len() as u32);
+            vertices.push(quench3d_render::Vertex::new(
+                Vec3::from_array(p),
+                n,
+                Vec2::ZERO,
+            ));
+        }
+    }
+    let mut model = LoadedModel {
+        name: name.to_string(),
+        ..Default::default()
+    };
+    model.meshes.push(LoadedMesh {
+        name: name.to_string(),
+        data: MeshData::from_parts(vertices, indices),
+        material: None,
+        ..Default::default()
+    });
+    model.materials.push(LoadedMaterial::default());
+    model
+}
+
+fn parse_binary_stl(bytes: &[u8], name: &str, count: usize) -> Result<LoadedModel, AssetError> {
+    let mut triangles = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = 84 + i * 50;
+        let read = |offset: usize| -> f32 {
+            f32::from_le_bytes(
+                bytes[base + offset..base + offset + 4]
+                    .try_into()
+                    .expect("50 字节记录内"),
+            )
+        };
+        let normal = [read(0), read(4), read(8)];
+        let points = [
+            [read(12), read(16), read(20)],
+            [read(24), read(28), read(32)],
+            [read(36), read(40), read(44)],
+        ];
+        triangles.push((normal, points));
+    }
+    Ok(stl_model(name, triangles))
+}
+
+fn parse_ascii_stl(text: &str, name: &str) -> Result<LoadedModel, AssetError> {
+    let mut triangles = Vec::new();
+    let mut normal = [0.0f32; 3];
+    let mut points: Vec<[f32; 3]> = Vec::new();
+    let mut saw_facet = false;
+    for (line_no, line) in text.lines().enumerate() {
+        let mut parts = line.split_whitespace();
+        let Some(tag) = parts.next() else { continue };
+        match tag {
+            "facet" => {
+                saw_facet = true;
+                points.clear();
+                normal = [0.0; 3];
+                let mut values = parts;
+                if values.next() == Some("normal") {
+                    let nums: Vec<f32> = values.filter_map(|v| v.parse().ok()).collect();
+                    if nums.len() >= 3 {
+                        normal = [nums[0], nums[1], nums[2]];
+                    }
+                }
+            }
+            "vertex" => {
+                let nums: Vec<f32> = parts.filter_map(|v| v.parse().ok()).collect();
+                if nums.len() >= 3 {
+                    points.push([nums[0], nums[1], nums[2]]);
+                }
+            }
+            "endfacet" => {
+                if points.len() >= 3 {
+                    triangles.push((normal, [points[0], points[1], points[2]]));
+                } else if saw_facet {
+                    return Err(AssetError::Parse(format!(
+                        "STL 第 {} 行：facet 不足 3 个顶点",
+                        line_no + 1
+                    )));
+                }
+                points.clear();
+            }
+            _ => {}
+        }
+    }
+    if !saw_facet {
+        return Err(AssetError::Parse(
+            "STL 既不是自洽的二进制格式，也没有 facet 记录".into(),
+        ));
+    }
+    Ok(stl_model(name, triangles))
 }
 
 /// 加载 Wavefront OBJ（会尝试解析同目录的 MTL 材质库）。
@@ -2138,6 +2282,69 @@ vt 0 1
 vn 0 0 1
 f 1/1/1 2/2/1 3/3/1 4/4/1
 "#;
+
+    fn binary_stl(tris: &[([f32; 3], [[f32; 3]; 3])]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 80];
+        bytes[..7].copy_from_slice(b"test st");
+        bytes.extend_from_slice(&(tris.len() as u32).to_le_bytes());
+        for (n, p) in tris {
+            for v in n.iter().chain(p.iter().flatten()) {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn parse_binary_stl_builds_one_mesh_and_keeps_normals() {
+        let bytes = binary_stl(&[
+            (
+                [0.0, 0.0, 1.0],
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            ),
+            (
+                [1.0, 0.0, 0.0],
+                [[1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0]],
+            ),
+        ]);
+        let model = parse_stl(&bytes, "two").unwrap();
+        assert_eq!(model.meshes.len(), 1);
+        assert_eq!(model.meshes[0].data.triangle_count(), 2);
+        assert_eq!(model.meshes[0].data.vertex_count(), 6);
+        assert_eq!(model.meshes[0].data.vertices[0].normal, [0.0, 0.0, 1.0]);
+        assert_eq!(model.meshes[0].data.vertices[3].normal, [1.0, 0.0, 0.0]);
+        assert_eq!(model.meshes[0].data.vertices[2].position, [0.0, 1.0, 0.0]);
+        assert!(!model.materials.is_empty());
+    }
+
+    #[test]
+    fn parse_ascii_stl_and_fallback_normals() {
+        let text = "solid demo\n\
+                    facet normal 0 0 0\n\
+                    outer loop\n\
+                    vertex 0 0 0\n\
+                    vertex 2 0 0\n\
+                    vertex 0 2 0\n\
+                    endloop\n\
+                    endfacet\n\
+                    endsolid demo\n";
+        let model = parse_stl(text.as_bytes(), "ascii").unwrap();
+        assert_eq!(model.meshes[0].data.triangle_count(), 1);
+        // 文件法线为 0：用叉积补，且必须是单位长。
+        let n = model.meshes[0].data.vertices[0].normal;
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        assert!((len - 1.0).abs() < 1e-5, "法线长度 {len}");
+    }
+
+    #[test]
+    fn parse_stl_rejects_garbage() {
+        let err = parse_stl(b"this is not an stl", "bad").unwrap_err();
+        assert!(
+            format!("{err}").contains("facet") || format!("{err}").contains("STL"),
+            "错误信息应说明 STL 格式问题：{err}"
+        );
+    }
 
     #[test]
     fn parse_obj_quad_triangulates() {

@@ -78,7 +78,7 @@ cargo run --release --example hello_cube
 # 物理沙盒：堆叠箱子 / 斜面 / 球体，空格发射小球，可射线拾取
 cargo run --release --example physics_playground
 
-# 3D 模型查看器：加载 glTF/GLB/OBJ（含 MTL），空格丢球验证模型碰撞体
+# 3D 模型查看器：加载 glTF/GLB/OBJ（含 MTL）/STL，空格丢球验证模型碰撞体
 cargo run --release --example model_viewer
 cargo run --release --example model_viewer -- 你的模型.glb
 
@@ -829,7 +829,7 @@ quench3d schema --json                   # 能力清单：命令、参数、场�
 | --- | --- | --- |
 | `schema` | 输出能力清单（命令 / 参数 / 场景语法 / 单位 / 退出码 / 示例） | 否 |
 | `doctor` | 环境自检 | 否 |
-| `info <模型>` | glTF/GLB/OBJ：网格、材质、贴图、顶点、三角形、包围盒 | 否 |
+| `info <模型>` | glTF/GLB/OBJ/STL：网格、材质、贴图、顶点、三角形、包围盒 | 否 |
 | `validate <场景>` | 校验场景，返回全部诊断（带 JSON 路径） | 否 |
 | `export <场景> [模型.obj\|模型.gltf\|模型.glb]` | 图元物体 → OBJ + MTL；扩展名 `.gltf` 导出文本 glTF 2.0（base64 内嵌几何/贴图/动画），`.glb` 导出二进制 GLB（BIN chunk），本引擎均可重新导入 | 否 |
 | `simulate <场景>` | 只跑物理，报告每个刚体的位置 / 速度 / 位移 / 休眠 / 接触，可按 `--trace` 采集轨迹 | 否 |

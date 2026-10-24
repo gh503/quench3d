@@ -47,6 +47,9 @@
 - **画中画节流测试（第 181 轮）**：`pip_refresh_uploads_a_texture` 增加同帧不重复
   回读、过 12 帧恢复的断言。测试总数仍为 833。
 
+- **STL 导入（第 196 轮）**：`assets::parse_stl` 支持二进制/ASCII，`load_model` 识别 `.stl`；
+  `info` 可读，导出→导入 e2e 三角形/包围盒一致；法线缺失时用叉积补。
+
 - **二进制 STL 导出（第 195 轮）**：`quench3d export scene.json model.stl`；与 OBJ 共用
   世界变换/图元网格，报告三角形数/字节数，凸包与 models 进 skipped；单元 + e2e 验证。
 

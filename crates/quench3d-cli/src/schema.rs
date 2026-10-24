@@ -119,7 +119,7 @@ pub fn schema() -> Value {
                 "name": "info",
                 "summary": "检查模型文件：网格/材质/贴图数量、顶点与三角形数、包围盒",
                 "args": [
-                    { "name": "path", "type": "path", "required": true, "description": "glTF/GLB/OBJ 文件路径" }
+                    { "name": "path", "type": "path", "required": true, "description": "glTF/GLB/OBJ/STL 文件路径" }
                 ],
                 "output": "{ path, format, meshes, materials, images, vertices, triangles, bounds_min, bounds_max, bounds_size, mesh_triangles }",
                 "examples": ["quench3d info assets/chair.glb --json"]
