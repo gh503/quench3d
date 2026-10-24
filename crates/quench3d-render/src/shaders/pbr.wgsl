@@ -17,6 +17,7 @@
 @group(2) @binding(4) var<uniform> material: Material;
 @group(2) @binding(5) var emissive_tex: texture_2d<f32>;
 @group(2) @binding(6) var linear_sampler: sampler;
+@group(2) @binding(7) var ao_tex: texture_2d<f32>;
 
 // GPU 蒙皮调色板：场景把本帧所有蒙皮物体的关节矩阵拼进同一块 uniform，
 // 每个实例只带 (起始下标, 关节数)。128 个关节 = 8 KB；只满足 WebGL2
@@ -444,11 +445,15 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
     let mr_sample = textureSample(mr_tex, linear_sampler, uv);
     let em_sample = textureSample(emissive_tex, linear_sampler, uv);
     let normal_sample = textureSample(normal_tex, linear_sampler, uv);
+    let ao_sample = textureSample(ao_tex, linear_sampler, uv);
 
     let has_base = (flags & FLAG_BASE_COLOR_TEX) != 0u;
     let has_mr = (flags & FLAG_MR_TEX) != 0u;
     let has_em = (flags & FLAG_EMISSIVE_TEX) != 0u;
     let has_normal = (flags & FLAG_NORMAL_TEX) != 0u;
+    let has_ao = (flags & FLAG_AO_TEX) != 0u;
+    // AO 只压环境光/IBL，不压直接光与自发光；强度 0 = 完全忽略贴图。
+    let ao = select(1.0, ao_sample.r * material.params2.z, has_ao);
 
     var albedo = material.base_color_factor * in.albedo;
     if (has_base) {
@@ -589,11 +594,12 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
                 roughness * roughness,
             );
             let env_spec = env_reflection * environment_brdf(f0, roughness, n_dot_v);
-            lo = lo + kd_env * albedo.rgb * env_diffuse;
-            lo = lo + env_spec;
+            lo = lo + kd_env * albedo.rgb * env_diffuse * ao;
+            lo = lo + env_spec * ao;
         } else {
-            lo = lo + kd_env * albedo.rgb * ambient_irradiance;
-            lo = lo + f_env * ambient_irradiance * (1.0 - roughness) * (0.35 + 0.65 * metallic);
+            lo = lo + kd_env * albedo.rgb * ambient_irradiance * ao;
+            lo = lo
+                + f_env * ambient_irradiance * (1.0 - roughness) * (0.35 + 0.65 * metallic) * ao;
         }
     } else {
         lo = albedo.rgb;

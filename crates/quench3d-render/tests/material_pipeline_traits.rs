@@ -162,6 +162,63 @@ fn alpha_blend_flag_makes_texture_alpha_show_through() {
 }
 
 #[test]
+fn ao_texture_darkens_only_the_ambient_term() {
+    let Some((mut ctx, mut renderer)) = setup() else {
+        return;
+    };
+
+    // 黑 AO 贴图：只压环境光；太阳关掉，避免直接光盖住差异。
+    let black: Vec<u8> = [0u8, 0, 0, 255].repeat(4);
+    let ao = renderer.add_texture(
+        &ctx,
+        &ImageData {
+            width: 2,
+            height: 2,
+            rgba: black,
+        },
+        false,
+    );
+    let plain = renderer.add_material(
+        &ctx,
+        MaterialDesc::from_srgb(0.5, 0.5, 0.5, 1.0).pbr(0.0, 0.9),
+    );
+    let occluded = renderer.add_material(
+        &ctx,
+        MaterialDesc::from_srgb(0.5, 0.5, 0.5, 1.0)
+            .pbr(0.0, 0.9)
+            .with_ao_texture(ao),
+    );
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    for (x, material) in [(-1.2f32, occluded), (1.2, plain)] {
+        renderer.draw(
+            cube,
+            material,
+            InstanceDesc::from_position(vec3(x, 0.0, 0.0), 1.6),
+        );
+    }
+
+    let mut lighting = Lighting::studio();
+    lighting.sun = None;
+    lighting.ambient_intensity = 1.0;
+    lighting.sky.enabled = false;
+    lighting.exposure = 1.0;
+
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 5.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let image = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染");
+    let (left, right) = halves_mean(&image);
+    assert!(
+        right[0] > left[0] * 1.25,
+        "AO 贴图没有压暗环境光：左（有 AO）R={:.3} 应明显低于右（无 AO）R={:.3}",
+        left[0],
+        right[0]
+    );
+}
+
+#[test]
 fn double_sided_flag_renders_back_faces() {
     let Some((mut ctx, mut renderer)) = setup() else {
         return;

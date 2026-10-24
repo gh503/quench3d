@@ -1861,6 +1861,16 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .changed();
             });
             ui.horizontal(|ui| {
+                ui.label("AO 强度");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut desc.ao_strength)
+                            .speed(0.02)
+                            .range(0.0..=1.0),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
                 ui.label("alpha 裁剪");
                 changed |= ui
                     .add(
@@ -1874,7 +1884,7 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             changed |= ui.checkbox(&mut desc.unlit, "无光照").changed();
             changed |= ui.checkbox(&mut desc.double_sided, "双面").changed();
             // 贴图**路径**：改的是文档层记录（导出依据），按下"应用"才真的读盘上传。
-            // 四个槽共用同一套控件；sRGB 按槽位区分（基础色/自发光是颜色贴图，法线/MR 是数据贴图）。
+            // 五个槽共用同一套控件；sRGB 按槽位区分（基础色/自发光是颜色贴图，其余是数据贴图）。
             ui.separator();
             for (slot, label, srgb) in [
                 (
@@ -1897,6 +1907,11 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     "自发光贴图",
                     true,
                 ),
+                (
+                    quench3d::render::MaterialTextureSlot::Ao,
+                    "环境光遮蔽贴图",
+                    false,
+                ),
             ] {
                 let mut path = doc
                     .textures
@@ -1908,6 +1923,7 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             t.metallic_roughness.clone()
                         }
                         quench3d::render::MaterialTextureSlot::Emissive => t.emissive.clone(),
+                        quench3d::render::MaterialTextureSlot::Ao => t.ao.clone(),
                     })
                     .unwrap_or_default();
                 ui.horizontal(|ui| {
@@ -1930,6 +1946,7 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                             quench3d::render::MaterialTextureSlot::Emissive => {
                                 entry.emissive = value
                             }
+                            quench3d::render::MaterialTextureSlot::Ao => entry.ao = value,
                         }
                     }
                 });
@@ -1958,6 +1975,9 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                     quench3d::render::MaterialTextureSlot::Emissive => {
                                         desc.emissive_texture = texture
                                     }
+                                    quench3d::render::MaterialTextureSlot::Ao => {
+                                        desc.ao_texture = texture
+                                    }
                                 }
                                 doc.status = format!("已应用{label}：{path}");
                             }
@@ -1979,6 +1999,9 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                     }
                                     quench3d::render::MaterialTextureSlot::Emissive => {
                                         desc.emissive_texture = None
+                                    }
+                                    quench3d::render::MaterialTextureSlot::Ao => {
+                                        desc.ao_texture = None
                                     }
                                 }
                                 doc.status = format!("已清除{label}");
@@ -2014,6 +2037,7 @@ fn material_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     entry.uv_offset = Some(desc.uv_offset);
     entry.uv_rotation = Some(desc.uv_rotation.to_degrees());
     entry.normal_scale = Some(desc.normal_scale);
+    entry.ao_strength = Some(desc.ao_strength);
     entry.alpha_cutoff = Some(desc.alpha_cutoff);
     entry.alpha_blend = Some(desc.alpha_blend);
     entry.unlit = Some(desc.unlit);
@@ -3323,6 +3347,7 @@ pub(crate) fn apply_object_texture(
             entry.metallic_roughness = value
         }
         quench3d::render::MaterialTextureSlot::Emissive => entry.emissive = value,
+        quench3d::render::MaterialTextureSlot::Ao => entry.ao = value,
     }
     doc.record_edit(engine);
     Ok(texture)

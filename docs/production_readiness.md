@@ -3367,6 +3367,33 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.90 材质环境光遮蔽（AO）贴图（第 190 轮）
+
+**问题**：PBR 材质只有基础色/法线/金属度-粗糙度/自发光四张贴图；`MaterialUniform`
+里虽然预留了 `params2.z`，但 AO 贴图既不能加载也不能生效，缝隙/凹槽只能靠顶点色
+或后期近似。
+
+**做了什么**：
+
+* `MaterialDesc` 新增 `ao_texture: Option<TextureId>` 与 `ao_strength: f32`（默认 1），
+  `flags::AO_TEX = 32`；`params2.z` 现在真正写入 AO 强度。
+* 着色器第五张材质贴图 `ao_tex`（binding 7，复用线性采样器）；片元里
+  `ao = texture.r * strength`，只乘到环境光/IBL 的 diffuse 与 specular 上，
+  **不压直接光、不压自发光**；`ao_strength = 0` 等于忽略贴图。
+* `MaterialDoc` 新增 `ao_texture` / `ao_strength`；校验器检查强度在 0~1 且贴图文件存在。
+* CLI runner、编辑器 `TexturePaths`/属性面板（第五个贴图槽 + 「AO 强度」）全部接线。
+* glTF 导出写 `occlusionTexture`（`strength` 同步），导入路径本来就有 AO 的话仍按贴图槽处理。
+
+**验证**：
+
+* 像素级 `ao_texture_darkens_only_the_ambient_term`：同一灰盒左右各一，左边挂纯黑
+  AO 贴图、右边不挂，关掉太阳只留环境光——左边平均红通道比右边低 **>25%**。
+* 单元测试：AO 标志位、强度进 `params2.z`、默认强度 1。
+* 场景校验：`ao_strength` 越界报错；`ao_texture` 缺文件报错（复用贴图路径检查）。
+* glTF 导出测试：`occlusionTexture.index/strength` 正确。
+* UI smoke：属性面板绘制「环境光遮蔽贴图」「AO 强度」。
+* 全量门禁 **840** 测试、0 失败（新增 2 个测试）。
+
 ### 23.89 逐物体接收阴影开关（第 189 轮）
 
 **问题**：23.88 只做了「投射」；想让地面/墙面不接收某个物体的影子，或者让

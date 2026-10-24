@@ -6,7 +6,7 @@
 //! **单文件**，不依赖外部 `.bin`。
 //!
 //! **贴图**：`base_color_texture` / `normal_texture` / `metallic_roughness_texture` /
-//! `emissive_texture` 会按场景文件所在目录解析并内嵌进同一个 buffer（`images` + `textures`），
+//! `emissive_texture` / `ao_texture` 会按场景文件所在目录解析并内嵌进同一个 buffer（`images` + `textures`），
 //! 只接受 PNG/JPEG；路径缺失/读不到/格式不支持会在 `skipped` 里报告，导出继续。
 //! Web 端没有文件系统，贴图统一报告为未嵌入，几何照常导出。
 //!
@@ -153,6 +153,7 @@ pub fn export_gltf_with_base(
             ("法线", &m.normal_texture),
             ("金属度-粗糙度", &m.metallic_roughness_texture),
             ("自发光", &m.emissive_texture),
+            ("环境光遮蔽", &m.ao_texture),
         ] {
             if let Some(path) = path {
                 load_texture(
@@ -486,6 +487,12 @@ fn material_json(
     }
     if let Some(index) = tex(&m.emissive_texture) {
         out["emissiveTexture"] = json!({ "index": index });
+    }
+    if let Some(index) = tex(&m.ao_texture) {
+        out["occlusionTexture"] = json!({
+            "index": index,
+            "strength": m.ao_strength.unwrap_or(1.0).clamp(0.0, 1.0),
+        });
     }
     if m.uv_scale.is_some_and(|s| (s - 1.0).abs() > 1e-6) {
         skipped.push(format!(
@@ -1040,6 +1047,7 @@ mod tests {
                     "带图": {
                         "color": [1, 1, 1],
                         "base_color_texture": "tex.png",
+                        "ao_texture": "tex.png", "ao_strength": 0.4,
                         "alpha_cutoff": 0.4,
                         "double_sided": true
                     }
@@ -1055,6 +1063,15 @@ mod tests {
         assert_eq!(json["textures"][0]["source"], 0);
         let pbr = &json["materials"][0]["pbrMetallicRoughness"];
         assert_eq!(pbr["baseColorTexture"]["index"], 0);
+        assert_eq!(json["materials"][0]["occlusionTexture"]["index"], 0);
+        assert!(
+            (json["materials"][0]["occlusionTexture"]["strength"]
+                .as_f64()
+                .unwrap()
+                - 0.4)
+                .abs()
+                < 1e-6
+        );
         assert_eq!(json["materials"][0]["alphaMode"], "MASK");
         assert!((json["materials"][0]["alphaCutoff"].as_f64().unwrap() - 0.4).abs() < 1e-5);
         assert_eq!(json["materials"][0]["doubleSided"], true);

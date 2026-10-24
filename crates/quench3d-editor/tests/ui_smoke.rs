@@ -1026,6 +1026,10 @@ fn material_texture_slots_have_apply_and_clear_buttons() {
         "物体材质面板没有清除基础色贴图按钮"
     );
     assert!(
+        shapes_contain_text(&shapes, "环境光遮蔽贴图") && shapes_contain_text(&shapes, "AO 强度"),
+        "材质面板没有 AO 贴图/强度控件"
+    );
+    assert!(
         shapes_contain_text(&shapes, "UV 偏移"),
         "物体材质面板没有绘制 UV 偏移"
     );

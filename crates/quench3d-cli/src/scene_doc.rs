@@ -572,7 +572,7 @@ impl MaterialDoc {
     ///
     /// 校验与加载共用这一份清单，避免"校验看了 4 个、加载只读了 3 个"这种漂移。
     /// 基础色与自发光贴图是颜色贴图（sRGB），法线与金属度-粗糙度贴图是数据贴图（线性）。
-    pub fn textures(&self) -> [(&'static str, Option<&String>, bool); 4] {
+    pub fn textures(&self) -> [(&'static str, Option<&String>, bool); 5] {
         [
             ("base_color_texture", self.base_color_texture.as_ref(), true),
             ("normal_texture", self.normal_texture.as_ref(), false),
@@ -582,6 +582,7 @@ impl MaterialDoc {
                 false,
             ),
             ("emissive_texture", self.emissive_texture.as_ref(), true),
+            ("ao_texture", self.ao_texture.as_ref(), false),
         ]
     }
 }
@@ -1304,6 +1305,12 @@ pub struct MaterialDoc {
     /// 自发光贴图路径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emissive_texture: Option<String>,
+    /// 环境光遮蔽（AO）贴图路径，只采样 R 通道。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ao_texture: Option<String>,
+    /// AO 强度 0~1，缺省 1；0 = 忽略 AO 贴图。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ao_strength: Option<f32>,
     /// 法线强度，缺省 1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normal_scale: Option<f32>,
@@ -4642,6 +4649,15 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.uv_scale"),
                         format!("UV 缩放必须是正有限数，当前为 {u}"),
+                    ));
+                }
+            }
+            if let Some(a) = m.ao_strength {
+                if !a.is_finite() || !(0.0..=1.0).contains(&a) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.ao_strength"),
+                        format!("AO 强度必须在 0~1 之间，当前为 {a}"),
                     ));
                 }
             }
@@ -8786,6 +8802,7 @@ mod tests {
             "materials": { "m": { "color": [1, 1, 1], "alpha": 0.5, "uv_scale": 2.0,
                                   "uv_offset": [0.25, -0.5], "uv_rotation": 45.0,
                                   "emissive_color": [1.0, 0.5, 0.0], "normal_scale": 0.5,
+                                  "ao_strength": 0.6,
                                   "alpha_blend": true, "double_sided": true, "unlit": false } }
         }))
         .unwrap();
@@ -8793,6 +8810,20 @@ mod tests {
         let m = &ok.materials["m"];
         assert_eq!(m.uv_offset, Some([0.25, -0.5]));
         assert_eq!(m.uv_rotation, Some(45.0));
+        assert_eq!(m.ao_strength, Some(0.6));
+
+        let bad_ao = SceneDoc::from_value(json!({
+            "materials": { "m": { "color": [1, 1, 1], "ao_strength": 1.5 } }
+        }))
+        .unwrap();
+        assert!(
+            bad_ao
+                .validate()
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.path == "materials.m.ao_strength"),
+            "AO 强度越界必须报错: {:?}",
+            bad_ao.validate()
+        );
 
         // 相机：近/远裁剪面与正交高度
         let cam = SceneDoc::from_value(json!({

@@ -1010,7 +1010,8 @@ NaN 刚体  : 0
 几处容易踩的语义（都有校验/警告兜着）：
 
 * **贴图路径相对场景文件解析**（再回退 `assets` 搜索路径），相对路径不会跟着你的 shell 目录跑；
-  支持 4 个槽位：`base_color_texture` / `normal_texture` / `metallic_roughness_texture` / `emissive_texture`。
+  支持 5 个槽位：`base_color_texture` / `normal_texture` / `metallic_roughness_texture` /
+  `emissive_texture` / `ao_texture`（AO 只采样 R 通道，`ao_strength` 0~1 控制压暗程度）。
 * `alpha_cutoff` 与 `alpha_blend` **同时给时裁剪优先**（会给出警告，避免你以为在混合）。
 * `lighting.point_lights` 最多 8 盏生效，**不写这个字段 = 保留预设自带的补光**，写 `[]` 才是显式清空。
 * `lighting.bloom` / `lighting.fog` **不写 = 关闭**（像素与关闭时逐位相同）；写了就是打开

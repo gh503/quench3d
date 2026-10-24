@@ -1209,6 +1209,8 @@ pub enum MaterialTextureSlot {
     MetallicRoughness,
     /// 自发光。
     Emissive,
+    /// 环境光遮蔽（只采样 R 通道）。
+    Ao,
 }
 
 /// 把 CPU 预滤波 cubemap 上传成 `Rgba16Float` 立方体贴图。
@@ -1363,6 +1365,7 @@ impl Renderer {
                 },
                 texture_binding(5),
                 sampler_binding(6, true),
+                texture_binding(7),
             ],
         });
 
@@ -2576,6 +2579,8 @@ impl Renderer {
         let normal_view = view_for(desc.normal_texture, &self.flat_normal_texture);
         let mr_view = view_for(desc.metallic_roughness_texture, &self.white_texture);
         let emissive_view = view_for(desc.emissive_texture, &self.black_texture);
+        // AO 缺省是白图（r = 1），乘上去等于不压暗。
+        let ao_view = view_for(desc.ao_texture, &self.white_texture);
         // 采样器统一使用基础色纹理的采样器（贴图参数差异对最终效果影响很小）
         let sampler = self
             .textures
@@ -2619,6 +2624,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::Sampler(&data_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&ao_view),
                 },
             ],
         });
@@ -2686,6 +2695,7 @@ impl Renderer {
             MaterialTextureSlot::Normal => desc.normal_texture = texture,
             MaterialTextureSlot::MetallicRoughness => desc.metallic_roughness_texture = texture,
             MaterialTextureSlot::Emissive => desc.emissive_texture = texture,
+            MaterialTextureSlot::Ao => desc.ao_texture = texture,
         }
         let uniform_buffer = self.materials[id as usize].uniform_buffer.clone();
         let bind_group = self.build_material_bind_group(ctx, &desc, &uniform_buffer);

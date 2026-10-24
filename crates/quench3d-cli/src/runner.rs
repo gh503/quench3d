@@ -3972,6 +3972,9 @@ fn material_desc(
     if let Some(n) = m.normal_scale {
         desc.normal_scale = n;
     }
+    if let Some(s) = m.ao_strength {
+        desc.ao_strength = s;
+    }
     if let Some(cut) = m.alpha_cutoff {
         desc.alpha_cutoff = cut;
     }
@@ -4000,6 +4003,7 @@ fn material_desc(
             "normal_texture" => desc.normal_texture = Some(id),
             "metallic_roughness_texture" => desc.metallic_roughness_texture = Some(id),
             "emissive_texture" => desc.emissive_texture = Some(id),
+            "ao_texture" => desc.ao_texture = Some(id),
             _ => {}
         }
     }

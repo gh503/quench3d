@@ -420,6 +420,8 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             normal_texture: None,
             metallic_roughness_texture: None,
             emissive_texture: None,
+            ao_texture: None,
+            ao_strength: None,
             normal_scale: None,
             alpha_cutoff: None,
             alpha_blend: None,
@@ -613,6 +615,12 @@ fn apply_texture_overrides(material: &mut MaterialDoc, explicit: &TexturePaths) 
     }
     if explicit.emissive.is_some() {
         material.emissive_texture = explicit.emissive.clone();
+    }
+    if explicit.ao.is_some() {
+        material.ao_texture = explicit.ao.clone();
+    }
+    if explicit.ao_strength.is_some() {
+        material.ao_strength = explicit.ao_strength;
     }
     if explicit.uv_scale.is_some() {
         material.uv_scale = explicit.uv_scale;

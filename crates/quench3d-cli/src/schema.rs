@@ -417,7 +417,9 @@ pub fn scene_grammar() -> Value {
             "base_color_texture": "贴图路径，相对**场景文件**解析（也支持 assets 搜索路径）",
             "normal_texture": "法线贴图路径",
             "metallic_roughness_texture": "金属度/粗糙度贴图路径（glTF 约定：G=粗糙度，B=金属度）",
-            "emissive_texture": "自发光贴图路径"
+            "emissive_texture": "自发光贴图路径",
+            "ao_texture": "环境光遮蔽（AO）贴图路径，只采样 R 通道",
+            "ao_strength": "AO 强度 0~1，缺省 1；0 = 忽略 AO 贴图"
         },
         "shape": {
             "type": ["box", "sphere", "capsule", "cylinder", "cone", "rounded_box", "heightfield", "plane", "convex"],
@@ -730,6 +732,8 @@ pub fn json_schema() -> Value {
             "normal_texture",
             "metallic_roughness_texture",
             "emissive_texture",
+            "ao_texture",
+            "ao_strength",
             "normal_scale",
             "alpha_cutoff",
             "alpha_blend",

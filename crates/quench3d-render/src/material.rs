@@ -22,6 +22,8 @@ pub mod flags {
     pub const EMISSIVE_TEX: u32 = 8;
     /// 无光照（纯色/自发光卡通外观）。
     pub const UNLIT: u32 = 16;
+    /// 使用环境光遮蔽（AO）贴图。
+    pub const AO_TEX: u32 = 32;
 }
 
 /// GPU 材质常量（与 `common.wgsl` 的 `Material` 布局一致）。
@@ -67,6 +69,10 @@ pub struct MaterialDesc {
     pub metallic_roughness_texture: Option<TextureId>,
     /// 自发光贴图。
     pub emissive_texture: Option<TextureId>,
+    /// 环境光遮蔽（AO）贴图，只采样 R 通道。
+    pub ao_texture: Option<TextureId>,
+    /// AO 强度（0 = 不压暗，1 = 全额；默认 1）。
+    pub ao_strength: f32,
     /// 法线强度。
     pub normal_scale: f32,
     /// alpha 裁剪阈值（> 0 时启用裁剪，0 表示不裁剪）。
@@ -101,6 +107,8 @@ impl Default for MaterialDesc {
             normal_texture: None,
             metallic_roughness_texture: None,
             emissive_texture: None,
+            ao_texture: None,
+            ao_strength: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.0,
             alpha_blend: false,
@@ -168,6 +176,18 @@ impl MaterialDesc {
         self
     }
 
+    /// AO 贴图（只采样 R 通道，乘到环境光/IBL 上）。
+    pub fn with_ao_texture(mut self, id: TextureId) -> Self {
+        self.ao_texture = Some(id);
+        self
+    }
+
+    /// AO 强度（0..=1，默认 1）。
+    pub fn with_ao_strength(mut self, strength: f32) -> Self {
+        self.ao_strength = strength;
+        self
+    }
+
     /// 无光照。
     pub fn unlit(mut self) -> Self {
         self.unlit = true;
@@ -217,6 +237,9 @@ impl MaterialDesc {
         if self.emissive_texture.is_some() {
             f |= flags::EMISSIVE_TEX;
         }
+        if self.ao_texture.is_some() {
+            f |= flags::AO_TEX;
+        }
         if self.unlit {
             f |= flags::UNLIT;
         }
@@ -242,7 +265,7 @@ impl MaterialDesc {
             params2: [
                 self.alpha_cutoff,
                 self.normal_scale,
-                1.0,
+                self.ao_strength.clamp(0.0, 1.0),
                 if self.water_mask { 1.0 } else { 0.0 },
             ],
             uv_transform: [
@@ -302,6 +325,25 @@ mod tests {
         assert_eq!(u[1], -0.5);
         assert!(u[2].abs() < 1e-6, "cos(90°) 应约为 0：{}", u[2]);
         assert!((u[3] - 1.0).abs() < 1e-6, "sin(90°) 应约为 1：{}", u[3]);
+    }
+
+    #[test]
+    fn ao_texture_sets_flag_and_strength_reaches_uniform() {
+        let m = MaterialDesc {
+            ao_texture: Some(3),
+            ao_strength: 0.35,
+            ..MaterialDesc::default()
+        };
+        let u = m.to_uniform();
+        assert_eq!(
+            m.flag_bits() & flags::AO_TEX,
+            flags::AO_TEX,
+            "有 AO 贴图时必须置 AO 标志"
+        );
+        assert!((u.params2[2] - 0.35).abs() < 1e-6, "AO 强度没进 uniform");
+        let plain = MaterialDesc::default();
+        assert_eq!(plain.flag_bits() & flags::AO_TEX, 0);
+        assert!((plain.to_uniform().params2[2] - 1.0).abs() < 1e-6);
     }
 
     #[test]

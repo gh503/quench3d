@@ -80,3 +80,4 @@ const FLAG_NORMAL_TEX: u32 = 2u;
 const FLAG_MR_TEX: u32 = 4u;
 const FLAG_EMISSIVE_TEX: u32 = 8u;
 const FLAG_UNLIT: u32 = 16u;
+const FLAG_AO_TEX: u32 = 32u;

@@ -128,6 +128,10 @@ pub struct TexturePaths {
     pub metallic_roughness: Option<String>,
     /// 自发光贴图路径。
     pub emissive: Option<String>,
+    /// 环境光遮蔽（AO）贴图路径。
+    pub ao: Option<String>,
+    /// AO 强度（0~1）。
+    pub ao_strength: Option<f32>,
     /// UV 平铺次数。
     pub uv_scale: Option<f32>,
     /// UV 偏移（度/贴图坐标）。
