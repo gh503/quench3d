@@ -3323,6 +3323,7 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     for (i, decal) in decals {
         let mut size = decal.size.unwrap_or([1.0, 1.0]);
         let mut rotation = decal.rotation.unwrap_or(0.0);
+        let mut color = decal.color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
         let mut changed = false;
         ui.label(
             RichText::new(format!(
@@ -3357,16 +3358,20 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .suffix("°"),
                 )
                 .changed();
+            ui.label("颜色");
+            changed |= ui.color_edit_button_rgba_unmultiplied(&mut color).changed();
         });
         if !changed {
             continue;
         }
         let size = [size[0].max(0.01), size[1].max(0.01)];
         let rotation = rotation.clamp(-360.0, 360.0);
+        color = color.map(|c| c.clamp(0.0, 1.0));
         if let Some(base) = doc.base_doc_mut() {
             if let Some(decal) = base.decals.get_mut(i) {
                 decal.size = Some(size);
                 decal.rotation = Some(rotation);
+                decal.color = Some(color);
             }
         }
         let name = format!("贴花{i}");
@@ -3385,6 +3390,7 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 quat,
                 Vec3::new(size[0], size[1], 1.0),
             );
+            engine.scene.objects[index].color = Vec4::from_array(color);
         }
         doc.record_edit(engine);
     }

@@ -67,6 +67,7 @@ tools/verify_all.sh
 | 命名相机切换 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke named_camera` | 装载侧视(position 10,5,0 / look_at 0,1,0 / fov 45°)，选择后焦点、√116 距离、fov 全对；下拉框显示「侧视」 |
 | 粒子终点色编辑 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_particle` | 面板排版出「终点色」控件 |
 | 粒子数量编辑 | `cargo test -p quench3d --lib particle_count`、UI smoke | 4→2 保留前两个代理；2→6 新代理在球内；6→1 收缩；面板有「数量」 |
+| 贴花颜色编辑 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_decals` | 贴花面板排版出颜色控件 |
 | 贴花面板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-editor --test ui_smoke inspector_lists_decals` | 2×1、45°、无贴图贴花在面板显示「贴花（1 个）」「尺寸」「旋转」「纯色」 |
 | 序列渲染粒子推进 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --lib sequence_updates_particles`；`quench3d movie examples/particles_showcase.json --frames 60 --encoder gif …` | 3 帧位置逐帧递增 >0.1；60 帧 GIF 帧间平均绝对差 0.432（修复前 0.0） |
 | 粒子展示场景 | `cargo test -p quench3d-cli --lib particles_showcase_example`；`cargo run -p quench3d-cli -- render examples/particles_showcase.json --out … --json` | 4 个发射器 shape=sphere/box/disc/cone 且校验无错；渲染 ok=true、304 实例、0 剔除 |
