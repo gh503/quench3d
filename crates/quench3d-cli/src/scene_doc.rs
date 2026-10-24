@@ -1638,10 +1638,10 @@ pub struct ModelAnimationDoc {
     /// `models[].blend.found = false` 会说明它没生效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<ModelAnimationBlendDoc>,
-    /// 可选根运动：把 glTF 里这个**节点名**的水平位移提取到整个物体上。
+    /// 可选根运动：把 glTF 里这个**节点名**的三维位移与偏航提取到整个物体上。
     ///
     /// 只支持单 clip、`"loop": false`、无 `blend`、无 `animator`、无两骨 IK 的模型；
-    /// 只取 XZ 与绕 Y 偏航，Y/俯仰/滚转不提取。节点名不存在时报告
+    /// 提取三维位移与绕 Y 偏航，俯仰/滚转不提取。节点名不存在时报告
     /// `root_motion.found = false`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_motion: Option<String>,

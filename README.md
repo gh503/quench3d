@@ -151,11 +151,11 @@ cargo run --release -p quench3d-editor -- 场景.json   # 启动即打开一个�
   边界：双 clip 混合会按 `blend_weight` 逐 target 插值两条 clip 的 morph 权重；
   编辑器「动画」面板可勾选手动覆盖并拖动每个 target 的滑杆；`models[].collide` 的碰撞体仍是绑定姿态。`info` 会报 `morph_targets`，动画报告
   会报 `animation.morph_tracks`。
-* **根运动（只提取水平位移）**：`models[].animation.root_motion` 写一个 glTF 节点名，
-  每帧把该节点相对**设置时**位置的 XZ 位移与绕 Y 偏航从节点世界矩阵里扣掉、再整体加到
-  模型物体上，所以蒙皮/刚性片段的可见结果不变，但物体真的往前走了、也真的转向了
+* **根运动（位移 + 偏航）**：`models[].animation.root_motion` 写一个 glTF 节点名，
+  每帧把该节点相对**设置时**位置的三维位移与绕 Y 偏航从节点世界矩阵里扣掉、再整体加到
+  模型物体上，所以蒙皮/刚性片段的可见结果不变，但物体真的往前/往上走了、也真的转向了
   （摄像机跟随、选择框、后续物理/导出都看到同一个位置）。要求单 clip、显式
-  `"loop": false`、无 `blend`/`animator`/IK；只取 XZ 与偏航，Y/俯仰/滚转留在模型内部。边界：节点名不存在时报告
+  `"loop": false`、无 `blend`/`animator`/IK；只取位移与偏航，俯仰/滚转留在模型内部。边界：节点名不存在时报告
   `models[].animation.root_motion.found = false` 并保持原地；不提取转身/跳跃的根旋转，
   也不做根运动重定向/速度曲线。
 * **参数驱动的动画状态机**：场景里用 `models[].animator` 声明 `states`、`parameters`

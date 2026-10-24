@@ -3342,9 +3342,9 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 **做了什么**：
 
 * `models[].animation.root_motion`：写 glTF 节点名；`Scene::set_model_root_motion`
-  记录设置时的节点世界位置与朝向，每帧把 XZ 差值与绕 Y 偏航从所有节点世界矩阵里扣掉，
+  记录设置时的节点世界位置与朝向，每帧把三维差值与绕 Y 偏航从所有节点世界矩阵里扣掉，
   再把同样的世界位移/偏航加到模型物体的基础变换上。
-* 只支持单 clip、`loop: false`、无 `blend`/`animator`/IK；只取 XZ 与偏航，Y/俯仰/滚转
+* 只支持单 clip、`loop: false`、无 `blend`/`animator`/IK；只取位移与偏航，俯仰/滚转
   保留在模型内部。`ModelAnimationStatus.root_motion` 报 `{node, found}`；节点不存在时
   `found=false` 并保持原地。
 * 编辑器动画面板显示「根运动 · 节点名」；schema/README/系统提示同步。
@@ -3355,11 +3355,13 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
   网格矩阵回到绑定位置（不双移），1s 前移 2m；循环实例拒绝启用。
 * `root_motion_extracts_yaw_to_the_object`：1s 后物体偏航 90°，网格矩阵回到绑定朝向
   （不双转）。
+* `root_motion_extracts_vertical_translation`：0.5s 上升 1m、1s 上升 2m，节点世界矩阵
+  扣掉 Y 位移。
 * `model_root_motion_is_reported_and_validated`（e2e）：真实 GLB 报告 `found=true`；
   错节点 `found=false`；loop 缺省 + root_motion、blend + root_motion 都校验失败。
 * UI smoke：动画面板排版出「根运动 · root」。
 
-**边界**：不是完整 root motion 系统——只提取绕 Y 偏航，不提取垂直位移/俯仰/滚转，
+**边界**：不是完整 root motion 系统——只提取三维位移与绕 Y 偏航，不提取俯仰/滚转，
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 

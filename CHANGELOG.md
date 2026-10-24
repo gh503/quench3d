@@ -42,8 +42,8 @@
 ### 新增
 
 - **模型根运动（第 148 轮）**：`models[].animation.root_motion` 提取指定 glTF 节点的
-  水平位移与绕 Y 偏航到模型物体上（单 clip/非循环/无 blend/animator/IK；只取 XZ+偏航）。
-  报告 `root_motion.{node,found}`，编辑器显示节点。测试总数 808 → 812。
+  三维位移与绕 Y 偏航到模型物体上（单 clip/非循环/无 blend/animator/IK；只取位移+偏航）。
+  报告 `root_motion.{node,found}`，编辑器显示节点。测试总数 808 → 813。
 
 - **粒子颜色渐变（第 147 轮）**：`particles[].color_end` 让 RGB/alpha 随寿命线性插值，
   再乘二次淡出；不写保持同色。测试总数 807 → 808。

@@ -503,16 +503,16 @@ pub struct ModelAnimationInstance {
     pub ik: Vec<IkChain>,
     /// 动画事件标记（主/副 clip 用 `clip` 区分）；空 = 不触发。
     pub events: Vec<SceneAnimationEvent>,
-    /// 根运动：把根节点的水平位移提取到整个物体上；`None` = 不提取。
+    /// 根运动：把根节点的三维位移与偏航提取到整个物体上；`None` = 不提取。
     pub root_motion: Option<ModelRootMotion>,
 }
 
-/// 根运动提取状态：根节点下标 + 设置时该节点的世界位置（水平位移的零点）。
+/// 根运动提取状态：根节点下标 + 设置时的世界位置/朝向（位移与偏航的零点）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelRootMotion {
     /// 被当作根运动的节点下标。
     pub node: usize,
-    /// 设置根运动时该节点的世界位置；只取 XZ 差值。
+    /// 设置根运动时该节点的世界位置；每帧取三维差值。
     pub origin: Vec3,
     /// 设置根运动时该节点的世界朝向；只取绕 Y 的偏航差。
     pub origin_rotation: Quat,
@@ -621,7 +621,7 @@ fn animation_worlds(a: &ModelAnimationInstance) -> Option<Vec<Mat4>> {
             .blended_node_worlds(&a.player, secondary, a.blend_weight),
         None => a.player.node_worlds(&a.model),
     }?;
-    // 根运动：把根节点的水平位移从节点世界矩阵里扣掉，再整体加到物体变换上。
+    // 根运动：把根节点的三维位移与偏航从节点世界矩阵里扣掉，再整体加到物体变换上。
     // 这样蒙皮/刚性片段的可见结果与没提取时**逐像素一致**，但外层的场景物体
     // 真的往前走了（摄像机/物理/编辑器选择都跟着）。
     if let Some(rm) = a.root_motion {
@@ -644,7 +644,7 @@ fn animation_worlds(a: &ModelAnimationInstance) -> Option<Vec<Mat4>> {
     Some(worlds)
 }
 
-/// 根节点相对设置时的世界位移（只取 XZ）。
+/// 根节点相对设置时的世界位移（XZ + 垂直 Y）。
 fn root_motion_delta(a: &ModelAnimationInstance, worlds: &[Mat4]) -> Vec3 {
     let Some(rm) = a.root_motion else {
         return Vec3::ZERO;
@@ -654,7 +654,7 @@ fn root_motion_delta(a: &ModelAnimationInstance, worlds: &[Mat4]) -> Vec3 {
     };
     let delta = world.translation() - rm.origin;
     if delta.is_finite() {
-        Vec3::new(delta.x, 0.0, delta.z)
+        delta
     } else {
         Vec3::ZERO
     }
@@ -1574,11 +1574,11 @@ impl Scene {
         Some(index)
     }
 
-    /// 启用**根运动提取**：把 `node` 的水平位移与绕 Y 偏航移到整个物体上。
+    /// 启用**根运动提取**：把 `node` 的三维位移与绕 Y 偏航移到整个物体上。
     ///
     /// 只支持单 clip、非循环、无副 clip、无状态机、无 IK 的实例；任一条件不满足
     /// 返回 `false`（不改变实例）。设置成功时以**当前播放时间**的根节点世界位置/朝向
-    /// 为零点；只提取 XZ 与偏航，Y/俯仰/滚转仍留在模型内部。
+    /// 为零点；只提取位移与偏航，俯仰/滚转仍留在模型内部。
     pub fn set_model_root_motion(&mut self, animation_index: usize, node: &str) -> bool {
         let Some(a) = self.animations.get_mut(animation_index) else {
             return false;
@@ -2897,6 +2897,47 @@ mod anim_tests {
         }
     }
 
+    /// 单节点、沿 Y 上升 2m 的模型（用于根运动垂直分量）。
+    fn rising_model() -> LoadedModel {
+        LoadedModel {
+            nodes: vec![
+                LoadedNode::default(),
+                LoadedNode {
+                    name: "上升".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            meshes: vec![
+                LoadedMesh {
+                    node: Some(0),
+                    bind_inverse: Mat4::IDENTITY,
+                    ..Default::default()
+                },
+                LoadedMesh {
+                    node: Some(1),
+                    bind_inverse: Mat4::IDENTITY,
+                    ..Default::default()
+                },
+            ],
+            animations: vec![LoadedAnimation {
+                name: "上升".into(),
+                duration: 1.0,
+                tracks: vec![AnimationTrack {
+                    node: 1,
+                    property: AnimatedProperty::Translation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0, 1.0],
+                    values: vec![[0.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]],
+                    in_tangents: Vec::new(),
+                    out_tangents: Vec::new(),
+                }],
+                morph_tracks: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
     fn marker(time: f32, name: &str) -> SceneAnimationEvent {
         SceneAnimationEvent {
             name: name.into(),
@@ -2983,6 +3024,37 @@ mod anim_tests {
         assert!(
             (Quat::from_mat3(still.to_mat3()).to_euler_yxz().0).abs() < 1e-3,
             "网格不应再转一次：{still:?}"
+        );
+    }
+
+    #[test]
+    fn root_motion_extracts_vertical_translation() {
+        let model = std::sync::Arc::new(rising_model());
+        let mut scene = Scene::new();
+        let dummy = scene.add_named(0, 0, Transform::default(), "根");
+        let object = scene.add_named(1, 0, Transform::default(), "上升");
+        let mut player = model.player("上升").expect("有动画");
+        player.looping = false;
+        let index = scene.play_model_animation(
+            std::sync::Arc::clone(&model),
+            vec![dummy, object],
+            vec![Transform::default(), Transform::default()],
+            player,
+        );
+        assert!(scene.set_model_root_motion(index, "上升"));
+        scene.advance_animations(0.5);
+        let y = scene.objects[object].transform.position.y;
+        assert!((y - 1.0).abs() < 1e-4, "0.5s 应上升 1m：{y}");
+        let worlds = animation_worlds(&scene.animations[index]).unwrap();
+        assert!(
+            worlds[1].translation().y.abs() < 1e-4,
+            "节点世界矩阵必须扣掉上升，避免双移：{:?}",
+            worlds[1].translation()
+        );
+        scene.advance_animations(0.5);
+        assert!(
+            (scene.objects[object].transform.position.y - 2.0).abs() < 1e-4,
+            "1s 应上升 2m"
         );
     }
 

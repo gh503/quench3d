@@ -1880,7 +1880,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .map(|n| n.name.as_str())
                         .unwrap_or("?");
                     ui.label(
-                        RichText::new(format!("根运动 · {node}（水平位移 + 偏航）"))
+                        RichText::new(format!("根运动 · {node}（位移 + 偏航）"))
                             .small()
                             .weak(),
                     );
