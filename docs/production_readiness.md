@@ -3367,6 +3367,30 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.66 修复：序列渲染/录像里的粒子不推进（第 166 轮）
+
+**问题**：`render_sequence_with_game`（`quench3d movie`、`render_sequence` 共用）只
+推进物理/动画，没有调用 `Scene::update_particles`。`quench3d movie` 录
+`examples/particles_showcase.json` 60 帧，GIF 逐帧像素完全相同（平均绝对差 0），
+粒子停在 setup 那一帧。
+
+**修复**：
+
+* 在序列循环里补上与窗口循环相同的两步：
+  - `engine.scene.update_lods(camera_position)`；
+  - `engine.scene.update_particles(camera_position, particle_dt)`，暂停时 `dt=0`。
+* 粒子的 LOD/朝向/年龄现在与交互窗口一致。
+
+**验证**：
+
+* `sequence_updates_particles_between_frames`：3 帧、dt=0.2、速度 +X，位置逐帧递增
+  > 0.1（修复前三条完全相同）。
+* 重录 640×400 / 60 帧 GIF：帧间平均绝对差 **0.432**（min 0.365、max 0.497），
+  digest 从 `fnv1a64:cd6d03ea8a14cbdd` 变为 `fnv1a64:44b098ff750fa252`。
+* 全量门禁 827 测试。
+
+**边界**：只修序列渲染；窗口循环本来就会更新粒子。
+
 ### 23.65 命名相机前后切换（第 165 轮）
 
 **做了什么**：

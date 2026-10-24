@@ -1482,6 +1482,13 @@ pub fn render_sequence_with_game<G: Game>(
             }
         }
 
+        // 手工 LOD 与粒子也必须和窗口循环一样每帧推进；否则 movie/render_sequence
+        // 里粒子会永远停在 setup 的那一帧（曾经就是这样，GIF 60 帧逐帧全同）。
+        let camera_position = engine.camera().position;
+        engine.scene.update_lods(camera_position);
+        let particle_dt = if engine.paused { 0.0 } else { frame_dt };
+        engine.scene.update_particles(camera_position, particle_dt);
+
         let camera = engine.camera();
         let lighting = engine.scene.lighting.clone();
         engine.renderer.begin_frame();
@@ -1666,4 +1673,81 @@ mod tests {
         let mid = (a + b) * 0.5;
         assert_eq!(last.position, (mid + Vec3::Z * 0.35).to_array());
     }
+}
+/// 序列渲染（movie/render_sequence）必须每帧推进粒子；否则 GIF 会逐帧全同。
+#[test]
+fn sequence_updates_particles_between_frames() {
+    if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+        return;
+    }
+    let config = EngineConfig {
+        width: 64,
+        height: 64,
+        ..Default::default()
+    };
+    let params = SequenceParams {
+        frames: 3,
+        steps_per_frame: 1,
+        dt: 0.2,
+        warmup_frames: 0,
+    };
+    let mut xs = Vec::new();
+    let mut setup = false;
+    let result = render_sequence_with_game(
+        64,
+        64,
+        &config,
+        params,
+        &mut NoGame,
+        |engine| {
+            let mesh = engine.assets.mesh(
+                &mut engine.renderer,
+                &engine.gpu,
+                "$test_particle_quad",
+                &quench3d_render::mesh::MeshData::quad(Vec2::ONE),
+            );
+            let material = engine.assets.material(
+                &mut engine.renderer,
+                &engine.gpu,
+                "$test_particle_mat",
+                quench3d_render::material::MaterialDesc {
+                    unlit: true,
+                    alpha_blend: true,
+                    double_sided: true,
+                    ..Default::default()
+                },
+            );
+            engine.scene.add_particle_system(
+                mesh,
+                material,
+                crate::scene::ParticleDesc {
+                    count: 1,
+                    lifetime: 10.0,
+                    velocity: Vec3::X,
+                    spread: 0.0,
+                    gravity: Vec3::ZERO,
+                    radius: 0.0,
+                    color: Vec4::ONE,
+                    color_end: Vec4::ONE,
+                    ..Default::default()
+                },
+            );
+            setup = true;
+        },
+        |engine, frame, _image| {
+            let index = engine.scene.particles[0].objects[0];
+            xs.push((
+                frame.frame,
+                engine.scene.objects[index].transform.position.x,
+            ));
+            Ok(())
+        },
+    );
+    result.expect("序列渲染应成功");
+    assert!(setup, "setup 必须执行");
+    assert_eq!(xs.len(), 3);
+    assert!(
+        xs[1].1 > xs[0].1 + 0.1 && xs[2].1 > xs[1].1 + 0.1,
+        "粒子必须逐帧前进：{xs:?}"
+    );
 }
