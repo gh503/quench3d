@@ -3243,6 +3243,66 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     .changed();
             }
         });
+        let mut texture = doc
+            .base_doc()
+            .and_then(|base| base.particles.get(i))
+            .and_then(|p| p.texture.clone())
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("发射器贴图");
+            ui.text_edit_singleline(&mut texture);
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui
+            .add_enabled(
+                !texture.trim().is_empty(),
+                egui::Button::new("应用粒子贴图（从磁盘读取）"),
+            )
+            .clicked()
+        {
+            match quench3d::render::ImageData::from_file(texture.trim()) {
+                Ok(image) => {
+                    let texture_id = engine.renderer.add_texture(&engine.gpu, &image, true);
+                    let old_material = engine.scene.particles[i].material;
+                    let objects = engine.scene.particles[i].objects.clone();
+                    let mut desc = engine
+                        .renderer
+                        .material(old_material)
+                        .cloned()
+                        .unwrap_or_default();
+                    desc.base_color_texture = None;
+                    let name = format!("$particle_ui_{i}_{}", engine.renderer.material_count());
+                    let material =
+                        engine
+                            .assets
+                            .material(&mut engine.renderer, &engine.gpu, &name, desc);
+                    let ok = engine.renderer.set_material_texture(
+                        &engine.gpu,
+                        material,
+                        quench3d::render::MaterialTextureSlot::BaseColor,
+                        Some(texture_id),
+                    );
+                    if ok {
+                        engine.scene.particles[i].material = material;
+                        for object in objects {
+                            if let Some(obj) = engine.scene.objects.get_mut(object) {
+                                obj.material = material;
+                            }
+                        }
+                        if let Some(base) = doc.base_doc_mut() {
+                            if let Some(particle) = base.particles.get_mut(i) {
+                                particle.texture = Some(texture.trim().to_string());
+                            }
+                        }
+                        doc.record_edit(engine);
+                        doc.status = format!("粒子贴图已应用：{}", texture.trim());
+                    } else {
+                        doc.status = "粒子贴图应用失败（材质或贴图句柄无效）".into();
+                    }
+                }
+                Err(error) => doc.status = format!("粒子贴图读图失败：{error}"),
+            }
+        }
         if changed {
             engine.scene.set_particle_enabled(i, new_enabled);
             if new_count != objects {

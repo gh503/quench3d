@@ -606,6 +606,10 @@ fn inspector_lists_particle_emitters_with_live_parameters() {
         "粒子面板没有启用开关"
     );
     assert!(
+        shapes_contain_text(&output.shapes, "发射器贴图"),
+        "粒子面板没有贴图控件"
+    );
+    assert!(
         shapes_contain_text(&output.shapes, "收束"),
         "粒子面板没有 size_end 编辑控件"
     );
