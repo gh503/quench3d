@@ -1149,6 +1149,9 @@ pub struct ParticleDoc {
     /// 寿命结束时的自转角（度），缺省同 `rotation` = 不转。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_end: Option<f32>,
+    /// 朝向模式：`"billboard"`（缺省，面向相机）或 `"velocity"`（局部 +Z 对齐速度）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<String>,
     /// 寿命（秒），缺省 2.0；必须 > 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<f32>,
@@ -4140,6 +4143,15 @@ impl SceneDoc {
                             "粒子自转角必须是有限数",
                         ));
                     }
+                }
+            }
+            if let Some(alignment) = &p.alignment {
+                if alignment != "billboard" && alignment != "velocity" {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{path}.alignment"),
+                        "粒子朝向只支持 \"billboard\" 或 \"velocity\"",
+                    ));
                 }
             }
             if let Some(shape) = &p.shape {
@@ -8135,6 +8147,7 @@ mod tests {
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
                   "size_end": 0.5, "shape": "box", "box_size": [2, 1, 4],
                   "drag": 0.5, "rotation": 10, "rotation_end": 190,
+                  "alignment": "velocity",
                   "velocity": [0, 2, 0], "gravity": [0, -3, 0],
                   "color_end": [0, 0, 1, 0.2] },
                 { "count": 2, "texture": texture_path.clone() }
@@ -8159,6 +8172,7 @@ mod tests {
         assert_eq!(again.particles[1].drag, Some(0.5));
         assert_eq!(again.particles[1].rotation, Some(10.0));
         assert_eq!(again.particles[1].rotation_end, Some(190.0));
+        assert_eq!(again.particles[1].alignment.as_deref(), Some("velocity"));
         assert_eq!(again.particles[1].color_end, Some([0.0, 0.0, 1.0, 0.2]));
         assert_eq!(
             again.particles[2].texture.as_deref(),
@@ -8189,6 +8203,7 @@ mod tests {
             (json!({"radius": -1}), "particles[0].radius"),
             (json!({"drag": -1}), "particles[0].drag"),
             (json!({"rotation": "x"}), "particles"),
+            (json!({"alignment": "cone"}), "particles[0].alignment"),
             (json!({"spread": -1}), "particles[0].spread"),
             (json!({"color": [1, 1, 1, 2]}), "particles[0].color"),
             (

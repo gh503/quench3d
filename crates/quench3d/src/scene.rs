@@ -107,6 +107,16 @@ pub enum ParticleShape {
     Box,
 }
 
+/// 公告板朝向模式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ParticleAlignment {
+    /// 正面朝向相机（烟雾/火光）。
+    #[default]
+    Billboard,
+    /// 局部 +Z 对齐粒子速度（火花/雨滴）；速度接近 0 时退回相机朝向。
+    Velocity,
+}
+
 /// 一个 CPU 粒子发射器的参数。
 ///
 /// 粒子是**公告板**：每个粒子是一个面向相机的四边形（`MeshData::quad`），
@@ -133,6 +143,8 @@ pub struct ParticleDesc {
     pub rotation: f32,
     /// 寿命结束时的自转角（弧度）；与 `rotation` 相同 = 不转。
     pub rotation_end: f32,
+    /// 公告板朝向模式。
+    pub alignment: ParticleAlignment,
     /// 寿命（秒，必须 > 0）。
     pub lifetime: f32,
     /// 初始四边形边长（米，必须 > 0）。
@@ -162,6 +174,7 @@ impl Default for ParticleDesc {
             drag: 0.0,
             rotation: 0.0,
             rotation_end: 0.0,
+            alignment: ParticleAlignment::Billboard,
             lifetime: 2.0,
             size: 0.12,
             size_end: 0.12,
@@ -194,6 +207,8 @@ pub struct ParticleSystem {
     pub rotation: f32,
     /// 寿命结束时的自转角（弧度）。
     pub rotation_end: f32,
+    /// 公告板朝向模式。
+    pub alignment: ParticleAlignment,
     /// 寿命（秒）。
     pub lifetime: f32,
     /// 初始四边形边长。
@@ -1306,6 +1321,7 @@ impl Scene {
             drag,
             rotation: desc.rotation,
             rotation_end: desc.rotation_end,
+            alignment: desc.alignment,
             lifetime,
             size,
             size_end: desc.size_end,
@@ -1388,8 +1404,17 @@ impl Scene {
                 }
                 let t = (state.age / system.lifetime).clamp(0.0, 1.0);
                 let to_camera = camera - object.transform.position;
-                if to_camera.length_squared() > 1e-8 {
-                    let dir = to_camera.normalize();
+                let velocity_dir = state.velocity.normalize_or_zero();
+                let dir = if system.alignment == ParticleAlignment::Velocity
+                    && velocity_dir.length_squared() > 1e-8
+                {
+                    velocity_dir
+                } else if to_camera.length_squared() > 1e-8 {
+                    to_camera.normalize()
+                } else {
+                    Vec3::ZERO
+                };
+                if dir.length_squared() > 1e-8 {
                     let face = Quat::from_rotation_arc(Vec3::Z, dir);
                     let spin = system.rotation + (system.rotation_end - system.rotation) * t;
                     object.transform.rotation = if spin.abs() > 1e-8 {
@@ -4220,6 +4245,7 @@ mod particle_tests {
             drag: 0.0,
             rotation: 0.0,
             rotation_end: 0.0,
+            alignment: ParticleAlignment::Billboard,
             lifetime: 1.0,
             size: 0.25,
             size_end: 0.25,
@@ -4261,6 +4287,7 @@ mod particle_tests {
             drag: 0.0,
             rotation: 0.0,
             rotation_end: 0.0,
+            alignment: ParticleAlignment::Billboard,
             lifetime: 2.0,
             size: 0.1,
             size_end: 0.5,
@@ -4343,6 +4370,38 @@ mod particle_tests {
             object.transform.position
         );
         assert!(object.color.w > 0.4, "重生后 alpha 应当恢复");
+    }
+
+    #[test]
+    fn particle_velocity_alignment_follows_motion() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 1;
+        desc.position = Vec3::ZERO;
+        desc.velocity = Vec3::new(1.0, 0.0, 0.0);
+        desc.spread = 0.0;
+        desc.gravity = Vec3::ZERO;
+        desc.drag = 0.0;
+        desc.lifetime = 2.0;
+        desc.alignment = ParticleAlignment::Velocity;
+        let system = scene.add_particle_system(0, 0, desc);
+        scene.particles[system].state[0].age = 0.0;
+        let index = scene.particles[system].objects[0];
+        scene.update_particles(Vec3::new(0.0, 0.0, 5.0), 0.1);
+        let normal = scene.objects[index].transform.rotation * Vec3::Z;
+        assert!(
+            (normal - Vec3::X).length() < 1e-4,
+            "速度对齐时局部 +Z 应指向 +X：{normal:?}"
+        );
+
+        // 速度归零后退回面向相机，不能留下上一帧的朝向。
+        scene.particles[system].state[0].velocity = Vec3::ZERO;
+        scene.update_particles(Vec3::new(0.0, 0.0, 5.0), 0.0);
+        let normal = scene.objects[index].transform.rotation * Vec3::Z;
+        assert!(
+            (normal - Vec3::Z).length() < 0.05,
+            "速度归零应退回相机朝向：{normal:?}"
+        );
     }
 
     #[test]

@@ -2978,6 +2978,9 @@ fn particles_section(ui: &mut Ui, engine: &Engine) {
             ),
         };
         let mut extra = Vec::new();
+        if system.alignment == quench3d::scene::ParticleAlignment::Velocity {
+            extra.push("速度对齐".into());
+        }
         if system.drag > 0.0 {
             extra.push(format!("阻尼 {:.2}/s", system.drag));
         }

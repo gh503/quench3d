@@ -3367,6 +3367,23 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.55 粒子的速度对齐（第 154 轮）
+
+**做了什么**：
+
+* `particles[].alignment`：`"billboard"`（缺省，面向相机）或 `"velocity"`。
+* `velocity` 模式下四边形局部 +Z 对齐粒子**当前速度**（火花/雨滴方向）；速度接近 0 时退回面向相机。
+* `ParticleAlignment` / `ParticleDesc.alignment` / `ParticleSystem.alignment` 公开。
+* 编辑器只读面板显示「速度对齐」。
+
+**验证**：
+
+* `particle_velocity_alignment_follows_motion`：速度 +X 时局部 +Z 指向 +X；把速度清零
+  （dt=0）后退回面向 +Z 的相机。
+* `particles_parse_validate_and_roundtrip` 增补 `alignment` 往返与非法值报错。
+
+**边界**：只切换朝向，不做沿速度拉长/拖尾；自转仍绕最终朝向轴。
+
 ### 23.54 编辑器的只读粒子面板（第 153 轮）
 
 **做了什么**：

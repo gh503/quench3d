@@ -3716,6 +3716,10 @@ fn add_particle_visuals(
                     .rotation_end
                     .unwrap_or(p.rotation.unwrap_or(0.0))
                     .to_radians(),
+                alignment: match p.alignment.as_deref() {
+                    Some("velocity") => quench3d::scene::ParticleAlignment::Velocity,
+                    _ => quench3d::scene::ParticleAlignment::Billboard,
+                },
                 lifetime: p.lifetime.unwrap_or(2.0),
                 size: p.size.unwrap_or(0.12),
                 size_end: p.size_end.unwrap_or(p.size.unwrap_or(0.12)),

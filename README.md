@@ -1083,7 +1083,7 @@ NaN 刚体  : 0
 * `particles` 是 **CPU 公告板粒子**（纯视觉，不参与物理）：`{ "count": 64,
   "position": [0, 1, 0], "radius": 0.1, "velocity": [0, 1.2, 0], "spread": 0.4,
   "lifetime": 2.0, "size": 0.12, "size_end": 0.4, "spread": 0.4, "drag": 0.5,
-  "rotation": 0, "rotation_end": 180,
+  "rotation": 0, "rotation_end": 180, "alignment": "velocity",
   "gravity": [0, -1, 0], "shape": "box", "box_size": [2, 0.2, 2],
   "color": [1, 0.65, 0.2, 0.8], "color_end": [0.3, 0.05, 0.02, 0.0],
   "texture": "tex/smoke.png" }`（`size_end`/`shape`/`box_size`/`color_end`/`texture`
@@ -1095,7 +1095,8 @@ NaN 刚体  : 0
   线性插值到寿命终点，再乘二次淡出；`size_end` 让四边形边长从 `size` 线性缩放到
   寿命终点；`shape` 选 `"sphere"`（默认，半径 `radius`）或 `"box"`（全尺寸
   `box_size`），决定初始位置分布；`drag`（1/s）让速度按 `exp(-drag·dt)` 衰减；
-  `rotation`/`rotation_end`（度）让公告板绕朝向相机的轴自转，寿命内线性插值。**边界**：没有软粒子；粒子按实例 AABB 中心到相机的距离参与全局透明排序，
+  `rotation`/`rotation_end`（度）让公告板绕朝向相机的轴自转，寿命内线性插值；
+  `alignment` 选 `"billboard"`（默认，面向相机）或 `"velocity"`（局部 +Z 对齐速度）。**边界**：没有软粒子；粒子按实例 AABB 中心到相机的距离参与全局透明排序，
   不是逐像素深度排序；没有 GPU 粒子/曲线编辑；编辑器的属性面板**只读**列出粒子
   发射器的数量/寿命/形状/阻尼/自转，不创建也不编辑，保存时原样保留 JSON 里的
   `particles`。
