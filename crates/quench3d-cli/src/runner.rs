@@ -3704,6 +3704,7 @@ fn add_particle_visuals(
                 shape: match p.shape.as_deref() {
                     Some("box") => quench3d::scene::ParticleShape::Box,
                     Some("disc") => quench3d::scene::ParticleShape::Disc,
+                    Some("cone") => quench3d::scene::ParticleShape::Cone,
                     _ => quench3d::scene::ParticleShape::Sphere,
                 },
                 box_size: {

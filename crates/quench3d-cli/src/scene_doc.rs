@@ -1131,7 +1131,7 @@ pub struct ParticleDoc {
     /// 初始位置球形半径（米），缺省 0.1；`shape = "box"` 时忽略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
-    /// 初始分布形状：`"sphere"`（缺省）、`"box"` 或 `"disc"`。
+    /// 初始分布形状：`"sphere"`（缺省）、`"box"`、`"disc"` 或 `"cone"`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
     /// 长方体分布的全尺寸 `[x, y, z]`（米），缺省 `[1, 1, 1]`；每轴必须 > 0。
@@ -4158,11 +4158,11 @@ impl SceneDoc {
                 }
             }
             if let Some(shape) = &p.shape {
-                if shape != "sphere" && shape != "box" && shape != "disc" {
+                if shape != "sphere" && shape != "box" && shape != "disc" && shape != "cone" {
                     cam_diags.push(Diagnostic::error_code(
                         ErrorCode::OutOfRange,
                         format!("{path}.shape"),
-                        "粒子形状只支持 \"sphere\"、\"box\" 或 \"disc\"",
+                        "粒子形状只支持 \"sphere\"、\"box\"、\"disc\" 或 \"cone\"",
                     ));
                 }
             }
@@ -8205,7 +8205,7 @@ mod tests {
             (json!({"lifetime": 0}), "particles[0].lifetime"),
             (json!({"size": 0}), "particles[0].size"),
             (json!({"size_end": 0}), "particles[0].size_end"),
-            (json!({"shape": "cone"}), "particles[0].shape"),
+            (json!({"shape": "torus"}), "particles[0].shape"),
             (json!({"box_size": [1, 0, 1]}), "particles[0].box_size[y]"),
             (json!({"radius": -1}), "particles[0].radius"),
             (json!({"drag": -1}), "particles[0].drag"),

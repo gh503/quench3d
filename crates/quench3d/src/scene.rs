@@ -107,6 +107,8 @@ pub enum ParticleShape {
     Box,
     /// XZ 平面上的圆盘内均匀分布（`radius`，Y 固定为 0）：地面雾/爆炸环。
     Disc,
+    /// 顶点在中心、沿 +Y 的圆锥体积内分布：底半径 `radius`，高 `box_size.y`。
+    Cone,
 }
 
 /// 公告板朝向模式。
@@ -277,6 +279,12 @@ fn particle_offset(seed: &mut u64, shape: ParticleShape, radius: f32, box_size: 
         ParticleShape::Disc => {
             let p = particle_point(seed, radius);
             Vec3::new(p.x, 0.0, p.z)
+        }
+        ParticleShape::Cone => {
+            let t = particle_rand(seed);
+            let angle = particle_rand(seed) * core::f32::consts::TAU;
+            let r = radius * t;
+            Vec3::new(angle.cos() * r, box_size.y * t, angle.sin() * r)
         }
     }
 }
@@ -4426,6 +4434,31 @@ mod particle_tests {
             (scene.objects[index].transform.position - before).length() > 1e-4,
             "重新启用后应继续运动"
         );
+    }
+
+    #[test]
+    fn particle_cone_shape_stays_inside_its_envelope() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 64;
+        desc.shape = ParticleShape::Cone;
+        desc.radius = 2.0;
+        desc.box_size = Vec3::new(1.0, 3.0, 1.0);
+        desc.velocity = Vec3::ZERO;
+        desc.gravity = Vec3::ZERO;
+        let system = scene.add_particle_system(0, 0, desc);
+        for &object in &scene.particles[system].objects {
+            let offset = scene.objects[object].transform.position - desc.position;
+            assert!(
+                offset.y >= -1e-5 && offset.y <= 3.0 + 1e-5,
+                "锥高越界：{offset:?}"
+            );
+            let allowed = 2.0 * (offset.y / 3.0).max(0.0) + 1e-5;
+            assert!(
+                offset.x * offset.x + offset.z * offset.z <= allowed * allowed,
+                "锥底半径越界：{offset:?}"
+            );
+        }
     }
 
     #[test]

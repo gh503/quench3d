@@ -2978,6 +2978,9 @@ fn particles_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 system.box_size.x, system.box_size.y, system.box_size.z
             ),
             quench3d::scene::ParticleShape::Disc => format!("圆盘 r={:.2}", system.radius),
+            quench3d::scene::ParticleShape::Cone => {
+                format!("锥 h={:.1} r={:.2}", system.box_size.y, system.radius)
+            }
         };
         let mut extra = Vec::new();
         if system.alignment == quench3d::scene::ParticleAlignment::Velocity {
