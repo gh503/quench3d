@@ -127,6 +127,8 @@ pub struct ParticleDesc {
     pub velocity: Vec3,
     /// 初速度的随机扰动幅度（米/秒）。
     pub spread: f32,
+    /// 线性阻尼（1/s）：速度按 `exp(-drag * dt)` 衰减；0 = 无阻尼。
+    pub drag: f32,
     /// 寿命（秒，必须 > 0）。
     pub lifetime: f32,
     /// 初始四边形边长（米，必须 > 0）。
@@ -153,6 +155,7 @@ impl Default for ParticleDesc {
             box_size: Vec3::ONE,
             velocity: Vec3::new(0.0, 1.2, 0.0),
             spread: 0.4,
+            drag: 0.0,
             lifetime: 2.0,
             size: 0.12,
             size_end: 0.12,
@@ -179,6 +182,8 @@ pub struct ParticleSystem {
     pub velocity: Vec3,
     /// 速度扰动。
     pub spread: f32,
+    /// 线性阻尼（1/s）。
+    pub drag: f32,
     /// 寿命（秒）。
     pub lifetime: f32,
     /// 初始四边形边长。
@@ -1256,6 +1261,11 @@ impl Scene {
         } else {
             0.0
         };
+        let drag = if desc.drag.is_finite() {
+            desc.drag.max(0.0)
+        } else {
+            0.0
+        };
         let box_size = Vec3::new(
             if desc.box_size.x.is_finite() && desc.box_size.x > 0.0 {
                 desc.box_size.x
@@ -1283,6 +1293,7 @@ impl Scene {
             box_size,
             velocity: desc.velocity,
             spread,
+            drag,
             lifetime,
             size,
             size_end: desc.size_end,
@@ -1341,8 +1352,13 @@ impl Scene {
                         state.velocity =
                             system.velocity + particle_point(&mut system.seed, system.spread);
                         if let Some(object) = self.objects.get_mut(object_index) {
-                            object.transform.position =
-                                system.position + particle_point(&mut system.seed, system.radius);
+                            object.transform.position = system.position
+                                + particle_offset(
+                                    &mut system.seed,
+                                    system.shape,
+                                    system.radius,
+                                    system.box_size,
+                                );
                         }
                         // 重生的这一帧不再积分：否则新粒子会凭空多飞一帧的 dt。
                         respawned = true;
@@ -1352,6 +1368,9 @@ impl Scene {
                     continue;
                 };
                 if dt > 0.0 && !respawned {
+                    if system.drag > 0.0 {
+                        state.velocity *= (-system.drag * dt).exp();
+                    }
                     object.transform.position += state.velocity * dt;
                     state.velocity += system.gravity * dt;
                 }
@@ -4180,6 +4199,7 @@ mod particle_tests {
             box_size: Vec3::ONE,
             velocity: Vec3::new(0.0, 1.0, 0.0),
             spread: 0.0,
+            drag: 0.0,
             lifetime: 1.0,
             size: 0.25,
             size_end: 0.25,
@@ -4218,6 +4238,7 @@ mod particle_tests {
             box_size: Vec3::ONE,
             velocity: Vec3::ZERO,
             spread: 0.0,
+            drag: 0.0,
             lifetime: 2.0,
             size: 0.1,
             size_end: 0.5,
@@ -4300,6 +4321,32 @@ mod particle_tests {
             object.transform.position
         );
         assert!(object.color.w > 0.4, "重生后 alpha 应当恢复");
+    }
+
+    #[test]
+    fn particle_drag_decays_velocity_without_respawning() {
+        let mut scene = Scene::new();
+        let mut desc = emitter();
+        desc.count = 1;
+        desc.velocity = Vec3::new(1.0, 0.0, 0.0);
+        desc.spread = 0.0;
+        desc.gravity = Vec3::ZERO;
+        desc.drag = 1.0;
+        desc.lifetime = 10.0;
+        let system = scene.add_particle_system(0, 0, desc);
+        scene.particles[system].state[0].age = 0.0;
+        let index = scene.particles[system].objects[0];
+        let base = scene.objects[index].transform.position;
+        scene.update_particles(Vec3::new(0.0, 0.0, 5.0), 1.0);
+        let moved = scene.objects[index].transform.position.x - base.x;
+        assert!(
+            moved > 0.3 && moved < 0.7,
+            "一秒钟的阻尼位移应在 (1-e^-1) 附近：{moved}"
+        );
+        assert!(
+            scene.particles[system].state[0].velocity.x < 0.4,
+            "速度应衰减到约 e^-1"
+        );
     }
 
     #[test]

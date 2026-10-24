@@ -1140,6 +1140,9 @@ pub struct ParticleDoc {
     /// 速度随机扰动幅度（米/秒），缺省 0.4。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spread: Option<f32>,
+    /// 线性阻尼（1/s），缺省 0 = 无阻尼；必须 >= 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drag: Option<f32>,
     /// 寿命（秒），缺省 2.0；必须 > 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<f32>,
@@ -4096,7 +4099,7 @@ impl SceneDoc {
                     }
                 }
             }
-            for (name, v) in [("radius", p.radius), ("spread", p.spread)] {
+            for (name, v) in [("radius", p.radius), ("spread", p.spread), ("drag", p.drag)] {
                 if let Some(v) = v {
                     if !(v.is_finite() && v >= 0.0) {
                         cam_diags.push(Diagnostic::error_code(
@@ -8114,7 +8117,7 @@ mod tests {
                 { "count": 12, "position": [0, 2, 0], "color": [1, 0.5, 0.2, 0.7] },
                 { "count": 1, "radius": 0, "lifetime": 0.5, "size": 0.2,
                   "size_end": 0.5, "shape": "box", "box_size": [2, 1, 4],
-                  "velocity": [0, 2, 0], "gravity": [0, -3, 0],
+                  "drag": 0.5, "velocity": [0, 2, 0], "gravity": [0, -3, 0],
                   "color_end": [0, 0, 1, 0.2] },
                 { "count": 2, "texture": texture_path.clone() }
             ]
@@ -8135,6 +8138,7 @@ mod tests {
         assert_eq!(again.particles[1].size_end, Some(0.5));
         assert_eq!(again.particles[1].shape.as_deref(), Some("box"));
         assert_eq!(again.particles[1].box_size, Some([2.0, 1.0, 4.0]));
+        assert_eq!(again.particles[1].drag, Some(0.5));
         assert_eq!(again.particles[1].color_end, Some([0.0, 0.0, 1.0, 0.2]));
         assert_eq!(
             again.particles[2].texture.as_deref(),
@@ -8163,6 +8167,7 @@ mod tests {
             (json!({"shape": "cone"}), "particles[0].shape"),
             (json!({"box_size": [1, 0, 1]}), "particles[0].box_size[y]"),
             (json!({"radius": -1}), "particles[0].radius"),
+            (json!({"drag": -1}), "particles[0].drag"),
             (json!({"spread": -1}), "particles[0].spread"),
             (json!({"color": [1, 1, 1, 2]}), "particles[0].color"),
             (

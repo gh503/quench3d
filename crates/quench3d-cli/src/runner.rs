@@ -3710,6 +3710,7 @@ fn add_particle_visuals(
                 },
                 velocity: Vec3::new(velocity[0], velocity[1], velocity[2]),
                 spread: p.spread.unwrap_or(0.4),
+                drag: p.drag.unwrap_or(0.0),
                 lifetime: p.lifetime.unwrap_or(2.0),
                 size: p.size.unwrap_or(0.12),
                 size_end: p.size_end.unwrap_or(p.size.unwrap_or(0.12)),

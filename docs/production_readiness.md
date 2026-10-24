@@ -3367,6 +3367,23 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 不做重定向、速度曲线、根运动事件或循环片段位移回绕；物理碰撞体仍是绑定姿态，
 不跟根运动走。
 
+### 23.52 粒子的线性阻尼（第 151 轮）
+
+**做了什么**：
+
+* `particles[].drag`（1/s，缺省 0）：每帧按 `exp(-drag * dt)` 衰减速度，再积分位置。
+* `ParticleDesc.drag` / `ParticleSystem.drag` 公开；校验 >= 0。
+* 与重力、颜色/尺寸渐变、球/盒形状独立组合。
+
+**验证**：
+
+* `particle_drag_decays_velocity_without_respawning`：初速 1 m/s、drag=1、dt=1，
+  位移 ≈ 0.368m（1-e⁻¹），速度衰减到 < 0.4 m/s。
+* `particles_parse_validate_and_roundtrip` 增补 `drag` 字段往返；负数在
+  `particles[i].drag` 报错。
+
+**边界**：只是一阶指数阻尼，不是风场/涡量/碰撞；不改变粒子数量或排序。
+
 ### 23.51 粒子的长方体发射形状（第 150 轮）
 
 **做了什么**：
