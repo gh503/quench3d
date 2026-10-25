@@ -242,9 +242,11 @@ node tools/check_web.mjs
 >30,000 三角形且 ≥10 个 object。每个网格是刚体的子节点，位置/朝向由父链精确继承，
 不存在“每帧重新算一次导致漂移”的路径。
 
-**已知近似**：5 个 STL 的局部变换是按 M1 关节轴手工对位的，不是 robot-modkit 官方
-装配变换；夹爪块只做了腕部占位。要做“逐零件精确对位 + 逐关节截图”，应以
-robot-modkit 的 CAD 装配重新导出。见 `tests/fixtures/meshes/README.md`。
+**已知近似**：5 个外观网格的局部变换按 M1 官方尺寸（base 90 / l1 120 / l2 110 /
+link_bar 100 mm）推导并与关节轴对位；立柱本轮已从横躺修正为 90 mm 竖直。上游仓库
+没有提交 `cad/out/`，也没有官方装配矩阵，所以这不是“抄官方装配文件”；夹爪块仍是
+腕部占位。要做逐孔/逐螺柱的精确对位，需要上游先导出已装配 STEP/STL。见
+`tests/fixtures/meshes/README.md`。
 
 **对照**：`visual_mesh.scene.json` 的球体从 y=0.4 落到 y=-3.95；加/不加 visual 的
 `states` 逐位相同，证明 `visual` 不进物理。
