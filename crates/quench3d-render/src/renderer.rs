@@ -989,6 +989,287 @@ pub struct CustomPostPass {
     pub params: [f32; 4],
 }
 
+const GPU_CULL_U32_PER_INSTANCE: usize = 40;
+
+/// GPU 剔除的 compute shader：一个 workgroup 处理一个批次，把可见实例压实到输出缓冲，
+/// 并写 `DrawIndexedIndirectArgs`。按 u32 拷贝实例（`InstanceRaw` = 40 个 u32），
+/// 避免在 WGSL 里重复声明 160 字节的顶点结构。
+const GPU_CULL_WGSL: &str = r#"
+struct CullParams {
+    planes: array<vec4<f32>, 6>,
+    camera: vec4<f32>,
+    limits: vec4<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> src: array<u32>;
+@group(0) @binding(1) var<storage, read> bounds: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> batches: array<vec4<u32>>;
+@group(0) @binding(3) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(4) var<uniform> params: CullParams;
+
+var<workgroup> visible: atomic<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
+    if (lane == 0u) {
+        atomicStore(&visible, 0u);
+    }
+    workgroupBarrier();
+
+    let batch = batches[wid.x];
+    let first = batch.x;
+    let count = batch.y;
+    let index_count = batch.z;
+
+    var i = lane;
+    loop {
+        if (i >= count) { break; }
+        let instance = first + i;
+        let sphere = bounds[instance];
+        var keep = true;
+        for (var p = 0u; p < 6u; p = p + 1u) {
+            if (dot(params.planes[p].xyz, sphere.xyz) + params.planes[p].w < -sphere.w) {
+                keep = false;
+            }
+        }
+        if (params.limits.x > 0.0) {
+            if (distance(params.camera.xyz, sphere.xyz) - sphere.w > params.limits.x) {
+                keep = false;
+            }
+        }
+        if (keep) {
+            let slot = atomicAdd(&visible, 1u);
+            let src_base = instance * 40u;
+            let dst_base = (first + slot) * 40u;
+            for (var k = 0u; k < 40u; k = k + 1u) {
+                dst[dst_base + k] = src[src_base + k];
+            }
+        }
+        i = i + 64u;
+    }
+    workgroupBarrier();
+
+    if (lane == 0u) {
+        let base = u32(params.limits.z) + wid.x * 5u;
+        dst[base] = index_count;
+        dst[base + 1u] = atomicLoad(&visible);
+        dst[base + 2u] = 0u;
+        dst[base + 3u] = 0u;
+        dst[base + 4u] = first;
+    }
+}
+"#;
+
+/// compute 的 uniform；与 WGSL 的 `CullParams` 逐字节一致。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GpuCullParams {
+    planes: [[f32; 4]; 6],
+    camera: [f32; 4],
+    limits: [f32; 4],
+}
+
+/// GPU 剔除的缓冲与管线。
+struct GpuCull {
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+    input: wgpu::Buffer,
+    output: wgpu::Buffer,
+    bounds: wgpu::Buffer,
+    batches: wgpu::Buffer,
+    params: wgpu::Buffer,
+    instance_capacity: u64,
+    batch_capacity: u64,
+    args_offset: u64,
+}
+
+impl GpuCull {
+    fn new(device: &wgpu::Device, instances: u64, batches: u64) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-gpu-cull-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quench3d-gpu-cull-pipeline-layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quench3d-gpu-cull-shader"),
+            source: wgpu::ShaderSource::Wgsl(GPU_CULL_WGSL.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("quench3d-gpu-cull"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let storage = |label: &str, size: u64, extra: wgpu::BufferUsages| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | extra,
+                mapped_at_creation: false,
+            })
+        };
+        let instance_bytes = instances.max(1) * GPU_CULL_U32_PER_INSTANCE as u64 * 4;
+        let input = storage(
+            "quench3d-gpu-cull-input",
+            instance_bytes,
+            wgpu::BufferUsages::empty(),
+        );
+        // 输出实例与间接参数共用一块缓冲：compute 的 storage binding 数被设备限制到
+        // 4（WebGPU 默认），分开建会超限。`args_offset` 指向实例区之后的参数区。
+        let args_offset = instance_bytes;
+        let output = storage(
+            "quench3d-gpu-cull-output",
+            instance_bytes + batches.max(1) * 20,
+            wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+        let bounds = storage(
+            "quench3d-gpu-cull-bounds",
+            instances.max(1) * 16,
+            wgpu::BufferUsages::empty(),
+        );
+        let batches_buf = storage(
+            "quench3d-gpu-cull-batches",
+            batches.max(1) * 16,
+            wgpu::BufferUsages::empty(),
+        );
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-gpu-cull-params"),
+            size: std::mem::size_of::<GpuCullParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("quench3d-gpu-cull-bind-group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bounds.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: batches_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        });
+        Self {
+            pipeline,
+            bind_group,
+            input,
+            output,
+            bounds,
+            batches: batches_buf,
+            params,
+            instance_capacity: instances.max(1),
+            batch_capacity: batches.max(1),
+            args_offset,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upload(
+        &self,
+        queue: &wgpu::Queue,
+        instances: &[InstanceRaw],
+        bounds: &[[f32; 4]],
+        batches: &[[u32; 4]],
+        params: &GpuCullParams,
+    ) {
+        if !instances.is_empty() {
+            queue.write_buffer(&self.input, 0, bytemuck::cast_slice(instances));
+            queue.write_buffer(&self.bounds, 0, bytemuck::cast_slice(bounds));
+        }
+        if !batches.is_empty() {
+            queue.write_buffer(&self.batches, 0, bytemuck::cast_slice(batches));
+        }
+        queue.write_buffer(&self.params, 0, bytemuck::bytes_of(params));
+    }
+
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, batches: u32) {
+        if batches == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("quench3d-gpu-cull-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups(batches, 1, 1);
+    }
+}
+
 /// 一条自定义 pass 的两条 GPU 管线：最终目标（8 位 sRGB）与 HDR 中间目标。
 struct CustomPostPipeline {
     target: wgpu::RenderPipeline,
@@ -1040,6 +1321,12 @@ pub struct RendererOptions {
     /// 按实例包围盒到相机的**最近点**判断：完全在距离外的实例不提交绘制。
     /// 只做距离剔除，不是遮挡剔除；阴影 pass 也按同一距离裁剪。
     pub max_draw_distance: f32,
+    /// GPU 视锥剔除 + 间接绘制（缺省关闭）。
+    ///
+    /// 打开后不透明实例由 compute shader 剔除并压实到第二份实例缓冲，主 pass 用
+    /// `draw_indexed_indirect` 提交；透明实例与阴影 pass 仍走 CPU 剔除路径（它们依赖
+    /// 每实例排序/另一套视锥）。后端没有 compute 能力时自动退回 CPU 路径。
+    pub gpu_culling: bool,
     /// 自动 LOD（缺省关闭）：高面数、非蒙皮网格在**上传时**生成 1/2、1/4 两档；
     /// 绘制时按批次包围盒与相机的距离选档。关闭时逐像素与旧行为一致。
     ///
@@ -1068,6 +1355,7 @@ impl Default for RendererOptions {
             taa: TaaOptions::default(),
             motion_blur: MotionBlurOptions::default(),
             max_draw_distance: f32::INFINITY,
+            gpu_culling: false,
             auto_lod: false,
         }
     }
@@ -1240,6 +1528,12 @@ pub struct Renderer {
     /// 上一帧的关节矩阵：TAA 运动向量对蒙皮网格也要用上一帧姿态。
     prev_skin_palette: Vec<[[f32; 4]; 4]>,
     staging: Vec<(InstanceRaw, Aabb)>,
+    /// GPU 剔除缓冲（`options.gpu_culling` 打开且后端支持 compute 时才有）。
+    gpu_cull: Option<GpuCull>,
+    gpu_cull_supported: bool,
+    gpu_cull_instances: Vec<InstanceRaw>,
+    gpu_cull_bounds: Vec<[f32; 4]>,
+    gpu_cull_batches: Vec<[u32; 4]>,
     visible: Vec<InstanceRaw>,
     /// 每个批次在可见实例缓冲中的 `(起始, 数量)`。
     visible_ranges: Vec<(u32, u32)>,
@@ -2640,6 +2934,15 @@ impl Renderer {
             skin_palette: Vec::new(),
             prev_skin_palette: Vec::new(),
             staging: Vec::new(),
+            gpu_cull: None,
+            gpu_cull_supported: ctx
+                .adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+            gpu_cull_instances: Vec::new(),
+            gpu_cull_bounds: Vec::new(),
+            gpu_cull_batches: Vec::new(),
             visible: Vec::new(),
             visible_ranges: Vec::new(),
             batches: Vec::new(),
@@ -3373,6 +3676,23 @@ impl Renderer {
             mapped_at_creation: false,
         });
         self.instance_capacity = cap;
+    }
+
+    fn ensure_gpu_cull(&mut self, device: &wgpu::Device, instances: usize, batches: usize) {
+        if !self.options.gpu_culling {
+            self.gpu_cull = None;
+            return;
+        }
+        let instance_cap = instances.max(1).next_power_of_two().max(256);
+        let batch_cap = batches.max(1).next_power_of_two().max(32);
+        if let Some(cull) = &self.gpu_cull {
+            if cull.instance_capacity >= instance_cap as u64
+                && cull.batch_capacity >= batch_cap as u64
+            {
+                return;
+            }
+        }
+        self.gpu_cull = Some(GpuCull::new(device, instance_cap as u64, batch_cap as u64));
     }
 
     fn ensure_line_capacity(&mut self, device: &wgpu::Device, needed: usize) {
@@ -4593,6 +4913,57 @@ impl Renderer {
                 bytemuck::cast_slice(&self.prev_skin_palette),
             );
         }
+        // ---------- GPU 剔除准备（不透明实例） ----------
+        // CPU 的 `visible` 仍服务阴影/透明/统计；GPU 拿到的是**完整** staging，
+        // 自己再剔一遍并压实，所以间接绘制的 instance_count 反映 GPU 的判定。
+        let gpu_cull_active =
+            self.options.gpu_culling && self.gpu_cull_supported && !self.batches.is_empty();
+        if gpu_cull_active {
+            self.ensure_gpu_cull(&ctx.device, self.staging.len(), self.batches.len());
+            self.gpu_cull_instances.clear();
+            self.gpu_cull_bounds.clear();
+            for (raw, bounds) in &self.staging {
+                self.gpu_cull_instances.push(*raw);
+                let center = bounds.center();
+                let radius = (bounds.max - center).length();
+                self.gpu_cull_bounds
+                    .push([center.x, center.y, center.z, radius]);
+            }
+            self.gpu_cull_batches.clear();
+            for batch in &self.batches {
+                let index_count = self
+                    .mesh_for_batch(batch.mesh, &batch.bounds, camera.position)
+                    .map_or(0, |m| m.index_count);
+                self.gpu_cull_batches
+                    .push([batch.first, batch.count, index_count, 0]);
+            }
+            let params = GpuCullParams {
+                planes: frustum
+                    .planes
+                    .map(|p| [p.normal.x, p.normal.y, p.normal.z, p.d]),
+                camera: [camera.position.x, camera.position.y, camera.position.z, 1.0],
+                limits: [
+                    self.options.max_draw_distance,
+                    0.0,
+                    self.gpu_cull
+                        .as_ref()
+                        .map_or(0.0, |c| (c.args_offset / 4) as f32),
+                    0.0,
+                ],
+            };
+            if let Some(cull) = &self.gpu_cull {
+                cull.upload(
+                    &ctx.queue,
+                    &self.gpu_cull_instances,
+                    &self.gpu_cull_bounds,
+                    &self.gpu_cull_batches,
+                    &params,
+                );
+            }
+        } else {
+            self.gpu_cull = None;
+        }
+
         if !self.visible.is_empty() {
             ctx.queue.write_buffer(
                 &self.instance_buffer,
@@ -4613,6 +4984,12 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quench3d-encoder"),
             });
+        if gpu_cull_active {
+            if let Some(cull) = &self.gpu_cull {
+                cull.record(&mut encoder, self.batches.len() as u32);
+                stats.post_passes += 1;
+            }
+        }
 
         // ---------- 阴影 pass（级联：每一级画进图集 2x2 的一个分块） ----------
         // 级联画在**同一个编码器**里：一级一个 pass、一级一个分块视口。
@@ -4845,9 +5222,19 @@ impl Renderer {
                 pass.set_bind_group(2, &gmat.bind_group, &[]);
                 pass.set_bind_group(3, &self.skin_bind_group, &[]);
                 pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
-                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-                pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..gm.index_count, 0, first..(first + count));
+                if gpu_cull_active {
+                    let cull = self.gpu_cull.as_ref().expect("GPU 剔除缓冲缺失");
+                    pass.set_vertex_buffer(1, cull.output.slice(..));
+                    pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed_indirect(
+                        &cull.output,
+                        cull.args_offset + (batch_index * 20) as u64,
+                    );
+                } else {
+                    pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                    pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..gm.index_count, 0, first..(first + count));
+                }
                 stats.draw_calls += 1;
                 stats.triangles += (gm.index_count as u64 / 3) * count as u64;
             }
@@ -5263,6 +5650,54 @@ impl Renderer {
         self.motion_prev_camera = Some((camera.position, camera.forward()));
         self.stats = stats;
         stats
+    }
+
+    /// 这个后端是否支持 compute shader（不支持时 `gpu_culling` 自动退回 CPU 路径）。
+    pub fn gpu_culling_supported(&self) -> bool {
+        self.gpu_cull_supported
+    }
+
+    /// 回读 GPU 剔除写出的前 `batches` 组 `DrawIndexedIndirectArgs`（调试/测试用）。
+    ///
+    /// 每组 5 个 u32：`index_count, instance_count, first_index, base_vertex, first_instance`。
+    /// 没有启用或后端不支持 GPU 剔除时返回空数组。
+    pub fn read_gpu_cull_args(&self, ctx: &GpuContext, batches: u32) -> Result<Vec<u32>, String> {
+        let Some(cull) = &self.gpu_cull else {
+            return Ok(Vec::new());
+        };
+        let size = batches.max(1) as u64 * 20;
+        let readback = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-gpu-cull-readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("quench3d-gpu-cull-readback-encoder"),
+            });
+        encoder.copy_buffer_to_buffer(&cull.output, cull.args_offset, &readback, 0, size);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("等待 GPU 失败: {e:?}"))?;
+        rx.recv()
+            .map_err(|e| format!("回读通道关闭: {e}"))?
+            .map_err(|e| format!("映射缓冲失败: {e:?}"))?;
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| format!("读取映射缓冲失败: {e:?}"))?;
+        let args = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        readback.unmap();
+        Ok(args)
     }
 
     /// 最近一帧的统计。

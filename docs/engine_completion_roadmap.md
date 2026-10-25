@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**901 通过 / 0 失败 / 3 ignored**
-- wasm：**13,563,633 字节**
+- 测试：**902 通过 / 0 失败 / 3 ignored**
+- wasm：**13,614,541 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -82,6 +82,14 @@
   - 边界：没有通用 pass 依赖图/资源别名，也没有法线/运动向量输入；自定义着色器不能
     声明额外资源。这些属于后续“完整 render graph”，不在本项的 Pass 扩展点范围内。
 - [ ] GPU 剔除 + 间接绘制；数千物体 60 fps 的实测。
+  - 已做（第一片）：`RendererOptions.gpu_culling`（缺省关）。compute 按批次剔除不透明
+    实例、压实到第二份实例缓冲，主 pass 用 `draw_indexed_indirect`；透明与阴影仍走
+    CPU 路径。设备 storage binding 上限 4，所以输出实例与间接参数共用一块缓冲。
+    没有 compute 的后端（GL/WebGL2）自动退回 CPU。
+  - 行为证据（GPU e2e）：同一批 4 个实例（2 个在相机背后），GPU 输入 4 个、间接参数
+    `instance_count=2`；整幅图与 CPU 剔除路径逐像素一致。间接参数回读接口同时作为
+    “compute 真的跑了”的证据。
+  - 未做：数千物体 60 fps 实测、GPU 侧透明/阴影剔除、遮挡剔除。
 - [ ] 遮挡剔除 / 自动 LOD / 多视口。
 - [ ] 压缩纹理（KTX2/Basis）与浮点纹理；EXR/HDR 读写。
 - [ ] FBX/USD 至少一条导入链；材质节点图或等价的自定义着色器层。

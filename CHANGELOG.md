@@ -41,6 +41,11 @@
 
 ### 新增
 
+- **GPU 视锥剔除 + 间接绘制（引擎 M2 第二片，未完成整项）**：
+  `RendererOptions.gpu_culling` 打开后，compute shader 按批次剔除不透明实例、压实到
+  第二份实例缓冲，主 pass 用 `draw_indexed_indirect`；透明/阴影仍走 CPU。GPU e2e 验证
+  4 个实例中相机背后的 2 个被剔掉（间接参数 `instance_count=2`），画面与 CPU 路径
+  逐像素一致。数千物体 60 fps 实测、GPU 透明/阴影剔除仍未做。
 - **自定义后处理链（引擎 M2 前两片，未完成整项）**：`CustomPostPass` /
   `Renderer::set_custom_post(s)`，固定插在 tonemap 之后、FXAA 之前；引擎生成全屏三角形、
   绑定与 uv，宿主只写 WGSL 片段体。多条 pass 按数组顺序执行，用两张 HDR 目标 ping-pong，
