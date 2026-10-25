@@ -199,7 +199,7 @@ node tools/check_web.mjs
 | P0-2 断开显式标记 | **PASS** | `joint_count=0`，`joints[0].broken=true`（e2e 已断言） |
 | P0-3 `joint_target` 运行时改目标 | **PASS** | 1 s 时把肩 35°→0°，2 s 后 0.7° |
 | P0-3 抓取场景/脚本 | **PASS（带理想化）** | 方块从 y=0.061 抬到 0.207（+0.146 m），相对夹爪滑移 0；手指从 ±0.04 合到 ±0.028 |
-| P0-3 滑块位置伺服 | **PASS（单元）** | `slider_pd_drives_to_target_displacement`：目标 0.5 m，600 步后误差 <1 cm |
+| P0-3 滑块位置伺服 | **PASS（单元 + CLI）** | 单元：目标 0.5 m，600 步后误差 <1 cm；CLI：`target_m=0.2` 到 0.19999996 m，报告只有 `target_m/error_m`，没有把米转成度 |
 | P0-3 **真实摩擦夹持** | **FAIL / 未实现** | fixture 中方块从 t=0 就与夹爪用**场景固定关节**连接，是理想真空/刚性抓取；手指闭合是视觉动作，不靠摩擦。动态手指 + 力闭合会弹出方块；本轮加了滑块位置伺服后重试，两个滑块手指仍会把方块挤出/夹爪固定关节在接触载荷下漂移，未解决 |
 | P1-1 `objects[].visual` | **PASS（功能与整机渲染）/ PARTIAL（精确装配）** | `visual` 支持 STL/GLB/GLTF/OBJ，挂成主物体子节点；加/不加 visual 的模拟 `states` 逐位相同；整机 STL 渲染 33,318 三角形 / 11 object。局部对位是手工近似，不是官方 CAD 装配，见 §8 |
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |
@@ -284,7 +284,7 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 
 ## 11. 门禁结果
 
-`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，876 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
+`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，877 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
 
 ## 12. 确定性
 

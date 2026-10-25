@@ -8180,3 +8180,27 @@ fn modkit_arm_visual_meshes_attach_and_render() {
         );
     }
 }
+
+/// 滑块位置伺服 + `joint_target.target_m`：报告必须用米，不能把米当弧度转成度。
+#[test]
+fn slider_servo_action_reports_meter_units() {
+    let out = run(&[
+        "simulate",
+        "tests/fixtures/slider_servo.scene.json",
+        "--json",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let j = out.json()["data"]["joints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["name"] == "s")
+        .cloned()
+        .unwrap();
+    let x = j["displacement_m"].as_f64().unwrap();
+    assert!((x - 0.2).abs() < 0.005, "滑块应到 0.2 m，实际 {x}");
+    assert!((j["target_m"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+    assert!(j.get("target_deg").is_none(), "滑块不应把米转成度：{j}");
+    assert!(j.get("error_deg").is_none(), "滑块不应有 error_deg：{j}");
+    assert!(j["error_m"].as_f64().unwrap().abs() < 0.005, "{j}");
+}

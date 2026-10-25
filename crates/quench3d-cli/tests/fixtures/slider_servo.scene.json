@@ -1,0 +1,7 @@
+{"format":"quench3d.scene","version":2,"name":"slider servo",
+ "objects":[
+  {"name":"rail","body":"static","shape":{"type":"box","size":[0.2,0.05,0.05]},"position":[0,0,0]},
+  {"name":"slider","body":"dynamic","shape":{"type":"box","size":[0.04,0.04,0.04]},"position":[0.1,0,0],"mass":0.2}],
+ "joints":[{"type":"slider","name":"s","a":"rail","b":"slider","axis":[1,0,0],"limits":[0,0.3],"motor_target_m":0.1,"motor_kp":200,"motor_kd":10,"motor_max_torque":20}],
+ "actions":[{"type":"joint_target","joint":"s","target_m":0.2,"speed_m_s":0.05,"at_time":0.5}],
+ "simulate":{"steps":300,"dt":0.01},"physics":{"substeps":4}}

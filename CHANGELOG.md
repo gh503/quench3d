@@ -45,7 +45,8 @@
   （N/m）/`motor_kd`（N·s/m）/`motor_max_torque`（N，最大推力），
   `joint_target` 动作可用 `target_m` + `speed_m_s` 驱动夹爪开合；报告/轨迹给
   滑块单独的 `target_m`/`error_m`（不再把米当弧度转成度）。单元测试
-  `slider_pd_drives_to_target_displacement`。
+  `slider_pd_drives_to_target_displacement`，CLI 回归
+  `slider_servo_action_reports_meter_units`。
 - **机械臂外观网格 `objects[].visual`（第 187 轮）**：可选 `{path, position?,
   rotation_deg?, scale?}`，支持 STL/GLB/GLTF/OBJ；网格挂成刚体的子节点，碰撞仍用
   `shape/shapes`。加/不加 visual 的 `simulate` 状态逐位相同；编辑器存盘按同名物体
