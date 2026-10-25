@@ -207,7 +207,7 @@ node tools/check_web.mjs
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |
 | P0-3 真实抓取根因 | 已修 | 旧 `modkit_arm_grasp` 沿用**未修正的 link 锚点/中心**，在负载下肘关节会自己塌；把手指/方块放到按 `modkit_arm` 修正几何算出的腕点并 +20 mm 避开 `link2` 后，同一套 2.5 N·m 限幅的 PD 就能稳定夹持。这不是给抓取“加力”，而是修场景几何 |
 
-| P1-3 wasm `setJointTarget/...` | **PASS（API/示例）** | 导出 `loadScene/setJointTarget/step/getJointStates/getBodyTransform`；Node 里真实装载 modkit 场景，2 s 后 shoulder=20.00°，矩阵 16 个有限数；`web/robot.html` 滑杆预览；**60 fps 未基准测试**，见 §10 |
+| P1-3 wasm `setJointTarget/...` | **PASS（API/示例）** | 导出 `loadScene/setJointTarget/step/getJointStates/getBodyTransform`；Node 里真实装载 modkit 场景，2 s 后 shoulder=20.00°，矩阵 16 个有限数；`web/robot.html` 滑杆预览；桌面 `bench` 1000 刚体 0.153 ms/步；浏览器 60 fps 未实测，见 §10 |
 | P2 MCP 新工具 / 接触力查询 / 1000 步 <2 s | **FAIL / 未实现** | 未做；`run_simulate` 是 CPU 路径，未做 1000 步性能门 |
 
 ## 8. P1-1：`objects[].visual`
@@ -284,7 +284,8 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * `web/robot.html` 是滑杆示例：改 yaw/shoulder/elbow，`setJointTarget` + 60 次 `step(1/60)`，用 `getBodyTransform` 画关节骨架；状态栏打印 `getJointStates`。
 * `tools/check_web.mjs` 在 Node 里真的实例化 wasm、装载 `modkit_arm_drive` 场景、跑 120 步，断言 shoulder=20.00°、`link2` 矩阵 16 个有限数、未知刚体返回空数组。
 * wasm 体积：**13,539,804 字节**（约 13.2 MiB；P0 基线 13,449,106，+90.7 KB）。这是把完整编辑器 + 物理 + 关节 API 打进同一个 example 的代价；只做物理的页面可以用 `wasm-opt`/裁剪入口再降。
-* **60 fps 规模没有实测**。这个 API 每步只做 CPU 物理；页面渲染由 JS 负责。已知上限：单场景 3 铰链 + 2 滑块在 1/60 下每步 <1 ms（P0 fixture 的 CPU 量级），但没有 1000 刚体/60 fps 的基准，不能宣称。
+* **桌面物理规模**：`quench3d bench` 在本机 1000 刚体 **0.153 ms/步**（睡眠开启），4 刚体轨迹 3.1–3.6 ms/2404 采样；4 自由度手臂 + 手指只有约 10 个刚体，物理远低于 1 ms/步，60 fps 的 16.7 ms 预算主要留给 JS/wgpu 渲染。
+* **浏览器 60 fps 仍未实测**：这个 API 每步只做 CPU 物理，页面渲染由 JS 负责；wasm 下没有 1000 刚体/60 fps 基准，不能宣称。
 
 ## 11. 门禁结果
 
