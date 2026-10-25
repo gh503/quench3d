@@ -52,11 +52,17 @@
       "viscosity": 0.05,
       "drag": 6,
       "iterations": 4,
-      "max_particles": 5000
+      "max_particles": 5000,
+      "surface_mesh": true,
+      "surface_resolution": 36
     }
   ],
   "water": {
-    "color": [0.08, 0.32, 0.52],
+    "color": [
+      0.08,
+      0.32,
+      0.52
+    ],
     "clarity": 0.75,
     "wave_strength": 1.2,
     "foam": 1.0,

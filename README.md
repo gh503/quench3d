@@ -744,7 +744,9 @@ quench3d::write_png(&image, "out.png")?;
   z 是 0.3~3.0 的**任意尺度**；
 * 编辑器：`quench3d-editor` 的「摄像头动捕（实验）」浮动窗口显示画面/轮廓/骨架，
   3D 世界点作为调试线段叠加到视口（青绿骨骼、黄色关节点）；勾选「显示点云」后
-  把深度反投影点画成青色小十字。
+  把深度反投影点画成青色小十字。勾选「作为 3D 视口背景（AR）」后，最新画面按
+  cover 铺满视口、画在天空之前、场景几何之后——模型真正叠在摄像头画面上，而不是
+  只在浮动窗口里预览；画面会经过场景的色调映射/泛光。
 
 ```bash
 python3 -m venv target/tmp/camvenv
@@ -1075,7 +1077,8 @@ NaN 刚体  : 0
   "浸没 %"。水面物体只是半透明平面，**没有波浪 / 折射 / 流动**。
 * `fluids` 是 **CPU PBF 粒子流体**（M2 求解器 + M3 双向耦合）：`{ "center": [x, y, z],
   "size": [x, y, z], "spacing": 0.1, "radius": 0.05, "rest_density": 1000,
-  "viscosity": 0.05, "drag": 6, "iterations": 4, "max_particles": 4000 }`。粒子从长方体里
+  "viscosity": 0.05, "drag": 6, "iterations": 4, "max_particles": 4000,
+  "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
   粒子质量按晶格静止密度校准（不是随便取 1），所以静止时密度比≈1；`simulate` 报告
@@ -1084,9 +1087,13 @@ NaN 刚体  : 0
   平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：
   `quench3d render examples/particles_showcase.json --out particles.png`。
-  `TriMesh` 碰撞体目前不挡粒子（`closest_surface` 返回 `None`），凸包/圆锥用 AABB 近似。
-  粒子**渲染**（M4）：每颗粒子画成低模球（8×6），速度越快颜色越偏青白；另加一张
-  跟着最高粒子走的半透明水面。
+  `TriMesh` 静态网格对粒子做**逐三角形最近点**碰撞（薄壳不会漏）；凸包/圆锥仍用
+  AABB 近似。
+  粒子**渲染**（M4）：每颗粒子画成低模球（8×6），速度越快颜色越偏青白。`surface_mesh =
+  true` 时不再重复画这些球，而是用 **Surface Nets** 从粒子标量场提取连续自由表面
+  （真实三角形、顶点法线来自场梯度、拓扑每帧可整体替换）；`surface_resolution`
+  控制最长轴格数，越大越细也越慢。缺省 false 时保留旧行为：一张跟着最高粒子走的
+  半透明平面。
   屏幕空间水（M4.2）：主 pass 的第二颜色附件写水面 mask（`MaterialDesc.water_mask`，
   `Rgba16Float`），r = 覆盖、g = 世界高度；后处理用屏幕射线与 g 求交重建水面世界坐标，据此生成
   程序化波面法线，再做屏幕空间折射、吸收、菲涅耳、太阳高光与波峰/边缘泡沫；

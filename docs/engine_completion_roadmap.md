@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**922 通过 / 0 失败 / 3 ignored**
-- wasm：**13,678,490 字节**
+- 测试：**929 通过 / 0 失败 / 4 ignored**
+- wasm：**13,698,258 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -133,6 +133,11 @@
 
 ### M4 物理精度与规模（8–12 人月）
 
+- [x] 流体连续自由表面：Surface Nets 从 PBF 粒子提取三角形网格（`fluids[].surface_mesh`，
+  分辨率 8~96），`Renderer::update_mesh_data` 支持拓扑整体替换；GPU e2e
+  （`fluid_surface_replaces_the_placeholder_mesh`）与提取单测 4 条。
+- [x] 流体对静态三角网碰撞：逐三角形最近点 + 扫掠薄壳检测
+  （`particles_stop_on_a_static_trimesh_floor`）。
 - [ ] 精确 CCD（旋转扫掠/凸体 TOI），不是中心射线近似。
 - [ ] 流形跨帧复用；三角网↔三角网、平面↔平面接触。
 - [ ] 关节并行求解；多体/articulation。

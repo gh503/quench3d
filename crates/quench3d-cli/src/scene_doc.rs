@@ -1147,6 +1147,14 @@ pub struct FluidDoc {
     /// 粒子上限 1~20000，缺省 4000；超出按晶格顺序截断。
     #[serde(default = "default_fluid_max_particles")]
     pub max_particles: usize,
+    /// 是否把粒子提取成**连续自由表面**（Surface Nets），缺省 false = 抬高的平面。
+    ///
+    /// 打开后每帧按粒子重建网格；比平面慢，但能看到真正的液滴/水花轮廓。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub surface_mesh: bool,
+    /// 表面提取分辨率（最长轴格数 8~96），缺省 32；只在 `surface_mesh = true` 时用。
+    #[serde(default = "default_fluid_mesh_resolution")]
+    pub surface_resolution: u32,
 }
 
 /// CPU 公告板粒子发射器（纯视觉）。
@@ -1284,6 +1292,10 @@ fn default_fluid_drag() -> f32 {
 
 fn default_fluid_iterations() -> u32 {
     4
+}
+
+fn default_fluid_mesh_resolution() -> u32 {
+    32
 }
 
 fn default_fluid_max_particles() -> usize {

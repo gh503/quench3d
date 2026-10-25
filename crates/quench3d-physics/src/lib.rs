@@ -25,6 +25,7 @@ mod contact;
 #[cfg(test)]
 mod digest_tests;
 mod fluid;
+mod fluid_mesh;
 mod gjk;
 mod island;
 mod joints;
@@ -49,6 +50,7 @@ pub use broadphase::*;
 pub use character::*;
 pub use contact::*;
 pub use fluid::*;
+pub use fluid_mesh::*;
 pub use joints::*;
 /// `narrowphase` 仅通过 [`PhysicsWorld`] 对外提供能力，无公开类型。
 #[allow(unused_imports)]

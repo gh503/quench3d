@@ -16,7 +16,8 @@ use std::sync::Arc;
 use quench3d_math::{Mat4, Quat, Transform, Vec2, Vec3, Vec4};
 use quench3d_physics::{BodyHandle, PhysicsWorld};
 use quench3d_render::{
-    InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshId, Renderer, TextureId,
+    GpuContext, InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshData, MeshId, Renderer,
+    TextureId, Vertex,
 };
 
 /// 场景中的一个实例。
@@ -313,12 +314,21 @@ pub struct FluidParticleVisual {
 }
 
 /// 粒子流体的水面可视绑定。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FluidSurfaceVisual {
     /// 流体下标（`world.fluids()` 的顺序）。
     pub fluid: usize,
-    /// 水面半尺寸 `(x, z)`（米）。
+    /// 水面半尺寸 `(x, z)`（米）。只有平面模式用；网格模式由粒子包围盒决定。
     pub half_size: Vec2,
+    /// 是否用粒子提取**连续自由表面**（Surface Nets），而不是抬高的半透明平面。
+    ///
+    /// 打开后物体的网格每帧被 [`Scene::refresh_fluid_surfaces`] 整体替换；
+    /// 变换固定为单位矩阵，因为顶点是世界坐标。
+    pub mesh: bool,
+    /// 提取分辨率（最长轴格数）。
+    pub resolution: u32,
+    /// 等值面阈值。
+    pub iso: f32,
 }
 
 impl SceneObject {
@@ -1615,8 +1625,73 @@ impl Scene {
         self.objects[index].fluid_surface = Some(FluidSurfaceVisual {
             fluid: spec.fluid,
             half_size: spec.half_size,
+            ..FluidSurfaceVisual::default()
         });
         index
+    }
+
+    /// 添加一个由粒子实时提取的**连续水面网格**（Surface Nets）。
+    ///
+    /// `placeholder` 只用于创建物体句柄；第一帧会立刻被真实网格替换，空网格也
+    /// 不会崩溃。物体不参与物理，材质通常用半透明水；提取失败（粒子太少）时
+    /// 保持上一帧表面，不会突然整块消失。
+    pub fn add_fluid_mesh(
+        &mut self,
+        placeholder: MeshId,
+        material: MaterialId,
+        fluid: usize,
+        resolution: u32,
+        iso: f32,
+        name: &str,
+    ) -> usize {
+        let index = self.add_named(placeholder, material, Transform::IDENTITY, name);
+        self.objects[index].fluid_surface = Some(FluidSurfaceVisual {
+            fluid,
+            half_size: Vec2::splat(1.0),
+            mesh: true,
+            resolution: resolution.clamp(8, 96),
+            iso: iso.clamp(0.05, 1.5),
+        });
+        self.objects[index].cast_shadows = false;
+        index
+    }
+
+    /// 把带 `fluid_surface.mesh` 的物体网格刷新为当前粒子表面。
+    ///
+    /// 每帧调用；只有实际提取到网格时才上传，空结果保留旧表面（避免闪一下）。
+    pub fn refresh_fluid_surfaces(
+        &mut self,
+        world: &PhysicsWorld,
+        renderer: &mut Renderer,
+        gpu: &GpuContext,
+    ) -> usize {
+        let mut updated = 0;
+        for obj in &mut self.objects {
+            let Some(visual) = obj.fluid_surface else {
+                continue;
+            };
+            if !visual.mesh {
+                continue;
+            }
+            let Some(fluid) = world.fluids().get(visual.fluid) else {
+                continue;
+            };
+            let surface = fluid.surface_mesh(visual.resolution, visual.iso);
+            if surface.is_empty() {
+                continue;
+            }
+            let mut vertices = Vec::with_capacity(surface.positions.len());
+            for (p, n) in surface.positions.iter().zip(surface.normals.iter()) {
+                let uv = Vec2::new(p.x * 0.5 + 0.5, p.z * 0.5 + 0.5);
+                vertices.push(Vertex::new(*p, *n, uv));
+            }
+            let mesh = MeshData::from_parts(vertices, surface.indices);
+            if renderer.update_mesh_data(gpu, obj.mesh, &mesh) {
+                obj.transform = Transform::IDENTITY;
+                updated += 1;
+            }
+        }
+        updated
     }
 
     /// 按名称查找。
@@ -2365,6 +2440,10 @@ impl Scene {
                 continue;
             }
             if let Some(visual) = obj.fluid_surface {
+                // 连续表面由 `refresh_fluid_surfaces` 用世界坐标网格更新，不再抬平面。
+                if visual.mesh {
+                    continue;
+                }
                 if let Some(f) = world.fluids().get(visual.fluid) {
                     let level = f
                         .particles()
@@ -3108,6 +3187,7 @@ mod tests {
         scene.objects[s].fluid_surface = Some(FluidSurfaceVisual {
             fluid: 0,
             half_size: Vec2::new(0.3, 0.3),
+            ..FluidSurfaceVisual::default()
         });
 
         scene.sync_from_physics(&world);

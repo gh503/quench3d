@@ -299,8 +299,87 @@ impl Shape {
                 }
                 Some((p - n * n.dot(p), n))
             }
-            Shape::TriMesh { .. } => None,
+            Shape::TriMesh { vertices, indices } => {
+                // 薄壳：取三角形上离 `p` 最近的点，法线从表面指向 `p`。
+                // 流体/粒子撞静态网格时走这里；以前返回 None 等于网格对粒子透明。
+                let mut best: Option<(f32, Vec3, Vec3)> = None;
+                let (tris, _) = indices.as_chunks::<3>();
+                for tri in tris {
+                    let (Some(&a), Some(&b), Some(&c)) = (
+                        vertices.get(tri[0] as usize),
+                        vertices.get(tri[1] as usize),
+                        vertices.get(tri[2] as usize),
+                    ) else {
+                        continue;
+                    };
+                    let q = Self::closest_point_on_triangle(p, a, b, c);
+                    let d2 = (p - q).length_squared();
+                    if !d2.is_finite() || best.is_some_and(|(bd, _, _)| d2 >= bd) {
+                        continue;
+                    }
+                    let face = (b - a).cross(c - a).normalize_or_zero();
+                    if face.length_squared() < 0.5 {
+                        continue;
+                    }
+                    let out = p - q;
+                    let n = if out.length_squared() > 1e-12 {
+                        // 从表面指向粒子：哪一侧近就往哪一侧推。
+                        if out.dot(face) < 0.0 {
+                            -face
+                        } else {
+                            face
+                        }
+                    } else {
+                        face
+                    };
+                    best = Some((d2, q, n));
+                }
+                best.map(|(_, q, n)| (q, n))
+            }
         }
+    }
+
+    /// 三角形上离 `p` 最近的点（Ericson, Real-Time Collision Detection）。
+    fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+        let ab = b - a;
+        let ac = c - a;
+        let ap = p - a;
+        let d1 = ab.dot(ap);
+        let d2 = ac.dot(ap);
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return a;
+        }
+        let bp = p - b;
+        let d3 = ab.dot(bp);
+        let d4 = ac.dot(bp);
+        if d3 >= 0.0 && d4 <= d3 {
+            return b;
+        }
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            let v = d1 / (d1 - d3).max(1e-20);
+            return a + ab * v;
+        }
+        let cp = p - c;
+        let d5 = ab.dot(cp);
+        let d6 = ac.dot(cp);
+        if d6 >= 0.0 && d5 <= d6 {
+            return c;
+        }
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            let w = d2 / (d2 - d6).max(1e-20);
+            return a + ac * w;
+        }
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+            let w = (d4 - d3) / ((d4 - d3) + (d5 - d6)).max(1e-20);
+            return b + (c - b) * w;
+        }
+        let denom = 1.0 / (va + vb + vc).max(1e-20);
+        let v = vb * denom;
+        let w = vc * denom;
+        a + ab * v + ac * w
     }
 
     /// 本地空间"点是否在形状内部"（浮力采样用）。
@@ -1339,12 +1418,26 @@ mod tests {
         assert!((q - Vec3::splat(corner)).length() < 1e-4, "{q:?}");
         assert!((n.length() - 1.0).abs() < 1e-5);
 
-        // 薄壳没有最近表面语义
-        assert!(Shape::TriMesh {
+        // 薄壳：最近点落在三角形上，法线朝粒子所在的一侧
+        let tri = Shape::TriMesh {
             vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
             indices: vec![0, 1, 2],
+        };
+        let (q, n) = tri.closest_surface(vec3(0.2, 0.2, 1.0)).unwrap();
+        assert!((q - vec3(0.2, 0.2, 0.0)).length() < 1e-5, "{q:?}");
+        assert!((n - Vec3::Z).length() < 1e-5, "{n:?}");
+        let (q, n) = tri.closest_surface(vec3(0.2, 0.2, -1.0)).unwrap();
+        assert!((q - vec3(0.2, 0.2, 0.0)).length() < 1e-5, "{q:?}");
+        assert!((n + Vec3::Z).length() < 1e-5, "{n:?}");
+        // 三角形外：最近点在边上
+        let (q, _) = tri.closest_surface(vec3(2.0, 0.0, 0.0)).unwrap();
+        assert!((q - Vec3::X).length() < 1e-5, "{q:?}");
+        // 退化三角形没有可用法线，跳过
+        assert!(Shape::TriMesh {
+            vertices: vec![Vec3::ZERO, Vec3::X, Vec3::X * 2.0],
+            indices: vec![0, 1, 2],
         }
-        .closest_surface(Vec3::ZERO)
+        .closest_surface(Vec3::Z)
         .is_none());
     }
 

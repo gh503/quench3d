@@ -1324,6 +1324,14 @@ impl DecalDesc {
     }
 }
 
+/// 摄像头/视频背景的 UV 缩放（cover/contain）。16 字节，与 `background.wgsl` 一致。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct BackgroundUniform {
+    /// xy = UV 缩放；zw = 预留偏移。
+    scale_offset: [f32; 4],
+}
+
 /// 渲染器创建选项。
 #[derive(Clone, Copy, Debug)]
 pub struct RendererOptions {
@@ -1581,6 +1589,15 @@ pub struct Renderer {
     opaque_double_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
+    /// 摄像头/视频背景：全屏三角形画在天空之前；`None` = 不画（旧行为）。
+    background_layout: wgpu::BindGroupLayout,
+    background_pipeline: wgpu::RenderPipeline,
+    background_sampler: wgpu::Sampler,
+    background_uniform: wgpu::Buffer,
+    background_texture: Option<wgpu::Texture>,
+    background_view: Option<wgpu::TextureView>,
+    background_bind_group: Option<wgpu::BindGroup>,
+    background_size: (u32, u32),
     grid_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     /// 后处理：HDR → tonemap（+ bloom）→ 目标。
@@ -2916,6 +2933,91 @@ impl Renderer {
             },
         );
 
+        // 摄像头/视频背景（可选）。独立 shader/layout，不影响旧场景的管线。
+        let background_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-background-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let background_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("quench3d-background-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let background_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-background-uniform"),
+            size: std::mem::size_of::<BackgroundUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let background_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quench3d-background-pipeline-layout"),
+                bind_group_layouts: &[Some(&background_layout)],
+                immediate_size: 0,
+            });
+        let background_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quench3d-background"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "shaders/background.wgsl"
+            ))),
+        });
+        let background_pipeline = build_pipeline(
+            device,
+            PipelineSpec {
+                label: "quench3d-background",
+                layout: &background_pipeline_layout,
+                module: &background_module,
+                vs_entry: "vs_main",
+                fs_entry: Some("fs_main"),
+                buffers: vec![],
+                targets: color_targets(HDR_FORMAT, None),
+                // 主 pass 有深度附件：管线必须声明同一格式；背景不测也不写深度。
+                depth: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                sample_count,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+            },
+        );
+
         let grid_pipeline = build_pipeline(
             device,
             PipelineSpec {
@@ -3229,6 +3331,14 @@ impl Renderer {
             opaque_double_pipeline,
             shadow_pipeline,
             sky_pipeline,
+            background_layout,
+            background_pipeline,
+            background_sampler,
+            background_uniform,
+            background_texture: None,
+            background_view: None,
+            background_bind_group: None,
+            background_size: (0, 0),
             grid_pipeline,
             line_pipeline,
             frame_uniform,
@@ -3942,6 +4052,130 @@ impl Renderer {
             mesh.bounds = Aabb::new(min, max);
         }
         true
+    }
+
+    /// 网格当前的索引数（0 = 空网格/未上传）。测试与调试用。
+    pub fn mesh_index_count(&self, id: MeshId) -> Option<u32> {
+        self.meshes.get(id).map(|m| m.index_count)
+    }
+
+    /// 整体替换网格的顶点与索引（拓扑可变），保留句柄/名称/CPU 保留开关。
+    ///
+    /// 流体自由表面每帧的三角形数量都会变，`update_mesh_vertices` 只改顶点、
+    /// 索引固定，不能用于这里。空网格会把 `index_count` 设为 0（保留旧缓冲但
+    /// 不提交绘制）；重新变非空时会重建缓冲。
+    pub fn update_mesh_data(&mut self, ctx: &GpuContext, id: MeshId, mesh: &MeshData) -> bool {
+        let Some(old) = self.meshes.get_mut(id) else {
+            return false;
+        };
+        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+            old.index_count = 0;
+            old.bounds = Aabb::EMPTY;
+            old.prev_position_buffer = None;
+            old.last_positions.clear();
+            old.auto_lod.clear();
+            return true;
+        }
+        let name = old.name.clone();
+        let keep_cpu = old.cpu.is_some();
+        let mut new = upload_gpu_mesh(&ctx.device, mesh, &name, keep_cpu);
+        // 旧的 LOD 是从旧拓扑生成的，拓扑变了必须丢弃，否则会画出过期三角形。
+        new.auto_lod.clear();
+        *old = new;
+        true
+    }
+
+    /// 设置摄像头/视频背景（RGBA8，sRGB）。`rgba` 长度必须是 `width*height*4`。
+    ///
+    /// 背景画在天空之前、场景几何之后，因此模型会盖在摄像头上；不参与深度。
+    /// 宽高不变时只 `write_texture`，不会每帧新建 GPU 纹理。传空尺寸或错误长度
+    /// 返回 `false` 并保持原背景不变。
+    pub fn set_background_rgba(
+        &mut self,
+        ctx: &GpuContext,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> bool {
+        if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+            return false;
+        }
+        let size = (width, height);
+        if self.background_texture.is_none() || self.background_size != size {
+            let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("quench3d-background"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quench3d-background-bind-group"),
+                layout: &self.background_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.background_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.background_uniform.as_entire_binding(),
+                    },
+                ],
+            });
+            self.background_texture = Some(texture);
+            self.background_view = Some(view);
+            self.background_bind_group = Some(bind_group);
+            self.background_size = size;
+        }
+        let Some(texture) = &self.background_texture else {
+            return false;
+        };
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        true
+    }
+
+    /// 关闭背景，回到原来的清屏色/天空。
+    pub fn clear_background(&mut self) {
+        self.background_texture = None;
+        self.background_view = None;
+        self.background_bind_group = None;
+        self.background_size = (0, 0);
+    }
+
+    /// 当前是否设置了背景。
+    pub fn has_background(&self) -> bool {
+        self.background_bind_group.is_some()
     }
 
     /// 这个网格有没有保留 CPU 数据（决定拾取能否做逐三角形检测）。
@@ -5629,6 +5863,28 @@ impl Renderer {
             }
         }
 
+        // 摄像头背景的 UV 缩放：cover（铺满、裁掉溢出），不把 4:3 硬拉成 16:9。
+        let background_on = self.background_bind_group.is_some();
+        if background_on {
+            let (iw, ih) = self.background_size;
+            if iw > 0 && ih > 0 {
+                let image_aspect = iw as f32 / ih as f32;
+                let target_aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
+                let (sx, sy) = if target_aspect > image_aspect {
+                    (1.0, image_aspect / target_aspect)
+                } else {
+                    (target_aspect / image_aspect, 1.0)
+                };
+                ctx.queue.write_buffer(
+                    &self.background_uniform,
+                    0,
+                    bytemuck::bytes_of(&BackgroundUniform {
+                        scale_offset: [sx, sy, 0.0, 0.0],
+                    }),
+                );
+            }
+        }
+
         // ---------- 主 pass（渲染到线性 HDR 中间目标） ----------
         let hdr_view = self.hdr_view.clone().expect("HDR 目标缺失");
         let mask_view = self.water_mask_view.clone().expect("水面 mask 目标缺失");
@@ -5682,8 +5938,14 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            // 天空
-            if self.options.sky && lighting.sky.enabled {
+            // 摄像头背景优先于程序化天空（AR 模式下不该再盖一层天空）。
+            if background_on {
+                if let Some(bg) = &self.background_bind_group {
+                    pass.set_pipeline(&self.background_pipeline);
+                    pass.set_bind_group(0, bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            } else if self.options.sky && lighting.sky.enabled {
                 pass.set_pipeline(&self.sky_pipeline);
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 pass.draw(0..3, 0..1);

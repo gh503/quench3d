@@ -146,6 +146,10 @@ pub struct Fluid {
     neighbors: Vec<Vec<u32>>,
     /// 每个粒子在本步撞到的最后一个边界（用于摩擦与两-way 反冲）。
     contacts: Vec<Option<Contact>>,
+    /// PBF 位置修正的临时缓冲（跨步复用，热路径零分配）。
+    delta: Vec<Vec3>,
+    /// 速度更新的临时缓冲（跨步复用，热路径零分配）。
+    new_vel: Vec<Vec3>,
     /// 粒子质量：按**晶格静止密度**校准（`rho0 / ΣW`），不是随便取 1。
     mass: f32,
     stats_contacts: usize,
@@ -168,6 +172,8 @@ impl Fluid {
             lambdas: Vec::new(),
             neighbors: Vec::new(),
             contacts: Vec::new(),
+            delta: Vec::new(),
+            new_vel: Vec::new(),
             mass: 1.0,
             stats_contacts: 0,
             stats: FluidStats::default(),
@@ -190,6 +196,19 @@ impl Fluid {
     /// 粒子速度（只读）。
     pub fn velocities(&self) -> &[Vec3] {
         &self.velocities
+    }
+
+    /// 用当前粒子提取连续表面（Surface Nets）。
+    ///
+    /// `resolution` 是最长轴的目标格数，`iso` 是等值面阈值；默认 `32 / 0.45`
+    /// 适合 `spacing ≈ 0.1 m` 的水。返回网格在**世界坐标**，可直接上传渲染。
+    pub fn surface_mesh(&self, resolution: u32, iso: f32) -> crate::FluidSurfaceMesh {
+        crate::extract_surface(
+            &self.positions,
+            self.desc.smoothing_radius(),
+            resolution,
+            iso,
+        )
     }
 
     /// 当前统计。
@@ -334,8 +353,9 @@ impl Fluid {
         let iters = self.desc.iterations.max(1);
         for _ in 0..iters {
             self.update_density_lambda(mass, rho0, h, h2, poly6, spiky, w0);
-            let mut delta = vec![Vec3::ZERO; n];
-            for (i, d) in delta.iter_mut().enumerate() {
+            self.delta.clear();
+            self.delta.resize(n, Vec3::ZERO);
+            for (i, d) in self.delta.iter_mut().enumerate() {
                 let mut dp = Vec3::ZERO;
                 for &j in &self.neighbors[i] {
                     let j = j as usize;
@@ -350,8 +370,9 @@ impl Fluid {
                 }
                 *d = (dp / rho0).clamp_length(0.1 * h);
             }
-            for (i, d) in delta.iter().enumerate() {
-                let (p, contact) = collide_position(self.predicted[i] + *d, &*bodies, radius);
+            for (i, d) in self.delta.iter().enumerate() {
+                let prev = self.predicted[i];
+                let (p, contact) = collide_position(prev, prev + *d, &*bodies, radius);
                 self.predicted[i] = p;
                 if contact.is_some() {
                     self.contacts[i] = contact;
@@ -363,8 +384,9 @@ impl Fluid {
 
         // 6. 速度 = 位置差 / dt，然后处理边界相对速度
         let inv_dt = 1.0 / dt;
-        let mut new_vel = vec![Vec3::ZERO; n];
-        for (i, out) in new_vel.iter_mut().enumerate() {
+        self.new_vel.clear();
+        self.new_vel.resize(n, Vec3::ZERO);
+        for (i, out) in self.new_vel.iter_mut().enumerate() {
             let mut v = (self.predicted[i] - self.positions[i]) * inv_dt;
             if let Some(c) = self.contacts[i] {
                 // 简单摩擦：法向速度清零，切向留 80%。
@@ -381,8 +403,9 @@ impl Fluid {
 
         // 7. XSPH 粘性（用邻居密度做归一化；没有邻居时保持原速度）
         if self.desc.viscosity > 0.0 {
-            let mut delta = vec![Vec3::ZERO; n];
-            for i in 0..n {
+            self.delta.clear();
+            self.delta.resize(n, Vec3::ZERO);
+            for (i, out) in self.delta.iter_mut().enumerate() {
                 let mut sum = Vec3::ZERO;
                 let mut wsum = 0.0f32;
                 for &j in &self.neighbors[i] {
@@ -393,15 +416,15 @@ impl Fluid {
                     }
                     let x = h2 - r2;
                     let w = poly6 * x * x * x;
-                    sum += (new_vel[j] - new_vel[i]) * w;
+                    sum += (self.new_vel[j] - self.new_vel[i]) * w;
                     wsum += w;
                 }
                 if wsum > 0.0 {
-                    delta[i] = sum * (self.desc.viscosity * mass / wsum.max(1e-9));
+                    *out = sum * (self.desc.viscosity * mass / wsum.max(1e-9));
                 }
             }
-            for i in 0..n {
-                new_vel[i] = (new_vel[i] + delta[i]).clamp_length(MAX_SPEED);
+            for (i, d) in self.delta.iter().enumerate() {
+                self.new_vel[i] = (self.new_vel[i] + *d).clamp_length(MAX_SPEED);
             }
         }
 
@@ -409,7 +432,7 @@ impl Fluid {
         //    冲量按动量守恒：粒子减 `J`、刚体加 `J`；`J = m_p · vn · n`
         //    （vn < 0 表示还在靠近，n 从刚体指向粒子，所以刚体被推向 -n）。
         let mut contact_count = 0usize;
-        for (i, v) in new_vel.iter_mut().enumerate() {
+        for (i, v) in self.new_vel.iter_mut().enumerate() {
             let Some(c) = self.contacts[i] else {
                 continue;
             };
@@ -437,7 +460,7 @@ impl Fluid {
         self.stats_contacts = contact_count;
 
         std::mem::swap(&mut self.positions, &mut self.predicted);
-        self.velocities = new_vel;
+        std::mem::swap(&mut self.velocities, &mut self.new_vel);
         self.recompute_stats();
     }
 
@@ -552,8 +575,16 @@ fn calibrated_mass(desc: &FluidDesc) -> f32 {
 }
 
 /// 把粒子投影到所有刚体边界之外；返回修正后的位置与最后一个接触。
-fn collide_position(mut p: Vec3, bodies: &[BodySlot], radius: f32) -> (Vec3, Option<Contact>) {
+fn collide_position(
+    prev: Vec3,
+    mut p: Vec3,
+    bodies: &[BodySlot],
+    radius: f32,
+) -> (Vec3, Option<Contact>) {
     let mut contact = None;
+    // 位移可能比半径大（快速下落/薄网格）：AABB 拒绝测试要把整段位移算进去，
+    // 否则一帧穿过 0 厚度的三角网时根本进不了碰撞循环。
+    let swept = (p - prev).length();
     for (body_index, slot) in bodies.iter().enumerate() {
         let Some(body) = &slot.body else {
             continue;
@@ -563,7 +594,10 @@ fn collide_position(mut p: Vec3, bodies: &[BodySlot], radius: f32) -> (Vec3, Opt
         }
         let aabb = body.world_aabb();
         // `Plane` 的 AABB 是无穷（无效值），不能拿它做拒绝测试。
-        if aabb.is_valid() && !aabb.grown(radius).contains_point(p) {
+        if aabb.is_valid()
+            && !aabb.grown(radius + swept).contains_point(prev)
+            && !aabb.grown(radius + swept).contains_point(p)
+        {
             continue;
         }
         for (shape, local) in body.parts() {
@@ -578,7 +612,20 @@ fn collide_position(mut p: Vec3, bodies: &[BodySlot], radius: f32) -> (Vec3, Opt
             }
             let surf_world = world.transform_point(surf);
             let signed = (p - surf_world).dot(n);
-            if signed < radius {
+            // `n` 由当前点所在的侧面决定。若上一步在另一侧（signed_prev < 0），
+            // 而这一步已经过面到当前侧，就是扫掠穿透：把粒子推回**来的一侧**，
+            // 而不是顺着 n 推到穿过去的那一侧（那会让它卡在网格背面/穿到地下）。
+            let signed_prev = (prev - world.transform_point(surf)).dot(n);
+            let crossed = signed_prev < -1e-5 && signed > -radius;
+            if crossed {
+                p = surf_world - n * radius;
+                contact = Some(Contact {
+                    normal: -n,
+                    velocity: body.velocity_at_point(surf_world),
+                    point: surf_world,
+                    body: body_index as u32,
+                });
+            } else if signed < radius {
                 p = surf_world + n * radius;
                 contact = Some(Contact {
                     normal: n,
@@ -670,6 +717,31 @@ mod tests {
         assert!(s.min_y > -0.06, "min_y = {}", s.min_y);
         assert!(s.max_speed < 5.0, "max_speed = {}", s.max_speed);
         assert!(s.avg_density_ratio.is_finite());
+    }
+
+    #[test]
+    fn particles_stop_on_a_static_trimesh_floor() {
+        // 以前 `TriMesh::closest_surface` 返回 None，粒子会直接穿过网格；
+        // 场景里用 `--collide` 导入的模型因此对流体完全透明。这里锁住薄壳碰撞。
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        let floor = vec![
+            vec3(-4.0, 0.0, -4.0),
+            vec3(4.0, 0.0, -4.0),
+            vec3(4.0, 0.0, 4.0),
+            vec3(-4.0, 0.0, 4.0),
+        ];
+        world.add_builder(BodyBuilder::r#static(Shape::TriMesh {
+            vertices: floor,
+            indices: vec![0, 1, 2, 0, 2, 3],
+        }));
+        world.add_fluid(box_desc()).expect("参数合法");
+        for _ in 0..240 {
+            world.step(1.0 / 60.0);
+        }
+        let s = world.fluids()[0].stats();
+        assert!(s.min_y > -0.06, "流体穿过了静态三角网：min_y = {}", s.min_y);
+        assert!(s.max_speed < 5.0, "max_speed = {}", s.max_speed);
     }
 
     #[test]

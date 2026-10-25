@@ -4100,8 +4100,14 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
             .assets
             .material(&mut engine.renderer, &engine.gpu, "$fluid_particle", desc);
     for (fi, fluid) in engine.world.fluids().iter().enumerate() {
-        let radius = doc.fluids.get(fi).map(|f| f.radius()).unwrap_or(0.05) * 1.4;
+        let spec = doc.fluids.get(fi);
+        // 连续表面模式不再画每颗粒子的球：它们全被表面包住，画了只是多几万次绘制/阴影。
+        let show_particles = spec.is_none_or(|f| !f.surface_mesh);
+        let radius = spec.map(|f| f.radius()).unwrap_or(0.05) * 1.4;
         for (pi, p) in fluid.particles().iter().enumerate() {
+            if !show_particles {
+                break;
+            }
             engine.scene.add_fluid_particle(
                 mesh,
                 material,
@@ -4115,7 +4121,7 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
             );
         }
         // 水面：半透明平面跟着最高粒子走。它不是折射/泡沫，只是让"水面"有个位置。
-        if let Some(spec) = doc.fluids.get(fi) {
+        if let Some(spec) = spec {
             let c = spec.center.unwrap_or([0.0, 0.0, 0.0]);
             let level = fluid
                 .particles()
@@ -4143,7 +4149,33 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
                 "$fluid_surface",
                 surface_desc,
             );
-            if level.is_finite() {
+            if spec.surface_mesh {
+                // 连续表面用世界坐标网格，和平面共用同一个占位网格句柄；
+                // 材质关掉 `water_mask`，否则屏幕空间水面会把它当成一张无限平面。
+                let mesh_desc = MaterialDesc {
+                    base_color: Vec4::new(0.10, 0.34, 0.58, 0.55),
+                    metallic: 0.0,
+                    roughness: 0.08,
+                    alpha_blend: true,
+                    double_sided: true,
+                    water_mask: false,
+                    ..MaterialDesc::default()
+                };
+                let mesh_material = engine.assets.material(
+                    &mut engine.renderer,
+                    &engine.gpu,
+                    "$fluid_surface_mesh",
+                    mesh_desc,
+                );
+                engine.scene.add_fluid_mesh(
+                    surface_mesh,
+                    mesh_material,
+                    fi,
+                    spec.surface_resolution,
+                    0.45,
+                    &format!("流体表面{fi}"),
+                );
+            } else if level.is_finite() {
                 engine.scene.add_fluid_surface(
                     surface_mesh,
                     surface_material,
@@ -5156,6 +5188,9 @@ fn run_render_single(
             return;
         }
         engine.scene.sync_from_physics(&engine.world);
+        engine
+            .scene
+            .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
         // 单帧没有 tick：至少把公告板转向相机、按初始年龄算好 alpha/缩放。
         engine.scene.update_particles(engine.camera().position, 0.0);
         // 单帧渲染没有"帧时间"：按播放器当前时间（= 场景里的 start）摆一次姿态。
@@ -5816,6 +5851,9 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
                 return;
             }
             engine.scene.sync_from_physics(&engine.world);
+            engine
+                .scene
+                .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
             scene_objects = engine.scene.len();
             camera_position = arr(engine.camera().position);
         },

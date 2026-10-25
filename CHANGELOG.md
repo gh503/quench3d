@@ -57,6 +57,17 @@
 
 ### 新增
 
+- **摄像头帧作为 3D 视口背景（AR）**：摄像头窗口新增「作为 3D 视口背景」开关。
+  最新 `latest.rgb` 以 `Rgba8UnormSrgb` 上传，背景全屏三角形画在天空之前、场景几何
+  之后；窗口与画面的宽高比不同时按 **cover** 裁切，不把 4:3 硬拉成 16:9；同一帧号
+  只上传一次。GPU e2e 验证左右两半颜色、蓝色立方体盖住中心、清背景回默认。关闭时
+  逐像素回到旧清屏色/天空。
+- **流体连续自由表面（Surface Nets）**：`fluids[]` 新增 `surface_mesh`（缺省 false）
+  与 `surface_resolution`（8~96，缺省 32）。打开后每帧从 PBF 粒子重建真实三角形
+  水面，替代"跟着最高粒子走的平面"；不再重复画每颗粒子的球，`TriMesh` 静态网格
+  也与粒子精确碰撞。`Renderer::update_mesh_data` 支持拓扑变化的网格整体替换。
+  GPU e2e 验证占位立方体的 36 个索引被真实表面替换、三角形数随分辨率增长；
+  `examples/fluid_pool.json` 加 `surface_mesh: true` 可直接渲染。
 - **HDR/EXR 浮点图像与 Rgba16Float 贴图（M2 第四项的一片）**：`FloatImage`
   支持 Radiance `.hdr`（平铺 RGBE 编码）与 OpenEXR 读写（scanline、HALF/FLOAT/UINT、
   NONE/RLE 解压；写盘 HALF 无压缩，RLE 解码含预测器逆变换与奇偶反交错）。

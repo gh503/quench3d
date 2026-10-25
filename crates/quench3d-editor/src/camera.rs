@@ -244,6 +244,12 @@ pub struct CameraFeed {
     depth_frame: u64,
     show_depth: bool,
     show_points: bool,
+    /// 把最新摄像头帧作为 3D 视口背景（AR 模式）；桌面端专用。
+    background_3d: bool,
+    /// 已经上传到渲染器的帧号（避免同一帧每帧重传）。
+    background_frame: u64,
+    /// 复用的 RGBA 缓冲（摄像头 640×480 一帧约 1.2 MB）。
+    background_rgba: Vec<u8>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -272,6 +278,9 @@ impl CameraFeed {
             depth_frame: u64::MAX,
             show_depth: false,
             show_points: false,
+            background_3d: false,
+            background_frame: u64::MAX,
+            background_rgba: Vec::new(),
         }
     }
 
@@ -282,6 +291,15 @@ impl CameraFeed {
             .lock()
             .ok()
             .and_then(|guard| guard.as_ref().cloned())
+    }
+
+    /// 最新帧号（不克隆帧数据）。
+    fn latest_frame_id(&self) -> Option<u64> {
+        self.shared
+            .latest
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|f| f.json.frame))
     }
 
     fn last_error(&self) -> Option<String> {
@@ -313,6 +331,57 @@ impl CameraFeed {
             return;
         }
         add_pose_lines(lines, &pose.world);
+    }
+
+    /// 把最新一帧上传为 3D 背景；关闭开关时清掉背景。
+    ///
+    /// 返回是否成功设置。同一帧只上传一次；尺寸/帧号变化才重传。
+    /// 不放宽文件协议：仍然只读 `latest.rgb`，没有摄像头时什么也不做。
+    pub fn sync_background(
+        &mut self,
+        renderer: &mut quench3d_render::Renderer,
+        gpu: &quench3d_render::GpuContext,
+    ) -> bool {
+        if !self.background_3d {
+            if renderer.has_background() {
+                renderer.clear_background();
+            }
+            self.background_frame = u64::MAX;
+            return false;
+        }
+        if let Some(id) = self.latest_frame_id() {
+            if id == self.background_frame && renderer.has_background() {
+                return true;
+            }
+        }
+        let Some(frame) = self.latest() else {
+            return false;
+        };
+        let (w, h) = (frame.json.width, frame.json.height);
+        let Some(expected) = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(3))
+        else {
+            return false;
+        };
+        if w == 0 || h == 0 || frame.rgb.len() != expected {
+            return false;
+        }
+        if self.background_frame == frame.json.frame && renderer.has_background() {
+            return true;
+        }
+        self.background_rgba.clear();
+        self.background_rgba.reserve(w as usize * h as usize * 4);
+        let (pixels, _) = frame.rgb.as_chunks::<3>();
+        for px in pixels {
+            self.background_rgba
+                .extend_from_slice(&[px[0], px[1], px[2], 255]);
+        }
+        let ok = renderer.set_background_rgba(gpu, w, h, &self.background_rgba);
+        if ok {
+            self.background_frame = frame.json.frame;
+        }
+        ok
     }
 
     /// 桌面端摄像头窗口由文件数据自动出现，工具栏不加按钮。
@@ -373,6 +442,11 @@ impl CameraFeed {
             egui::RichText::new(status)
         });
 
+        ui.checkbox(
+            &mut self.background_3d,
+            "作为 3D 视口背景（AR，模型叠在画面上）",
+        )
+        .on_hover_text("摄像头帧会铺在 3D 场景后面；天空被替换，模型仍正常受光/投影。");
         if frame.json.pose.present {
             ui.label(
                 egui::RichText::new("3D 骨骼已叠加到视口（青绿骨骼 / 黄色关节点）")

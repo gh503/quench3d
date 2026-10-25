@@ -639,6 +639,9 @@ impl Engine {
         if self.scene.auto_sync_physics {
             let world = &self.world;
             self.scene.sync_from_physics(world);
+            // 连续水面网格的拓扑每帧会变，必须整体替换（不是只改顶点）。
+            self.scene
+                .refresh_fluid_surfaces(world, &mut self.renderer, &self.gpu);
         }
         // 模型动画按**帧**时间推进（不是物理子步）：它是视觉量，暂停时也不该继续走。
         if !self.paused {
@@ -747,6 +750,8 @@ impl Engine {
     pub fn restore(&mut self, snapshot: PhysicsSnapshot) {
         self.world.restore(snapshot);
         self.scene.sync_from_physics(&self.world);
+        self.scene
+            .refresh_fluid_surfaces(&self.world, &mut self.renderer, &self.gpu);
         self.accumulator = 0.0;
     }
 
@@ -1585,6 +1590,9 @@ pub fn render_sequence_with_game<G: Game>(
 
         if engine.scene.auto_sync_physics {
             engine.scene.sync_from_physics(&engine.world);
+            engine
+                .scene
+                .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
         }
         // 与窗口循环同一个口径：动画按帧时间推进，暂停时不走。
         if !engine.paused {
