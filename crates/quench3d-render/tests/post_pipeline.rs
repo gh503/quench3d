@@ -2151,3 +2151,92 @@ fn custom_post_pass_composes_with_fxaa() {
         "移除自定义 pass 后 FXAA 路径必须回到基线"
     );
 }
+
+/// 多条自定义 pass 按数组顺序串联：换顺序像素必须不同，删掉一条只影响它那一趟。
+#[test]
+fn custom_post_chain_runs_in_order() {
+    let Some((mut ctx, mut renderer)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.7, 0.3, 0.6, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 80.0),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let lighting = Lighting {
+        exposure: 1.0,
+        ..Default::default()
+    };
+    let swap = CustomPostPass {
+        label: "swap-rb".into(),
+        fragment: "let c = textureSample(input_tex, input_sampler, uv); return vec4<f32>(c.b, c.g, c.r, 1.0);"
+            .into(),
+        params: [0.0; 4],
+    };
+    let halve_red = CustomPostPass {
+        label: "halve-red".into(),
+        fragment: "let c = textureSample(input_tex, input_sampler, uv); return vec4<f32>(c.r * 0.5, c.g, c.b, 1.0);"
+            .into(),
+        params: [0.0; 4],
+    };
+    let t = aces(lin([0.7, 0.3, 0.6]));
+
+    renderer.set_custom_posts(&ctx, vec![swap.clone(), halve_red.clone()]);
+    let swap_then_halve = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("swap → halve");
+    let expected = srgb8([t[2] * 0.5, t[1], t[0]]);
+    assert!(
+        near(pixel(&swap_then_halve, W / 2, H / 2), expected, 2),
+        "swap → halve 手算 {expected:?}，实际 {:?}",
+        pixel(&swap_then_halve, W / 2, H / 2)
+    );
+
+    renderer.set_custom_posts(&ctx, vec![halve_red.clone(), swap.clone()]);
+    let halve_then_swap = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("halve → swap");
+    let expected_reversed = srgb8([t[2], t[1], t[0] * 0.5]);
+    assert!(
+        near(pixel(&halve_then_swap, W / 2, H / 2), expected_reversed, 2),
+        "顺序反过来结果必须不同且符合手算：{:?}",
+        pixel(&halve_then_swap, W / 2, H / 2)
+    );
+    assert_ne!(
+        pixel(&swap_then_halve, W / 2, H / 2),
+        pixel(&halve_then_swap, W / 2, H / 2)
+    );
+
+    // 只留第二趟：结果必须等于“单独 halve red”，而不是残留上一整条链。
+    renderer.set_custom_posts(&ctx, vec![halve_red.clone()]);
+    let only_halve = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("只留 halve");
+    let expected_only = srgb8([t[0] * 0.5, t[1], t[2]]);
+    assert!(
+        near(pixel(&only_halve, W / 2, H / 2), expected_only, 2),
+        "删掉一条后只应剩它自己的效果：{:?}",
+        pixel(&only_halve, W / 2, H / 2)
+    );
+
+    // 开 FXAA 时链长度为偶数：最后一趟写回 ldr，FXAA 必须从 ldr 读，不能读错缓冲。
+    renderer.options.fxaa.enabled = true;
+    renderer.set_custom_posts(&ctx, vec![swap, halve_red]);
+    let with_fxaa = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("FXAA + 两条 pass");
+    assert!(
+        near(
+            pixel(&with_fxaa, W / 2, H / 2),
+            srgb8([t[2] * 0.5, t[1], t[0]]),
+            2
+        ),
+        "FXAA + 偶数链的最终缓冲接错：{:?}",
+        pixel(&with_fxaa, W / 2, H / 2)
+    );
+}

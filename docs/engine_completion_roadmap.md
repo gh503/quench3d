@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**898 通过 / 0 失败 / 3 ignored**
-- wasm：**13,561,084 字节**
+- 测试：**899 通过 / 0 失败 / 3 ignored**
+- wasm：**13,563,625 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -67,13 +67,15 @@
 ### M2 渲染架构（8–12 人月）
 
 - [ ] Render graph / Pass 扩展点，自定义后处理可插入并出图。
-  - 已做（第一片）：`CustomPostPass` + `Renderer::set_custom_post`，固定插在
-    `tonemap → 自定义 → FXAA`；宿主只给 WGSL 片段体，绑定/全屏三角形/uv 由引擎生成。
-    两条管线分别写最终目标与 HDR 中间目标，FXAA 打开时从自定义输出读。
+  - 已做（前两片）：`CustomPostPass` + `Renderer::set_custom_post(s)`，固定插在
+    `tonemap → 自定义链 → FXAA`；宿主只给 WGSL 片段体，绑定/全屏三角形/uv 由引擎生成。
+    多条 pass 按数组顺序执行，相邻 pass 在两张 HDR 目标之间 ping-pong；最后一趟在未开
+    FXAA 时直接写最终目标，开了 FXAA 则写中间目标再由 FXAA 读（奇数/偶数链都覆盖）。
   - 行为证据（GPU 像素 e2e）：无 FXAA 与开 FXAA 两条路径都验证“tonemap 后乘 0.5”与
-    手算一致；移除后整幅图与安装前逐位相同。
-  - 未做：多 pass 依赖图/资源别名、自定义 pass 读深度/法线/运动向量、同时注册多条
-    效果并声明顺序。这些做完才把本项勾完成。
+    手算一致；两条 pass 的 swap→halve 与 halve→swap 像素不同且各自等于手算，删到只剩
+    一条只保留它自己的效果；偶数链 + FXAA 也验证最终缓冲没接错；移除后逐位回到基线。
+  - 未做：通用 pass 依赖图/资源别名、自定义 pass 读深度/法线/运动向量、自定义着色器
+    声明输入输出资源。这些做完才把本项勾完成。
 - [ ] GPU 剔除 + 间接绘制；数千物体 60 fps 的实测。
 - [ ] 遮挡剔除 / 自动 LOD / 多视口。
 - [ ] 压缩纹理（KTX2/Basis）与浮点纹理；EXR/HDR 读写。
