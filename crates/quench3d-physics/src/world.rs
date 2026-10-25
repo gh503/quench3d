@@ -24,7 +24,9 @@ use crate::broadphase::{Broadphase, Proxy};
 use crate::contact::{ContactManifold, ContactPair, ContactPoint};
 use crate::fluid::{self, Fluid, FluidDesc, FluidStats};
 use crate::island::{IslandStats, Islands};
-use crate::joints::{Joint, JointEntry, JointHandle, JointImpulses, JointSolver};
+use crate::joints::{
+    hinge_angle, Joint, JointEntry, JointHandle, JointImpulses, JointSolver, JointTelemetry,
+};
 use crate::narrowphase;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::parallel::ParallelLayout;
@@ -784,6 +786,131 @@ impl PhysicsWorld {
         slot.joint.as_ref()
     }
 
+    /// 所有**还活着**的关节句柄，按槽位顺序（与场景 `joints[]` 顺序一致）。
+    pub fn joint_handles(&self) -> Vec<JointHandle> {
+        self.joints
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.joint.as_ref().map(|_| JointHandle {
+                    index: i as u32,
+                    generation: slot.generation,
+                })
+            })
+            .collect()
+    }
+
+    /// 一个关节的运行时遥测（角度 / 目标 / 限位 / 马达力矩）。
+    ///
+    /// `dt` 是刚刚跑过的子步长：马达力矩 = 累积马达冲量 / dt。没跑过步时冲量为 0，
+    /// 因此力矩是 0——报告里要"静力矩"就至少先跑一步。
+    pub fn joint_telemetry(&self, handle: JointHandle, dt: f32) -> Option<JointTelemetry> {
+        let slot = self
+            .joints
+            .get(handle.index as usize)
+            .filter(|s| s.generation == handle.generation)?;
+        let joint = slot.joint.as_ref()?;
+        let (ha, hb) = joint.bodies();
+        let (a, b) = (self.body(ha)?, self.body(hb)?);
+        let (coordinate, target, limits) = match joint {
+            Joint::Hinge {
+                local_anchor_a: _,
+                local_anchor_b: _,
+                local_axis_a,
+                local_axis_b,
+                limits,
+                motor,
+                ..
+            } => {
+                let axis = a.rotation() * *local_axis_a;
+                let angle = hinge_angle(
+                    *local_axis_a,
+                    *local_axis_b,
+                    &BodyView::from_body(a),
+                    &BodyView::from_body(b),
+                    axis,
+                );
+                (angle, motor.and_then(|m| m.target_angle), *limits)
+            }
+            Joint::Slider {
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a,
+                limits,
+                ..
+            } => {
+                let axis = a.rotation() * *local_axis_a;
+                let wa = a.position() + a.rotation() * *local_anchor_a;
+                let wb = b.position() + b.rotation() * *local_anchor_b;
+                ((wb - wa).dot(axis), None, *limits)
+            }
+            _ => (0.0, None, None),
+        };
+        let dt = if dt.is_finite() && dt > 1e-9 {
+            dt
+        } else {
+            1e-9
+        };
+        Some(JointTelemetry {
+            handle,
+            kind: joint.kind_name(),
+            coordinate,
+            target,
+            limits,
+            motor_torque: slot.impulses.motor / dt,
+        })
+    }
+
+    /// 运行时改一个铰链伺服的目标角（rad）。返回是否改成功。
+    ///
+    /// 只改目标，不动增益 / 限幅；关节两端会被唤醒，下一子步就朝新目标转。
+    /// 给 `None` / 非有限值返回 false（不静默写 NaN 进世界）。
+    pub fn set_joint_target(&mut self, handle: JointHandle, target: f32) -> bool {
+        if !target.is_finite() {
+            return false;
+        }
+        let slot = match self.joints.get_mut(handle.index as usize) {
+            Some(s) if s.generation == handle.generation => s,
+            _ => return false,
+        };
+        let (ha, hb) = match slot.joint.as_mut() {
+            Some(Joint::Hinge {
+                motor: Some(m),
+                a,
+                b,
+                ..
+            }) => {
+                m.target_angle = Some(target);
+                m.target_velocity = 0.0;
+                (*a, *b)
+            }
+            _ => return false,
+        };
+        if let Some(body) = self.bodies.get_mut(ha.index as usize) {
+            if let Some(body) = body.body.as_mut() {
+                body.wake_up();
+            }
+        }
+        if let Some(body) = self.bodies.get_mut(hb.index as usize) {
+            if let Some(body) = body.body.as_mut() {
+                body.wake_up();
+            }
+        }
+        true
+    }
+
+    /// 读一个铰链伺服的当前目标角（rad）。
+    pub fn joint_target(&self, handle: JointHandle) -> Option<f32> {
+        let slot = self
+            .joints
+            .get(handle.index as usize)
+            .filter(|s| s.generation == handle.generation)?;
+        match slot.joint.as_ref()? {
+            Joint::Hinge { motor: Some(m), .. } => m.target_angle,
+            _ => None,
+        }
+    }
+
     /// 关节数量。
     pub fn joint_count(&self) -> usize {
         self.joints.iter().filter(|s| s.joint.is_some()).count()
@@ -1102,6 +1229,27 @@ impl PhysicsWorld {
         steps
     }
 
+    /// 用**固定数量**的等长子步推进 `dt`，跳过累加器与 [`MAX_SUBSTEPS`] 上限。
+    ///
+    /// 这是批量仿真（`simulate` / 脚本驱动）用的确定性入口：`dt` 与 `substeps` 相同，
+    /// 子步序列就逐位相同，不受帧率或宿主调用节奏影响。`substeps = 0` 视为 1。
+    ///
+    /// 与 [`Self::step`] 的区别：`step` 以 `fixed_dt` 为步长、按累加器决定跑几步；
+    /// 这里**一定**跑 `substeps` 步，每步 `dt / substeps`。物理结果仍由子步长与求解器
+    /// 配置决定，不会因为换成这个入口而"变准"。
+    pub fn step_substeps(&mut self, dt: f32, substeps: u32) -> usize {
+        if !dt.is_finite() || dt <= 0.0 {
+            return 0;
+        }
+        let n = substeps.max(1) as usize;
+        let h = dt.min(MAX_FRAME_DT) / n as f32;
+        self.version = self.version.wrapping_add(1);
+        for _ in 0..n {
+            self.substep(h);
+        }
+        n
+    }
+
     /// 浮力 + 浸没阻尼：对每个动态体，把各水域的排开体积合成一个力，
     /// 作用在合成形心上（因此有扶正力矩）。
     ///
@@ -1344,6 +1492,8 @@ impl PhysicsWorld {
         self.phase_timings.islands = island_stats.islands;
         self.phase_timings.largest_island = island_stats.largest;
         self.phase_timings.multi_body_islands = island_stats.multi_body_islands;
+        // 5.9 扭矩级 PD 马达：先作为外力施加一次，再进约束求解。
+        self.joint_solver.apply_pd_torques(&mut views, dt);
         // 6. 热启动
         self.contact_solver.warm_start(&mut views, &self.config);
         self.joint_solver.warm_start(&mut views);

@@ -491,7 +491,7 @@ impl McpServer {
                             report.bodies,
                             report.dynamic,
                             report.contacts,
-                            report.joints,
+                            report.joint_count,
                             report.max_speed,
                             report.lowest_y,
                             report.nan_bodies

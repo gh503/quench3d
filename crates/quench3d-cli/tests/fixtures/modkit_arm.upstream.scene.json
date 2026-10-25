@@ -1,0 +1,251 @@
+{
+  "format": "quench3d.scene",
+  "version": 2,
+  "name": "modkit M1 · yaw 0.0° shoulder 35.0° elbow -55.0°",
+  "gravity": [
+    0,
+    -9.81,
+    0
+  ],
+  "ground": {
+    "size": 4,
+    "material": "floor"
+  },
+  "materials": {
+    "floor": {
+      "color": [
+        0.55,
+        0.58,
+        0.62
+      ],
+      "roughness": 0.9
+    },
+    "steel": {
+      "color": [
+        0.55,
+        0.58,
+        0.62
+      ],
+      "metallic": 0.8,
+      "roughness": 0.3
+    },
+    "orange": {
+      "color": [
+        0.95,
+        0.52,
+        0.09
+      ],
+      "roughness": 0.5
+    },
+    "joint": {
+      "color": [
+        0.18,
+        0.22,
+        0.25
+      ],
+      "roughness": 0.6
+    }
+  },
+  "objects": [
+    {
+      "name": "chassis",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.24,
+          0.005,
+          0.2
+        ]
+      },
+      "position": [
+        0,
+        0.0025,
+        0
+      ],
+      "material": "steel",
+      "body": "static"
+    },
+    {
+      "name": "column",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.04,
+          0.09,
+          0.04
+        ]
+      },
+      "position": [
+        0,
+        0.05,
+        0
+      ],
+      "material": "joint",
+      "body": "static"
+    },
+    {
+      "name": "yaw",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.05,
+          0.03,
+          0.05
+        ]
+      },
+      "position": [
+        0.025,
+        0.105,
+        0
+      ],
+      "material": "orange",
+      "body": "dynamic",
+      "mass": 0.08
+    },
+    {
+      "name": "link1",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.12,
+          0.02,
+          0.03
+        ]
+      },
+      "position": [
+        0.085,
+        0.12,
+        0
+      ],
+      "material": "orange",
+      "body": "dynamic",
+      "mass": 0.09,
+      "friction": 0.6
+    },
+    {
+      "name": "link2",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.11,
+          0.02,
+          0.03
+        ]
+      },
+      "position": [
+        0.225,
+        0.12,
+        0
+      ],
+      "material": "orange",
+      "body": "dynamic",
+      "mass": 0.07,
+      "friction": 0.6
+    }
+  ],
+  "joints": [
+    {
+      "type": "hinge",
+      "a": "column",
+      "b": "yaw",
+      "axis": [
+        0,
+        1,
+        0
+      ],
+      "anchor_a": [
+        0,
+        0.045,
+        0
+      ],
+      "anchor_b": [
+        -0.025,
+        0,
+        0
+      ],
+      "limits": [
+        -2.09,
+        2.09
+      ],
+      "motor_target_deg": 0.0,
+      "motor_stiffness": 8.0,
+      "motor_damping": 10.0,
+      "motor_max_impulse": 2.0
+    },
+    {
+      "type": "hinge",
+      "a": "yaw",
+      "b": "link1",
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "anchor_a": [
+        0.025,
+        0,
+        0
+      ],
+      "anchor_b": [
+        -0.06,
+        0,
+        0
+      ],
+      "limits": [
+        -0.4363323129985824,
+        1.7453292519943295
+      ],
+      "motor_target_deg": 35.0,
+      "motor_stiffness": 20.0,
+      "motor_damping": 10.0,
+      "motor_max_impulse": 2.0,
+      "break_torque": 2.941995
+    },
+    {
+      "type": "hinge",
+      "a": "link1",
+      "b": "link2",
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "anchor_a": [
+        0.06,
+        0,
+        0
+      ],
+      "anchor_b": [
+        -0.055,
+        0,
+        0
+      ],
+      "limits": [
+        -2.6179938779914944,
+        0.08726646259971647
+      ],
+      "motor_target_deg": -55.0,
+      "motor_stiffness": 50.0,
+      "motor_damping": 10.0,
+      "motor_max_impulse": 2.0,
+      "break_torque": 2.941995
+    }
+  ],
+  "camera": {
+    "position": [
+      0.55,
+      0.35,
+      0.55
+    ],
+    "look_at": [
+      0.12,
+      0.12,
+      0
+    ],
+    "fov_deg": 45
+  },
+  "simulate": {
+    "steps": 6000,
+    "dt": 0.002
+  }
+}

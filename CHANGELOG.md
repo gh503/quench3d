@@ -41,6 +41,15 @@
 
 ### 新增
 
+- **robot-modkit M1 机械臂（第 186 轮）**：铰链伺服新增 SI 扭矩级 PD
+  （`motor_kp` / `motor_kd` / `motor_max_torque`，N·m/rad、N·m·s/rad、N·m），
+  `physics.substeps` / `solver_iterations` / `position_iterations` 可调；
+  `simulate --json` 的 `joints[]` 给出 `angle_deg/target_deg/error_deg/torque_nm/
+  limit_state/broken`，`--trace` 支持关节，动作新增 `joint_target`（可选
+  `speed_deg_s`）。夹具 `tests/fixtures/modkit_arm*.scene.json`，测试 4 条 + e2e 1 条；
+  门禁 871 测试全绿。**已知缺口**：抓取夹具用理想固定关节，不是摩擦夹持；
+  `visual`/STL、运动学 drive、wasm 关节 API 未做，见 `docs/robot_arm_sim.md`。
+
 - **CI：无 GPU 的序列测试改为跳过（第 170 轮）**：`sequence_updates_particles_between_frames`
   在找不到适配器时打印跳过；修复 ubuntu CI 的假红。
 

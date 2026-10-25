@@ -901,7 +901,7 @@ fn dispatch(args: &Args) -> i32 {
                         report.dynamic,
                         report.sleeping,
                         report.contacts,
-                        report.joints,
+                        report.joint_count,
                         report.max_speed,
                         report.lowest_y,
                         report.nan_bodies
@@ -941,8 +941,40 @@ fn dispatch(args: &Args) -> i32 {
                     for w in &report.warnings {
                         human.push_str(&format!("警告      : {w}\n"));
                     }
+                    for j in &report.joints {
+                        human.push_str(&format!(
+                            "  joint {:<10} {:<6} 角度 {:>8.2}° 目标 {:>8.2}° 误差 {:>7.2}° 力矩 {:>7.3} N·m{}{}\n",
+                            j.name,
+                            j.kind,
+                            j.angle_deg,
+                            j.target_deg.unwrap_or(f32::NAN),
+                            j.error_deg.unwrap_or(f32::NAN),
+                            j.torque_nm,
+                            if j.limit_state == "ok" {
+                                String::new()
+                            } else {
+                                format!(" 限位={}", j.limit_state)
+                            },
+                            if j.broken { " 已断开" } else { "" }
+                        ));
+                    }
                     for t in &trajectories {
                         human.push_str(&trajectory_human(t));
+                    }
+                    for t in &report.joint_traces {
+                        human.push_str(&format!(
+                            "关节轨迹 {}：{} 个采样（{} → {}）\n",
+                            t.name,
+                            t.samples.len(),
+                            t.samples
+                                .first()
+                                .map(|s| format!("{:.2}{}", s.value, s.unit))
+                                .unwrap_or_default(),
+                            t.samples
+                                .last()
+                                .map(|s| format!("{:.2}{}", s.value, s.unit))
+                                .unwrap_or_default()
+                        ));
                     }
                     // 可选同时渲染
                     if let Some(out) = args.flag_str("--render") {
@@ -1553,6 +1585,12 @@ fn trace_targets(args: &Args, doc: &quench3d_cli::scene_doc::SceneDoc) -> Vec<St
                 if !names.contains(&name) {
                     names.push(name);
                 }
+            }
+        }
+        for (i, j) in expanded.joints.iter().enumerate() {
+            let name = j.name.clone().unwrap_or_else(|| format!("joint[{i}]"));
+            if !names.contains(&name) {
+                names.push(name);
             }
         }
     }

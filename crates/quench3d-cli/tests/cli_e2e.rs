@@ -4180,7 +4180,8 @@ fn joint_servo_cone_limit_and_break_force_are_wired() {
 
     // ① 伺服
     let servo = sim("servo.json", servo_scene(Some(30.0), None));
-    assert_eq!(servo["joints"].as_u64().unwrap(), 1);
+    assert_eq!(servo["joint_count"].as_u64().unwrap(), 1);
+    assert_eq!(servo["joints"][0]["name"].as_str().unwrap(), "joint[0]");
     assert_eq!(servo["joints_broken"].as_u64().unwrap(), 0);
     let door = spin_about(&servo, "门", 1);
     assert!(
@@ -4210,16 +4211,21 @@ fn joint_servo_cone_limit_and_break_force_are_wired() {
         "628 N 的载荷挂在 500 N 的关节上该断"
     );
     assert_eq!(
-        broken["joints"].as_u64().unwrap(),
+        broken["joint_count"].as_u64().unwrap(),
         0,
         "断掉的关节不该还在计数里"
+    );
+    assert!(
+        broken["joints"][0]["broken"].as_bool().unwrap(),
+        "断掉的关节要在 joints[] 里显式标 broken: true"
     );
     let fallen = y_of(&broken, "载");
     assert!(fallen < 0.5, "断了之后载荷该掉下去，实测 y = {fallen:.2}");
 
     let held = sim("break_big.json", break_scene(1.0e6));
     assert_eq!(held["joints_broken"].as_u64().unwrap(), 0);
-    assert_eq!(held["joints"].as_u64().unwrap(), 1);
+    assert_eq!(held["joint_count"].as_u64().unwrap(), 1);
+    assert!(!held["joints"][0]["broken"].as_bool().unwrap());
     let hanging = y_of(&held, "载");
     assert!(
         (hanging - 1.0).abs() < 0.05,
@@ -8009,5 +8015,46 @@ fn decal_quad_changes_pixels() {
     assert!(
         br > ar + 80.0 && br > bg + 60.0 && br > bb + 60.0,
         "贴花必须让中心变红：无贴花 ({ar:.1},{ag:.1},{ab:.1}) vs 有贴花 ({br:.1},{bg:.1},{bb:.1})"
+    );
+}
+
+/// 机械臂：`--trace` 要能直接点名关节，报告里给角度/目标/误差/力矩；上游场景的
+/// 锚点错位必须在校验阶段吵出来，而不是让用户对着 ±3° 的残差瞎调增益。
+#[test]
+fn robot_arm_joint_trace_and_anchor_diagnostic() {
+    let traced = run(&[
+        "simulate",
+        "tests/fixtures/modkit_arm.scene.json",
+        "--json",
+        "--trace",
+        "shoulder",
+    ]);
+    assert_eq!(traced.code, 0, "stderr={}", traced.stderr);
+    let report = traced.json();
+    let data = &report["data"];
+    let trace = &data["joint_traces"][0];
+    assert_eq!(trace["name"], "shoulder");
+    let samples = trace["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 2501, "初始 + 2500 步都要有采样");
+    let last = samples.last().unwrap();
+    assert!((last["value"].as_f64().unwrap() - 35.0).abs() <= 1.0);
+    assert_eq!(last["target_deg"].as_f64().unwrap(), 35.0);
+    assert!(last["torque_nm"].as_f64().unwrap().abs() > 0.1);
+
+    let upstream = run(&[
+        "validate",
+        "tests/fixtures/modkit_arm.upstream.scene.json",
+        "--json",
+    ]);
+    assert_eq!(upstream.code, 0, "锚点错位是 warning，不阻塞");
+    let v = upstream.json();
+    let diags = v["data"]["diagnostics"].as_array().unwrap();
+    assert!(
+        diags.iter().any(|d| {
+            d["severity"] == "warning"
+                && d["path"].as_str().unwrap_or("").starts_with("joints[")
+                && d["message"].as_str().unwrap_or("").contains("锚点")
+        }),
+        "上游 modkit 场景的锚点错位必须报 warning：{diags:?}"
     );
 }

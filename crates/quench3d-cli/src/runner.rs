@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Instant;
 
-use quench3d::physics::{BodyType, PhysicsWorld, QueryFilter, Shape};
+use quench3d::physics::{BodyType, Joint, PhysicsWorld, QueryFilter, Shape};
 use quench3d::prelude::*;
 use quench3d::render::{environment::EnvironmentMap, RenderStats, Vertex};
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,79 @@ pub struct FluidReport {
     pub contacts: usize,
 }
 
+/// 一个关节的运行时遥测（`simulate --json` 的 `joints[]`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JointReport {
+    /// 关节名（场景 `joints[].name`，不写时是 `joint[i]`）。
+    pub name: String,
+    /// 关节类型。
+    pub kind: String,
+    /// 当前角度（度）；滑块是位移（米，见 `displacement_m`）。
+    pub angle_deg: f32,
+    /// 滑块位移（米）；只有滑块才有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub displacement_m: Option<f32>,
+    /// 伺服目标角度（度）；没有伺服时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_deg: Option<f32>,
+    /// 目标 − 当前（度）；没有目标时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_deg: Option<f32>,
+    /// 马达在最后一步施加的力矩（N·m；绕关节轴作用于 B，带符号）。
+    pub torque_nm: f32,
+    /// 限位状态：`ok` / `low` / `high`。
+    pub limit_state: String,
+    /// 关节是否已经断开（断裂后角度/力矩停在最后可读值，0 表示不可用）。
+    pub broken: bool,
+}
+
+/// 一个关节的轨迹采样。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JointTraceSample {
+    /// 第几步（0 是初始状态）。
+    pub step: u32,
+    /// 时间（秒）。
+    pub time: f32,
+    /// 角度（度）；滑块是位移（米），见 `kind`。
+    pub value: f32,
+    /// 单位（`deg` 或 `m`）。
+    pub unit: String,
+    /// 伺服目标（度）；没有目标时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_deg: Option<f32>,
+    /// 误差（度）；没有目标时不出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_deg: Option<f32>,
+    /// 马达力矩（N·m）。
+    pub torque_nm: f32,
+}
+
+/// 一个关节的完整轨迹。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JointTrace {
+    /// 关节名。
+    pub name: String,
+    /// 关节类型。
+    pub kind: String,
+    /// 采样点。
+    pub samples: Vec<JointTraceSample>,
+}
+
+/// 构建期记下的关节元信息（断开后句柄失效，报告仍要能列出名字/目标/限位）。
+#[derive(Debug, Clone)]
+pub struct JointRuntime {
+    /// 关节名。
+    pub name: String,
+    /// 句柄。
+    pub handle: JointHandle,
+    /// 类型名。
+    pub kind: String,
+    /// 场景里写的伺服目标角（度）。
+    pub target_deg: Option<f32>,
+    /// 限位（弧度）。
+    pub limits: Option<(f32, f32)>,
+}
+
 /// 物理仿真报告。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimReport {
@@ -154,7 +227,12 @@ pub struct SimReport {
     /// 接触流形数。
     pub contacts: usize,
     /// 关节数（**跑完之后**还剩几个）。
-    pub joints: usize,
+    pub joint_count: usize,
+    /// 每个关节的运行时遥测（按场景 `joints[]` 顺序，含断开的）。
+    pub joints: Vec<JointReport>,
+    /// `--trace` 点名的关节角度序列（没点名时不出现）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joint_traces: Vec<JointTrace>,
     /// 断掉的关节数（场景里没写 `break_force` / `break_torque` 时恒为 0）。
     pub joints_broken: usize,
     /// 事件总线（按发生顺序；引擎默认上限 4096 条，超了记在 `events_dropped`）。
@@ -936,13 +1014,17 @@ pub struct WorldBuild {
     pub handles: BTreeMap<String, BodyHandle>,
     /// 名字 → 出生位置。
     pub born: BTreeMap<String, Vec3>,
+    /// 关节名 → 句柄（按 `joints[]` 顺序；断开后句柄失效，但名字还在）。
+    pub joints: Vec<JointRuntime>,
+    /// 每个外层步内部切几个物理子步。
+    pub substeps: u32,
 }
 
 impl WorldBuild {
     /// 步进若干步。
     pub fn step(&mut self, steps: u32, dt: f32) {
         for _ in 0..steps {
-            self.world.step(dt);
+            self.world.step_substeps(dt, self.substeps);
         }
     }
 }
@@ -1071,6 +1153,16 @@ struct PreparedAction {
     position: Vec3,
     /// 目标朝向（只有 teleport 用）。
     rotation: Option<Quat>,
+    /// `joint_target` 的关节句柄。
+    joint: Option<JointHandle>,
+    /// `joint_target` 的目标角（弧度）。
+    target_angle: Option<f32>,
+    /// `joint_target` 的最大角速度（rad/s）；0 = 立即。
+    joint_speed: f32,
+    /// `weld` 的另一端刚体。
+    other: Option<BodyHandle>,
+    /// 动作原始目标名（`weld`/`release` 用来配对）。
+    label: String,
     /// 原始下标：同一时刻的动作按作者写的顺序施加，保证确定性。
     index: usize,
 }
@@ -1106,6 +1198,24 @@ pub struct Script {
     animations: Vec<PreparedAnimation>,
     /// 已经过的时间（秒），动画采样用。
     time: f32,
+    /// 每个外层步内部切几个物理子步。
+    substeps: u32,
+    /// 正在按速度限制移动的关节（避免动作重触发）。
+    joint_moves: Vec<JointMove>,
+    /// `weld` 建立的名字 → 关节句柄，供 `release` 解开。
+    welds: BTreeMap<String, JointHandle>,
+}
+
+/// 一个正在限速移动的关节目标。
+#[derive(Debug, Clone, Copy)]
+struct JointMove {
+    joint: JointHandle,
+    /// 最终目标（rad）。
+    target: f32,
+    /// 当前目标（rad），每步朝 `target` 走 `speed*dt`。
+    current: f32,
+    /// 角速度（rad/s）。
+    speed: f32,
 }
 
 impl Script {
@@ -1115,17 +1225,45 @@ impl Script {
         world: &PhysicsWorld,
         handles: &BTreeMap<String, BodyHandle>,
     ) -> Result<Self, RunError> {
+        let joints: BTreeMap<String, JointHandle> = world
+            .joint_handles()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, h)| {
+                doc.joints
+                    .get(i)
+                    .and_then(|j| j.name.clone())
+                    .or_else(|| Some(format!("joint[{i}]")))
+                    .map(|n| (n, h))
+            })
+            .collect();
         let mut actions = Vec::new();
         for (index, a) in doc.actions.iter().enumerate() {
             // `target: "*"` = 全部（只有 wake 允许，校验器已经拦过别的组合）
-            let handle =
-                if a.target == "*" {
-                    None
-                } else {
+            let (handle, joint) = if a.kind == ActionKind::JointTarget {
+                let name = a
+                    .joint
+                    .as_deref()
+                    .or_else(|| (!a.target.is_empty()).then_some(a.target.as_str()))
+                    .ok_or_else(|| {
+                        RunError::scene(format!(
+                            "actions[{index}] 是 joint_target，但没有写 joint（或 target）"
+                        ))
+                    })?;
+                let h = *joints.get(name).ok_or_else(|| {
+                    RunError::scene(format!("动作要驱动的关节 \"{name}\" 不存在"))
+                })?;
+                (None, Some(h))
+            } else if a.target == "*" {
+                (None, None)
+            } else {
+                (
                     Some(*handles.get(&a.target).ok_or_else(|| {
                         RunError::scene(format!("动作目标 \"{}\" 不存在", a.target))
-                    })?)
-                };
+                    })?),
+                    None,
+                )
+            };
             let step = match (a.at_step, a.at_time) {
                 (Some(s), _) => s,
                 (None, Some(t)) => (t / doc.simulate.dt).round().max(0.0) as u32,
@@ -1144,6 +1282,16 @@ impl Script {
                 point: v3(a.point.unwrap_or([0.0; 3])),
                 position: v3(a.position.unwrap_or([0.0; 3])),
                 rotation: a.rotation_deg.map(|r| euler_quat(Some(r))),
+                joint,
+                target_angle: a.target_deg.map(f32::to_radians),
+                joint_speed: a.speed_deg_s.unwrap_or(0.0).to_radians(),
+                label: a.target.clone(),
+                other: match (&a.other, &handles) {
+                    (Some(n), h) => Some(*h.get(n).ok_or_else(|| {
+                        RunError::scene(format!("动作 `other` 目标 \"{n}\" 不存在"))
+                    })?),
+                    _ => None,
+                },
                 index,
             });
         }
@@ -1253,6 +1401,9 @@ impl Script {
             animations,
             time: 0.0,
             step: 0,
+            substeps: doc.physics.substeps.unwrap_or(1).max(1),
+            joint_moves: Vec::new(),
+            welds: BTreeMap::new(),
         })
     }
 
@@ -1309,9 +1460,32 @@ impl Script {
         self.time += dt;
         self.apply_animations(world, dt);
         self.apply_actions(world);
-        world.step(dt);
+        self.step_joint_moves(world, dt);
+        world.step_substeps(dt, self.substeps);
         self.observe(world);
         self.step += 1;
+    }
+
+    /// 按 `speed_deg_s` 把当前目标朝最终目标推进一个外层步。
+    fn step_joint_moves(&mut self, world: &mut PhysicsWorld, dt: f32) {
+        if self.joint_moves.is_empty() {
+            return;
+        }
+        let mut done = Vec::new();
+        for (i, m) in self.joint_moves.iter_mut().enumerate() {
+            let delta = m.target - m.current;
+            let step = m.speed * dt;
+            if delta.abs() <= step {
+                m.current = m.target;
+                done.push(i);
+            } else {
+                m.current += delta.signum() * step;
+            }
+            world.set_joint_target(m.joint, m.current);
+        }
+        for i in done.into_iter().rev() {
+            self.joint_moves.swap_remove(i);
+        }
     }
 
     /// 施加属于第 `self.step` 步的动作。
@@ -1322,6 +1496,52 @@ impl Script {
         for a in &self.actions {
             // 持续力 `steps` 步：作用区间是 [step, step + steps)
             if self.step < a.step || self.step >= a.step.saturating_add(a.steps) {
+                continue;
+            }
+            if a.kind == ActionKind::Weld {
+                let (Some(handle), Some(other)) = (a.handle, a.other) else {
+                    continue;
+                };
+                // 保持**当前**相对位姿：锚点取两端质心的当前世界差在 B 局部的表达，
+                // 否则固定关节会把两个质心硬拉到同一点（看起来像瞬移，不是抓取）。
+                let (Some(ba), Some(bb)) = (world.body(handle), world.body(other)) else {
+                    continue;
+                };
+                let anchor_b = bb.rotation().inverse() * (ba.position() - bb.position());
+                let joint = Joint::Fixed {
+                    a: handle,
+                    b: other,
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: anchor_b,
+                    local_frame_a: Quat::IDENTITY,
+                    local_frame_b: Quat::IDENTITY,
+                };
+                let h = world.add_joint(joint);
+                self.welds.insert(a.label.clone(), h);
+                continue;
+            }
+            if a.kind == ActionKind::Release {
+                let Some(_) = a.handle else { continue };
+                if let Some(h) = self.welds.remove(&a.label) {
+                    world.remove_joint(h);
+                }
+                continue;
+            }
+            if a.kind == ActionKind::JointTarget {
+                let (Some(joint), Some(target)) = (a.joint, a.target_angle) else {
+                    continue;
+                };
+                if a.joint_speed > 0.0 {
+                    let current = world.joint_target(joint).unwrap_or(0.0);
+                    self.joint_moves.push(JointMove {
+                        joint,
+                        target,
+                        current,
+                        speed: a.joint_speed,
+                    });
+                } else {
+                    world.set_joint_target(joint, target);
+                }
                 continue;
             }
             // `target: "*"`：一次唤醒全部（此时没有单个 handle）
@@ -1344,6 +1564,7 @@ impl Script {
                     let rot = a.rotation.unwrap_or_else(|| body.rotation());
                     body.set_transform(Transform::new(a.position, rot, Vec3::ONE));
                 }
+                ActionKind::JointTarget | ActionKind::Weld | ActionKind::Release => {}
             }
         }
     }
@@ -1824,6 +2045,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     let mut world = PhysicsWorld::new();
     let mut handles = BTreeMap::new();
     let mut born = BTreeMap::new();
+    let mut joint_entries: Vec<JointRuntime> = Vec::new();
 
     if let Some(g) = doc.gravity {
         world.set_gravity(v3(g));
@@ -1885,6 +2107,13 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     if let Some(v) = doc.physics.speculative_margin {
         world.config.speculative_margin = v.max(0.0);
     }
+    if let Some(v) = doc.physics.solver_iterations {
+        world.config.velocity_iterations = v.max(1) as usize;
+    }
+    if let Some(v) = doc.physics.position_iterations {
+        world.config.position_iterations = v as usize;
+    }
+    let substeps = doc.physics.substeps.unwrap_or(1).max(1);
 
     if let Some(ground) = &doc.ground {
         let pos = Vec3::new(0.0, ground.y, 0.0);
@@ -2038,6 +2267,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     }
 
     for (i, j) in doc.joints.iter().enumerate() {
+        let name = j.name.clone().unwrap_or_else(|| format!("joint[{i}]"));
         let a = *handles
             .get(&j.a)
             .ok_or_else(|| RunError::scene(format!("joints[{i}].a 找不到刚体 {}", j.a)))?;
@@ -2104,6 +2334,13 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             },
         };
         let handle = world.add_joint(joint);
+        joint_entries.push(JointRuntime {
+            name,
+            handle,
+            kind: j.kind.as_str().to_string(),
+            target_deg: j.motor_target_deg,
+            limits: j.limits.map(|l| (l[0], l[1])),
+        });
         if j.break_force.is_some() || j.break_torque.is_some() {
             world.set_joint_break(handle, j.break_force, j.break_torque);
         }
@@ -2117,6 +2354,8 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         world,
         handles,
         born,
+        joints: joint_entries,
+        substeps,
     })
 }
 
@@ -2128,6 +2367,14 @@ fn build_hinge_motor(j: &JointDoc) -> Result<Option<HingeMotor>, RunError> {
     let max_impulse = j.motor_max_impulse.unwrap_or(f32::MAX);
     match (j.motor_target_deg, j.motor_velocity) {
         (Some(deg), _) => {
+            if let Some(kp) = j.motor_kp {
+                return Ok(Some(HingeMotor::pd(
+                    deg.to_radians(),
+                    kp,
+                    j.motor_kd.unwrap_or(0.0),
+                    j.motor_max_torque.unwrap_or(0.0),
+                )));
+            }
             let motor = HingeMotor::servo(deg.to_radians(), max_impulse);
             Ok(Some(motor.gains(
                 j.motor_stiffness.unwrap_or(8.0),
@@ -2268,6 +2515,50 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         }
     }
 
+    let mut joint_reports = Vec::with_capacity(build.joints.len());
+    for j in &build.joints {
+        let broken = build.world.broken_joints().contains(&j.handle);
+        if let Some(t) = build
+            .world
+            .joint_telemetry(j.handle, dt / build.substeps.max(1) as f32)
+            .filter(|_| !broken)
+        {
+            let is_slider = t.kind == "slider";
+            let angle_deg = if is_slider {
+                0.0
+            } else {
+                t.coordinate.to_degrees()
+            };
+            let limit_state = match t.limits {
+                Some((lo, _)) if t.coordinate < lo => "low",
+                Some((_, hi)) if t.coordinate > hi => "high",
+                _ => "ok",
+            };
+            joint_reports.push(JointReport {
+                name: j.name.clone(),
+                kind: t.kind.to_string(),
+                angle_deg,
+                displacement_m: if is_slider { Some(t.coordinate) } else { None },
+                target_deg: t.target.map(f32::to_degrees),
+                error_deg: t.target.map(|target| (target - t.coordinate).to_degrees()),
+                torque_nm: t.motor_torque,
+                limit_state: limit_state.to_string(),
+                broken,
+            });
+        } else {
+            joint_reports.push(JointReport {
+                name: j.name.clone(),
+                kind: j.kind.clone(),
+                angle_deg: 0.0,
+                displacement_m: None,
+                target_deg: j.target_deg,
+                error_deg: None,
+                torque_nm: 0.0,
+                limit_state: "ok".to_string(),
+                broken,
+            });
+        }
+    }
     let mut warnings = Vec::new();
     if nan > 0 {
         warnings.push(format!("有 {nan} 个刚体出现 NaN/Inf"));
@@ -2310,7 +2601,9 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         dynamic,
         sleeping,
         contacts: build.world.contacts().len(),
-        joints: build.world.joint_count(),
+        joint_count: build.world.joint_count(),
+        joints: joint_reports,
+        joint_traces: Vec::new(),
         joints_broken: build.world.broken_joints().len(),
         events,
         events_dropped,
@@ -2884,13 +3177,24 @@ pub fn run_simulate_traced(
     };
     let truncated = steps / every > MAX_TRACE_SAMPLES as u32;
 
+    let sub_dt = dt / build.substeps.max(1) as f32;
+    let mut joint_traced: Vec<(String, String, JointHandle)> = Vec::new();
     let mut traced: Vec<Tracing> = Vec::new();
     for name in trace {
+        if let Some(j) = build.joints.iter().find(|j| &j.name == name) {
+            joint_traced.push((j.name.clone(), j.kind.clone(), j.handle));
+            continue;
+        }
         let Some(handle) = build.handles.get(name).copied() else {
-            let mut known: Vec<&str> = build.handles.keys().map(|k| k.as_str()).collect();
+            let mut known: Vec<&str> = build
+                .handles
+                .keys()
+                .chain(build.joints.iter().map(|j| &j.name))
+                .map(|k| k.as_str())
+                .collect();
             known.sort_unstable();
             return Err(RunError::scene(format!(
-                "找不到刚体 `{name}`；可用名字：{}",
+                "找不到刚体或关节 `{name}`；可用名字：{}",
                 known.join("、")
             )));
         };
@@ -2908,6 +3212,29 @@ pub fn run_simulate_traced(
         });
     }
 
+    let joint_sample = |world: &PhysicsWorld, j: &JointHandle, step: u32, sub_dt: f32| {
+        world.joint_telemetry(*j, sub_dt).map(|t| JointTraceSample {
+            step,
+            time: step as f32 * dt,
+            value: if t.kind == "slider" {
+                t.coordinate
+            } else {
+                t.coordinate.to_degrees()
+            },
+            unit: if t.kind == "slider" { "m" } else { "deg" }.to_string(),
+            target_deg: t.target.map(f32::to_degrees),
+            error_deg: t.target.map(|x| (x - t.coordinate).to_degrees()),
+            torque_nm: t.motor_torque,
+        })
+    };
+    let mut joint_samples: Vec<Vec<JointTraceSample>> = joint_traced
+        .iter()
+        .map(|(_, _, handle)| {
+            joint_sample(&build.world, handle, 0, sub_dt)
+                .into_iter()
+                .collect()
+        })
+        .collect();
     // 先采初始状态
     for t in traced.iter_mut() {
         if let Some(body) = build.world.body(t.handle) {
@@ -2931,6 +3258,13 @@ pub fn run_simulate_traced(
                 t.samples.push(s);
             }
         }
+        for (i, (_, _, handle)) in joint_traced.iter().enumerate() {
+            if let Some(s) = joint_sample(&build.world, handle, step, sub_dt) {
+                if let Some(list) = joint_samples.get_mut(i) {
+                    list.push(s);
+                }
+            }
+        }
     }
 
     // 动画名对不对只有装载后才知道；`validate` 读不到资产，这里是唯一出口。
@@ -2941,6 +3275,15 @@ pub fn run_simulate_traced(
     report.sensors = script.sensor_report();
     report.warnings.extend(animation_warnings(&models));
     report.models = models;
+    report.joint_traces = joint_traced
+        .into_iter()
+        .zip(joint_samples)
+        .map(|((name, kind, _), samples)| JointTrace {
+            name,
+            kind,
+            samples,
+        })
+        .collect();
     let trajectories = traced
         .into_iter()
         .map(|t| summarize_trace(t.name, t.shape.to_string(), t.samples, truncated))
@@ -4577,6 +4920,8 @@ fn run_render_single(
         world,
         handles,
         born: _,
+        joints: _,
+        substeps: _,
     } = build;
 
     let config = EngineConfig {
@@ -5116,6 +5461,8 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         mut world,
         handles,
         born: _,
+        joints: _,
+        substeps: _,
     } = build_world(doc)?;
 
     let policy = OutputPolicy {

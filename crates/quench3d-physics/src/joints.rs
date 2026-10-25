@@ -45,6 +45,16 @@ pub struct HingeMotor {
     /// `1/(1+damping)` 的松弛系数分多次迭代逼近目标角速度。
     /// `0` = 一次迭代到位（最急），`≥10` = 很柔和。
     pub damping: f32,
+    /// SI 比例增益（N·m/rad）；`> 0` 时启用扭矩级 PD，忽略上面的速度伺服参数。
+    ///
+    /// 与 `stiffness` 的区别：`stiffness` 是"离目标 1 rad 想要多大角速度"（1/s，
+    /// 0.1.0 的历史模型），力矩不被显式限幅；`kp/kd` 直接算力矩并限到
+    /// `max_torque`，因此能表达"30 kg·cm 舵机最多出 2.94 N·m"。
+    pub kp: f32,
+    /// SI 阻尼增益（N·m·s/rad），与 `kp` 配套。
+    pub kd: f32,
+    /// 最大输出力矩（N·m）；`<= 0` 表示不额外限幅（仍受 `max_impulse` 限制）。
+    pub max_torque: f32,
 }
 
 impl HingeMotor {
@@ -56,6 +66,9 @@ impl HingeMotor {
             target_angle: None,
             stiffness: 8.0,
             damping: 1.0,
+            kp: 0.0,
+            kd: 0.0,
+            max_torque: 0.0,
         }
     }
 
@@ -72,6 +85,32 @@ impl HingeMotor {
         self.stiffness = stiffness;
         self.damping = damping;
         self
+    }
+
+    /// 改成**扭矩级 PD 伺服**：`kp`（N·m/rad）、`kd`（N·m·s/rad）、
+    /// `max_torque`（N·m，`<= 0` 不限）。
+    ///
+    /// 推荐从 `kp = 12`、`kd ≈ 2√(kp·I)` 起步（每个关节按自己的惯量取，
+    /// M1 的 yaw/shoulder/elbow 约为 0.08/0.40/0.15），`max_torque` 取略低于
+    /// 电机额定力矩。对 0.05–0.5 kg 的连杆、≤3 N·m 负载，在 1/500–1/60 的子步下
+    /// 都能在 5 s 内收敛到 ±1°（见 `docs/robot_arm_sim.md`）。`kd` 太大会在
+    /// 小惯量关节上激发高频振荡，太小则来回摆。
+    pub fn pd(target_angle: f32, kp: f32, kd: f32, max_torque: f32) -> Self {
+        Self {
+            target_angle: Some(target_angle),
+            target_velocity: 0.0,
+            max_impulse: f32::MAX,
+            stiffness: 8.0,
+            damping: 1.0,
+            kp: kp.max(0.0),
+            kd: kd.max(0.0),
+            max_torque: max_torque.max(0.0),
+        }
+    }
+
+    /// 是否扭矩级 PD 模式。
+    pub fn is_pd(&self) -> bool {
+        self.kp > 0.0 && self.target_angle.is_some()
     }
 
     /// 当前这一子步想要达到的相对角速度。
@@ -244,6 +283,17 @@ pub enum Joint {
 }
 
 impl Joint {
+    /// 关节类型名（报告与校验用，稳定字符串）。
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Joint::Fixed { .. } => "fixed",
+            Joint::Ball { .. } => "ball",
+            Joint::Hinge { .. } => "hinge",
+            Joint::Distance { .. } => "distance",
+            Joint::Slider { .. } => "slider",
+        }
+    }
+
     /// 关节两端的刚体句柄。
     pub fn bodies(&self) -> (BodyHandle, BodyHandle) {
         match self {
@@ -347,6 +397,26 @@ pub fn fixed_frame_error_deg(
     fixed_frame_error(q_a, local_frame_a, q_b, local_frame_b)
         .length()
         .to_degrees()
+}
+
+/// 一个关节的只读运行时状态（遥测/报告用）。
+///
+/// 角度单位：铰链/球窝是弧度，滑块是米；力矩是**马达**在前一子步施加的力矩（N·m），
+/// 不含点约束与限位约束的等效力矩。
+#[derive(Clone, Copy, Debug)]
+pub struct JointTelemetry {
+    /// 关节句柄。
+    pub handle: JointHandle,
+    /// 关节类型名（`hinge` / `slider` / `fixed` / `ball` / `distance`）。
+    pub kind: &'static str,
+    /// 当前坐标：铰链角度（rad）/ 滑块位移（m）；其余类型为 0。
+    pub coordinate: f32,
+    /// 伺服目标角（rad）；速度模式或非马达关节为 `None`。
+    pub target: Option<f32>,
+    /// 限位（铰链 rad / 滑块 m）。
+    pub limits: Option<(f32, f32)>,
+    /// 马达上一子步的力矩（N·m，绕关节轴作用于 B；非马达关节为 0）。
+    pub motor_torque: f32,
 }
 
 /// 关节句柄（带代数，删除后旧句柄失效）。
@@ -583,6 +653,8 @@ impl JointSolver {
                 limit_impulse: e.impulses.limit,
                 motor: None,
                 k_motor: 0.0,
+                // 老式速度伺服用跨步累积冲量热启动；力矩级 PD 是"本子步的力"，
+                // 在下面 prepare 的分支里会被清零（否则等于双倍力矩）。
                 motor_impulse: e.impulses.motor,
             };
 
@@ -673,6 +745,9 @@ impl JointSolver {
                     st.v = v;
                     st.limits = *limits;
                     st.motor = *motor;
+                    if motor.is_some_and(|m| m.is_pd()) {
+                        st.motor_impulse = 0.0;
+                    }
                     st.coord = hinge_angle(*local_axis_a, *local_axis_b, &va, &vb, axis);
                     let k_axis = axis.dot(ang_vec(&va, &vb, axis));
                     if k_axis > 1e-9 {
@@ -749,6 +824,39 @@ impl JointSolver {
         }
     }
 
+    /// 扭矩级 PD 马达：每个子步**只施加一次**外部力矩冲量。
+    ///
+    /// 为什么不在速度迭代里做：PD 是力，不是约束。迭代 10 次会把同一个力矩重算
+    /// 10 次（叠加或反号），高增益时表现为"力矩在 ±cap 之间抖、角度反而慢慢掉"。
+    /// 这里按 `τ = kp·e − kd·ω` 算一次、限到 `max_torque`，再把 `τ·dt` 加进速度，
+    /// 后续的关节/接触约束再在这个速度上求解。
+    pub fn apply_pd_torques(&mut self, views: &mut [BodyView], dt: f32) {
+        if !(dt.is_finite() && dt > 0.0) {
+            return;
+        }
+        for st in self.states.iter_mut() {
+            let Some(m) = st.motor else { continue };
+            if !m.is_pd() {
+                continue;
+            }
+            let va = views[st.a];
+            let vb = views[st.b];
+            let w_axis = (vb.ang - va.ang).dot(st.axis);
+            let error = wrap_pi(m.target_angle.unwrap_or(0.0) - st.coord);
+            let cap_t = if m.max_torque > 0.0 {
+                m.max_torque
+            } else {
+                f32::MAX
+            };
+            let torque = (m.kp * error - m.kd * w_axis).clamp(-cap_t, cap_t);
+            let impulse = torque * dt;
+            if impulse.is_finite() {
+                st.motor_impulse = impulse;
+                angular_impulse(views, st.a, st.b, st.axis * impulse);
+            }
+        }
+    }
+
     /// 热启动。
     pub fn warm_start(&self, views: &mut [BodyView]) {
         for st in &self.states {
@@ -788,7 +896,7 @@ impl JointSolver {
                     _ => angular_impulse(views, st.a, st.b, st.axis * st.limit_impulse),
                 }
             }
-            if st.motor_impulse != 0.0 {
+            if st.motor_impulse != 0.0 && !st.motor.is_some_and(|m| m.is_pd()) {
                 angular_impulse(views, st.a, st.b, st.axis * st.motor_impulse);
             }
         }
@@ -967,13 +1075,16 @@ impl JointSolver {
                     let va = views[st.a];
                     let vb = views[st.b];
                     let w_axis = (vb.ang - va.ang).dot(st.axis);
-                    let max_i = m.max_impulse.abs();
-                    let target = m.desired_velocity(st.coord);
-                    let mut d = (target - w_axis) * st.k_motor * m.velocity_relaxation();
-                    let new = clamp(st.motor_impulse + d, -max_i, max_i);
-                    d = new - st.motor_impulse;
-                    st.motor_impulse = new;
-                    angular_impulse(views, st.a, st.b, st.axis * d);
+                    // PD 已经在 `apply_pd_torques` 里按外部力矩施加过一次。
+                    if !m.is_pd() {
+                        let max_i = m.max_impulse.abs();
+                        let target = m.desired_velocity(st.coord);
+                        let mut d = (target - w_axis) * st.k_motor * m.velocity_relaxation();
+                        let new = clamp(st.motor_impulse + d, -max_i, max_i);
+                        d = new - st.motor_impulse;
+                        st.motor_impulse = new;
+                        angular_impulse(views, st.a, st.b, st.axis * d);
+                    }
                 }
             }
         }
@@ -1118,7 +1229,7 @@ impl JointSolver {
 }
 
 /// 铰链当前角度（绕轴、以 A 的垂直参考向量为基准）。
-fn hinge_angle(
+pub(crate) fn hinge_angle(
     local_axis_a: Vec3,
     local_axis_b: Vec3,
     va: &BodyView,

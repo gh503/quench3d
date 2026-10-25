@@ -522,6 +522,18 @@ pub struct PhysicsDoc {
     /// 逐位不变）。**单形状与复合形状都生效**（复合刚体逐部件膨胀）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speculative_margin: Option<f32>,
+    /// 每个 `simulate` 步内部再切几个等长子步（1~32，缺省 1 = 历史行为）。
+    ///
+    /// 子步长 = `simulate.dt / substeps`。串链伺服、快速接触需要更小的子步；
+    /// 缺省 1 时与旧版本逐位相同。`simulate.steps` 仍是**外层**步数，总时长不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substeps: Option<u32>,
+    /// 速度迭代次数（1~64，缺省引擎的 10）。只影响约束收敛，不改变场景语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_iterations: Option<u32>,
+    /// 位置修正迭代次数（0~32，缺省引擎的 4）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_iterations: Option<u32>,
 }
 
 /// 摩擦/恢复系数的合成规则（场景文件里的写法）。
@@ -1968,10 +1980,29 @@ pub enum JointKind {
     Slider,
 }
 
+impl JointKind {
+    /// 稳定的类型名（报告/文档用，与 JSON 里的 `type` 相同）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JointKind::Fixed => "fixed",
+            JointKind::Ball => "ball",
+            JointKind::Hinge => "hinge",
+            JointKind::Distance => "distance",
+            JointKind::Slider => "slider",
+        }
+    }
+}
+
 /// 一个关节（用物体名引用两端）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JointDoc {
+    /// 关节名（可选，报告与 `joint_target` 动作用）。
+    ///
+    /// 不写时自动叫 `joint[i]`（i 是 `joints[]` 下标）；写了必须唯一。
+    /// 老场景不写这个字段，行为逐位不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// 关节类型。
     #[serde(rename = "type")]
     pub kind: JointKind,
@@ -2048,6 +2079,16 @@ pub struct JointDoc {
     /// 伺服阻尼增益，缺省 1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motor_damping: Option<f32>,
+    /// SI 比例增益（N·m/rad）。给了它就启用扭矩级 PD，`motor_stiffness` /
+    /// `motor_damping` 被忽略（校验会提示）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor_kp: Option<f32>,
+    /// SI 阻尼增益（N·m·s/rad），与 `motor_kp` 配套，缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor_kd: Option<f32>,
+    /// 最大输出力矩（N·m）；缺省不限。舵机按额定力矩填（M1 的 30 kg·cm ≈ 2.94）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor_max_torque: Option<f32>,
     /// 球窝关节的锥形限位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cone_limit: Option<ConeLimitDoc>,
@@ -2106,6 +2147,14 @@ pub enum ActionKind {
     /// [`PhysicsWorld::wake_up_all`]）。用法：搬动了一批物体、或从快照恢复之后，
     /// 让"以睡着姿态停在半空"的物体重新落下来。
     Wake,
+    /// 运行时改一个铰链伺服的目标角（度）。用 `joint` 指定关节名，
+    /// 目标写在 `target_deg`；不需要 `target`（刚体名）。
+    JointTarget,
+    /// 把 `target` 与 `other` 两个刚体在当前相对位姿上焊死（理想刚性抓取）。
+    /// 用 `at_time` 表示夹爪闭合完成的瞬间；`release` 动作会解开。
+    Weld,
+    /// 解开由 `weld` 建立的固定约束（`target` 写 weld 时的 `target` 刚体名）。
+    Release,
 }
 
 impl ActionKind {
@@ -2120,12 +2169,22 @@ impl ActionKind {
             ActionKind::Force => "force",
             ActionKind::Teleport => "teleport",
             ActionKind::Wake => "wake",
+            ActionKind::JointTarget => "joint_target",
+            ActionKind::Weld => "weld",
+            ActionKind::Release => "release",
         }
     }
 
     /// 是否需要 `value`。
     pub fn needs_value(self) -> bool {
-        !matches!(self, ActionKind::Teleport | ActionKind::Wake)
+        !matches!(
+            self,
+            ActionKind::Teleport
+                | ActionKind::Wake
+                | ActionKind::JointTarget
+                | ActionKind::Weld
+                | ActionKind::Release
+        )
     }
 
     /// 是否用世界坐标作用点 `point`。
@@ -2145,7 +2204,10 @@ impl ActionKind {
 
     /// 是否会给刚体施加作用（静态刚体上完全没有效果）。
     pub fn pushes(self) -> bool {
-        !matches!(self, ActionKind::Wake)
+        !matches!(
+            self,
+            ActionKind::Wake | ActionKind::JointTarget | ActionKind::Weld | ActionKind::Release
+        )
     }
 }
 
@@ -2164,7 +2226,22 @@ pub struct ActionDoc {
     /// 只有 `wake` 动作接受特殊值 `"*"`：唤醒**所有**刚体（不需要挨个点名）。
     /// 别的动作给 `"*"` 会报错——否则"我写了 `*` 但它其实只作用在一个物体上"
     /// 就成了最难查的那类静默失效。
+    ///
+    /// `joint_target` 可以完全不写 `target`（关节名写在 `joint`）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target: String,
+    /// `joint_target` 的关节名（`joints[].name`；不写关节名时是 `joint[i]`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joint: Option<String>,
+    /// `joint_target` 的目标角（度）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_deg: Option<f32>,
+    /// `joint_target` 的最大角速度（度/秒）；不写 = 立即设到目标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_deg_s: Option<f32>,
+    /// `weld` 的另一端刚体名（例如夹爪主体）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
     /// 第几步开始前施加。与 `at_time` 二选一；两个都不给时是第 0 步。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_step: Option<u32>,
@@ -4565,6 +4642,33 @@ impl SceneDoc {
             }
         }
 
+        if let Some(v) = self.physics.substeps {
+            if !(1..=32).contains(&v) {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "physics.substeps",
+                    format!("substeps 必须在 1~32 之间，当前为 {v}"),
+                ));
+            }
+        }
+        if let Some(v) = self.physics.solver_iterations {
+            if !(1..=64).contains(&v) {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "physics.solver_iterations",
+                    format!("solver_iterations 必须在 1~64 之间，当前为 {v}"),
+                ));
+            }
+        }
+        if let Some(v) = self.physics.position_iterations {
+            if v > 32 {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "physics.position_iterations",
+                    format!("position_iterations 不能超过 32，当前为 {v}"),
+                ));
+            }
+        }
         if let Some(v) = self.physics.speculative_margin {
             if !v.is_finite() || v < 0.0 {
                 out.push(Diagnostic::error_code(
@@ -6294,8 +6398,24 @@ impl SceneDoc {
             .iter()
             .filter_map(|o| o.name.as_deref().map(|n| (n, o)))
             .collect();
+        let mut joint_names: BTreeSet<&str> = BTreeSet::new();
         for (i, j) in self.joints.iter().enumerate() {
             let p = format!("joints[{i}]");
+            if let Some(name) = j.name.as_deref() {
+                if name.trim().is_empty() {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        format!("{p}.name"),
+                        "关节名不能为空",
+                    ));
+                } else if !joint_names.insert(name) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::DuplicateName,
+                        format!("{p}.name"),
+                        format!("关节名 \"{name}\" 重复，joint_target / 报告无法区分"),
+                    ));
+                }
+            }
             let mut ends = Vec::new();
             for (field, name) in [("a", &j.a), ("b", &j.b)] {
                 match names.get(name.as_str()) {
@@ -6453,6 +6573,40 @@ impl SceneDoc {
                             format!("{p}.{key}"),
                             "锚点必须是有限数",
                         ));
+                    }
+                }
+            }
+            // 两端锚点在初始位姿下必须重合（distance 除外：它的 rest_length 就是两端距离）。
+            // 差 1 cm 看起来"只是装偏了"，但点约束会在第一步把两个刚体硬拉到一起，
+            // 表现为"机械臂自己往下掉/关节伺服怎么调都不收敛"——必须吵一声。
+            if j.kind != JointKind::Distance && j.kind != JointKind::Slider {
+                let world = |name: &str| -> Option<(Vec3, Quat)> {
+                    let o = self
+                        .objects
+                        .iter()
+                        .find(|o| o.name.as_deref() == Some(name))?;
+                    let p = v3(o.position.unwrap_or([0.0; 3]));
+                    let r = o.rotation_deg.unwrap_or([0.0; 3]).map(f32::to_radians);
+                    Some((p, Quat::from_euler_xyz(r[0], r[1], r[2])))
+                };
+                if let (Some((pa, ra)), Some((pb, rb))) = (world(&j.a), world(&j.b)) {
+                    let aa = v3(j.anchor_a.unwrap_or([0.0; 3]));
+                    let ab = v3(j.anchor_b.unwrap_or([0.0; 3]));
+                    let gap = (pb + rb.mul_vec3(ab) - pa - ra.mul_vec3(aa)).length();
+                    if gap > 1e-3 {
+                        out.push(
+                            Diagnostic::warn_code(
+                                ErrorCode::SuspiciousValue,
+                                format!("{p}.anchor_b"),
+                                format!(
+                                    "两端锚点初始相距 {:.1} mm：点约束会在第一步把两个刚体硬拉到一起，关节角度/伺服会被这个瞬移污染",
+                                    gap * 1000.0
+                                ),
+                            )
+                            .with_hint(
+                                "让 anchor_a 与 anchor_b 落在同一点：调物体 position，或把两个锚点都改成相对各自质心的正确偏移",
+                            ),
+                        );
                     }
                 }
             }
@@ -6763,6 +6917,112 @@ impl SceneDoc {
                 }
             }
 
+            if a.kind == ActionKind::Weld || a.kind == ActionKind::Release {
+                if a.kind == ActionKind::Weld {
+                    match a.other.as_deref() {
+                        None => out.push(Diagnostic::error_code(
+                            ErrorCode::MissingField,
+                            format!("{p}.other"),
+                            "weld 需要 other（另一端刚体名），例如夹爪主体",
+                        )),
+                        Some(other) if other == a.target => out.push(Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{p}.other"),
+                            "weld 的两端不能是同一个刚体",
+                        )),
+                        Some(other) => match bodies.get(other) {
+                            None => out.push(Diagnostic::error_code(
+                                ErrorCode::UnknownReference,
+                                format!("{p}.other"),
+                                format!("找不到名为 \"{other}\" 的刚体"),
+                            )),
+                            Some(BodyKind::Dynamic) => {}
+                            Some(_) => out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{p}.other"),
+                                "weld 的 other 必须是 dynamic 刚体",
+                            )),
+                        },
+                    }
+                } else if a.other.is_some() {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        format!("{p}.other"),
+                        "release 不需要 other，会被忽略",
+                    ));
+                }
+                if a.value.is_some() || a.point.is_some() || a.position.is_some() {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        &p,
+                        "weld/release 只用 target/other/at_time，value/point/position 会被忽略",
+                    ));
+                }
+                continue;
+            }
+            if a.kind == ActionKind::JointTarget {
+                let joint = a
+                    .joint
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .or_else(|| (!a.target.is_empty()).then(|| a.target.clone()));
+                match joint {
+                    None => out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::MissingField,
+                            format!("{p}.joint"),
+                            "joint_target 需要 joint（关节名），也可以把关节名写在 target",
+                        )
+                        .with_hint("关节名来自 joints[].name；不写 name 时是 joint[i]"),
+                    ),
+                    Some(name) => {
+                        let known = self.joints.iter().enumerate().any(|(i, j)| {
+                            j.name.as_deref() == Some(name.as_str())
+                                || (j.name.is_none() && name == format!("joint[{i}]"))
+                        });
+                        if !known {
+                            out.push(
+                                Diagnostic::error_code(
+                                    ErrorCode::UnknownReference,
+                                    format!("{p}.joint"),
+                                    format!("找不到名为 \"{name}\" 的关节"),
+                                )
+                                .with_hint("关节名来自 joints[].name；不写 name 时是 joint[i]"),
+                            );
+                        }
+                    }
+                }
+                match a.target_deg {
+                    None => out.push(Diagnostic::error_code(
+                        ErrorCode::MissingField,
+                        format!("{p}.target_deg"),
+                        "joint_target 需要 target_deg（度）",
+                    )),
+                    Some(v) if !v.is_finite() => out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.target_deg"),
+                        "目标角必须是有限数",
+                    )),
+                    Some(_) => {}
+                }
+                if let Some(v) = a.speed_deg_s {
+                    if !v.is_finite() || v <= 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.speed_deg_s"),
+                            "speed_deg_s 必须是有限正数（度/秒）",
+                        ));
+                    }
+                }
+                if a.value.is_some() || a.point.is_some() || a.position.is_some() {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        &p,
+                        "joint_target 只用 joint / target_deg / speed_deg_s，value/point/position 会被忽略",
+                    ));
+                }
+                continue;
+            }
             // 参数：缺了必需的、或者给了用不上的，都要说清楚（静默忽略最难查）
             match &a.value {
                 None if a.kind.needs_value() => out.push(
