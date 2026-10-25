@@ -647,6 +647,27 @@ fn render_menu(ui: &mut Ui, engine: &mut Engine) {
                     .set_shadow_map_size(&engine.gpu.device, resolution);
             }
         });
+        ui.horizontal(|ui| {
+            let mut limit = if engine.renderer.options.max_draw_distance.is_finite() {
+                engine.renderer.options.max_draw_distance
+            } else {
+                0.0
+            };
+            ui.label("最大绘制距离");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut limit)
+                        .speed(1.0)
+                        .range(0.0..=10000.0)
+                        .suffix(" m"),
+                )
+                .on_hover_text("0 = 不限；按实例包围盒最近点到相机的距离剔除，不是遮挡剔除")
+                .changed()
+            {
+                engine.renderer.options.max_draw_distance =
+                    if limit <= 0.0 { f32::INFINITY } else { limit };
+            }
+        });
         ui.checkbox(&mut engine.renderer.options.bloom.enabled, "泛光（bloom）");
         ui.add_enabled_ui(engine.renderer.options.bloom.enabled, |ui| {
             ui.horizontal(|ui| {

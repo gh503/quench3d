@@ -497,6 +497,8 @@ pub struct RenderStats {
     pub triangles: u64,
     /// 被视锥剔除的实例数。
     pub culled: u32,
+    /// 其中因为超过 `max_draw_distance` 被剔除的实例数。
+    pub distance_culled: u32,
     /// 阴影绘制调用数（平行光；多级级联时每级各算一遍）。
     pub shadow_draw_calls: u32,
     /// 阴影实例数。
@@ -863,6 +865,11 @@ pub struct RendererOptions {
     pub tonemap: Tonemap,
     /// 时域抗锯齿（缺省关闭）。
     pub taa: TaaOptions,
+    /// 最大绘制距离（米，缺省 `INFINITY` = 不限）。
+    ///
+    /// 按实例包围盒到相机的**最近点**判断：完全在距离外的实例不提交绘制。
+    /// 只做距离剔除，不是遮挡剔除；阴影 pass 也按同一距离裁剪。
+    pub max_draw_distance: f32,
     /// 自动 LOD（缺省关闭）：高面数、非蒙皮网格在**上传时**生成 1/2、1/4 两档；
     /// 绘制时按批次包围盒与相机的距离选档。关闭时逐像素与旧行为一致。
     ///
@@ -889,6 +896,7 @@ impl Default for RendererOptions {
             dof: DofOptions::default(),
             tonemap: Tonemap::default(),
             taa: TaaOptions::default(),
+            max_draw_distance: f32::INFINITY,
             auto_lod: false,
         }
     }
@@ -4002,6 +4010,15 @@ impl Renderer {
             for (raw, bounds) in &self.staging[start..end] {
                 if !frustum.intersects_aabb(bounds) {
                     stats.culled += 1;
+                    continue;
+                }
+                let max_distance = self.options.max_draw_distance;
+                if max_distance.is_finite()
+                    && bounds.distance_squared_to_point(camera.position)
+                        > max_distance.max(0.0) * max_distance.max(0.0)
+                {
+                    stats.culled += 1;
+                    stats.distance_culled += 1;
                     continue;
                 }
                 let instance_index = write;

@@ -1645,6 +1645,65 @@ fn taa_motion_vectors_change_moving_object_pixels() {
     );
 }
 
+/// 最大绘制距离：只剔除完全在距离外的实例，近处不变。
+#[test]
+fn max_draw_distance_culls_only_far_instances() {
+    let Some(mut ctx) = context(1, "最大绘制距离（真的创建 wgpu 上下文）") else {
+        return;
+    };
+    let mut renderer = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: false,
+            shadows: false,
+            sky: false,
+            max_draw_distance: 80.0,
+            ..Default::default()
+        },
+    );
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(10.0));
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(1.0, 1.0, 1.0, 1.0).unlit());
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(Vec3::ZERO);
+    let lighting = Lighting::default();
+
+    renderer.begin_frame();
+    renderer.draw(cube, mat, InstanceDesc::new(Transform::IDENTITY));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::new(Transform::from_translation(vec3(30.0, 0.0, -60.0))),
+    );
+    let near_only = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("近处立方体应当能渲染");
+    let culled = renderer.stats();
+    assert_eq!(culled.instances, 1, "远处立方体应当被距离剔除");
+    assert_eq!(culled.distance_culled, 1);
+
+    renderer.options.max_draw_distance = f32::INFINITY;
+    renderer.begin_frame();
+    renderer.draw(cube, mat, InstanceDesc::new(Transform::IDENTITY));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::new(Transform::from_translation(vec3(30.0, 0.0, -60.0))),
+    );
+    let both = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("不限距离时两个立方体都应当渲染");
+    assert_eq!(renderer.stats().instances, 2);
+    let changed = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel(&near_only, x, y) != pixel(&both, x, y))
+        .count();
+    assert!(
+        changed > 10,
+        "远处立方体重新出现后画面应当变化，实际 {changed} 像素"
+    );
+}
+
 /// morph / CPU 变形的 TAA 运动向量：必须记录上一帧顶点位置，不能拿当前网格硬猜。
 #[test]
 fn taa_motion_vectors_follow_morphed_vertices() {
