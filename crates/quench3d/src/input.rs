@@ -17,6 +17,49 @@ pub enum MouseButton {
     Middle,
 }
 
+/// 触屏点的阶段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchPhase {
+    /// 手指按下。
+    Started,
+    /// 手指移动。
+    Moved,
+    /// 手指抬起/取消。
+    Ended,
+}
+
+/// 一个触屏点（逻辑像素，左上角为原点）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TouchPoint {
+    /// 平台给的触点 id（同一根手指在生命周期内不变）。
+    pub id: u64,
+    /// 当前位置。
+    pub position: Vec2,
+    /// 本帧阶段。
+    pub phase: TouchPhase,
+}
+
+/// 一个手柄的快照（由宿主按平台事件注入；引擎不依赖具体手柄 API）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GamepadState {
+    /// 是否连接。
+    pub connected: bool,
+    /// 左/右摇杆 xy + 扳机（顺序由宿主约定，缺省 6 轴）。
+    pub axes: [f32; 6],
+    /// 按键位图（宿主约定；引擎只做透传）。
+    pub buttons: u32,
+}
+
+impl Default for GamepadState {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            axes: [0.0; 6],
+            buttons: 0,
+        }
+    }
+}
+
 /// 一帧的输入状态。
 #[derive(Clone, Debug, Default)]
 pub struct Input {
@@ -40,6 +83,12 @@ pub struct Input {
     pub alt: bool,
     /// 窗口是否聚焦。
     pub focused: bool,
+    /// 4 个手柄的当前状态（宿主注入；没有手柄时 `connected = false`）。
+    gamepads: [GamepadState; 4],
+    /// 本帧的触屏点（`Started/Moved` 保留，`Ended` 只保留这一帧）。
+    touches: Vec<TouchPoint>,
+    /// 上一帧的触屏点（用来判断“这一帧还按着”）。
+    touches_prev: Vec<TouchPoint>,
 }
 
 impl Input {
@@ -59,6 +108,7 @@ impl Input {
         self.mouse_released = [false; 3];
         self.mouse_delta = Vec2::ZERO;
         self.scroll_delta = 0.0;
+        self.touches_prev = std::mem::take(&mut self.touches);
     }
 
     /// 按键是否按下。
@@ -152,6 +202,87 @@ impl Input {
             boost: self.shift,
             dragging: orbit_drag,
         }
+    }
+
+    /// 手柄是否连接。
+    pub fn gamepad_connected(&self, pad: usize) -> bool {
+        self.gamepads.get(pad).is_some_and(|g| g.connected)
+    }
+
+    /// 手柄轴值；未连接或越界返回 0。
+    pub fn gamepad_axis(&self, pad: usize, axis: usize) -> f32 {
+        self.gamepads
+            .get(pad)
+            .filter(|g| g.connected)
+            .and_then(|g| g.axes.get(axis))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// 手柄按键位图；未连接或越界返回 0。
+    pub fn gamepad_buttons(&self, pad: usize) -> u32 {
+        self.gamepads
+            .get(pad)
+            .filter(|g| g.connected)
+            .map_or(0, |g| g.buttons)
+    }
+
+    /// 当前触屏点（不含上一帧）。
+    pub fn touches(&self) -> &[TouchPoint] {
+        &self.touches
+    }
+
+    /// 某一帧的触屏点是否还在按着（`Started/Moved` 或本帧 `Ended` 之前）。
+    pub fn touch_down(&self, id: u64) -> bool {
+        if let Some(t) = self.touches.iter().find(|t| t.id == id) {
+            return t.phase != TouchPhase::Ended;
+        }
+        self.touches_prev.iter().any(|t| t.id == id)
+    }
+
+    /// 注入手柄连接状态。
+    pub fn on_gamepad_connected(&mut self, pad: usize, connected: bool) {
+        if let Some(g) = self.gamepads.get_mut(pad) {
+            g.connected = connected;
+            if !connected {
+                *g = GamepadState::default();
+            }
+        }
+    }
+
+    /// 注入手柄轴值（非有限值按 0 处理）。
+    pub fn on_gamepad_axis(&mut self, pad: usize, axis: usize, value: f32) {
+        if let Some(g) = self.gamepads.get_mut(pad) {
+            if let Some(slot) = g.axes.get_mut(axis) {
+                *slot = if value.is_finite() {
+                    value.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
+    /// 注入手柄按键位图。
+    pub fn on_gamepad_buttons(&mut self, pad: usize, buttons: u32) {
+        if let Some(g) = self.gamepads.get_mut(pad) {
+            g.buttons = buttons;
+        }
+    }
+
+    /// 注入触屏开始/移动。
+    pub fn on_touch(&mut self, id: u64, position: Vec2, phase: TouchPhase) {
+        self.touches.retain(|t| t.id != id);
+        self.touches.push(TouchPoint {
+            id,
+            position,
+            phase,
+        });
+    }
+
+    /// 注入触屏结束。
+    pub fn on_touch_end(&mut self, id: u64, position: Vec2) {
+        self.on_touch(id, position, TouchPhase::Ended);
     }
 
     // ---- 由窗口层调用的事件注入 ----
@@ -257,5 +388,40 @@ mod tests {
         input.on_focus_lost();
         assert!(!input.key_down(KeyCode::Space));
         assert!(!input.mouse_button_down(MouseButton::Left));
+    }
+
+    #[test]
+    fn gamepad_state_is_injected_and_bounded() {
+        let mut input = Input::new();
+        assert!(!input.gamepad_connected(0));
+        assert_eq!(input.gamepad_axis(0, 0), 0.0);
+        input.on_gamepad_connected(0, true);
+        input.on_gamepad_axis(0, 0, 0.5);
+        input.on_gamepad_axis(0, 1, 3.0);
+        input.on_gamepad_axis(0, 2, f32::NAN);
+        input.on_gamepad_buttons(0, 0b101);
+        assert!(input.gamepad_connected(0));
+        assert_eq!(input.gamepad_axis(0, 0), 0.5);
+        assert_eq!(input.gamepad_axis(0, 1), 1.0);
+        assert_eq!(input.gamepad_axis(0, 2), 0.0);
+        assert_eq!(input.gamepad_buttons(0), 0b101);
+        input.on_gamepad_connected(0, false);
+        assert_eq!(input.gamepad_buttons(0), 0);
+    }
+
+    #[test]
+    fn touch_keeps_lifecycle_and_ends_only_for_one_frame() {
+        let mut input = Input::new();
+        input.on_touch(7, Vec2::new(1.0, 2.0), TouchPhase::Started);
+        assert!(input.touch_down(7));
+        input.begin_frame();
+        // 上一帧按着：begin_frame 后仍算 down，直到显式 End。
+        assert!(input.touch_down(7));
+        input.on_touch(7, Vec2::new(3.0, 4.0), TouchPhase::Moved);
+        assert_eq!(input.touches()[0].position, Vec2::new(3.0, 4.0));
+        input.on_touch_end(7, Vec2::new(3.0, 4.0));
+        assert!(!input.touch_down(7));
+        input.begin_frame();
+        assert!(input.touches().is_empty(), "Ended 只保留一帧");
     }
 }

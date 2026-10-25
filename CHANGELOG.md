@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **输入抽象补齐手柄/触屏（引擎 M1 第 1 片）**：`Input` 新增 4 个手柄槽位
+  （`on_gamepad_connected/axis/buttons`，轴值 clamp 到 ±1、NaN 归零）、触屏点
+  `TouchPoint`/`TouchPhase` 与 `on_touch/on_touch_end`，winit `WindowEvent::Touch`
+  已接到主循环；新增 2 条单测。未做：重绑定、平台手柄后端、手势。
 - **真实浏览器基准（第 121 轮）**：`tools/check_browser.mjs` 用 headless Chrome
   跑 `web/robot.html?bench=1`，wasm 物理 1000 步本机 **0.81–1.07 s**（0.81–1.07 ms/步），
   Canvas 2D 预览 **0.09 ms/帧**；门禁有 Chrome 就自动跑，没有则 SKIP。

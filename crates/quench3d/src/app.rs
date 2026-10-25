@@ -12,12 +12,15 @@ use quench3d_render::{
     Renderer, RendererOptions,
 };
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, TouchPhase as WinitTouchPhase,
+    WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::input::{Input, MouseButton};
+use crate::input::{Input, MouseButton, TouchPhase};
 use crate::scene::{AssetCache, Scene};
 
 /// 相机控制模式。
@@ -986,6 +989,22 @@ impl<G: Game> ForgeApp<G> {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
                 };
                 engine.input.on_scroll(scroll);
+            }
+            WindowEvent::Touch(touch) => {
+                let position = Vec2::new(touch.location.x as f32, touch.location.y as f32);
+                match touch.phase {
+                    WinitTouchPhase::Started => {
+                        engine
+                            .input
+                            .on_touch(touch.id, position, TouchPhase::Started);
+                    }
+                    WinitTouchPhase::Moved => {
+                        engine.input.on_touch(touch.id, position, TouchPhase::Moved);
+                    }
+                    WinitTouchPhase::Ended | WinitTouchPhase::Cancelled => {
+                        engine.input.on_touch_end(touch.id, position);
+                    }
+                }
             }
             WindowEvent::RedrawRequested => {
                 let now = crate::clock::now_seconds();
