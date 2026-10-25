@@ -1690,6 +1690,15 @@ impl Scene {
             }
             let surface = fluid.surface_mesh(visual.resolution, visual.iso);
             if surface.is_empty() {
+                // 排水/清空后必须把旧网格清掉，否则画面会一直保留最后一帧的水。
+                if fluid.particles().is_empty()
+                    && renderer.update_mesh_data(gpu, obj.mesh, &MeshData::default())
+                {
+                    if let Some(visual) = obj.fluid_surface.as_mut() {
+                        visual.revision = fluid.revision();
+                    }
+                    updated += 1;
+                }
                 continue;
             }
             let mut vertices = Vec::with_capacity(surface.positions.len());

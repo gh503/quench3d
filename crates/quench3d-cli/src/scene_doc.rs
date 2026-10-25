@@ -528,6 +528,9 @@ pub struct PhysicsDoc {
     /// 逐位不变）。**单形状与复合形状都生效**（复合刚体逐部件膨胀）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speculative_margin: Option<f32>,
+    /// 圆形摩擦锥（两切向按向量模长夹到 `μ·N`），缺省 false = 历史方形摩擦。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_cone: Option<bool>,
     /// 每个 `simulate` 步内部再切几个等长子步（1~32，缺省 1 = 历史行为）。
     ///
     /// 子步长 = `simulate.dt / substeps`。串链伺服、快速接触需要更小的子步；
@@ -1145,6 +1148,12 @@ pub struct FluidDoc {
     /// 涡量约束强度 0~5，缺省 0 = 关闭。
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub vorticity: f32,
+    /// 粒子初始速度 `[x, y, z]`（米/秒），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<[f32; 3]>,
+    /// 排水面高度（米）：粒子 y 低于它就被移除；不写 = 不排水。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_y: Option<f32>,
     /// 浸没刚体的线性阻尼（1/s），缺省 6；0 = 无阻尼。
     #[serde(default = "default_fluid_drag")]
     pub drag: f32,
@@ -4317,6 +4326,24 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.{name}"),
                         "表面张力/涡量强度必须在 0~5 之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.velocity {
+                if !v.iter().all(|c| c.is_finite()) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.velocity"),
+                        "初始速度必须是三个有限数",
+                    ));
+                }
+            }
+            if let Some(y) = f.drain_y {
+                if !y.is_finite() {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.drain_y"),
+                        "排水面高度必须是有限数",
                     ));
                 }
             }

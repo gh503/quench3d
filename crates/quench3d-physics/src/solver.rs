@@ -67,6 +67,12 @@ pub struct SolverConfig {
     /// 缺省 `0.0` = 只在重叠时生成接触（历史行为，结果逐位不变）。写正值让快速
     /// 下落/高速碰撞的物体"即将接触"时就进入约束求解，减少一帧的穿透突跳。
     pub speculative_margin: f32,
+    /// 摩擦锥：把两切向累积冲量按**向量模长**夹到 `μ·N`，而不是每轴各夹一次。
+    ///
+    /// 缺省 `false` = 历史方形摩擦（对角线方向等效摩擦可达 √2·μ），旧场景逐位不变；
+    /// 打开后更接近 PhysX/Rapier 的圆形摩擦锥。需要每步按配置解析，不能只存在
+    /// 接触里（配置可能在步之间改）。
+    pub friction_cone: bool,
 }
 
 impl Default for SolverConfig {
@@ -87,6 +93,7 @@ impl Default for SolverConfig {
             restitution_combine: CombineRule::Max,
             static_friction_speed: 0.02,
             speculative_margin: 0.0,
+            friction_cone: false,
         }
     }
 }
@@ -372,6 +379,8 @@ pub(crate) struct SolverContact {
     pub friction: f32,
     /// 滚动阻力系数（米）。
     pub rolling_friction: f32,
+    /// 是否用圆形摩擦锥（准备时从配置冻结，迭代中不变）。
+    pub friction_cone: bool,
     /// 恢复目标速度。
     /// 恢复系数偏置。
     pub restitution_bias: f32,
@@ -579,6 +588,7 @@ impl ContactSolver {
                     k_tangent: [k1, k2],
                     friction,
                     rolling_friction,
+                    friction_cone: cfg.friction_cone,
                     restitution_bias,
                     speculative_bias,
                     penetration,
@@ -644,20 +654,44 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
             let mut vrel = vb.velocity_at(c.rb) - va.velocity_at(c.ra);
             // 摩擦（用上一轮的法向冲量作为上界）
             let max_friction = c.friction * c.normal_impulse;
-            for i in 0..2 {
-                let k = c.k_tangent[i];
-                if k <= 1e-12 {
-                    continue;
+            if c.friction_cone {
+                // 圆形摩擦锥：两个切向方向一起投影，再按总量缩放。旧路径的
+                // 逐轴 clamp 在对角线方向允许 √2·μ·N。
+                if c.k_tangent[0] > 1e-12 && c.k_tangent[1] > 1e-12 {
+                    let d0 = -vrel.dot(c.tangent[0]) / c.k_tangent[0];
+                    let d1 = -vrel.dot(c.tangent[1]) / c.k_tangent[1];
+                    let mut next = [c.tangent_impulse[0] + d0, c.tangent_impulse[1] + d1];
+                    let len = (next[0] * next[0] + next[1] * next[1]).sqrt();
+                    if len > max_friction {
+                        let scale = max_friction / len;
+                        next[0] *= scale;
+                        next[1] *= scale;
+                    }
+                    for (i, n) in next.iter().enumerate() {
+                        let d = *n - c.tangent_impulse[i];
+                        c.tangent_impulse[i] = *n;
+                        apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);
+                    }
+                    let va2 = views[c.a];
+                    let vb2 = views[c.b];
+                    vrel = vb2.velocity_at(c.rb) - va2.velocity_at(c.ra);
                 }
-                let vt = vrel.dot(c.tangent[i]);
-                let mut d = -vt / k;
-                let new = clamp(c.tangent_impulse[i] + d, -max_friction, max_friction);
-                d = new - c.tangent_impulse[i];
-                c.tangent_impulse[i] = new;
-                apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);
-                let va2 = views[c.a];
-                let vb2 = views[c.b];
-                vrel = vb2.velocity_at(c.rb) - va2.velocity_at(c.ra);
+            } else {
+                for i in 0..2 {
+                    let k = c.k_tangent[i];
+                    if k <= 1e-12 {
+                        continue;
+                    }
+                    let vt = vrel.dot(c.tangent[i]);
+                    let mut d = -vt / k;
+                    let new = clamp(c.tangent_impulse[i] + d, -max_friction, max_friction);
+                    d = new - c.tangent_impulse[i];
+                    c.tangent_impulse[i] = new;
+                    apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);
+                    let va2 = views[c.a];
+                    let vb2 = views[c.b];
+                    vrel = vb2.velocity_at(c.rb) - va2.velocity_at(c.ra);
+                }
             }
             // 法向
             let vn = vrel.dot(c.normal);

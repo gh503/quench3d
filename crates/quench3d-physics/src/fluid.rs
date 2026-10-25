@@ -47,6 +47,12 @@ pub struct FluidDesc {
     pub vorticity: f32,
     /// 浸没刚体的线性阻尼（1/s），只对浮力部分生效；0 = 无阻尼。
     pub drag: f32,
+    /// 初始速度（米/秒），缺省 0；给水柱一个喷射方向。
+    pub initial_velocity: Vec3,
+    /// 排水面高度：粒子 y 低于它就被移除（`None` = 不排水）。
+    ///
+    /// 用来做"无底水池"/开放边界，避免水一直掉到 -1e6 还在算。
+    pub drain_y: Option<f32>,
     /// 密度约束迭代次数（1~8）。
     pub iterations: u32,
     /// 粒子上限（超过就按晶格顺序截断）。
@@ -64,6 +70,8 @@ impl Default for FluidDesc {
             viscosity: 0.05,
             surface_tension: 0.0,
             vorticity: 0.0,
+            initial_velocity: Vec3::ZERO,
+            drain_y: None,
             drag: 6.0,
             iterations: 4,
             max_particles: 4000,
@@ -94,6 +102,8 @@ impl FluidDesc {
             && (0.0..=5.0).contains(&self.surface_tension)
             && self.vorticity.is_finite()
             && (0.0..=5.0).contains(&self.vorticity)
+            && self.initial_velocity.is_finite()
+            && self.drain_y.is_none_or(|y| y.is_finite())
             && self.drag.is_finite()
             && self.drag >= 0.0
             && (1..=8).contains(&self.iterations)
@@ -300,7 +310,7 @@ impl Fluid {
             }
         }
         self.positions = positions;
-        self.velocities = vec![Vec3::ZERO; self.positions.len()];
+        self.velocities = vec![d.initial_velocity; self.positions.len()];
         self.mass = calibrated_mass(d);
         self.recompute_stats();
         self.spawned = true;
@@ -567,6 +577,19 @@ impl Fluid {
 
         std::mem::swap(&mut self.positions, &mut self.predicted);
         std::mem::swap(&mut self.velocities, &mut self.new_vel);
+        // 开放排水边界：粒子穿过 `drain_y` 后移除（紧凑写回，保持顺序）。
+        if let Some(y) = self.desc.drain_y {
+            let mut keep = 0usize;
+            for i in 0..self.positions.len() {
+                if self.positions[i].y >= y {
+                    self.positions[keep] = self.positions[i];
+                    self.velocities[keep] = self.velocities[i];
+                    keep += 1;
+                }
+            }
+            self.positions.truncate(keep);
+            self.velocities.truncate(keep);
+        }
         self.recompute_stats();
         self.revision = self.revision.wrapping_add(1);
     }
@@ -902,6 +925,47 @@ mod tests {
         b.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
         let changed = a.particles().iter().zip(b.particles()).any(|(p, q)| p != q);
         assert!(changed, "表面张力必须实际改变下一步的位置");
+    }
+
+    #[test]
+    fn initial_velocity_moves_the_jet_and_drain_removes_particles() {
+        let mut jet = Fluid::new(FluidDesc {
+            center: vec3(0.0, 2.0, 0.0),
+            half_extents: vec3(0.2, 0.2, 0.2),
+            spacing: 0.1,
+            radius: 0.05,
+            initial_velocity: vec3(2.0, 0.0, 0.0),
+            ..FluidDesc::default()
+        })
+        .expect("参数合法");
+
+        for _ in 0..30 {
+            jet.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        }
+        let mean_x: f32 =
+            jet.particles().iter().map(|p| p.x).sum::<f32>() / jet.particles().len() as f32;
+        assert!(mean_x > 0.4, "初始速度必须推着水柱走，实际 mean_x={mean_x}");
+
+        let mut drained = Fluid::new(FluidDesc {
+            center: vec3(0.0, 1.0, 0.0),
+            half_extents: vec3(0.2, 0.2, 0.2),
+            spacing: 0.1,
+            radius: 0.05,
+            drain_y: Some(0.5),
+            ..FluidDesc::default()
+        })
+        .expect("参数合法");
+        let before = drained.particles().len();
+        assert!(before > 0);
+        for _ in 0..90 {
+            drained.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        }
+        assert!(
+            drained.particles().is_empty(),
+            "排水面以下应清空，还剩 {} 颗",
+            drained.particles().len()
+        );
+        assert_eq!(drained.particles().len(), drained.velocities().len());
     }
 
     #[test]

@@ -41,6 +41,20 @@ pub(crate) struct Proxy {
     pub groups: InteractionGroups,
 }
 
+/// BVH 节点：叶子用 `start/count` 指向 `bvh_order`，内部节点用 `left/right`。
+#[derive(Clone, Copy, Debug)]
+struct BvhNode {
+    aabb: Aabb,
+    left: u32,
+    right: u32,
+    start: u32,
+    count: u32,
+}
+
+/// 超过这个代理数就改用 BVH：深堆里网格的"相邻单元 × 单元内物体"会退化成
+/// 十几万次 AABB 测试，而 BVH 只测真正重叠的分支（候选对集合不变）。
+const BVH_MIN_PROXIES: usize = 512;
+
 /// 空间哈希宽相（所有缓冲跨步复用，稳态零分配）。
 #[derive(Clone, Debug)]
 pub(crate) struct Broadphase {
@@ -67,6 +81,9 @@ pub(crate) struct Broadphase {
     stamp: u32,
     /// `stamps.len() - 1`，用于代替取模。
     mask: usize,
+    /// BVH 节点与叶子顺序（大场景复用）。
+    bvh_nodes: Vec<BvhNode>,
+    bvh_order: Vec<u32>,
 }
 
 impl Default for Broadphase {
@@ -109,6 +126,8 @@ impl Broadphase {
             buckets: Vec::new(),
             stamp: 0,
             mask: 0,
+            bvh_nodes: Vec::new(),
+            bvh_order: Vec::new(),
         }
     }
 
@@ -169,6 +188,149 @@ impl Broadphase {
 
     /// 计算所有可能相交的刚体对，写入 `out`（已排序去重）。
     pub fn compute_pairs(&mut self, proxies: &[Proxy], out: &mut Vec<(u32, u32)>) {
+        if proxies.len() >= BVH_MIN_PROXIES {
+            out.clear();
+            if proxies.len() < 2 || !proxies.iter().any(|p| p.movable) {
+                return;
+            }
+            self.compute_pairs_bvh(proxies, out);
+            out.sort_unstable();
+            out.dedup();
+            return;
+        }
+        self.compute_pairs_grid(proxies, out);
+    }
+
+    /// 大场景的 BVH 宽相（与网格产生同一组候选对，只是少做无用测试）。
+    fn compute_pairs_bvh(&mut self, proxies: &[Proxy], out: &mut Vec<(u32, u32)>) {
+        self.bvh_order.clear();
+        self.globals.clear();
+        for (i, p) in proxies.iter().enumerate() {
+            if p.global || !p.aabb.is_valid() {
+                self.globals.push(i);
+            } else {
+                self.bvh_order.push(i as u32);
+            }
+        }
+        self.bvh_nodes.clear();
+        if !self.bvh_order.is_empty() {
+            let root = self.build_bvh(proxies, 0, self.bvh_order.len(), 0);
+            self.bvh_self(root, proxies, out);
+        }
+        // 全局代理（半空间/超大物体）仍逐个测；数量通常是个位数。
+        for gi in 0..self.globals.len() {
+            let i = self.globals[gi];
+            for j in 0..proxies.len() {
+                if i == j || self.globals[gi + 1..].contains(&j) {
+                    continue;
+                }
+                try_pair(proxies, i as u32, j as u32, out);
+            }
+        }
+    }
+
+    fn build_bvh(&mut self, proxies: &[Proxy], start: usize, end: usize, depth: usize) -> u32 {
+        let mut aabb = proxies[self.bvh_order[start] as usize].aabb;
+        for i in self.bvh_order[start + 1..end].iter() {
+            aabb = aabb.union(&proxies[*i as usize].aabb);
+        }
+        let idx = self.bvh_nodes.len() as u32;
+        self.bvh_nodes.push(BvhNode {
+            aabb,
+            left: u32::MAX,
+            right: u32::MAX,
+            start: start as u32,
+            count: (end - start) as u32,
+        });
+        if end - start <= 4 || depth >= 24 {
+            return idx;
+        }
+        let mut cmin = Vec3::splat(f32::INFINITY);
+        let mut cmax = Vec3::splat(f32::NEG_INFINITY);
+        for i in &self.bvh_order[start..end] {
+            let c = proxies[*i as usize].aabb.center();
+            cmin = cmin.min(c);
+            cmax = cmax.max(c);
+        }
+        let extent = cmax - cmin;
+        let axis = if extent.x >= extent.y && extent.x >= extent.z {
+            0
+        } else if extent.y >= extent.z {
+            1
+        } else {
+            2
+        };
+        let order = &mut self.bvh_order[start..end];
+        order.sort_unstable_by(|a, b| {
+            let ca = proxies[*a as usize].aabb.center();
+            let cb = proxies[*b as usize].aabb.center();
+            let (a, b) = match axis {
+                0 => (ca.x, cb.x),
+                1 => (ca.y, cb.y),
+                _ => (ca.z, cb.z),
+            };
+            a.total_cmp(&b)
+        });
+        let mid = start + (end - start) / 2;
+        let left = self.build_bvh(proxies, start, mid, depth + 1);
+        let right = self.build_bvh(proxies, mid, end, depth + 1);
+        self.bvh_nodes[idx as usize].left = left;
+        self.bvh_nodes[idx as usize].right = right;
+        idx
+    }
+
+    fn bvh_self(&self, node: u32, proxies: &[Proxy], out: &mut Vec<(u32, u32)>) {
+        let n = self.bvh_nodes[node as usize];
+        if n.left == u32::MAX {
+            self.bvh_leaf_pairs(node, node, proxies, out);
+            return;
+        }
+        self.bvh_self(n.left, proxies, out);
+        self.bvh_self(n.right, proxies, out);
+        self.bvh_cross(n.left, n.right, proxies, out);
+    }
+
+    fn bvh_cross(&self, a: u32, b: u32, proxies: &[Proxy], out: &mut Vec<(u32, u32)>) {
+        let na = self.bvh_nodes[a as usize];
+        let nb = self.bvh_nodes[b as usize];
+        if !na.aabb.intersects(&nb.aabb) {
+            return;
+        }
+        let a_leaf = na.left == u32::MAX;
+        let b_leaf = nb.left == u32::MAX;
+        if a_leaf && b_leaf {
+            self.bvh_leaf_pairs(a, b, proxies, out);
+        } else if a_leaf {
+            self.bvh_cross(a, nb.left, proxies, out);
+            self.bvh_cross(a, nb.right, proxies, out);
+        } else if b_leaf {
+            self.bvh_cross(na.left, b, proxies, out);
+            self.bvh_cross(na.right, b, proxies, out);
+        } else {
+            self.bvh_cross(na.left, nb.left, proxies, out);
+            self.bvh_cross(na.left, nb.right, proxies, out);
+            self.bvh_cross(na.right, nb.left, proxies, out);
+            self.bvh_cross(na.right, nb.right, proxies, out);
+        }
+    }
+
+    fn bvh_leaf_pairs(&self, a: u32, b: u32, proxies: &[Proxy], out: &mut Vec<(u32, u32)>) {
+        let na = self.bvh_nodes[a as usize];
+        let nb = self.bvh_nodes[b as usize];
+        for ia in na.start..(na.start + na.count) {
+            let i = self.bvh_order[ia as usize];
+            for ib in nb.start..(nb.start + nb.count) {
+                let j = self.bvh_order[ib as usize];
+                if a == b && j <= i {
+                    continue;
+                }
+                try_pair(proxies, i, j, out);
+            }
+        }
+    }
+
+    /// 小场景的网格宽相（历史路径，保逐位兼容）。
+    fn compute_pairs_grid(&mut self, proxies: &[Proxy], out: &mut Vec<(u32, u32)>) {
         out.clear();
         if proxies.len() < 2 {
             return;
@@ -426,6 +588,50 @@ mod tests {
         bp.compute_pairs(&proxies, &mut out);
         assert_eq!(out, vec![(0, 1)]);
         assert_eq!(out.len(), 1, "不能重复报告同一对");
+    }
+
+    #[test]
+    fn bvh_and_grid_report_the_same_candidate_pairs() {
+        let mut proxies = Vec::new();
+        // 一个半空间（全局代理）+ 600 个随机代理，覆盖 movable/sleeping/groups。
+        proxies.push(Proxy {
+            index: 0,
+            aabb: Aabb::new(Vec3::splat(f32::NEG_INFINITY), Vec3::splat(f32::INFINITY)),
+            movable: false,
+            sleeping: false,
+            global: true,
+            groups: InteractionGroups::default(),
+        });
+        let mut seed = 0x1234_5678u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / 16_777_216.0
+        };
+        for i in 1..601 {
+            let c = Vec3::new(rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0, rnd() * 8.0 - 4.0);
+            let h = 0.05 + rnd() * 0.45;
+            let groups = InteractionGroups {
+                memberships: 1 << (i % 4),
+                filter: InteractionGroups::ALL,
+            };
+            proxies.push(Proxy {
+                index: i as u32,
+                aabb: Aabb::from_center_half_extents(c, Vec3::splat(h)),
+                movable: i % 7 != 0,
+                sleeping: i % 11 == 0,
+                global: false,
+                groups,
+            });
+        }
+        let mut grid = Broadphase::new();
+        let mut want = Vec::new();
+        grid.compute_pairs_grid(&proxies, &mut want);
+        want.sort_unstable();
+        want.dedup();
+        let mut bvh = Broadphase::new();
+        let mut got = Vec::new();
+        bvh.compute_pairs(&proxies, &mut got);
+        assert_eq!(got, want, "BVH 必须与网格产生完全相同的候选对");
     }
 
     #[test]

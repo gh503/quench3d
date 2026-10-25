@@ -304,6 +304,35 @@ fn incline_low_friction_slides() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn circular_friction_cone_allows_more_diagonal_sliding_than_square() {
+    fn slide(cone: bool) -> f32 {
+        let mut w = PhysicsWorld::new();
+        add_ground(&mut w, 0.5, 0.0);
+        w.config.friction_cone = cone;
+        let b = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            })
+            .position(vec3(0.0, 0.5, 0.0))
+            .friction(0.5)
+            .linear_velocity(vec3(3.0, 0.0, 3.0))
+            .build(),
+        );
+        for _ in 0..150 {
+            w.step(DT);
+        }
+        let p = w.body(b).unwrap().position();
+        (p.x * p.x + p.z * p.z).sqrt()
+    }
+    let square = slide(false);
+    let cone = slide(true);
+    assert!(
+        cone > square + 0.2,
+        "圆形摩擦锥的总摩擦应更小、滑得更远：cone={cone}, square={square}"
+    );
+}
+
+#[test]
 fn raycast_finds_nearest_body() {
     let mut w = PhysicsWorld::new();
     let near = add_box(&mut w, 0.5, vec3(2.0, 0.0, 0.0), 0.5, 0.0);
@@ -3152,4 +3181,61 @@ fn slider_pd_drives_to_target_displacement() {
         tele.coordinate
     );
     assert_all_finite(&w, "滑块伺服");
+}
+
+/// 2000 体深堆性能基准（默认跳过；显式 `--ignored` 才跑）。
+///
+/// 只断言数值有限/没有炸开，不断言墙钟时间：CI 机器差异太大。数字打出来供
+/// 与发布构建对比，不能把本机 llvmpipe 当行业验收。
+#[test]
+#[ignore = "慢：2000 体深堆，显式 --ignored 运行"]
+fn deep_stack_2000_perf() {
+    let mut world = PhysicsWorld::new();
+    add_ground(&mut world, 0.8, 0.0);
+    let mut n = 0;
+    for y in 0..20 {
+        for x in 0..10 {
+            for z in 0..10 {
+                world.add_builder(
+                    BodyBuilder::dynamic(Shape::Box {
+                        half_extents: Vec3::splat(0.1),
+                    })
+                    .position(vec3(
+                        (x as f32 - 4.5) * 0.205,
+                        y as f32 * 0.205 + 0.105,
+                        (z as f32 - 4.5) * 0.205,
+                    ))
+                    .friction(0.8)
+                    .restitution(0.0),
+                );
+                n += 1;
+            }
+        }
+    }
+    assert_eq!(n, 2000);
+    world.set_phase_timing(true);
+    let start = std::time::Instant::now();
+    for _ in 0..60 {
+        world.step(DT);
+    }
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    println!("2000 体深堆：60 步 {ms:.1} ms（{:.2} ms/步）", ms / 60.0);
+    let t = world.phase_timings();
+    println!(
+        "  候选对/步 {:.0}，流形/步 {:.0}，岛 {}（最大 {}，多体 {}）",
+        t.candidate_pairs as f64 / t.steps.max(1) as f64,
+        t.manifolds as f64 / t.steps.max(1) as f64,
+        t.islands,
+        t.largest_island,
+        t.multi_body_islands
+    );
+    for (name, us) in t.per_step() {
+        println!("  {name}: {us:.1} us");
+    }
+    assert_all_finite(&world, "2000 体深堆");
+    let lowest = world
+        .bodies()
+        .map(|(_, b)| b.position().y)
+        .fold(f32::INFINITY, f32::min);
+    assert!(lowest > -1.0, "堆不能穿地：最低 y = {lowest}");
 }

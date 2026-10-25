@@ -1037,6 +1037,8 @@ NaN 刚体  : 0
   想表达"推得动、但推住之后不会慢慢滑"就把它写得比 `friction` 大。
 * `objects[].rolling_friction` 是滚动阻力（米，缺省 0 = 关闭），只对设置了它的
   球/轮子/圆柱生效；编辑器属性面板也能改。
+* `physics.friction_cone`（缺省 false）打开后两切向冲量按**向量模长**夹到 `μN`；
+  缺省仍是历史方形摩擦（对角线可达 √2·μ），旧场景逐位不变。
 * `models[].animation` 是**视觉**动画：`{ "name": "走路", "start": 0, "speed": 1, "loop": true,
   "blend": { "name": "跑步", "weight": 0.5, "fade": 0.25 } }`。名字在资产里存不存在**只有装载后才知道**
   （`validate` 不读资产），所以 `validate` 只查结构（名字非空、`speed > 0`、`start >= 0`、
@@ -1083,15 +1085,17 @@ NaN 刚体  : 0
   "浸没 %"。水面物体只是半透明平面，**没有波浪 / 折射 / 流动**。
 * `fluids` 是 **CPU PBF 粒子流体**（M2 求解器 + M3 双向耦合）：`{ "center": [x, y, z],
   "size": [x, y, z], "spacing": 0.1, "radius": 0.05, "rest_density": 1000,
-  "viscosity": 0.05, "surface_tension": 0, "vorticity": 0, "drag": 6,
-  "iterations": 4, "max_particles": 4000, "surface_mesh": false,
-  "surface_resolution": 32 }`。粒子从长方体里
+  "viscosity": 0.05, "surface_tension": 0, "vorticity": 0,
+  "velocity": [0,0,0], "drain_y": -2.0, "drag": 6, "iterations": 4,
+  "max_particles": 4000, "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
   粒子质量按晶格静止密度校准（不是随便取 1），所以静止时密度比≈1；`simulate` 报告
   `fluids[]` 的 `particles` / `avg_density_ratio` / `max_speed` / `y` 范围。
   `surface_tension`（0~5）把表面粒子往邻居重心拉，减少"摊成薄膜"；`vorticity`
   （0~5）加限幅涡量约束，保留小尺度涡。两者缺省 0 = 完全不执行，旧场景逐位不变。
+  `velocity` 给初始水柱一个喷射速度；`drain_y` 是开放排水面，粒子 y 低于它即移除
+  （不写 = 不排水），用来做无底水池/瀑布。
   **边界**：表面张力不是曲率/真实 mN/m 模型，涡量是视觉/稳定性约束；没有粒子间
   碰撞，敞开的平地上水仍会摊成薄层（这是"液体在无限平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：
@@ -1657,7 +1661,8 @@ cargo run --release -p quench3d-physics --example bench -- --phases         # �
 | 2000 | 22.21 ms | 45 | 90 051 | 0.06 |
 
 接触图密集的深堆（逐层堆叠、关闭睡眠，最坏情况）：
-200 体 1.44 ms/步 · 500 体 5.20 ms/步 · 1000 体 11.71 ms/步 · 2000 体 34.3 ms/步。
+200 体 1.44 ms/步 · 500 体 5.20 ms/步 · 1000 体 11.71 ms/步 · 2000 体 **29.6 ms/步**
+（BVH 宽相后；同一命令上一轮 34.3 ms/步）。
 
 稳定与省资源：
 
@@ -1763,6 +1768,32 @@ cargo run --release -p quench3d-physics --example bench -- --phases         # �
 
 实测（2000 体，同一次会话内 3 次取最小，平铺布局）：
 每步 **15.91 ms**、宽相 **3.23 ms**（上一轮同场景宽相约 5.9 ms）。
+
+### 8.5.1 第四轮：大场景宽相切 BVH
+
+网格宽相在 2000 体深堆里要处理「相邻 13 个单元 × 单元内物体」的笛卡尔积：
+实测一步 21.3 ms 里大部分是**重复的 AABB 测试**（候选对只有 10 824 个）。
+新增一条仅在 `proxies.len() >= 512` 时启用的 BVH：
+
+* 按最长轴中位数递归二分，叶子最多 4 个代理；
+* 两棵树自交 + 互交遍历，AABB 不重叠的分支整段剪掉；
+* 输出仍然排序去重，候选对集合与网格**逐个相等**（新增
+  `bvh_and_grid_report_the_same_candidate_pairs`，600 个随机代理 + 半空间/睡眠/分组）；
+* 512 以下继续走原网格路径，旧场景/黄金摘要逐位不变；
+* 节点与叶子顺序数组跨步复用，稳态零分配。
+
+同一 2000 体深堆（release、60 步）：
+
+| 阶段 | 网格宽相 | BVH 宽相 |
+| --- | --- | --- |
+| 宽相 | 21.3 ms | **2.5 ms** |
+| 整步 | 43.7 ms | **25.3 ms** |
+
+官方 `bench --layout stack --bodies 2000 --no-sleep --no-render` 同会话单次：
+**34.3 → 29.6 ms/步**。剩下的大头是速度迭代（14.1 ms）：2000 个箱子仍是一个
+连通 island，现有并行只切 island，所以这一段还是单线程。要再往下需要岛内并行
+（会改变 Gauss-Seidel 顺序，必须作为可选开关并单独验证）。**不把这 29.6 ms
+说成 60 Hz 行业级**：它是一台 4 线程无独显机器上的最坏情况数字。
 
 > **测量方法上踩过的坑（写下来免得再犯）**：这台机器上绝对数字在会话之间会漂 ±10%，
 > 单次运行前后对比得出的结论可能是错的。我第一次测完哈希版本，看到深堆从 34.3 变成

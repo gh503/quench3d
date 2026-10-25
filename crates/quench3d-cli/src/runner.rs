@@ -2145,6 +2145,8 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             viscosity: f.viscosity,
             surface_tension: f.surface_tension,
             vorticity: f.vorticity,
+            initial_velocity: v3(f.velocity.unwrap_or([0.0, 0.0, 0.0])),
+            drain_y: f.drain_y,
             drag: f.drag,
             iterations: f.iterations,
             max_particles: f.max_particles,
@@ -2174,6 +2176,9 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     // `world_config_wiring_is_field_for_field` 逐字段盯住。
     if let Some(v) = doc.physics.speculative_margin {
         world.config.speculative_margin = v.max(0.0);
+    }
+    if let Some(v) = doc.physics.friction_cone {
+        world.config.friction_cone = v;
     }
     if let Some(v) = doc.physics.solver_iterations {
         world.config.velocity_iterations = v.max(1) as usize;
@@ -6109,6 +6114,19 @@ mod tests {
         assert!((b.rolling_friction - 0.25).abs() < 1e-6);
     }
 
+    #[test]
+    fn fluid_velocity_and_drain_are_wired_from_scene_doc() {
+        let doc = SceneDoc::from_json(
+            r#"{ "fluids": [ { "size": [0.4, 0.4, 0.4], "spacing": 0.1,
+                 "velocity": [1.5, 0.0, 0.0], "drain_y": -2.0 } ] }"#,
+        )
+        .unwrap();
+        let build = build_world(&doc).unwrap();
+        let fluid = &build.world.fluids()[0];
+        assert_eq!(fluid.desc().initial_velocity, vec3(1.5, 0.0, 0.0));
+        assert_eq!(fluid.desc().drain_y, Some(-2.0));
+    }
+
     /// Z-up 资产必须先转成 Y-up，再套用户旋转；顺序反了物体会"躺"在错误方向。
     #[test]
     fn model_up_axis_conversion_is_local_and_maps_z_to_y() {
@@ -6152,7 +6170,8 @@ mod tests {
         // 四个字段同时给：各归各位
         let all = build_world(&doc(
             r#"{ "friction_combine": "min", "restitution_combine": "average",
-                 "static_friction_speed": 0.07, "speculative_margin": 0.013 }"#,
+                 "static_friction_speed": 0.07, "speculative_margin": 0.013,
+                 "friction_cone": true }"#,
         ))
         .expect("要能建世界");
         let cfg = &all.world.config;
@@ -6171,6 +6190,7 @@ mod tests {
             "speculative_margin = {}（是不是串到别的字段上了？）",
             cfg.speculative_margin
         );
+        assert!(cfg.friction_cone, "friction_cone 没接上");
 
         // 只给摩擦阈值：余量必须保持默认 0
         let only_friction = build_world(&doc(r#"{ "static_friction_speed": 0.07 }"#)).unwrap();
@@ -6188,6 +6208,7 @@ mod tests {
         // 两个都不写：全是引擎缺省（老场景行为逐位不变）
         let none = build_world(&doc("{}")).unwrap();
         assert_eq!(none.world.config.speculative_margin, 0.0);
+        assert!(!none.world.config.friction_cone, "缺省必须是历史方形摩擦");
         assert!((none.world.config.static_friction_speed - 0.02).abs() < 1e-6);
     }
 

@@ -362,6 +362,7 @@ pub fn scene_grammar() -> Value {
                 "friction_combine": ["geometric_mean（缺省，= sqrt(a×b)，历史行为）", "average", "min", "max", "multiply"],
                 "restitution_combine": ["缺省 max（= max(ea,eb)，历史行为）", "average", "min", "geometric_mean", "multiply"],
                 "static_friction_speed": "切向速度低于它就算静止接触（m/s），缺省 0.02；写大 = 更容易「黏住」",
+                "friction_cone": "true = 圆形摩擦锥（两切向按模长夹），缺省 false = 历史方形摩擦（对角线可达 √2·μ）",
                 "note": "世界级缺省；物体上的同名字段优先。不写这一节 = 全用引擎缺省（结果与没有这一节逐位相同）"
             },
             "ground": { "size": "f32 边长，缺省 40", "material": "材质名（可选）", "y": "f32 高度，缺省 0" },
@@ -819,6 +820,8 @@ pub fn json_schema() -> Value {
             "max_particles",
             "surface_tension",
             "vorticity",
+            "velocity",
+            "drain_y",
             "surface_mesh",
             "surface_resolution",
         ]);
@@ -828,6 +831,11 @@ pub fn json_schema() -> Value {
         for name in ["surface_tension", "vorticity"] {
             d["properties"][name] = json!({ "type": "number", "minimum": 0, "maximum": 5 });
         }
+        d["properties"]["velocity"] = json!({
+            "type": "array", "items": { "type": "number" },
+            "minItems": 3, "maxItems": 3
+        });
+        d["properties"]["drain_y"] = json!({ "type": "number" });
         d["properties"]["surface_mesh"] = json!({ "type": "boolean" });
         d["properties"]["surface_resolution"] =
             json!({ "type": "integer", "minimum": 8, "maximum": 96 });
@@ -1244,6 +1252,7 @@ pub fn json_schema() -> Value {
             "restitution_combine",
             "static_friction_speed",
             "speculative_margin",
+            "friction_cone",
             "substeps",
             "solver_iterations",
             "position_iterations",
