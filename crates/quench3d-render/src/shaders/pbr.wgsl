@@ -612,10 +612,17 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
     }
     lo = lo + emissive;
 
-    // ---- 指数距离雾 ----
-    if (frame.fog.w > 0.0) {
-        let dist = length(frame.camera_pos.xyz - in.world_position);
-        let fog_amount = 1.0 - exp(-frame.fog.w * dist);
+    // ---- 距离雾（指数 / 线性） ----
+    let dist = length(frame.camera_pos.xyz - in.world_position);
+    var fog_amount = 0.0;
+    if (frame.fog2.x > 0.5) {
+        if (frame.fog2.z > frame.fog2.y) {
+            fog_amount = clamp((dist - frame.fog2.y) / (frame.fog2.z - frame.fog2.y), 0.0, 1.0);
+        }
+    } else if (frame.fog.w > 0.0) {
+        fog_amount = 1.0 - exp(-frame.fog.w * dist);
+    }
+    if (fog_amount > 0.0) {
         // 用天空色做雾色，地平线方向更浓
         let dir = normalize(in.world_position - frame.camera_pos.xyz);
         let haze = mix(frame.fog.rgb, frame.sky_horizon.rgb, clamp(1.0 - abs(dir.y), 0.0, 1.0) * 0.5);

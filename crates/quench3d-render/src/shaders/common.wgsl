@@ -38,6 +38,8 @@ struct Frame {
     sky_ground: vec4<f32>,
     // rgb = 雾颜色, w = 雾密度
     fog: vec4<f32>,
+    // x = 模式（0 指数 / 1 线性）, y = 线性起点, z = 线性终点, w 备用
+    fog2: vec4<f32>,
     // x = 时间(秒), y = 阴影偏移, z = 阴影贴图纹素大小, w = 阴影强度
     params: vec4<f32>,
     point_lights: array<PointLight, 8>,

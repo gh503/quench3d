@@ -185,6 +185,8 @@ pub struct FrameUniforms {
     pub sky_ground: [f32; 4],
     /// rgb = 雾色，w = 雾密度。
     pub fog: [f32; 4],
+    /// x = 模式（0 指数 / 1 线性），y = 线性起点，z = 线性终点，w 备用。
+    pub fog2: [f32; 4],
     /// x = 时间，y = 阴影偏移，z = 阴影纹素，w = 阴影强度。
     pub params: [f32; 4],
     /// 点光源（结构体数组，与 WGSL 的 `array<PointLight, 8>` 同布局）。
@@ -4419,6 +4421,15 @@ impl Renderer {
                 lighting.fog.color.z,
                 lighting.fog.density,
             ],
+            fog2: [
+                match lighting.fog.mode {
+                    crate::light::FogMode::Exponential => 0.0,
+                    crate::light::FogMode::Linear => 1.0,
+                },
+                lighting.fog.linear_start,
+                lighting.fog.linear_end,
+                0.0,
+            ],
             params: [
                 self.time,
                 // 深度偏移：约 1.5 个世界空间纹素。这是**归一化深度**里的量，
@@ -6632,24 +6643,24 @@ mod tests {
         assert_eq!(offset_of!(FrameUniforms, shadow_matrices), 320);
         assert_eq!(offset_of!(FrameUniforms, cascade_splits), 576);
         assert_eq!(offset_of!(FrameUniforms, cascade_info), 592);
-        assert_eq!(offset_of!(FrameUniforms, point_lights), 688);
-        assert_eq!(offset_of!(FrameUniforms, params2), 1200);
+        assert_eq!(offset_of!(FrameUniforms, point_lights), 704);
+        assert_eq!(offset_of!(FrameUniforms, params2), 1216);
         // 聚光阴影段紧跟在 params2 之后（WGSL 里也是这个顺序）：
         // 矩阵 64 字节 + 两个 vec4，全部 16 字节对齐
-        assert_eq!(offset_of!(FrameUniforms, spot_shadow_matrix), 1216);
-        assert_eq!(offset_of!(FrameUniforms, spot_shadow_params), 1280);
-        assert_eq!(offset_of!(FrameUniforms, spot_shadow_texel), 1296);
+        assert_eq!(offset_of!(FrameUniforms, spot_shadow_matrix), 1232);
+        assert_eq!(offset_of!(FrameUniforms, spot_shadow_params), 1296);
+        assert_eq!(offset_of!(FrameUniforms, spot_shadow_texel), 1312);
         // 点光源阴影段紧跟在聚光阴影之后（WGSL 同顺序）：两个 vec4
-        assert_eq!(offset_of!(FrameUniforms, point_shadow_params), 1312);
-        assert_eq!(offset_of!(FrameUniforms, point_shadow_texel), 1328);
-        assert_eq!(size_of::<FrameUniforms>(), 1344);
+        assert_eq!(offset_of!(FrameUniforms, point_shadow_params), 1328);
+        assert_eq!(offset_of!(FrameUniforms, point_shadow_texel), 1344);
+        assert_eq!(size_of::<FrameUniforms>(), 1360);
     }
 
     #[test]
     fn frame_uniforms_size_is_multiple_of_16() {
         let size = std::mem::size_of::<FrameUniforms>();
         assert_eq!(size % 16, 0, "uniform 结构大小必须是 16 的倍数: {size}");
-        assert_eq!(size, 1344, "FrameUniforms 布局与 WGSL 不一致");
+        assert_eq!(size, 1360, "FrameUniforms 布局与 WGSL 不一致");
     }
 
     /// 新增的聚光阴影字段必须在 `mat4x4<f32>` 的 16 字节边界上，

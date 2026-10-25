@@ -208,9 +208,17 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     lighting.sky = Some(light.sky.enabled);
     lighting.grid = Some(light.sky.show_grid);
     // 编辑器能改的雾 / 阴影质量 / 天空颜色也从引擎写回；不能改的（点光、bloom…）沿用底稿。
+    let fog_linear = matches!(light.fog.mode, quench3d_render::light::FogMode::Linear);
     lighting.fog = Some(quench3d_cli::scene_doc::FogDoc {
         color: Some([light.fog.color.x, light.fog.color.y, light.fog.color.z]),
         density: Some(light.fog.density),
+        mode: Some(if fog_linear {
+            quench3d_cli::scene_doc::FogModeDoc::Linear
+        } else {
+            quench3d_cli::scene_doc::FogModeDoc::Exponential
+        }),
+        start: fog_linear.then_some(light.fog.linear_start),
+        end: fog_linear.then_some(light.fog.linear_end),
     });
     // 级联数与切分系数现在由编辑器自己管（UI 直接改 `engine.renderer.options`，载入时
     // 也把场景里的值应用进去），所以从**引擎**写回而不是"沿用底稿"。

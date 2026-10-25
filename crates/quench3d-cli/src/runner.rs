@@ -22,8 +22,8 @@ use quench3d::render::{environment::EnvironmentMap, RenderStats, Vertex};
 use serde::{Deserialize, Serialize};
 
 use crate::scene_doc::{
-    arr, v3, ActionKind, BodyKind, JointDoc, JointKind, MaterialDoc, ModelUpAxis, PointLightDoc,
-    ProbeDoc, ProbeShapeDoc, SceneDoc, ShapeDoc, ShapeKind, SpotLightDoc,
+    arr, v3, ActionKind, BodyKind, FogModeDoc, JointDoc, JointKind, MaterialDoc, ModelUpAxis,
+    PointLightDoc, ProbeDoc, ProbeShapeDoc, SceneDoc, ShapeDoc, ShapeKind, SpotLightDoc,
 };
 
 /// 运行期错误。
@@ -4807,12 +4807,23 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) -> Result<(), RunErro
             lighting.sky.ground = v3(g);
         }
     }
-    // 雾：写了这一节才开（`density` 缺省 0.02；给 0 就是关掉）
+    // 雾：写了这一节才开（指数 `density` 缺省 0.02；给 0 就是关掉）。
+    // `mode = linear` 走 start/end，不再看 density。
     if let Some(fog) = &l.fog {
         if let Some(color) = fog.color {
             lighting.fog.color = v3(color);
         }
-        lighting.fog.density = fog.density.unwrap_or(0.02).max(0.0);
+        match fog.mode.unwrap_or(FogModeDoc::Exponential) {
+            FogModeDoc::Exponential => {
+                lighting.fog.density = fog.density.unwrap_or(0.02).max(0.0);
+            }
+            FogModeDoc::Linear => {
+                lighting.fog.density = 0.0;
+                lighting.fog = lighting
+                    .fog
+                    .with_linear(fog.start.unwrap_or(0.0), fog.end.unwrap_or(50.0));
+            }
+        }
     }
     // 点光源：预设会整体替换 lighting，所以放在最后覆盖。
     // 注意"没写"与"写了空数组"是两种意思：前者保留预设的补光，后者才是显式清空。

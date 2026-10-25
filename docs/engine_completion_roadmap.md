@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**902 通过 / 0 失败 / 3 ignored**
-- wasm：**13,614,541 字节**
+- 测试：**904 通过 / 0 失败 / 3 ignored**
+- wasm：**13,621,615 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -98,6 +98,10 @@
 - [ ] 压缩纹理（KTX2/Basis）与浮点纹理；EXR/HDR 读写。
 - [ ] FBX/USD 至少一条导入链；材质节点图或等价的自定义着色器层。
 - [ ] 透明排序/OIT、投影贴花、多盏投影阴影、线性雾距离。
+  - 已做：线性雾 `FogParams::with_linear(start, end)` / 场景 `lighting.fog.mode = "linear"`
+    + `start`/`end`。起点之前逐位无雾、终点处完全雾色，GPU 像素 e2e 验证；旧指数雾与
+    “不写雾 = 关闭”语义不变。
+  - 未做：OIT、贴花、多盏投影阴影。
 
 ### M3 动画、音频与内容（6–9 人月）
 

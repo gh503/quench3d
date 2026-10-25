@@ -2641,9 +2641,29 @@ pub struct FogDoc {
     /// 雾颜色（**线性空间**），缺省跟随预设/引擎缺省 `[0.36, 0.46, 0.63]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[f32; 3]>,
-    /// 密度（每米），缺省 0.02（写了这一节就是想看见雾；给 0 等于关掉）。
+    /// 密度（每米），缺省 0.02（只对指数雾有意义；给 0 等于关掉）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub density: Option<f32>,
+    /// 距离模型：`exponential`（缺省）或 `linear`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<FogModeDoc>,
+    /// 线性雾起点（米，缺省 0）：近于此距离完全没有雾。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<f32>,
+    /// 线性雾终点（米，缺省 50）：远于此距离完全是雾色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f32>,
+}
+
+/// 雾的距离模型（场景 JSON）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FogModeDoc {
+    /// `1 - exp(-density * dist)`。
+    #[default]
+    Exponential,
+    /// `clamp((dist - start) / (end - start), 0, 1)`。
+    Linear,
 }
 
 /// 阴影质量配置。
@@ -5172,6 +5192,35 @@ impl SceneDoc {
                     .with_hint("常见区间 0.02~0.1：0.05 大约 20 米外看不清"),
                 ),
                 _ => {}
+            }
+            if fog.mode == Some(FogModeDoc::Linear) {
+                let start = fog.start.unwrap_or(0.0);
+                let end = fog.end.unwrap_or(50.0);
+                if !start.is_finite() || start < 0.0 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.fog.start",
+                        "线性雾起点必须是非负有限数",
+                    ));
+                }
+                if !end.is_finite() || end <= start {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.fog.end",
+                        "线性雾终点必须是有限数且大于起点",
+                    ));
+                }
+            } else {
+                if fog.start.is_some() || fog.end.is_some() {
+                    out.push(
+                        Diagnostic::warn_code(
+                            ErrorCode::SuspiciousValue,
+                            "lighting.fog.mode",
+                            "只有 mode = linear 时 start/end 才生效",
+                        )
+                        .with_hint("指数雾请用 density；或者写 \"mode\": \"linear\""),
+                    );
+                }
             }
         }
         // 阴影质量：强度 0~1、覆盖半径为正
@@ -11347,6 +11396,49 @@ mod tests {
         assert!(plain.lighting.shadow_quality.is_none());
         assert!(plain.lighting.sky_colors.is_none());
         assert!(SceneDoc::from_json(r#"{ "lighting": { "fog": { "densty": 0.1 } } }"#).is_err());
+    }
+
+    #[test]
+    fn linear_fog_parses_validates_and_round_trips() {
+        let doc = SceneDoc::from_json(
+            r#"{ "lighting": { "fog": {
+                "color": [0.2, 0.3, 0.4], "mode": "linear", "start": 10, "end": 80
+            } } }"#,
+        )
+        .unwrap();
+        assert!(
+            !SceneDoc::has_errors(&doc.validate()),
+            "{:?}",
+            doc.validate()
+        );
+        let fog = doc.lighting.fog.unwrap();
+        assert_eq!(fog.mode, Some(FogModeDoc::Linear));
+        assert_eq!(fog.start, Some(10.0));
+        assert_eq!(fog.end, Some(80.0));
+        let back = SceneDoc::from_value(serde_json::to_value(&doc).unwrap()).unwrap();
+        let fog = back.lighting.fog.unwrap();
+        assert_eq!(fog.mode, Some(FogModeDoc::Linear));
+        assert_eq!(fog.start, Some(10.0));
+        assert_eq!(fog.end, Some(80.0));
+
+        // 终点必须大于起点。
+        let bad = SceneDoc::from_json(
+            r#"{ "lighting": { "fog": { "mode": "linear", "start": 20, "end": 10 } } }"#,
+        )
+        .unwrap();
+        assert!(diag_at(&bad.validate(), "lighting.fog.end").is_some());
+
+        // 写了 start/end 却没写 mode：能跑（按指数雾），但提示这两个字段无效。
+        let odd = SceneDoc::from_json(
+            r#"{ "lighting": { "fog": { "density": 0.03, "start": 5, "end": 30 } } }"#,
+        )
+        .unwrap();
+        let diags = odd.validate();
+        assert!(!SceneDoc::has_errors(&diags), "{diags:?}");
+        assert_eq!(
+            diag_at(&diags, "lighting.fog.mode").map(|d| d.severity),
+            Some(Severity::Warning)
+        );
     }
 
     #[test]

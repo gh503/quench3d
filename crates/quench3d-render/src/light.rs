@@ -252,13 +252,29 @@ impl Default for SkyParams {
     }
 }
 
-/// 指数距离雾。
+/// 雾的距离模型。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FogMode {
+    /// 指数距离雾：`1 - exp(-density * dist)`。
+    #[default]
+    Exponential,
+    /// 线性距离雾：`clamp((dist - start) / (end - start), 0, 1)`。
+    Linear,
+}
+
+/// 距离雾。指数与线性两种模型共用同一个颜色；`density == 0` 且模式为指数时关闭。
 #[derive(Clone, Copy, Debug)]
 pub struct FogParams {
     /// 雾颜色。
     pub color: Vec3,
-    /// 密度（0 表示关闭）。
+    /// 指数雾密度（0 表示关闭）。
     pub density: f32,
+    /// 距离模型。
+    pub mode: FogMode,
+    /// 线性雾起点（米）。
+    pub linear_start: f32,
+    /// 线性雾终点（米，必须大于起点才生效）。
+    pub linear_end: f32,
 }
 
 impl Default for FogParams {
@@ -266,14 +282,32 @@ impl Default for FogParams {
         Self {
             color: Vec3::new(0.36, 0.46, 0.63),
             density: 0.0,
+            mode: FogMode::Exponential,
+            linear_start: 0.0,
+            linear_end: 0.0,
         }
     }
 }
 
 impl FogParams {
-    /// 开启一定强度的雾。
+    /// 开启一定强度的指数雾。
     pub fn with_density(mut self, d: f32) -> Self {
         self.density = d.max(0.0);
+        self.mode = FogMode::Exponential;
+        self
+    }
+
+    /// 设置雾颜色。
+    pub fn with_color(mut self, color: Vec3) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// 开启线性距离雾：`start` 之前没有雾，`end` 之后完全变成雾色。
+    pub fn with_linear(mut self, start: f32, end: f32) -> Self {
+        self.mode = FogMode::Linear;
+        self.linear_start = start.max(0.0);
+        self.linear_end = end.max(self.linear_start);
         self
     }
 }

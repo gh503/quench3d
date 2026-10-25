@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **线性距离雾（引擎 M2 第六项的一片）**：`FogParams::with_linear(start, end)`，
+  场景 JSON 支持 `lighting.fog.mode = "linear"` + `start`/`end`。起点之前逐位无雾，
+  终点处完全雾色；缺省仍是指数雾，`density = 0` 仍等于关闭。GPU 像素 e2e 验证，
+  场景解析/校验/往返各一条测试。
 - **GPU 视锥剔除 + 间接绘制（引擎 M2 第二片，未完成整项）**：
   `RendererOptions.gpu_culling` 打开后，compute shader 按批次剔除不透明实例、压实到
   第二份实例缓冲，主 pass 用 `draw_indexed_indirect`；透明/阴影仍走 CPU。GPU e2e 验证

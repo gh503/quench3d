@@ -67,7 +67,14 @@ fn fs_main(in: GridOut) -> GridFrag {
 
     // 雾/淡出混合到天空地平线色，避免远处突兀
     let horizon = frame.sky_horizon.rgb;
-    let fog_amount = 1.0 - exp(-frame.fog.w * dist);
+    var fog_amount = 0.0;
+    if (frame.fog2.x > 0.5) {
+        if (frame.fog2.z > frame.fog2.y) {
+            fog_amount = clamp((dist - frame.fog2.y) / (frame.fog2.z - frame.fog2.y), 0.0, 1.0);
+        }
+    } else if (frame.fog.w > 0.0) {
+        fog_amount = 1.0 - exp(-frame.fog.w * dist);
+    }
     color = mix(color, horizon, clamp(fog_amount, 0.0, 1.0));
 
     var alpha = max(max(minor * 0.35, major), max(axis_z, axis_x)) * fade;

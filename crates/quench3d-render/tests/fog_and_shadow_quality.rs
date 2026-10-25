@@ -135,10 +135,9 @@ fn fog_pulls_distant_pixels_toward_the_fog_color() {
 
     // 纯红浓雾：1 - exp(-0.6 * 6) ≈ 0.97，几乎把箱子整个染红
     let mut foggy = base.clone();
-    foggy.fog = FogParams {
-        color: Vec3::new(1.0, 0.0, 0.0),
-        density: 0.6,
-    };
+    foggy.fog = FogParams::default()
+        .with_density(0.6)
+        .with_color(Vec3::new(1.0, 0.0, 0.0));
     let fogged = renderer
         .capture(&mut ctx, W, H, &camera, &foggy)
         .expect("离屏渲染");
@@ -156,10 +155,9 @@ fn fog_pulls_distant_pixels_toward_the_fog_color() {
 
     // 密度 0 = 关闭：必须与不写 fog 那一节**逐位相同**（"不写 = 关闭"的承诺）。
     let mut off = base.clone();
-    off.fog = FogParams {
-        color: Vec3::new(1.0, 0.0, 0.0),
-        density: 0.0,
-    };
+    off.fog = FogParams::default()
+        .with_density(0.0)
+        .with_color(Vec3::new(1.0, 0.0, 0.0));
     let off = renderer
         .capture(&mut ctx, W, H, &camera, &off)
         .expect("离屏渲染");
@@ -258,4 +256,57 @@ fn shadow_strength_only_darkens_the_shadowed_pixels() {
         changed > 20,
         "shadow_bias 0.75 → 30 只改了 {changed} 个像素：偏移没有进 uniform 或没有参与比较"
     );
+}
+
+/// 线性雾：起点之外完全无雾；终点之内完全变成雾色。指数雾的 `density=0`
+/// 关闭承诺不能被这次扩展破坏。
+#[test]
+fn linear_fog_respects_start_and_end_distances() {
+    let Some((mut ctx, mut renderer)) = setup(false) else {
+        return;
+    };
+    let mesh = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    let material = renderer.add_material(&ctx, MaterialDesc::from_srgb(1.0, 1.0, 1.0, 1.0));
+    renderer.draw(mesh, material, InstanceDesc::from_position(Vec3::ZERO, 1.0));
+
+    let mut lighting = dark_lighting();
+    lighting.sun = Some(DirectionalLight {
+        direction: Vec3::new(0.2, -0.3, -1.0).normalize_or_zero(),
+        color: Vec3::ONE,
+        intensity: 3.0,
+        cast_shadows: false,
+        ..DirectionalLight::default()
+    });
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = Vec3::new(0.0, 0.0, 6.0);
+    camera.look_at(Vec3::ZERO);
+
+    let clear = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染");
+
+    // 起点 100 米：这个 6 米远的箱子在起点之前，线性雾必须**逐位**不生效。
+    let mut before = lighting.clone();
+    before.fog = FogParams::default()
+        .with_color(Vec3::new(1.0, 0.0, 0.0))
+        .with_linear(100.0, 200.0);
+    let before = renderer
+        .capture(&mut ctx, W, H, &camera, &before)
+        .expect("离屏渲染");
+    assert_eq!(before.rgba, clear.rgba, "线性雾起点之前必须完全没有雾");
+
+    // 终点 6 米：箱子正好在终点附近，几乎整块变红。
+    let mut after = lighting.clone();
+    after.fog = FogParams::default()
+        .with_color(Vec3::new(1.0, 0.0, 0.0))
+        .with_linear(0.0, 6.0);
+    let after = renderer
+        .capture(&mut ctx, W, H, &camera, &after)
+        .expect("离屏渲染");
+    assert!(
+        red_dominant(&after) > 200,
+        "线性雾终点处没有把箱子染红：红主导像素 {}",
+        red_dominant(&after)
+    );
+    assert!(red_dominant(&before) == 0, "起点之前不该有红主导像素");
 }
