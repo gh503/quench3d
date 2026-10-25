@@ -2738,6 +2738,9 @@ pub struct RenderDoc {
     /// 缺省 false（保持旧画面/旧显存）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_lod: Option<bool>,
+    /// 最大绘制距离（米）。不写 = 不限；按实例包围盒最近点剔除，不是遮挡剔除。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_draw_distance: Option<f32>,
 }
 
 fn default_output() -> PathBuf {
@@ -2766,6 +2769,7 @@ impl Default for RenderDoc {
             enabled: true,
             outputs: Vec::new(),
             auto_lod: None,
+            max_draw_distance: None,
         }
     }
 }
@@ -7372,6 +7376,15 @@ impl SceneDoc {
                 "MSAA 只能是 1 / 2 / 4 / 8",
             ));
         }
+        if let Some(distance) = self.render.max_draw_distance {
+            if !distance.is_finite() || distance <= 0.0 {
+                out.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    "render.max_draw_distance",
+                    "最大绘制距离必须是大于 0 的有限数（不写 = 不限）",
+                ));
+            }
+        }
         if self.render.output.as_os_str().is_empty() {
             out.push(Diagnostic::error_code(
                 ErrorCode::InvalidValue,
@@ -8108,6 +8121,18 @@ mod tests {
     }
 
     #[test]
+    fn non_positive_max_draw_distance_is_rejected() {
+        let doc = SceneDoc::from_json(r#"{"render":{"max_draw_distance":0}}"#).unwrap();
+        let diags = doc.validate();
+        assert!(
+            diags
+                .iter()
+                .any(|d| { d.severity == Severity::Error && d.path == "render.max_draw_distance" }),
+            "0 必须报错（不写才是不限）：{diags:?}"
+        );
+    }
+
+    #[test]
     fn dynamic_plane_is_rejected() {
         let doc =
             SceneDoc::from_json(r#"{"objects":[{"shape":{"type":"plane"},"body":"dynamic"}]}"#)
@@ -8124,7 +8149,8 @@ mod tests {
             "objects": [{"name":"b","shape":{"type":"sphere","radius":0.4},
                          "position":[1,2,3],"body":"dynamic","restitution":0.5}],
             "simulate": {"steps": 60},
-            "render": {"output":"x.png","width":320,"height":240,"auto_lod":true}
+            "render": {"output":"x.png","width":320,"height":240,"auto_lod":true,
+                       "max_draw_distance": 120}
         }"#;
         let doc = SceneDoc::from_json(text).unwrap();
         assert!(doc.validate().iter().all(|d| d.severity != Severity::Error));
@@ -8134,6 +8160,11 @@ mod tests {
         assert_eq!(again.simulate.steps, 60);
         assert_eq!(again.render.output, PathBuf::from("x.png"));
         assert_eq!(again.render.auto_lod, Some(true), "自动 LOD 开关要往返");
+        assert_eq!(
+            again.render.max_draw_distance,
+            Some(120.0),
+            "最大绘制距离要往返"
+        );
     }
 
     #[test]

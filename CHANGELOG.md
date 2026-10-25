@@ -49,7 +49,8 @@
 
 - **最大绘制距离剔除（第 111 轮）**：`RendererOptions.max_draw_distance` 按实例包围盒
   最近点剔除远处实例，`RenderStats.distance_culled` 单独记账；编辑器「渲染」菜单可调。
-  GPU 测试验证近处保留、远处消失且画面同步变化。
+  GPU 测试验证近处保留、远处消失且画面同步变化；场景格式 `render.max_draw_distance`
+  与渲染报告 `distance_culled` 已接线，CLI e2e 覆盖。
 
 - **编辑器场景探针可视化（第 109 轮）**：`probes[]` 的球形区域画三个正交圆、盒形区域画
   12 条边线框；「视图 → 场景探针」开关 / 快捷键 B，纯函数单测线段数量（3×24+12）。

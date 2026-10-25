@@ -1191,7 +1191,14 @@ pub fn json_schema() -> Value {
     defs.insert(
         "render".into(),
         def(&[
-            "output", "width", "height", "msaa", "enabled", "outputs", "auto_lod",
+            "output",
+            "width",
+            "height",
+            "msaa",
+            "enabled",
+            "outputs",
+            "auto_lod",
+            "max_draw_distance",
         ]),
     );
     defs.insert(
@@ -1396,8 +1403,10 @@ animations: [{ target, loop?, start?, speed?, weight?, position?: {times,values}
     fog 让远处往雾色里淡出（density 0.02~0.1，线性色不是 sRGB）；
     shadow_quality 只调阴影质量（强度 0~1、覆盖半径米），开关仍是 shadows）
 - simulate: { steps: 180, dt: 0.0166667 }
-- render: { output: "scene.png", width: 960, height: 600, msaa: 4, auto_lod: false }
+- render: { output: "scene.png", width: 960, height: 600, msaa: 4, auto_lod: false,
+            max_draw_distance: 200 }
   // auto_lod=true 时高面数非蒙皮网格在上传时生成 1/2、1/4 两档，按距离切换；缺省 false。
+  // max_draw_distance：实例包围盒最近点超过它就不画；不写 = 不限；不是遮挡剔除。
 
 硬性要求：
 1. 单位：长度米、时间秒、角度度（字段名带 _deg）；重力是 y 轴向下。

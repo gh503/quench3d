@@ -3378,6 +3378,8 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
   **离相机最近的点**判断，超过就整实例跳过；阴影名单同一遍循环里生成，所以阴影也
   一起裁掉。
 * `RenderStats.distance_culled` 单独记账（`culled` 仍是视锥 + 距离的总数）。
+* 场景格式 `render.max_draw_distance`（不写 = 不限，0/负数/非有限数报 `out_of_range`）；
+  CLI `render`/`movie` 都读它，渲染报告新增 `distance_culled`（为 0 时省略）。
 * 编辑器「渲染」菜单加「最大绘制距离」拖动条，0 = 不限。
 * 纯 CPU 判定，不需要显卡；GL/WebGL2 同样生效。
 
@@ -3386,14 +3388,17 @@ SBOM 只含 name/version/purl/license，不含文件哈希与传递依赖图。
 * `max_draw_distance_culls_only_far_instances`：相机在 z=60，近立方体距离约 55 m、
   远立方体约 123 m；限制 80 m 时只画 1 个且 `distance_culled=1`，改回不限后 2 个都画，
   两张图的右半部分有像素差异。
-* 全量门禁 **861** 测试、0 失败。
+* `scene_render_max_draw_distance_culls_far_object`：场景里近/远两个立方体，
+  写 30 m 时报告 `instances=1, distance_culled=1`；不写时 `instances=2` 且字段省略/0。
+* `non_positive_max_draw_distance_is_rejected`：0 报错路径。
+* 全量门禁 **863** 测试、0 失败。
 
 **边界**：
 
 * 只是**距离**剔除，不是遮挡剔除；被墙挡住但距离内的物体仍会画。
 * 阈值是相机到包围盒最近点，不是屏幕尺寸；大物体贴脸时仍可能很远。
 * 半透明物体与阴影一起裁；没有"只裁阴影不裁主画面"的开关。
-* 不写进场景格式，只在运行期/编辑器里调；CLI 没有对应参数。
+* 场景格式与 CLI 已接线；编辑器里调的是运行期值，不会自动写回场景（要持久化请写 JSON）。
 
 ### 23.98 编辑器场景探针可视化（第 109 轮）
 

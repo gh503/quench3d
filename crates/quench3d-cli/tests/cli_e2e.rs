@@ -6674,6 +6674,63 @@ fn scene_model_lods_load_replacements_without_breaking_simulate() {
     assert_eq!(d["ok"], true, "LOD 场景应当成功装载：{d}");
 }
 
+/// 场景格式 → runner → 渲染器：`render.max_draw_distance` 真的裁掉远处实例，并在
+/// 报告里单独记账。
+#[test]
+fn scene_render_max_draw_distance_culls_far_object() {
+    let dir = temp_dir("max_draw_distance");
+    let objects = serde_json::json!([
+        { "name": "near", "shape": { "type": "box", "size": [2, 2, 2] },
+          "position": [0, 0, 0], "body": "static", "material": "m" },
+        { "name": "far", "shape": { "type": "box", "size": [4, 4, 4] },
+          "position": [12, 0, -50], "body": "static", "material": "m" }
+    ]);
+    let make = |name: &str, limit: Option<f32>, output: &str| {
+        let output_path = dir.join(output).display().to_string();
+        let mut render = serde_json::json!({
+            "output": output_path, "width": 160, "height": 120, "msaa": 1
+        });
+        if let Some(limit) = limit {
+            render["max_draw_distance"] = serde_json::json!(limit);
+        }
+        write_scene(
+            &dir,
+            name,
+            serde_json::json!({
+                "format": "quench3d.scene", "version": 2,
+                "materials": { "m": { "color": [0.8, 0.8, 0.8] } },
+                "objects": objects,
+                "camera": { "position": [0, 0, 12], "look_at": [0, 0, -30], "fov_deg": 60 },
+                "render": render
+            }),
+        )
+    };
+    let limited = make("limited.json", Some(30.0), "limited.png");
+    let r = run(&["render", limited.to_str().unwrap(), "--json"]);
+    if r.code == 3 {
+        return; // 无 GPU
+    }
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    let data = &d["data"];
+    assert_eq!(data["instances"], 1, "远处物体应当被剔除：{d}");
+    assert_eq!(data["distance_culled"], 1, "距离剔除要单独记账：{d}");
+
+    let unlimited = make("unlimited.json", None, "unlimited.png");
+    let r = run(&["render", unlimited.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "stderr={} stdout={}", r.stderr, r.stdout);
+    let d = r.json();
+    let data = &d["data"];
+    assert_eq!(
+        data["instances"], 2,
+        "不写 max_draw_distance 时两个都画：{d}"
+    );
+    assert!(
+        data.get("distance_culled").is_none() || data["distance_culled"] == 0,
+        "没有距离剔除时字段应当省略或为 0：{d}"
+    );
+}
+
 /// 状态机：报告字段 + 立即过渡（after=0, fade=0）必须改变首帧画面。
 #[test]
 fn scene_animator_is_reported_and_changes_cli_render() {

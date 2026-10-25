@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **861** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **863** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -35,7 +35,7 @@ tools/verify_editor_features.sh
 | 点光 / 聚光阴影 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test point_lights` | 有/无投影的像素差 |
 | Bloom | `cargo test -p quench3d-render --test post_pipeline bloom` | 亮区外溢、关闭时参数无效 |
 | FXAA | `cargo test -p quench3d-render --test post_pipeline fxaa` | 边缘变平滑、平面不变 |
-| 最大绘制距离 | `cargo test -p quench3d-render --test post_pipeline max_draw_distance` | 近/远两个立方体，限 80 m 时 `instances=1`、`distance_culled=1`；取消限制后 `instances=2` 且画面出现差异 |
+| 最大绘制距离 | `cargo test -p quench3d-render --test post_pipeline max_draw_distance` + `cargo test -p quench3d-cli --test cli_e2e scene_render_max_draw_distance` | 引擎像素测试：限 80 m 只画近物；场景格式 → CLI：写 30 m 报告 `instances=1/distance_culled=1`，不写则 2 个；0 被校验拒绝 |
 | 编辑器探针线框 | `cargo test -p quench3d-editor --lib probes_draw_three_circles_and_one_box` + `tools/probe_web_ui.sh` | 球 3 个正交圆 + 盒 12 条边，共 84 条线；「视图 → 场景探针」/快捷键 B 切换，Web 探针断言 `probes=false → true` |
 | TAA 运动向量 | `cargo test -p quench3d-render --test post_pipeline taa_motion_vectors` + `cargo test -p quench3d-render --lib instance_desc_packs_previous` + `cargo test -p quench3d --lib snapshot_previous` | 刚体立方体跳变、蒙皮三角形调色板平移、morph 顶点上移三组 A/B，开/关运动向量第二帧像素不同；CPU 上一帧矩阵/场景快照正确；原 TAA 历史测试仍过 |
 | TAA | `cargo test -p quench3d-render --test post_pipeline taa` | 相机不动时第 1→2 帧变化（历史被消费）；feedback 0.9 与 feedback 0 的第 2 帧不同；关闭 TAA 重复 capture 逐位相同；切镜（位置 >2m/朝向 >60°）丢弃历史；GL/MSAA 跳过 |

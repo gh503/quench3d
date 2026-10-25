@@ -685,7 +685,7 @@ quench3d::write_png(&image, "out.png")?;
 | 阴影 | 太阳：单张（级联时 2×2 图集）`Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段，主 pass 按视空间深度选级。**局部光阴影**：`SpotLight.cast_shadows`（一张透视 2D 深度图，视锥 = 外锥角）与 `PointLight.cast_shadows`（**立方体阴影**：`texture_depth_2d_array` 6 层，每层 90°，面选择 + 面内 uv 是 CPU 纯函数、WGSL 逐字镜像，靠"公式 == 矩阵"的 CPU 测试保证两边一致）；两者**各自整帧只支持一盏**（第一盏要求投影的），缺点都是缺省 `false`（老场景像素逐位不变），两套图互相独立 |
 | 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **IBL 环境贴图**（`lighting.environment_map`，等距柱状 HDR/PNG/JPEG → 64px 7 级预滤波 cubemap，按粗糙度采样）或解析式环境高光（不写贴图时；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。IBL 没有精确 PMREM/GGX、没有屏幕空间反射 |
 | 天空/地面 | 全屏三角形程序化天空（三个渐变颜色可从 `lighting.sky_colors` 调）+ 解析无限网格（`fwidth` 抗锯齿 + 深度写入） |
-| 批处理 | 不透明按 (材质, 网格) 分批 + 实例化（160 字节/实例）+ 逐实例视锥剔除；超过 `max_draw_distance` 的实例按包围盒最近点剔除（`RenderStats.distance_culled`，不是遮挡剔除）；**半透明按相机距离全局由远到近逐实例绘制**（按实例 AABB 中心排序，不再按批次/材质 id 顺序），叠玻璃不会因提交顺序闪错 |
+| 批处理 | 不透明按 (材质, 网格) 分批 + 实例化（160 字节/实例）+ 逐实例视锥剔除；超过 `render.max_draw_distance` 的实例按包围盒最近点剔除（`RenderStats.distance_culled` / 报告同名字段，不是遮挡剔除）；**半透明按相机距离全局由远到近逐实例绘制**（按实例 AABB 中心排序，不再按批次/材质 id 顺序），叠玻璃不会因提交顺序闪错 |
 | 其它 | MSAA（1/2/4/8；GL/WebGL2 上按能力夹到 1）、Alpha 混合与 Alpha 裁剪、无光照材质、调试线段/接触点/包围盒 |
 | 后端 | 桌面 Vulkan/Metal/DX12，Web WebGPU→WebGL2 回退；同一套 WGSL。GL/WebGL2 上：SSAO 按能力关闭（读不了深度纹理）、**MSAA 按能力夹到 1**（多采样纹理在 WebGL2 的 glow 里是 `panic!`、在原生 GL 上出黑帧），见 [production_readiness §12.7](docs/production_readiness.md) |
 

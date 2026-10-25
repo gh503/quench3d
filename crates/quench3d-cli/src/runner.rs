@@ -657,8 +657,11 @@ pub struct RenderReport {
     pub instances: u32,
     /// 三角形数。
     pub triangles: u64,
-    /// 被剔除的实例数。
+    /// 被剔除的实例数（视锥 + 距离）。
     pub culled: u32,
+    /// 其中因为超过 `render.max_draw_distance` 被剔除的实例数。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub distance_culled: u32,
     /// 阴影实例数。
     pub shadow_instances: u32,
     /// 调试线段数。
@@ -2167,6 +2170,10 @@ pub struct EventReport {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_f32(v: &f32) -> bool {
     *v == 0.0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 fn is_zero_usize(v: &usize) -> bool {
@@ -4532,6 +4539,7 @@ fn run_render_single(
             instances: 0,
             triangles: 0,
             culled: 0,
+            distance_culled: 0,
             shadow_instances: 0,
             lines: 0,
             objects: 0,
@@ -4571,6 +4579,7 @@ fn run_render_single(
             shadow_cascades: shadow_cascades(doc),
             shadow_split_lambda: shadow_split_lambda(doc),
             auto_lod: doc.render.auto_lod.unwrap_or(false),
+            max_draw_distance: doc.render.max_draw_distance.unwrap_or(f32::INFINITY),
             ..Default::default()
         },
         ..Default::default()
@@ -4622,6 +4631,7 @@ fn run_render_single(
         instances,
         triangles,
         culled,
+        distance_culled,
         shadow_instances,
         lines,
         ..
@@ -4636,6 +4646,7 @@ fn run_render_single(
         instances,
         triangles,
         culled,
+        distance_culled,
         shadow_instances,
         lines,
         objects: scene_objects,
@@ -5197,6 +5208,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             shadow_cascades: shadow_cascades(doc),
             shadow_split_lambda: shadow_split_lambda(doc),
             auto_lod: doc.render.auto_lod.unwrap_or(false),
+            max_draw_distance: doc.render.max_draw_distance.unwrap_or(f32::INFINITY),
             ..Default::default()
         },
         ..Default::default()
