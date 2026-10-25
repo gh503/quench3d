@@ -29,7 +29,21 @@ pub fn trim_outliers(points: &[Vec3], trim: f32) -> Vec<Vec3> {
     } else {
         0.0
     };
-    let finite: Vec<Vec3> = points.iter().copied().filter(|p| p.is_finite()).collect();
+    // 实时建模时深度点可能上百万；三轴排序前先等距抽样到 20 万点，
+    // 把每帧重建的排序开销压住（采样是确定性的：按下标取模）。
+    const MAX_POINTS: usize = 200_000;
+    let stride = if trim > 0.0 {
+        points.len().div_ceil(MAX_POINTS).max(1)
+    } else {
+        1
+    };
+    let finite: Vec<Vec3> = points
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % stride == 0)
+        .map(|(_, p)| *p)
+        .filter(|p| p.is_finite())
+        .collect();
     if trim <= 0.0 || finite.len() < 64 {
         return finite;
     }
@@ -298,6 +312,20 @@ mod tests {
         // 点云在原点附近，平滑网格不能跑到 bounds 之外太远。
         let b = mesh.aabb();
         assert!(b.min.x > -0.3 && b.max.x < 0.3);
+    }
+
+    #[test]
+    fn huge_clouds_are_sampled_before_sorting() {
+        let pts: Vec<Vec3> = (0..300_000)
+            .map(|i| Vec3::new(i as f32 * 1e-4, (i % 73) as f32 * 1e-4, 0.0))
+            .collect();
+        let trimmed = trim_outliers(&pts, 0.005);
+        assert!(trimmed.len() <= 200_000, "{}", trimmed.len());
+        assert!(
+            trimmed.len() > 100_000,
+            "抽样不应把点云削得太少：{}",
+            trimmed.len()
+        );
     }
 
     #[test]
