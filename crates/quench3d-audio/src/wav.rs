@@ -306,6 +306,37 @@ mod tests {
     }
 
     #[test]
+    fn decodes_24_bit_signed_samples() {
+        // +0.5 与 -0.5 的 24-bit 补码。
+        let vals: [i32; 2] = [4_194_304, -4_194_304];
+        let mut data = Vec::new();
+        for v in vals {
+            data.extend_from_slice(&[
+                (v & 0xFF) as u8,
+                ((v >> 8) & 0xFF) as u8,
+                ((v >> 16) & 0xFF) as u8,
+            ]);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&8_000u32.to_le_bytes());
+        out.extend_from_slice(&(8_000u32 * 3).to_le_bytes());
+        out.extend_from_slice(&3u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        let clip = AudioClip::from_wav(&out).unwrap();
+        assert!((clip.sample(0, 0) - 0.5).abs() < 1e-5);
+        assert!((clip.sample(1, 0) + 0.5).abs() < 1e-5);
+    }
+
+    #[test]
     fn decodes_float32() {
         let mut out = Vec::new();
         let samples = [0.25f32, -0.5f32];
