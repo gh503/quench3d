@@ -203,7 +203,7 @@ node tools/check_web.mjs
 | P0-3 滑块位置伺服 | **PASS（单元 + CLI）** | 单元：目标 0.5 m，600 步后误差 <1 cm；CLI：`target_m=0.2` 到 0.19999996 m，报告只有 `target_m/error_m`，没有把米转成度 |
 | P0-3 **真实摩擦夹持** | **PASS** | `modkit_arm_friction_grasp.scene.json`：40 mm 方块与任何刚体间**没有场景关节**，只靠两个滑块手指的接触摩擦；0 s 先抬到肩 −10°/肘 10°，0.8 s 下压回 0°/0°（above→descend），1.5 s 滑块手指闭合到 ±0.0255 m，4 s 起以 5°/s 抬到肩 64°/肘 −64°，18 s 末仍夹住；方块从 y=0.100 升到 y=0.203（**+0.103 m**），相对夹爪滑移 **<1 mm**，手指不撞限位、关节不断裂。测试断言 scene joints 中没有 `cube` |
 | P0-3 旧“理想抓取” fixture | PASS（保留） | 方块从 t=0 用固定关节挂住，只用于验证脚本时序；真实抓取以上面这一行为准 |
-| P1-1 `objects[].visual` | **PASS（功能与整机渲染）/ PARTIAL（精确装配）** | `visual` 支持 STL/GLB/GLTF/OBJ，挂成主物体子节点；加/不加 visual 的模拟 `states` 逐位相同；整机 STL 渲染 33,318 三角形 / 11 object。局部对位是手工近似，不是官方 CAD 装配，见 §8 |
+| P1-1 `objects[].visual` | **PASS（功能与整机渲染）** | `visual` 支持 STL/GLB/GLTF/OBJ，挂成主物体子节点；加/不加 visual 的模拟 `states` 逐位相同；整机 STL 渲染 33,318 三角形 / 11 object；立柱已修正为 90 mm 竖直。上游没有官方装配矩阵，对位按官方尺寸（base 90 / l1 120 / l2 110 / link_bar 100）推导，见 §8 |
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |
 | P0-3 真实抓取根因 | 已修 | 旧 `modkit_arm_grasp` 沿用**未修正的 link 锚点/中心**，在负载下肘关节会自己塌；把手指/方块放到按 `modkit_arm` 修正几何算出的腕点并 +20 mm 避开 `link2` 后，同一套 2.5 N·m 限幅的 PD 就能稳定夹持。这不是给抓取“加力”，而是修场景几何 |
 
@@ -302,11 +302,9 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 
 ## 13. 还没做
 
-* P1-1 的官方 CAD 装配变换（当前 STL 对位是手工近似，不是 robot-modkit 官方装配矩阵）。
-* 浏览器 wgpu 渲染下的 60 fps 仍需要真实浏览器测得。
-* 真实夹持目前只验证 20 g、40 mm 方块、friction 1.5；更重的物体需要重新标定预紧/增益。
-* 用 robot-modkit 的真实 STL 装完整 M1 并逐关节截图对位（P1-1 的功能在，资产/验收没做）。
-* 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
+* robot-modkit 上游没有提交 `cad/out/` 或官方装配矩阵；当前 STL 对位按官方尺寸推导，逐孔/逐螺柱的 CAD 装配仍需上游导出已装配资产后才能替换。
 * 浏览器 wgpu 渲染下的 60 fps 实测（wasm/Node 的 1000 步 1.106 s 已测；1000 刚体的 wasm 规模没测）。
+* 真实夹持目前只验证 20 g、40 mm 方块、friction 1.5；更重的物体需要重新标定预紧/增益。
+* 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
 * MCP `simulate_steps` 已由 `quench3d_simulate.steps` 覆盖；`joint_target` 与 `query_contact` 已加。
 * 关节径向间隙 0.2 mm 的建模（当前铰链是理想约束，没有间隙）。
