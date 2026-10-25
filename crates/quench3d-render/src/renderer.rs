@@ -963,6 +963,30 @@ impl Tonemap {
     }
 }
 
+/// 一条自定义后处理 pass。
+///
+/// 它是**固定接口的全屏 pass**：输入是 tonemap 之后的 LDR 画面，输出写到最终目标
+/// （开了 FXAA 时先写中间目标，再由 FXAA 做抗锯齿）。插入顺序固定在
+/// `tonemap → 自定义 pass → FXAA`，所以它拿到的是显示空间颜色，适合做调色、
+/// 暗角、扫描线一类后期效果。
+///
+/// `fragment` 是 WGSL 片段函数体，可以直接用这些名字：
+///
+/// * `input_tex` / `input_sampler`：输入颜色（线性显示值），`uv` 是 0..1 屏幕坐标；
+/// * `params`：`vec4<f32>`，由 [`CustomPostPass::params`] 写入；
+/// * `coord`：像素坐标。
+///
+/// 片段体必须 `return` 一个 `vec4<f32>`。
+#[derive(Clone, Debug)]
+pub struct CustomPostPass {
+    /// 调试标签（也用于 GPU 管线名）。
+    pub label: String,
+    /// WGSL 片段函数体（见类型文档里的可用名字）。
+    pub fragment: String,
+    /// 传给片段的 `params`。
+    pub params: [f32; 4],
+}
+
 /// 渲染器创建选项。
 #[derive(Clone, Copy, Debug)]
 pub struct RendererOptions {
@@ -1102,6 +1126,12 @@ pub struct Renderer {
     post_pipeline: wgpu::RenderPipeline,
     /// 后处理写 **LDR 中间目标**时用的同一条管线（颜色目标格式不同，管线不能复用）。
     post_ldr_pipeline: wgpu::RenderPipeline,
+    /// 自定义后处理的管线：输出到最终目标（未开 FXAA）或 HDR 中间目标（开 FXAA）。
+    custom_post_pipeline: Option<wgpu::RenderPipeline>,
+    custom_post_hdr_pipeline: Option<wgpu::RenderPipeline>,
+    custom_post_layout: Option<wgpu::BindGroupLayout>,
+    custom_post_uniform: Option<wgpu::Buffer>,
+    custom_post: Option<CustomPostPass>,
     /// Bloom：亮度提取 + 横向/纵向模糊。
     bloom_bright_pipeline: wgpu::RenderPipeline,
     bloom_blur_h_pipeline: wgpu::RenderPipeline,
@@ -1127,6 +1157,10 @@ pub struct Renderer {
     bloom_blur_h_bind_group: Option<wgpu::BindGroup>,
     bloom_blur_v_bind_group: Option<wgpu::BindGroup>,
     fxaa_bind_group: Option<wgpu::BindGroup>,
+    /// 自定义 pass 启用时，FXAA 从它的输出读，而不是 LDR 中间目标。
+    fxaa_custom_bind_group: Option<wgpu::BindGroup>,
+    custom_post_bind_group: Option<wgpu::BindGroup>,
+    custom_post_view: Option<wgpu::TextureView>,
     depth_resolve_bind_group: Option<wgpu::BindGroup>,
 
     // 帧资源
@@ -1384,6 +1418,29 @@ fn build_fullscreen_pipeline(
             sample_count: 1,
             primitive: wgpu::PrimitiveState::default(),
         },
+    )
+}
+
+/// 把用户片段体包成固定的全屏 pass：绑定、顶点着色器、uv 计算都由引擎提供。
+fn custom_post_wgsl(fragment: &str) -> String {
+    format!(
+        r#"
+@group(0) @binding(0) var input_tex: texture_2d<f32>;
+@group(0) @binding(1) var input_sampler: sampler;
+@group(0) @binding(2) var<uniform> params: vec4<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {{
+    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    return vec4<f32>(p[i], 0.0, 1.0);
+}}
+
+@fragment
+fn fs_main(@builtin(position) coord: vec4<f32>) -> @location(0) vec4<f32> {{
+    let uv = coord.xy / vec2<f32>(textureDimensions(input_tex));
+    {fragment}
+}}
+"#
     )
 }
 
@@ -2584,6 +2641,11 @@ impl Renderer {
             line_capacity: 1024,
             post_pipeline,
             post_ldr_pipeline,
+            custom_post_pipeline: None,
+            custom_post_hdr_pipeline: None,
+            custom_post_layout: None,
+            custom_post_uniform: None,
+            custom_post: None,
             bloom_bright_pipeline,
             bloom_blur_h_pipeline,
             bloom_blur_v_pipeline,
@@ -2600,6 +2662,9 @@ impl Renderer {
             bloom_blur_h_bind_group: None,
             bloom_blur_v_bind_group: None,
             fxaa_bind_group: None,
+            fxaa_custom_bind_group: None,
+            custom_post_bind_group: None,
+            custom_post_view: None,
             depth_resolve_bind_group: None,
             depth_view: None,
             msaa_view: None,
@@ -3324,7 +3389,13 @@ impl Renderer {
         let ssao_on = self.ssao_active();
         let ssao_depth_ready = ssao_on == self.resolved_depth_view.is_some();
         let taa_ready = self.taa_pipeline.is_none() || self.taa_current.is_some();
-        if self.target_size == size && self.depth_view.is_some() && ssao_depth_ready && taa_ready {
+        let custom_ready = self.custom_post.is_none() || self.custom_post_view.is_some();
+        if self.target_size == size
+            && self.depth_view.is_some()
+            && ssao_depth_ready
+            && taa_ready
+            && custom_ready
+        {
             return;
         }
         let device = &ctx.device;
@@ -3719,6 +3790,77 @@ impl Renderer {
                 },
             ],
         }));
+        // 自定义后处理的中间输出（只有开 FXAA 时才需要；仍按需创建绑定组）。
+        if self.custom_post.is_some() {
+            let custom = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("quench3d-custom-post"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let custom_view = custom.create_view(&wgpu::TextureViewDescriptor::default());
+            self.custom_post_bind_group = Some(
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("quench3d-custom-post-bind-group"),
+                    layout: self
+                        .custom_post_layout
+                        .as_ref()
+                        .expect("自定义后处理布局缺失"),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&ldr_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self
+                                .custom_post_uniform
+                                .as_ref()
+                                .expect("自定义后处理 uniform 缺失")
+                                .as_entire_binding(),
+                        },
+                    ],
+                }),
+            );
+            self.fxaa_custom_bind_group =
+                Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("quench3d-fxaa-custom-bind-group"),
+                    layout: &self.fxaa_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&custom_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.post_uniform.as_entire_binding(),
+                        },
+                    ],
+                }));
+            self.custom_post_view = Some(custom_view);
+        } else {
+            self.custom_post_bind_group = None;
+            self.custom_post_view = None;
+            self.fxaa_custom_bind_group = None;
+        }
+
         self.target_size = (w, h);
     }
 
@@ -3924,6 +4066,91 @@ impl Renderer {
     }
 
     /// 渲染到指定视图。
+    /// 安装 / 移除自定义后处理 pass。
+    ///
+    /// 传 `None` 移除：下一帧的像素与从未安装过时**逐位相同**（自定义那一趟根本不编码）。
+    /// 传 `Some` 会立刻编译 WGSL 并建两条管线（最终目标格式 / HDR 中间目标）；
+    /// 片段体语法错误会在下一次 GPU 校验时暴露，不会静默回退。
+    ///
+    /// 只支持一条 pass，插在 tonemap 之后、FXAA 之前。见 [`CustomPostPass`]。
+    pub fn set_custom_post(&mut self, ctx: &GpuContext, pass: Option<CustomPostPass>) {
+        let Some(pass) = pass else {
+            self.custom_post = None;
+            self.custom_post_pipeline = None;
+            self.custom_post_hdr_pipeline = None;
+            self.custom_post_layout = None;
+            self.custom_post_uniform = None;
+            self.custom_post_bind_group = None;
+            self.custom_post_view = None;
+            self.fxaa_custom_bind_group = None;
+            return;
+        };
+        let device = &ctx.device;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("quench3d-custom-post-layout"),
+            entries: &[
+                texture_binding(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quench3d-custom-post-shader"),
+            source: wgpu::ShaderSource::Wgsl(custom_post_wgsl(&pass.fragment).into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("quench3d-custom-post-pipeline-layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let label = format!("quench3d-custom-post-{}", pass.label);
+        let pipeline = build_fullscreen_pipeline(
+            device,
+            &label,
+            &pipeline_layout,
+            &module,
+            "fs_main",
+            ctx.format,
+        );
+        let hdr_pipeline = build_fullscreen_pipeline(
+            device,
+            &format!("{label}-hdr"),
+            &pipeline_layout,
+            &module,
+            "fs_main",
+            HDR_FORMAT,
+        );
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quench3d-custom-post-uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.custom_post = Some(pass);
+        self.custom_post_layout = Some(layout);
+        self.custom_post_pipeline = Some(pipeline);
+        self.custom_post_hdr_pipeline = Some(hdr_pipeline);
+        self.custom_post_uniform = Some(uniform);
+        // 旧尺寸的绑定组/中间视图绑定的是旧纹理，必须让 `ensure_targets` 重建。
+        self.custom_post_bind_group = None;
+        self.custom_post_view = None;
+        self.fxaa_custom_bind_group = None;
+    }
+
     pub fn render(
         &mut self,
         ctx: &GpuContext,
@@ -4783,7 +5010,8 @@ impl Renderer {
         // ---------- 后处理 pass：tonemap（+ bloom 合成）→ 最终目标 ----------
         // 开了 FXAA 时先写 LDR 中间目标，再由下面那一趟做抗锯齿；否则直接写目标
         // （**关掉 FXAA 的像素与加这个功能之前逐位相同**：那一趟根本不跑）。
-        let post_target = if fxaa_on {
+        let custom_on = self.custom_post.is_some();
+        let post_target = if fxaa_on || custom_on {
             self.ldr_view.clone().expect("LDR 中间目标缺失")
         } else {
             target.clone()
@@ -4805,7 +5033,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(if fxaa_on {
+            pass.set_pipeline(if fxaa_on || custom_on {
                 &self.post_ldr_pipeline
             } else {
                 &self.post_pipeline
@@ -4816,6 +5044,58 @@ impl Renderer {
                 self.post_bind_group.as_ref()
             };
             pass.set_bind_group(0, post_bind.expect("后处理绑定组缺失"), &[]);
+            pass.draw(0..3, 0..1);
+            stats.post_passes += 1;
+        }
+
+        // ---------- 自定义后处理：tonemap 之后 → 最终目标（或 FXAA 的输入） ----------
+        if let Some(custom) = &self.custom_post {
+            let pipeline = if fxaa_on {
+                self.custom_post_hdr_pipeline
+                    .as_ref()
+                    .expect("自定义后处理 HDR 管线缺失")
+            } else {
+                self.custom_post_pipeline
+                    .as_ref()
+                    .expect("自定义后处理管线缺失")
+            };
+            let uniform = self
+                .custom_post_uniform
+                .as_ref()
+                .expect("自定义后处理 uniform 缺失");
+            ctx.queue
+                .write_buffer(uniform, 0, bytemuck::bytes_of(&custom.params));
+            let output = if fxaa_on {
+                self.custom_post_view
+                    .as_ref()
+                    .expect("自定义后处理输出视图缺失")
+            } else {
+                target
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("quench3d-custom-post-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: output,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(
+                0,
+                self.custom_post_bind_group
+                    .as_ref()
+                    .expect("自定义后处理绑定组缺失"),
+                &[],
+            );
             pass.draw(0..3, 0..1);
             stats.post_passes += 1;
         }
@@ -4866,11 +5146,14 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.fxaa_pipeline);
-            pass.set_bind_group(
-                0,
-                self.fxaa_bind_group.as_ref().expect("FXAA 绑定组缺失"),
-                &[],
-            );
+            let fxaa_bind = if custom_on {
+                self.fxaa_custom_bind_group
+                    .as_ref()
+                    .expect("FXAA 自定义绑定组缺失")
+            } else {
+                self.fxaa_bind_group.as_ref().expect("FXAA 绑定组缺失")
+            };
+            pass.set_bind_group(0, fxaa_bind, &[]);
             pass.draw(0..3, 0..1);
             stats.post_passes += 1;
         }

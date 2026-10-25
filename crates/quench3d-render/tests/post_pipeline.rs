@@ -2028,3 +2028,126 @@ fn taa_uses_temporal_history_and_off_stays_stable() {
         "关闭 TAA 后同一相机重复 capture 必须逐位稳定"
     );
 }
+
+/// 自定义后处理真的插进了 tonemap 之后、FXAA 之前：像素等于“tonemap 结果再乘 0.5”，
+/// 移除后与安装前逐位相同（不是“接口存在”）。
+#[test]
+fn custom_post_pass_changes_pixels_and_removal_restores_baseline() {
+    let Some((mut ctx, mut renderer)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.5, 0.6, 0.7, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 80.0),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let lighting = Lighting {
+        exposure: 1.0,
+        ..Default::default()
+    };
+    let baseline = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("离屏渲染");
+
+    renderer.set_custom_post(
+        &ctx,
+        Some(CustomPostPass {
+            label: "half".into(),
+            fragment: "return textureSample(input_tex, input_sampler, uv) * vec4<f32>(0.5, 0.5, 0.5, 1.0);"
+                .into(),
+            params: [0.0; 4],
+        }),
+    );
+    let custom = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("自定义后处理离屏渲染");
+
+    let tonemapped = aces(lin([0.5, 0.6, 0.7]));
+    let expected = srgb8(tonemapped.map(|v| v * 0.5));
+    let got = pixel(&custom, W / 2, H / 2);
+    assert!(
+        near(got, expected, 2),
+        "自定义 pass 应在 tonemap 之后乘 0.5：手算 {expected:?}，实际 {got:?}"
+    );
+    assert_ne!(
+        pixel(&baseline, W / 2, H / 2),
+        got,
+        "安装自定义 pass 后画面必须真的变化"
+    );
+
+    renderer.set_custom_post(&ctx, None);
+    let restored = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("移除后离屏渲染");
+    for y in 0..H {
+        for x in 0..W {
+            assert_eq!(
+                pixel(&restored, x, y),
+                pixel(&baseline, x, y),
+                "移除自定义 pass 后 ({x},{y}) 必须与安装前逐位相同"
+            );
+        }
+    }
+}
+
+/// 开 FXAA 时自定义 pass 写 HDR 中间目标、FXAA 再从它读：既要出图，也不能把
+/// 自定义效果丢掉或读错纹理。
+#[test]
+fn custom_post_pass_composes_with_fxaa() {
+    let Some((mut ctx, mut renderer)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    renderer.options.fxaa.enabled = true;
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.5, 0.6, 0.7, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 80.0),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 60.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    let lighting = Lighting {
+        exposure: 1.0,
+        ..Default::default()
+    };
+    let baseline = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("FXAA 基线");
+
+    renderer.set_custom_post(
+        &ctx,
+        Some(CustomPostPass {
+            label: "half-fxaa".into(),
+            fragment: "return textureSample(input_tex, input_sampler, uv) * vec4<f32>(0.5, 0.5, 0.5, 1.0);"
+                .into(),
+            params: [0.0; 4],
+        }),
+    );
+    let custom = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("FXAA + 自定义后处理");
+    let expected = srgb8(aces(lin([0.5, 0.6, 0.7])).map(|v| v * 0.5));
+    let got = pixel(&custom, W / 2, H / 2);
+    assert!(
+        near(got, expected, 2),
+        "FXAA 路径也必须保留自定义调色：手算 {expected:?}，实际 {got:?}"
+    );
+    assert_ne!(pixel(&baseline, W / 2, H / 2), got);
+
+    renderer.set_custom_post(&ctx, None);
+    let restored = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("移除后 FXAA 基线");
+    assert_eq!(
+        pixel(&restored, W / 2, H / 2),
+        pixel(&baseline, W / 2, H / 2),
+        "移除自定义 pass 后 FXAA 路径必须回到基线"
+    );
+}

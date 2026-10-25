@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **自定义后处理扩展点（引擎 M2 第一片，未完成整项）**：`CustomPostPass` /
+  `Renderer::set_custom_post`，固定插在 tonemap 之后、FXAA 之前；引擎生成全屏三角形、
+  绑定与 uv，宿主只写 WGSL 片段体。无 FXAA 与开 FXAA 两条路径都有像素 e2e（乘 0.5 与
+  手算一致，移除后逐位回到基线）。多 pass 依赖图仍未做。
 - **运行期稳定错误码（引擎 M1 第 8 片）**：CLI 与 MCP 的 `error` 新增 `code` 字段，
   由 `report::runtime_code(kind)` 统一映射（scene_runtime / environment_unavailable /
   output_exists / golden_mismatch / unknown_camera / io_error / network_error / invalid），
