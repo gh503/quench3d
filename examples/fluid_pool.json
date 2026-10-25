@@ -54,7 +54,9 @@
       "iterations": 4,
       "max_particles": 5000,
       "surface_mesh": true,
-      "surface_resolution": 36
+      "surface_resolution": 36,
+      "surface_tension": 0.4,
+      "vorticity": 0.2
     }
   ],
   "water": {

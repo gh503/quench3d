@@ -815,12 +815,17 @@ pub fn json_schema() -> Value {
             "drag",
             "iterations",
             "max_particles",
+            "surface_tension",
+            "vorticity",
             "surface_mesh",
             "surface_resolution",
         ]);
         d["description"] = json!(
             "一个 CPU PBF 粒子流体：长方体发射器 + 粒子参数；粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；可选 Surface Nets 连续自由表面"
         );
+        for name in ["surface_tension", "vorticity"] {
+            d["properties"][name] = json!({ "type": "number", "minimum": 0, "maximum": 5 });
+        }
         d["properties"]["surface_mesh"] = json!({ "type": "boolean" });
         d["properties"]["surface_resolution"] =
             json!({ "type": "integer", "minimum": 8, "maximum": 96 });

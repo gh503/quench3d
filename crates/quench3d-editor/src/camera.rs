@@ -258,6 +258,10 @@ pub struct CameraFeed {
     background_rgba: Vec<u8>,
     /// UI 请求"从当前点云生成网格"，下一帧由 3D 循环消费。
     recon_requested: bool,
+    /// 是否跟随最新帧自动重建（每帧一次，开销明显）。
+    recon_auto: bool,
+    /// 已重建的摄像头帧号。
+    recon_frame: u64,
     /// 生成的网格/物体句柄（会话内复用，避免每次点击都新增物体）。
     recon_mesh: Option<MeshId>,
     recon_object: Option<usize>,
@@ -297,6 +301,8 @@ impl CameraFeed {
             background_frame: u64::MAX,
             background_rgba: Vec::new(),
             recon_requested: false,
+            recon_auto: false,
+            recon_frame: u64::MAX,
             recon_mesh: None,
             recon_object: None,
             recon_voxel: 0.03,
@@ -353,9 +359,9 @@ impl CameraFeed {
         add_pose_lines(lines, &pose.world);
     }
 
-    /// UI 是否请求生成重建网格。
+    /// UI 是否请求生成重建网格（手动或实时跟随）。
     pub fn recon_requested(&self) -> bool {
-        self.recon_requested
+        self.recon_requested || self.recon_auto
     }
 
     /// 从当前深度点云生成/更新一个体素表面物体。
@@ -372,17 +378,21 @@ impl CameraFeed {
             self.recon_status = "这一帧没有点云（需要深度模型 + --points）".to_string();
             return;
         };
+        let object_ok = self
+            .recon_object
+            .and_then(|i| engine.scene.objects.get(i))
+            .zip(self.recon_mesh)
+            .is_some_and(|(o, id)| o.generated && o.mesh == id);
+        if object_ok && self.recon_frame == frame.json.frame {
+            self.recon_status = format!("已是最新（帧 {}）", frame.json.frame);
+            return;
+        }
         let mesh = crate::reconstruct::voxel_surface(points, self.recon_voxel);
         if mesh.indices.is_empty() {
             self.recon_status = "点云为空或体素太大，没有生成面".to_string();
             return;
         }
         let triangles = mesh.indices.len() / 3;
-        let object_ok = self
-            .recon_object
-            .and_then(|i| engine.scene.objects.get(i))
-            .zip(self.recon_mesh)
-            .is_some_and(|(o, id)| o.generated && o.mesh == id);
         if !object_ok {
             let placeholder = engine.assets.mesh(
                 &mut engine.renderer,
@@ -416,6 +426,7 @@ impl CameraFeed {
             return;
         };
         if engine.renderer.update_mesh_data(&engine.gpu, id, &mesh) {
+            self.recon_frame = frame.json.frame;
             self.recon_status = format!(
                 "已生成 {triangles} 个三角形（帧 {}，体素 {:.1} cm）",
                 frame.json.frame,
@@ -650,6 +661,8 @@ impl CameraFeed {
             {
                 self.recon_requested = true;
             }
+            ui.checkbox(&mut self.recon_auto, "实时跟随")
+                .on_hover_text("每个新摄像头帧都重建一次；体素小/点数多时明显吃 CPU");
         });
         if !self.recon_status.is_empty() {
             ui.label(egui::RichText::new(&self.recon_status).small().weak());

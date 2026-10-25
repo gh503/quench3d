@@ -1080,14 +1080,17 @@ NaN 刚体  : 0
   "浸没 %"。水面物体只是半透明平面，**没有波浪 / 折射 / 流动**。
 * `fluids` 是 **CPU PBF 粒子流体**（M2 求解器 + M3 双向耦合）：`{ "center": [x, y, z],
   "size": [x, y, z], "spacing": 0.1, "radius": 0.05, "rest_density": 1000,
-  "viscosity": 0.05, "drag": 6, "iterations": 4, "max_particles": 4000,
-  "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
+  "viscosity": 0.05, "surface_tension": 0, "vorticity": 0, "drag": 6,
+  "iterations": 4, "max_particles": 4000, "surface_mesh": false,
+  "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
   粒子质量按晶格静止密度校准（不是随便取 1），所以静止时密度比≈1；`simulate` 报告
   `fluids[]` 的 `particles` / `avg_density_ratio` / `max_speed` / `y` 范围。
-  **边界**：没有表面张力/涡量/粒子间碰撞，敞开的平地上水会摊成薄层（这是"液体在无限
-  平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
+  `surface_tension`（0~5）把表面粒子往邻居重心拉，减少"摊成薄膜"；`vorticity`
+  （0~5）加限幅涡量约束，保留小尺度涡。两者缺省 0 = 完全不执行，旧场景逐位不变。
+  **边界**：表面张力不是曲率/真实 mN/m 模型，涡量是视觉/稳定性约束；没有粒子间
+  碰撞，敞开的平地上水仍会摊成薄层（这是"液体在无限平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：
   `quench3d render examples/particles_showcase.json --out particles.png`。
   `TriMesh` 静态网格对粒子做**逐三角形最近点**碰撞（薄壳不会漏）；凸包/圆锥仍用

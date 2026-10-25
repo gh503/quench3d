@@ -2143,6 +2143,8 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             radius: f.radius(),
             rest_density: f.rest_density,
             viscosity: f.viscosity,
+            surface_tension: f.surface_tension,
+            vorticity: f.vorticity,
             drag: f.drag,
             iterations: f.iterations,
             max_particles: f.max_particles,

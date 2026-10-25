@@ -1138,6 +1138,12 @@ pub struct FluidDoc {
     /// XSPH 粘性系数 0~1，缺省 0.05。
     #[serde(default = "default_fluid_viscosity")]
     pub viscosity: f32,
+    /// 表面张力/内聚力系数 0~5，缺省 0 = 关闭。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub surface_tension: f32,
+    /// 涡量约束强度 0~5，缺省 0 = 关闭。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub vorticity: f32,
     /// 浸没刚体的线性阻尼（1/s），缺省 6；0 = 无阻尼。
     #[serde(default = "default_fluid_drag")]
     pub drag: f32,
@@ -1272,6 +1278,10 @@ impl FluidDoc {
     pub fn estimated_particles(&self) -> usize {
         self.raw_particles().min(self.max_particles)
     }
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
 }
 
 fn default_fluid_spacing() -> f32 {
@@ -4293,6 +4303,18 @@ impl SceneDoc {
                     format!("{p}.viscosity"),
                     "粘性系数必须在 0~1 之间",
                 ));
+            }
+            for (name, value) in [
+                ("surface_tension", f.surface_tension),
+                ("vorticity", f.vorticity),
+            ] {
+                if !(value.is_finite() && (0.0..=5.0).contains(&value)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.{name}"),
+                        "表面张力/涡量强度必须在 0~5 之间",
+                    ));
+                }
             }
             if !(f.drag.is_finite() && f.drag >= 0.0) {
                 cam_diags.push(Diagnostic::error_code(

@@ -2398,6 +2398,10 @@ impl PhysicsWorld {
         self.collisions_enabled = snapshot.collisions_enabled;
         self.waters = snapshot.waters;
         self.fluids = snapshot.fluids;
+        // 快照恢复后渲染端的表面网格可能比快照新/旧：强制下一帧重建。
+        for f in &mut self.fluids {
+            f.bump_revision();
+        }
         self.fixed_dt = snapshot.fixed_dt;
         self.accumulator = snapshot.accumulator;
         self.step_count = snapshot.step_count;

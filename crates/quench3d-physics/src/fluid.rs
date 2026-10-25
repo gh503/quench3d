@@ -38,6 +38,13 @@ pub struct FluidDesc {
     pub rest_density: f32,
     /// XSPH 粘性系数（0~1）。
     pub viscosity: f32,
+    /// 表面张力/内聚力系数（0~5，0 = 关闭）。
+    ///
+    /// 用邻居方向加权把表面粒子往内拉，近似"水不想摊成薄膜"；不是 Young-Laplace
+    /// 曲率模型，不能标定真实表面张力系数（mN/m）。
+    pub surface_tension: f32,
+    /// 涡量约束强度（0~5，0 = 关闭）。保留小尺度涡，减少 PBF 的过度耗散。
+    pub vorticity: f32,
     /// 浸没刚体的线性阻尼（1/s），只对浮力部分生效；0 = 无阻尼。
     pub drag: f32,
     /// 密度约束迭代次数（1~8）。
@@ -55,6 +62,8 @@ impl Default for FluidDesc {
             radius: 0.05,
             rest_density: 1000.0,
             viscosity: 0.05,
+            surface_tension: 0.0,
+            vorticity: 0.0,
             drag: 6.0,
             iterations: 4,
             max_particles: 4000,
@@ -81,6 +90,10 @@ impl FluidDesc {
             && self.rest_density > 0.0
             && self.viscosity.is_finite()
             && (0.0..=1.0).contains(&self.viscosity)
+            && self.surface_tension.is_finite()
+            && (0.0..=5.0).contains(&self.surface_tension)
+            && self.vorticity.is_finite()
+            && (0.0..=5.0).contains(&self.vorticity)
             && self.drag.is_finite()
             && self.drag >= 0.0
             && (1..=8).contains(&self.iterations)
@@ -150,6 +163,12 @@ pub struct Fluid {
     delta: Vec<Vec3>,
     /// 速度更新的临时缓冲（跨步复用，热路径零分配）。
     new_vel: Vec<Vec3>,
+    /// 涡量临时缓冲（只在场强 > 0 时用）。
+    omega: Vec<Vec3>,
+    /// 涡量梯度临时缓冲。
+    eta: Vec<Vec3>,
+    /// 位置/速度版本号：每步 +1；渲染端用它跳过未变化流体的表面重建。
+    revision: u64,
     /// 粒子质量：按**晶格静止密度**校准（`rho0 / ΣW`），不是随便取 1。
     mass: f32,
     stats_contacts: usize,
@@ -174,6 +193,9 @@ impl Fluid {
             contacts: Vec::new(),
             delta: Vec::new(),
             new_vel: Vec::new(),
+            omega: Vec::new(),
+            eta: Vec::new(),
+            revision: 0,
             mass: 1.0,
             stats_contacts: 0,
             stats: FluidStats::default(),
@@ -209,6 +231,16 @@ impl Fluid {
             resolution,
             iso,
         )
+    }
+
+    /// 当前版本号（每次 `step` 自增）。
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// 外部（快照恢复）让缓存失效。
+    pub(crate) fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// 当前统计。
@@ -428,6 +460,80 @@ impl Fluid {
             }
         }
 
+        // 7b. 表面张力（内聚力）：把粒子拉向邻居重心；只在显式开启时执行。
+        if self.desc.surface_tension > 0.0 && dt > 0.0 {
+            self.delta.clear();
+            self.delta.resize(n, Vec3::ZERO);
+            for (i, out) in self.delta.iter_mut().enumerate() {
+                let mut sum = Vec3::ZERO;
+                let mut count = 0.0f32;
+                for &j in &self.neighbors[i] {
+                    let j = j as usize;
+                    let d = self.predicted[j] - self.predicted[i];
+                    let r = d.length();
+                    if r <= EPS || r >= h {
+                        continue;
+                    }
+                    let w = 1.0 - r / h;
+                    sum += d / r * (w * w);
+                    count += 1.0;
+                }
+                if count > 0.0 {
+                    *out = sum / count;
+                }
+            }
+            let k = self.desc.surface_tension * 40.0 * dt;
+            for (i, d) in self.delta.iter().enumerate() {
+                self.new_vel[i] = (self.new_vel[i] + *d * k).clamp_length(MAX_SPEED);
+            }
+        }
+
+        // 7c. 涡量约束：f = ε h (N × ω)，N = ∇|ω|；只在显式开启时执行。
+        if self.desc.vorticity > 0.0 && dt > 0.0 {
+            let inv_pi_h6 = 45.0 / (std::f32::consts::PI * h * h * h * h * h * h);
+            self.omega.clear();
+            self.omega.resize(n, Vec3::ZERO);
+            for (i, out) in self.omega.iter_mut().enumerate() {
+                let mut curl = Vec3::ZERO;
+                for &j in &self.neighbors[i] {
+                    let j = j as usize;
+                    let d = self.predicted[i] - self.predicted[j];
+                    let r = d.length();
+                    if r <= EPS || r >= h {
+                        continue;
+                    }
+                    let x = h - r;
+                    let grad = d * (-inv_pi_h6 * x * x / r);
+                    curl += (self.new_vel[j] - self.new_vel[i]).cross(grad);
+                }
+                *out = curl;
+            }
+            self.eta.clear();
+            self.eta.resize(n, Vec3::ZERO);
+            for (i, out) in self.eta.iter_mut().enumerate() {
+                let mut eta = Vec3::ZERO;
+                for &j in &self.neighbors[i] {
+                    let j = j as usize;
+                    let d = self.predicted[i] - self.predicted[j];
+                    let r = d.length();
+                    if r <= EPS || r >= h {
+                        continue;
+                    }
+                    let x = h - r;
+                    let grad = d * (-inv_pi_h6 * x * x / r);
+                    eta += grad * (self.omega[j].length() - self.omega[i].length());
+                }
+                *out = eta.normalize_or_zero();
+            }
+            let scale = self.desc.vorticity * h;
+            for (i, e) in self.eta.iter().enumerate() {
+                // 约束力是**加速度**：先限幅再乘 dt。单帧相邻速度差很大时 `ω`
+                // 可以到 1e3/s，不限幅会一帧把粒子打到 MAX_SPEED（实测飞出 70 m）。
+                let accel = (e.cross(self.omega[i]) * scale).clamp_length(10.0);
+                self.new_vel[i] = (self.new_vel[i] + accel * dt).clamp_length(MAX_SPEED);
+            }
+        }
+
         // 8. 两-way：把粒子撞到**动态**刚体上的法向冲量反推给刚体。
         //    冲量按动量守恒：粒子减 `J`、刚体加 `J`；`J = m_p · vn · n`
         //    （vn < 0 表示还在靠近，n 从刚体指向粒子，所以刚体被推向 -n）。
@@ -462,6 +568,7 @@ impl Fluid {
         std::mem::swap(&mut self.positions, &mut self.predicted);
         std::mem::swap(&mut self.velocities, &mut self.new_vel);
         self.recompute_stats();
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// 用当前 `predicted` 位置重算密度与 lambda（每次 PBF 迭代前调用）。
@@ -717,6 +824,84 @@ mod tests {
         assert!(s.min_y > -0.06, "min_y = {}", s.min_y);
         assert!(s.max_speed < 5.0, "max_speed = {}", s.max_speed);
         assert!(s.avg_density_ratio.is_finite());
+    }
+
+    fn forced_world(surface_tension: f32, vorticity: f32) -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        world
+            .add_fluid(FluidDesc {
+                center: vec3(0.0, 1.2, 0.0),
+                half_extents: vec3(0.3, 0.3, 0.3),
+                spacing: 0.1,
+                radius: 0.05,
+                surface_tension,
+                vorticity,
+                ..FluidDesc::default()
+            })
+            .expect("参数合法");
+        world
+    }
+
+    #[test]
+    fn surface_tension_and_vorticity_are_finite_and_bounded() {
+        for (st, vort) in [(1.0, 0.0), (0.0, 1.0), (0.8, 0.8)] {
+            let mut world = forced_world(st, vort);
+            for _ in 0..180 {
+                world.step(1.0 / 60.0);
+            }
+            let s = world.fluids()[0].stats();
+            assert!(s.particles > 0);
+            assert!(s.avg_density_ratio.is_finite());
+            assert!(
+                s.max_speed.is_finite() && s.max_speed < 20.0,
+                "最大速度 {}",
+                s.max_speed
+            );
+            assert!(s.min_y > -0.1, "穿地：min_y = {}", s.min_y);
+            assert!(s.max_y.is_finite());
+        }
+    }
+
+    #[test]
+    fn surface_tension_changes_a_non_symmetric_drop() {
+        // 把最外层的一颗粒子推开，破坏对称性；开表面张力后它应被邻居拉回，
+        // 至少一步后的位置/速度必须不同（关闭时逐位保持旧行为）。
+        let mut a = Fluid::new(FluidDesc {
+            center: vec3(0.0, 1.2, 0.0),
+            half_extents: vec3(0.3, 0.3, 0.3),
+            spacing: 0.1,
+            radius: 0.05,
+            ..FluidDesc::default()
+        })
+        .expect("参数合法");
+        let mut b = Fluid::new(FluidDesc {
+            center: vec3(0.0, 1.2, 0.0),
+            half_extents: vec3(0.3, 0.3, 0.3),
+            spacing: 0.1,
+            radius: 0.05,
+            surface_tension: 1.0,
+            ..FluidDesc::default()
+        })
+        .expect("参数合法");
+        a.positions[0] += Vec3::X * 0.05;
+        b.positions[0] += Vec3::X * 0.05;
+        a.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        b.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        // 表面张力改的是速度；位置要在**下一步**的预测里才体现。
+        let changed_v = a
+            .velocities()
+            .iter()
+            .zip(b.velocities())
+            .any(|(p, q)| p != q);
+        assert!(changed_v, "表面张力必须实际改变至少一个速度");
+        a.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        b.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        let changed = a.particles().iter().zip(b.particles()).any(|(p, q)| p != q);
+        assert!(changed, "表面张力必须实际改变下一步的位置");
     }
 
     #[test]

@@ -334,6 +334,8 @@ pub struct FluidSurfaceVisual {
     pub resolution: u32,
     /// 等值面阈值。
     pub iso: f32,
+    /// 已经提取过的流体版本号（`u64::MAX` = 强制重建）。
+    pub revision: u64,
 }
 
 impl SceneObject {
@@ -1657,6 +1659,7 @@ impl Scene {
             mesh: true,
             resolution: resolution.clamp(8, 96),
             iso: iso.clamp(0.05, 1.5),
+            revision: u64::MAX,
         });
         self.objects[index].cast_shadows = false;
         index
@@ -1682,6 +1685,9 @@ impl Scene {
             let Some(fluid) = world.fluids().get(visual.fluid) else {
                 continue;
             };
+            if visual.revision == fluid.revision() {
+                continue;
+            }
             let surface = fluid.surface_mesh(visual.resolution, visual.iso);
             if surface.is_empty() {
                 continue;
@@ -1694,6 +1700,9 @@ impl Scene {
             let mesh = MeshData::from_parts(vertices, surface.indices);
             if renderer.update_mesh_data(gpu, obj.mesh, &mesh) {
                 obj.transform = Transform::IDENTITY;
+                if let Some(visual) = obj.fluid_surface.as_mut() {
+                    visual.revision = fluid.revision();
+                }
                 updated += 1;
             }
         }
