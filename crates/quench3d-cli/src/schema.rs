@@ -822,6 +822,11 @@ pub fn json_schema() -> Value {
             "vorticity",
             "velocity",
             "drain_y",
+            "emit_rate",
+            "emit_position",
+            "emit_radius",
+            "emit_velocity",
+            "emit_spread",
             "surface_mesh",
             "surface_resolution",
         ]);
@@ -836,6 +841,17 @@ pub fn json_schema() -> Value {
             "minItems": 3, "maxItems": 3
         });
         d["properties"]["drain_y"] = json!({ "type": "number" });
+        d["properties"]["emit_rate"] = json!({ "type": "number", "minimum": 0 });
+        d["properties"]["emit_position"] = json!({
+            "type": "array", "items": { "type": "number" },
+            "minItems": 3, "maxItems": 3
+        });
+        d["properties"]["emit_radius"] = json!({ "type": "number", "minimum": 0 });
+        d["properties"]["emit_velocity"] = json!({
+            "type": "array", "items": { "type": "number" },
+            "minItems": 3, "maxItems": 3
+        });
+        d["properties"]["emit_spread"] = json!({ "type": "number", "minimum": 0 });
         d["properties"]["surface_mesh"] = json!({ "type": "boolean" });
         d["properties"]["surface_resolution"] =
             json!({ "type": "integer", "minimum": 8, "maximum": 96 });

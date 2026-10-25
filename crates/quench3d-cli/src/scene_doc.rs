@@ -1154,6 +1154,21 @@ pub struct FluidDoc {
     /// 排水面高度（米）：粒子 y 低于它就被移除；不写 = 不排水。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_y: Option<f32>,
+    /// 连续发射速率（粒子/秒，缺省 0 = 不发射）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_rate: Option<f32>,
+    /// 发射器中心 `[x, y, z]`，缺省 `[0, 0, 0]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_position: Option<[f32; 3]>,
+    /// 发射器半径（米，缺省 0.1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_radius: Option<f32>,
+    /// 发射初速度 `[x, y, z]`（米/秒），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_velocity: Option<[f32; 3]>,
+    /// 发射速度扰动幅度（米/秒，缺省 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_spread: Option<f32>,
     /// 浸没刚体的线性阻尼（1/s），缺省 6；0 = 无阻尼。
     #[serde(default = "default_fluid_drag")]
     pub drag: f32,
@@ -4344,6 +4359,51 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.drain_y"),
                         "排水面高度必须是有限数",
+                    ));
+                }
+            }
+            if let Some(rate) = f.emit_rate {
+                if !(rate.is_finite() && rate >= 0.0) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.emit_rate"),
+                        "发射速率必须是 >= 0 的有限数",
+                    ));
+                }
+            }
+            if let Some(pos) = f.emit_position {
+                if !pos.iter().all(|c| c.is_finite()) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.emit_position"),
+                        "发射器中心必须是三个有限数",
+                    ));
+                }
+            }
+            if let Some(radius) = f.emit_radius {
+                if !(radius.is_finite() && radius >= 0.0) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.emit_radius"),
+                        "发射器半径必须是 >= 0 的有限数",
+                    ));
+                }
+            }
+            if let Some(v) = f.emit_velocity {
+                if !v.iter().all(|c| c.is_finite()) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.emit_velocity"),
+                        "发射初速度必须是三个有限数",
+                    ));
+                }
+            }
+            if let Some(spread) = f.emit_spread {
+                if !(spread.is_finite() && spread >= 0.0) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.emit_spread"),
+                        "发射扰动必须是 >= 0 的有限数",
                     ));
                 }
             }

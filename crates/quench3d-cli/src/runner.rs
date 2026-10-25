@@ -2147,6 +2147,11 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             vorticity: f.vorticity,
             initial_velocity: v3(f.velocity.unwrap_or([0.0, 0.0, 0.0])),
             drain_y: f.drain_y,
+            emit_rate: f.emit_rate.unwrap_or(0.0),
+            emit_position: v3(f.emit_position.unwrap_or([0.0, 0.0, 0.0])),
+            emit_radius: f.emit_radius.unwrap_or(0.1),
+            emit_velocity: v3(f.emit_velocity.unwrap_or([0.0, 0.0, 0.0])),
+            emit_spread: f.emit_spread.unwrap_or(0.0),
             drag: f.drag,
             iterations: f.iterations,
             max_particles: f.max_particles,
@@ -6118,13 +6123,21 @@ mod tests {
     fn fluid_velocity_and_drain_are_wired_from_scene_doc() {
         let doc = SceneDoc::from_json(
             r#"{ "fluids": [ { "size": [0.4, 0.4, 0.4], "spacing": 0.1,
-                 "velocity": [1.5, 0.0, 0.0], "drain_y": -2.0 } ] }"#,
+                 "velocity": [1.5, 0.0, 0.0], "drain_y": -2.0,
+                 "emit_rate": 80.0, "emit_position": [1.0, 2.0, 0.0],
+                 "emit_radius": 0.3, "emit_velocity": [0.0, 3.0, 0.0],
+                 "emit_spread": 0.2 } ] }"#,
         )
         .unwrap();
         let build = build_world(&doc).unwrap();
         let fluid = &build.world.fluids()[0];
         assert_eq!(fluid.desc().initial_velocity, vec3(1.5, 0.0, 0.0));
         assert_eq!(fluid.desc().drain_y, Some(-2.0));
+        assert_eq!(fluid.desc().emit_rate, 80.0);
+        assert_eq!(fluid.desc().emit_position, vec3(1.0, 2.0, 0.0));
+        assert_eq!(fluid.desc().emit_radius, 0.3);
+        assert_eq!(fluid.desc().emit_velocity, vec3(0.0, 3.0, 0.0));
+        assert_eq!(fluid.desc().emit_spread, 0.2);
     }
 
     /// Z-up 资产必须先转成 Y-up，再套用户旋转；顺序反了物体会"躺"在错误方向。

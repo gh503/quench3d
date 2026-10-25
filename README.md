@@ -1087,7 +1087,9 @@ NaN 刚体  : 0
 * `fluids` 是 **CPU PBF 粒子流体**（M2 求解器 + M3 双向耦合）：`{ "center": [x, y, z],
   "size": [x, y, z], "spacing": 0.1, "radius": 0.05, "rest_density": 1000,
   "viscosity": 0.05, "surface_tension": 0, "vorticity": 0,
-  "velocity": [0,0,0], "drain_y": -2.0, "drag": 6, "iterations": 4,
+  "velocity": [0,0,0], "drain_y": -2.0,
+  "emit_rate": 0, "emit_position": [0,1,0], "emit_radius": 0.1,
+  "emit_velocity": [0,1,0], "emit_spread": 0.0, "drag": 6, "iterations": 4,
   "max_particles": 4000, "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
@@ -1096,7 +1098,9 @@ NaN 刚体  : 0
   `surface_tension`（0~5）把表面粒子往邻居重心拉，减少"摊成薄膜"；`vorticity`
   （0~5）加限幅涡量约束，保留小尺度涡。两者缺省 0 = 完全不执行，旧场景逐位不变。
   `velocity` 给初始水柱一个喷射速度；`drain_y` 是开放排水面，粒子 y 低于它即移除
-  （不写 = 不排水），用来做无底水池/瀑布。
+  （不写 = 不排水），用来做无底水池/瀑布。`emit_rate`（粒子/秒）配
+  `emit_position`/`emit_radius`/`emit_velocity`/`emit_spread` 是连续发射器：
+  黄金角确定撒点、不用随机数，排水后也能继续补水；缺省 0 逐位不变。
   **边界**：表面张力不是曲率/真实 mN/m 模型，涡量是视觉/稳定性约束；没有粒子间
   碰撞，敞开的平地上水仍会摊成薄层（这是"液体在无限平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：

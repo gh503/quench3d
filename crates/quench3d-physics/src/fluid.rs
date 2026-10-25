@@ -53,6 +53,16 @@ pub struct FluidDesc {
     ///
     /// 用来做"无底水池"/开放边界，避免水一直掉到 -1e6 还在算。
     pub drain_y: Option<f32>,
+    /// 连续发射速率（粒子/秒，0 = 不发射）。
+    pub emit_rate: f32,
+    /// 发射器中心。
+    pub emit_position: Vec3,
+    /// 发射器半径（米，XZ 圆盘内均匀撒点）。
+    pub emit_radius: f32,
+    /// 发射初速度（米/秒）。
+    pub emit_velocity: Vec3,
+    /// 发射速度随机扰动幅度（米/秒）。
+    pub emit_spread: f32,
     /// 密度约束迭代次数（1~8）。
     pub iterations: u32,
     /// 粒子上限（超过就按晶格顺序截断）。
@@ -72,6 +82,11 @@ impl Default for FluidDesc {
             vorticity: 0.0,
             initial_velocity: Vec3::ZERO,
             drain_y: None,
+            emit_rate: 0.0,
+            emit_position: Vec3::ZERO,
+            emit_radius: 0.1,
+            emit_velocity: Vec3::ZERO,
+            emit_spread: 0.0,
             drag: 6.0,
             iterations: 4,
             max_particles: 4000,
@@ -104,6 +119,14 @@ impl FluidDesc {
             && (0.0..=5.0).contains(&self.vorticity)
             && self.initial_velocity.is_finite()
             && self.drain_y.is_none_or(|y| y.is_finite())
+            && self.emit_rate.is_finite()
+            && self.emit_rate >= 0.0
+            && self.emit_position.is_finite()
+            && self.emit_radius.is_finite()
+            && self.emit_radius >= 0.0
+            && self.emit_velocity.is_finite()
+            && self.emit_spread.is_finite()
+            && self.emit_spread >= 0.0
             && self.drag.is_finite()
             && self.drag >= 0.0
             && (1..=8).contains(&self.iterations)
@@ -184,6 +207,10 @@ pub struct Fluid {
     stats_contacts: usize,
     stats: FluidStats,
     spawned: bool,
+    /// 连续发射的不足一颗的累积量。
+    emit_accum: f32,
+    /// 已经发射的粒子序号（用于确定性撒点）。
+    emitted: u64,
 }
 
 impl Fluid {
@@ -210,6 +237,8 @@ impl Fluid {
             stats_contacts: 0,
             stats: FluidStats::default(),
             spawned: false,
+            emit_accum: 0.0,
+            emitted: 0,
         };
         fluid.spawn();
         Some(fluid)
@@ -316,11 +345,55 @@ impl Fluid {
         self.spawned = true;
     }
 
+    /// 连续发射：按 `emit_rate` 累积，最多补到 `max_particles` 上限。
+    ///
+    /// 撒点不用随机数：第 `k` 颗的半径/角度由黄金角与 k 的确定函数给出，
+    /// 同一初始状态 + 同样步数逐位可复现。
+    fn emit(&mut self, dt: f32) {
+        let d = &self.desc;
+        if d.emit_rate <= 0.0 || !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        if self.positions.len() >= d.max_particles {
+            self.emit_accum = 0.0;
+            return;
+        }
+        self.emit_accum += d.emit_rate * dt;
+        let available = d.max_particles - self.positions.len();
+        let n = (self.emit_accum.floor() as usize).min(available);
+        if n == 0 {
+            return;
+        }
+        self.emit_accum -= n as f32;
+        for _ in 0..n {
+            let k = self.emitted;
+            self.emitted = self.emitted.wrapping_add(1);
+            let phase = k as f32 * 2.399_963_1;
+            // 半径用 sqrt 让圆盘面积均匀，而不是全挤在中心。
+            let frac = ((k as f32 * 0.618_034).fract() + 1.0).fract();
+            let r = d.emit_radius * frac.sqrt();
+            let offset = Vec3::new(phase.cos() * r, 0.0, phase.sin() * r);
+            let wobble = d.emit_spread
+                * Vec3::new(
+                    (phase * 1.7).sin(),
+                    (phase * 2.3).cos() * 0.5,
+                    (phase * 3.1).cos(),
+                );
+            self.positions.push(d.emit_position + offset);
+            self.velocities.push(d.emit_velocity + wobble);
+        }
+        if self.positions.len() >= d.max_particles {
+            self.emit_accum = 0.0;
+        }
+    }
+
     /// 推进一步（PBF：预测 → 密度约束 → 边界投影 → 速度更新 → XSPH 粘性）。
     fn step(&mut self, bodies: &mut [BodySlot], gravity: Vec3, dt: f32) {
         if !self.spawned {
             self.spawn();
         }
+        // 发射要在 n == 0 的早退之前：水被排空后还能继续补水。
+        self.emit(dt);
         let n = self.positions.len();
         if n == 0 {
             self.stats = FluidStats::default();
@@ -966,6 +1039,60 @@ mod tests {
             drained.particles().len()
         );
         assert_eq!(drained.particles().len(), drained.velocities().len());
+    }
+
+    #[test]
+    fn emitter_adds_particles_deterministically_and_respects_cap() {
+        let mut f = Fluid::new(FluidDesc {
+            center: vec3(0.0, 1.0, 0.0),
+            half_extents: vec3(0.1, 0.1, 0.1),
+            spacing: 0.1,
+            radius: 0.05,
+            emit_rate: 120.0,
+            emit_position: vec3(2.0, 1.0, 0.0),
+            emit_radius: 0.2,
+            emit_velocity: vec3(0.0, 1.0, 0.0),
+            max_particles: 80,
+            ..FluidDesc::default()
+        })
+        .expect("参数合法");
+        let start = f.particles().len();
+        for _ in 0..120 {
+            f.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        }
+        assert!(
+            f.particles().len() > start,
+            "发射器必须补粒子：{} → {}",
+            start,
+            f.particles().len()
+        );
+        assert!(
+            f.particles().len() <= 80,
+            "不能超过 max_particles：{}",
+            f.particles().len()
+        );
+        // 新粒子应出现在发射器附近（X 正方向），不是初始方块的位置。
+        let emitted = f.particles().iter().filter(|p| p.x > 1.0).count();
+        assert!(emitted > 20, "发射位置不对：只有 {emitted} 颗在 x>1");
+        // 同样的参数再跑一次，粒子数必须逐位一致。
+        let mut g = Fluid::new(FluidDesc {
+            center: vec3(0.0, 1.0, 0.0),
+            half_extents: vec3(0.1, 0.1, 0.1),
+            spacing: 0.1,
+            radius: 0.05,
+            emit_rate: 120.0,
+            emit_position: vec3(2.0, 1.0, 0.0),
+            emit_radius: 0.2,
+            emit_velocity: vec3(0.0, 1.0, 0.0),
+            max_particles: 80,
+            ..FluidDesc::default()
+        })
+        .expect("参数合法");
+        for _ in 0..120 {
+            g.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        }
+        assert_eq!(f.particles().len(), g.particles().len());
+        assert_eq!(f.particles(), g.particles());
     }
 
     #[test]
