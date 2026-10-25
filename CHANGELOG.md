@@ -44,8 +44,9 @@
 - **自定义后处理链（引擎 M2 前两片，未完成整项）**：`CustomPostPass` /
   `Renderer::set_custom_post(s)`，固定插在 tonemap 之后、FXAA 之前；引擎生成全屏三角形、
   绑定与 uv，宿主只写 WGSL 片段体。多条 pass 按数组顺序执行，用两张 HDR 目标 ping-pong，
-  奇数/偶数链都能正确接 FXAA。GPU 像素 e2e 覆盖单条、两条顺序相反、删到只剩一条、
-  移除回基线。通用 pass 依赖图仍未做。
+  奇数/偶数链都能正确接 FXAA。自定义 pass 还能读单采样场景深度（MSAA 自动解析）。
+  GPU 像素 e2e 覆盖单条、两条顺序相反、删到只剩一条、移除回基线、深度红/蓝分区与
+  MSAA=4 解析路径。通用 pass 依赖图仍未做。
 - **运行期稳定错误码（引擎 M1 第 8 片）**：CLI 与 MCP 的 `error` 新增 `code` 字段，
   由 `report::runtime_code(kind)` 统一映射（scene_runtime / environment_unavailable /
   output_exists / golden_mismatch / unknown_camera / io_error / network_error / invalid），

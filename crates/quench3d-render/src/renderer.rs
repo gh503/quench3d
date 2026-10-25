@@ -974,7 +974,9 @@ impl Tonemap {
 ///
 /// * `input_tex` / `input_sampler`：输入颜色（线性显示值），`uv` 是 0..1 屏幕坐标；
 /// * `params`：`vec4<f32>`，由 [`CustomPostPass::params`] 写入；
-/// * `coord`：像素坐标。
+/// * `coord`：像素坐标；
+/// * `depth_tex`：单采样场景深度（`texture_depth_2d`，`textureLoad(.., vec2<i32>(coord.xy), 0)`）。
+///   MSAA > 1 时读的是解析后的那一张；后端不支持解析深度时绑 1×1 占位（值为 1.0）。
 ///
 /// 片段体必须 `return` 一个 `vec4<f32>`。
 #[derive(Clone, Debug)]
@@ -1436,6 +1438,7 @@ fn custom_post_wgsl(fragment: &str) -> String {
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
 @group(0) @binding(1) var input_sampler: sampler;
 @group(0) @binding(2) var<uniform> params: vec4<f32>;
+@group(0) @binding(3) var depth_tex: texture_depth_2d;
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {{
@@ -3395,6 +3398,8 @@ impl Renderer {
         // `post.wgsl` 用的也是删掉 SSAO 的那个变体 —— 三者必须**同时**成立，
         // 否则要么管线建不出来，要么着色器读了没绑的资源。
         let ssao_on = self.ssao_active();
+        let custom_on = !self.custom_posts.is_empty();
+        let depth_needed = ssao_on || custom_on;
         let ssao_depth_ready = ssao_on == self.resolved_depth_view.is_some();
         let taa_ready = self.taa_pipeline.is_none() || self.taa_current.is_some();
         let custom_ready = self.custom_posts.is_empty()
@@ -3403,6 +3408,7 @@ impl Renderer {
         if self.target_size == size
             && self.depth_view.is_some()
             && ssao_depth_ready
+            && (custom_on == self.resolved_depth_view.is_some())
             && taa_ready
             && custom_ready
         {
@@ -3546,7 +3552,7 @@ impl Renderer {
 
         // SSAO 的深度输入：多采样时先解析成单采样；单采样时就是主 pass 那一张。
         // 只在（真的能生效的）SSAO 开着时建（关掉就什么都不多占用、像素也与以前逐位相同）。
-        if ssao_on && self.sample_count > 1 {
+        if depth_needed && self.sample_count > 1 {
             let resolved = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("quench3d-depth-resolved"),
                 size: wgpu::Extent3d {
@@ -3575,7 +3581,7 @@ impl Renderer {
             self.resolved_depth_view = Some(resolved_view);
         } else {
             self.depth_resolve_bind_group = None;
-            self.resolved_depth_view = if ssao_on {
+            self.resolved_depth_view = if depth_needed {
                 Some(depth_view.clone())
             } else {
                 None
@@ -3826,48 +3832,68 @@ impl Renderer {
                 .custom_post_uniforms
                 .iter()
                 .map(|uniform| {
-                    Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("quench3d-custom-post-ldr-bind-group"),
-                        layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&ldr_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.post_sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: uniform.as_entire_binding(),
-                            },
-                        ],
-                    }))
+                    Some(
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("quench3d-custom-post-ldr-bind-group"),
+                            layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&ldr_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: uniform.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        self.resolved_depth_view
+                                            .as_ref()
+                                            .unwrap_or(&self.dummy_depth_view),
+                                    ),
+                                },
+                            ],
+                        }),
+                    )
                 })
                 .collect();
             self.custom_post_ping_bind_groups = self
                 .custom_post_uniforms
                 .iter()
                 .map(|uniform| {
-                    Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("quench3d-custom-post-ping-bind-group"),
-                        layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&ping_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.post_sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: uniform.as_entire_binding(),
-                            },
-                        ],
-                    }))
+                    Some(
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("quench3d-custom-post-ping-bind-group"),
+                            layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&ping_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: uniform.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        self.resolved_depth_view
+                                            .as_ref()
+                                            .unwrap_or(&self.dummy_depth_view),
+                                    ),
+                                },
+                            ],
+                        }),
+                    )
                 })
                 .collect();
             // 链长度奇数：最后一趟写 ping；偶数：写回 ldr。FXAA 读最后那一张。
@@ -4157,6 +4183,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -4329,6 +4365,7 @@ impl Renderer {
         let fxaa_on = fxaa.enabled;
         let ssao = self.options.ssao;
         let ssao_on = self.ssao_active();
+        let custom_on = !self.custom_posts.is_empty();
         // 半球采样点要投回屏幕（proj）、深度要反投影成视空间位置（inv_proj）
         let proj = camera.projection_matrix();
         let inv_proj = proj.inverse();
@@ -4927,7 +4964,7 @@ impl Renderer {
         // ---------- 深度解析（可选：开了 SSAO 且 MSAA > 1） ----------
         // 把多采样深度的第 0 号采样搬到单采样深度贴图，供后处理按像素读取。
         // 三个都要有：绑定组/目标视图（跟着 `ssao_on` 建）与管线（GL 上是 `None`）。
-        if ssao_on {
+        if ssao_on || custom_on {
             if let (Some(pipeline), Some(bind_group), Some(resolved)) = (
                 &self.depth_resolve_pipeline,
                 &self.depth_resolve_bind_group,
@@ -5067,7 +5104,6 @@ impl Renderer {
         // ---------- 后处理 pass：tonemap（+ bloom 合成）→ 最终目标 ----------
         // 开了 FXAA 时先写 LDR 中间目标，再由下面那一趟做抗锯齿；否则直接写目标
         // （**关掉 FXAA 的像素与加这个功能之前逐位相同**：那一趟根本不跑）。
-        let custom_on = !self.custom_posts.is_empty();
         let post_target = if fxaa_on || custom_on {
             self.ldr_view.clone().expect("LDR 中间目标缺失")
         } else {

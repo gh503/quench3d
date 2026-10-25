@@ -2240,3 +2240,108 @@ fn custom_post_chain_runs_in_order() {
         pixel(&with_fxaa, W / 2, H / 2)
     );
 }
+
+/// 自定义 pass 能读主 pass 的真实深度：立方体覆盖区深度 < 1，背景 = 1。
+/// 如果绑的是占位深度/没解析，中心会是背景色而不是红色。
+#[test]
+fn custom_post_pass_reads_scene_depth() {
+    let Some((mut ctx, mut renderer)) = setup(BloomOptions::default()) else {
+        return;
+    };
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.5, 0.5, 0.5, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 10.0),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 30.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    renderer.set_custom_post(
+        &ctx,
+        Some(CustomPostPass {
+            label: "depth-debug".into(),
+            fragment: "let d = textureLoad(depth_tex, vec2<i32>(coord.xy), 0); \
+                       if (d < 0.999) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); } \
+                       return vec4<f32>(0.0, 0.0, 1.0, 1.0);"
+                .into(),
+            params: [0.0; 4],
+        }),
+    );
+    let image = renderer
+        .capture(
+            &mut ctx,
+            W,
+            H,
+            &camera,
+            &Lighting {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        )
+        .expect("深度输入测试");
+    assert_eq!(
+        pixel(&image, W / 2, H / 2),
+        [255, 0, 0],
+        "中心被立方体覆盖，深度应 < 1"
+    );
+    assert_eq!(
+        pixel(&image, 0, 0),
+        [0, 0, 255],
+        "角落没有几何体，深度应为 1"
+    );
+}
+
+/// MSAA > 1：自定义 pass 绑的必须是解析后的单采样深度，不是多采样主深度。
+#[test]
+fn custom_post_depth_input_uses_resolved_msaa_depth() {
+    let Some(ctx) = context(4, "MSAA 深度的自定义后处理输入") else {
+        return;
+    };
+    let mut ctx = ctx;
+    let mut renderer = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: false,
+            shadows: false,
+            sky: false,
+            ..Default::default()
+        },
+    );
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(0.5, 0.5, 0.5, 1.0).unlit());
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(1.0));
+    renderer.draw(
+        cube,
+        mat,
+        InstanceDesc::from_position(vec3(0.0, 0.0, 0.0), 10.0),
+    );
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 30.0);
+    camera.look_at(vec3(0.0, 0.0, 0.0));
+    renderer.set_custom_post(
+        &ctx,
+        Some(CustomPostPass {
+            label: "depth-msaa".into(),
+            fragment: "let d = textureLoad(depth_tex, vec2<i32>(coord.xy), 0); \
+                       if (d < 0.999) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); } \
+                       return vec4<f32>(0.0, 0.0, 1.0, 1.0);"
+                .into(),
+            params: [0.0; 4],
+        }),
+    );
+    let image = renderer
+        .capture(
+            &mut ctx,
+            W,
+            H,
+            &camera,
+            &Lighting {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        )
+        .expect("MSAA 深度输入");
+    assert_eq!(pixel(&image, W / 2, H / 2), [255, 0, 0]);
+    assert_eq!(pixel(&image, 0, 0), [0, 0, 255]);
+}
