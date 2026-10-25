@@ -762,8 +762,9 @@ cargo run -p quench3d-editor
 没有摄像头时用 `--source synthetic` 验证协议；深度模型需要显式下载一次，详见
 [`tools/camera_mocap/README.md`](tools/camera_mocap/README.md)。
 
-**Web 端是预览 + 外部姿态注入**：顶部「摄像头」按钮 → `getUserMedia` → `<video>` →
-canvas → egui 纹理；页面脚本（例如 MediaPipe Tasks Vision）可调用
+**Web 端是预览 + 外部姿态注入 + 3D 背景**：顶部「摄像头」按钮 → `getUserMedia` →
+`<video>` → canvas → egui 纹理；窗口里勾选「作为 3D 背景」后，同一帧 RGBA 会上传为
+3D 视口背景（同帧不重传，关掉即清除）。页面脚本（例如 MediaPipe Tasks Vision）可调用
 
 ```js
 window.quench3dCameraPose(JSON.stringify({

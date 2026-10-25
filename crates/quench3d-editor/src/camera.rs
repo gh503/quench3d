@@ -40,6 +40,8 @@ use quench3d_math::Vec3;
 #[cfg(not(target_arch = "wasm32"))]
 use quench3d_math::Vec4;
 use quench3d_render::DebugLines;
+#[cfg(target_arch = "wasm32")]
+use quench3d_render::{GpuContext, Renderer};
 #[cfg(not(target_arch = "wasm32"))]
 use quench3d_render::{MaterialDesc, MeshData, MeshId};
 use serde::Deserialize;
@@ -1175,6 +1177,12 @@ struct WebCameraState {
     context: Option<CanvasRenderingContext2d>,
     error: Option<String>,
     starting: bool,
+    /// 最近一帧的 RGBA（给 3D 背景用，和 egui 预览纹理分开存）。
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    /// 帧序号：同一帧不重复上传 GPU 纹理。
+    frame: u64,
 }
 
 /// Web 端摄像头**预览**：`getUserMedia` → `<video>` → 2D canvas 采样 → egui 纹理。
@@ -1189,6 +1197,10 @@ pub struct CameraFeed {
     show: bool,
     /// `?camera=1` 调试入口：加载后自动开窗并申请权限（配合无头 Chrome 假摄像头）。
     autostart: bool,
+    /// 是否把摄像头画面作为 3D 视口背景。
+    background_3d: bool,
+    /// 已上传背景的帧序号。
+    background_frame: u64,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1210,6 +1222,8 @@ impl CameraFeed {
             texture: None,
             show: autostart,
             autostart,
+            background_3d: false,
+            background_frame: u64::MAX,
         }
     }
 
@@ -1327,6 +1341,14 @@ impl CameraFeed {
             return;
         };
         let pixels = image_data.data();
+        {
+            let mut state = self.state.borrow_mut();
+            state.rgba.clear();
+            state.rgba.extend_from_slice(&pixels[..]);
+            state.width = width;
+            state.height = height;
+            state.frame = state.frame.wrapping_add(1);
+        }
         let color =
             ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &pixels[..]);
         match self.texture.as_mut() {
@@ -1336,6 +1358,32 @@ impl CameraFeed {
             }
         }
         ctx.request_repaint_after(Duration::from_millis(33));
+    }
+
+    /// 把最新一帧上传为 3D 视口背景（Web 端）。
+    ///
+    /// 与桌面端同义：只有勾选「作为 3D 背景」且已经有摄像头帧时才上传；
+    /// 同一帧不重复写纹理，关掉开关会清空背景。
+    pub fn sync_background(&mut self, renderer: &mut Renderer, gpu: &GpuContext) -> bool {
+        if !self.background_3d {
+            if renderer.has_background() {
+                renderer.clear_background();
+            }
+            self.background_frame = u64::MAX;
+            return false;
+        }
+        let state = self.state.borrow();
+        if state.width == 0 || state.height == 0 || state.rgba.is_empty() {
+            return false;
+        }
+        if state.frame == self.background_frame && renderer.has_background() {
+            return true;
+        }
+        let ok = renderer.set_background_rgba(gpu, state.width, state.height, &state.rgba);
+        if ok {
+            self.background_frame = state.frame;
+        }
+        ok
     }
 
     /// 预览窗口；默认关闭，从顶部「摄像头」按钮打开。
@@ -1352,6 +1400,8 @@ impl CameraFeed {
             .open(&mut open)
             .default_width(420.0)
             .show(ctx, |ui| {
+                ui.checkbox(&mut self.background_3d, "作为 3D 背景")
+                    .on_hover_text("把摄像头画面放到 3D 视口后面；需要先开启摄像头");
                 let error = self.state.borrow().error.clone();
                 let starting = self.state.borrow().starting;
                 let has_video = self.state.borrow().video.is_some();

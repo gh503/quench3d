@@ -9,7 +9,7 @@
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
 - 测试：**944 通过 / 0 失败 / 5 ignored**
-- wasm：**13,727,184 字节**
+- wasm：**13,730,010 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
