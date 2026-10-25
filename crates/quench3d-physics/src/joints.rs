@@ -279,6 +279,9 @@ pub enum Joint {
         local_axis_b: Vec3,
         /// 轴向限位（下界, 上界）。
         limits: Option<(f32, f32)>,
+        /// 轴向马达：`target_angle` 在这里表示**位移（米）**，`kp` 是 N/m，
+        /// `kd` 是 N·s/m，`max_torque` 是最大推力（N）。仅 `kp > 0` 时启用。
+        motor: Option<HingeMotor>,
     },
 }
 
@@ -322,7 +325,10 @@ impl Joint {
     /// 马达存在就算活动——包括 `target_velocity = 0`：那表示"用马达把轴按住"，
     /// 松手（把马达删掉）之后才该恢复正常睡眠。
     pub fn has_active_motor(&self) -> bool {
-        matches!(self, Joint::Hinge { motor: Some(_), .. })
+        matches!(
+            self,
+            Joint::Hinge { motor: Some(_), .. } | Joint::Slider { motor: Some(_), .. }
+        )
     }
 
     /// B 端本地锚点。
@@ -786,6 +792,7 @@ impl JointSolver {
                     local_axis_a,
                     local_axis_b,
                     limits,
+                    motor,
                     ..
                 } => {
                     let axis_a = va.rot.mul_vec3(*local_axis_a).normalize_or_zero();
@@ -815,6 +822,10 @@ impl JointSolver {
                     st.u = u;
                     st.v = v;
                     st.limits = *limits;
+                    st.motor = *motor;
+                    if motor.is_some_and(|m| m.is_pd()) {
+                        st.motor_impulse = 0.0;
+                    }
                     let wa = va.pos + ra;
                     let wb = vb.pos + rb;
                     st.coord = (wb - wa).dot(axis);
@@ -841,18 +852,31 @@ impl JointSolver {
             }
             let va = views[st.a];
             let vb = views[st.b];
-            let w_axis = (vb.ang - va.ang).dot(st.axis);
-            let error = wrap_pi(m.target_angle.unwrap_or(0.0) - st.coord);
             let cap_t = if m.max_torque > 0.0 {
                 m.max_torque
             } else {
                 f32::MAX
             };
-            let torque = (m.kp * error - m.kd * w_axis).clamp(-cap_t, cap_t);
-            let impulse = torque * dt;
-            if impulse.is_finite() {
-                st.motor_impulse = impulse;
-                angular_impulse(views, st.a, st.b, st.axis * impulse);
+            let target = m.target_angle.unwrap_or(0.0);
+            if matches!(st.kind, JointKind::Slider { .. }) {
+                // 滑块：沿轴推/拉，误差就是位移差（米），速度取锚点的轴向相对速度。
+                let vel =
+                    ((vb.lin + vb.ang.cross(st.rb)) - (va.lin + va.ang.cross(st.ra))).dot(st.axis);
+                let force = (m.kp * (target - st.coord) - m.kd * vel).clamp(-cap_t, cap_t);
+                let impulse = force * dt;
+                if impulse.is_finite() {
+                    st.motor_impulse = impulse;
+                    apply_impulse(views, st.a, st.b, st.ra, st.rb, st.axis * impulse);
+                }
+            } else {
+                let w_axis = (vb.ang - va.ang).dot(st.axis);
+                let error = wrap_pi(target - st.coord);
+                let torque = (m.kp * error - m.kd * w_axis).clamp(-cap_t, cap_t);
+                let impulse = torque * dt;
+                if impulse.is_finite() {
+                    st.motor_impulse = impulse;
+                    angular_impulse(views, st.a, st.b, st.axis * impulse);
+                }
             }
         }
     }
@@ -897,7 +921,12 @@ impl JointSolver {
                 }
             }
             if st.motor_impulse != 0.0 && !st.motor.is_some_and(|m| m.is_pd()) {
-                angular_impulse(views, st.a, st.b, st.axis * st.motor_impulse);
+                match st.kind {
+                    JointKind::Slider { .. } => {
+                        apply_impulse(views, st.a, st.b, st.ra, st.rb, st.axis * st.motor_impulse)
+                    }
+                    _ => angular_impulse(views, st.a, st.b, st.axis * st.motor_impulse),
+                }
             }
         }
     }

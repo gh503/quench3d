@@ -198,6 +198,7 @@ impl Game for JointsDemo {
             local_axis_a: Vec3::Y,
             local_axis_b: Vec3::Y,
             limits: Some((-1.5, 1.5)),
+            motor: None,
         });
 
         // ---------------- ③ 弹簧（软距离关节） ----------------

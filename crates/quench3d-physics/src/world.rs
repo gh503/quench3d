@@ -858,12 +858,17 @@ impl PhysicsWorld {
                 local_anchor_b,
                 local_axis_a,
                 limits,
+                motor,
                 ..
             } => {
                 let axis = a.rotation() * *local_axis_a;
                 let wa = a.position() + a.rotation() * *local_anchor_a;
                 let wb = b.position() + b.rotation() * *local_anchor_b;
-                ((wb - wa).dot(axis), None, *limits)
+                (
+                    (wb - wa).dot(axis),
+                    motor.and_then(|m| m.target_angle),
+                    *limits,
+                )
             }
             _ => (0.0, None, None),
         };
@@ -882,9 +887,9 @@ impl PhysicsWorld {
         })
     }
 
-    /// 运行时改一个铰链伺服的目标角（rad）。返回是否改成功。
+    /// 运行时改一个伺服的目标：铰链是**弧度**，滑块是**米**。返回是否改成功。
     ///
-    /// 只改目标，不动增益 / 限幅；关节两端会被唤醒，下一子步就朝新目标转。
+    /// 只改目标，不动增益 / 限幅；关节两端会被唤醒，下一子步就朝新目标动。
     /// 给 `None` / 非有限值返回 false（不静默写 NaN 进世界）。
     pub fn set_joint_target(&mut self, handle: JointHandle, target: f32) -> bool {
         if !target.is_finite() {
@@ -896,6 +901,12 @@ impl PhysicsWorld {
         };
         let (ha, hb) = match slot.joint.as_mut() {
             Some(Joint::Hinge {
+                motor: Some(m),
+                a,
+                b,
+                ..
+            })
+            | Some(Joint::Slider {
                 motor: Some(m),
                 a,
                 b,
@@ -927,7 +938,9 @@ impl PhysicsWorld {
             .get(handle.index as usize)
             .filter(|s| s.generation == handle.generation)?;
         match slot.joint.as_ref()? {
-            Joint::Hinge { motor: Some(m), .. } => m.target_angle,
+            Joint::Hinge { motor: Some(m), .. } | Joint::Slider { motor: Some(m), .. } => {
+                m.target_angle
+            }
             _ => None,
         }
     }

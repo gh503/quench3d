@@ -301,6 +301,7 @@ fn joints_api() {
         local_axis_a: Vec3::X,
         local_axis_b: Vec3::X,
         limits: None,
+        motor: None,
     });
     assert_eq!(w.joint_count(), 5);
 }

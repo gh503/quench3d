@@ -2115,6 +2115,10 @@ pub struct JointDoc {
     /// 否则 `motor_velocity` 是速度模式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motor_target_deg: Option<f32>,
+    /// 滑块马达的**伺服目标位移**（米）。需要同时给 `motor_kp`（N/m）；
+    /// `motor_kd` 是 N·s/m，`motor_max_torque` 在这里是最大推力（N）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor_target_m: Option<f32>,
     /// 伺服比例增益（1/s），缺省 8。越大越"急着到位"，配合 `motor_max_impulse` 限幅。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motor_stiffness: Option<f32>,
@@ -2275,12 +2279,18 @@ pub struct ActionDoc {
     /// `joint_target` 的关节名（`joints[].name`；不写关节名时是 `joint[i]`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joint: Option<String>,
-    /// `joint_target` 的目标角（度）。
+    /// `joint_target` 的目标角（度，铰链用）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_deg: Option<f32>,
+    /// `joint_target` 的目标位移（米，滑块/夹爪用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_m: Option<f32>,
     /// `joint_target` 的最大角速度（度/秒）；不写 = 立即设到目标。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_deg_s: Option<f32>,
+    /// `joint_target` 的滑块最大速度（米/秒）；不写 = 立即设到目标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_m_s: Option<f32>,
     /// `weld` 的另一端刚体名（例如夹爪主体）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub other: Option<String>,
@@ -6803,9 +6813,10 @@ impl SceneDoc {
                         .with_hint("伺服模式请只给 motor_target_deg（可选 motor_stiffness / motor_damping）"),
                     );
                 }
-            } else {
+            } else if j.kind == JointKind::Slider {
                 for (key, given) in [
                     ("motor_target_deg", j.motor_target_deg.is_some()),
+                    ("motor_velocity", j.motor_velocity.is_some()),
                     ("motor_stiffness", j.motor_stiffness.is_some()),
                     ("motor_damping", j.motor_damping.is_some()),
                 ] {
@@ -6813,10 +6824,51 @@ impl SceneDoc {
                         out.push(Diagnostic::warn_code(
                             ErrorCode::Ineffective,
                             format!("{p}.{key}"),
-                            "只有铰链关节支持马达",
+                            "滑块马达用 motor_target_m（米）+ motor_kp/kd（N/m、N·s/m）+ motor_max_torque（N）",
                         ));
                     }
                 }
+                if j.motor_target_m.is_some() && j.motor_kp.is_none() {
+                    out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{p}.motor_target_m"),
+                            "滑块伺服给了目标位移，但没有 motor_kp",
+                        )
+                        .with_hint("补上 motor_kp（例如 2000 N/m）；只写目标不会动"),
+                    );
+                }
+                if let Some(m) = j.motor_target_m {
+                    if !m.is_finite() {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.motor_target_m"),
+                            "滑块目标位移必须是有限数",
+                        ));
+                    }
+                }
+            } else {
+                for (key, given) in [
+                    ("motor_target_deg", j.motor_target_deg.is_some()),
+                    ("motor_target_m", j.motor_target_m.is_some()),
+                    ("motor_stiffness", j.motor_stiffness.is_some()),
+                    ("motor_damping", j.motor_damping.is_some()),
+                ] {
+                    if given {
+                        out.push(Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
+                            format!("{p}.{key}"),
+                            "只有铰链/滑块关节支持马达",
+                        ));
+                    }
+                }
+            }
+            if j.kind != JointKind::Slider && j.motor_target_m.is_some() {
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
+                    format!("{p}.motor_target_m"),
+                    "motor_target_m 只对滑块关节生效",
+                ));
             }
             if let Some(deg) = j.motor_target_deg {
                 if !deg.is_finite() {
@@ -7056,6 +7108,16 @@ impl SceneDoc {
                     .clone()
                     .filter(|n| !n.trim().is_empty())
                     .or_else(|| (!a.target.is_empty()).then(|| a.target.clone()));
+                let joint_kind = joint.as_deref().and_then(|name| {
+                    self.joints
+                        .iter()
+                        .enumerate()
+                        .find(|(i, j)| {
+                            j.name.as_deref() == Some(name)
+                                || (j.name.is_none() && name == format!("joint[{i}]"))
+                        })
+                        .map(|(_, j)| j.kind)
+                });
                 match joint {
                     None => out.push(
                         Diagnostic::error_code(
@@ -7082,18 +7144,57 @@ impl SceneDoc {
                         }
                     }
                 }
-                match a.target_deg {
-                    None => out.push(Diagnostic::error_code(
+                let kind = joint_kind;
+                match (a.target_deg, a.target_m) {
+                    (Some(_), Some(_)) => out.push(Diagnostic::error_code(
+                        ErrorCode::MutuallyExclusive,
+                        &p,
+                        "joint_target 不能同时给 target_deg 和 target_m",
+                    )),
+                    (None, None) => out.push(Diagnostic::error_code(
                         ErrorCode::MissingField,
                         format!("{p}.target_deg"),
-                        "joint_target 需要 target_deg（度）",
+                        "joint_target 需要 target_deg（铰链，度）或 target_m（滑块，米）",
                     )),
-                    Some(v) if !v.is_finite() => out.push(Diagnostic::error_code(
-                        ErrorCode::OutOfRange,
-                        format!("{p}.target_deg"),
-                        "目标角必须是有限数",
-                    )),
-                    Some(_) => {}
+                    (Some(v), None) => {
+                        if !v.is_finite() {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{p}.target_deg"),
+                                "目标角必须是有限数",
+                            ));
+                        }
+                        if kind == Some(JointKind::Slider) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{p}.target_deg"),
+                                "滑块关节的 joint_target 要用 target_m（米），不是 target_deg",
+                            ));
+                        }
+                    }
+                    (None, Some(v)) => {
+                        if !v.is_finite() {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::OutOfRange,
+                                format!("{p}.target_m"),
+                                "目标位移必须是有限数",
+                            ));
+                        }
+                        if kind != Some(JointKind::Slider) {
+                            out.push(Diagnostic::error_code(
+                                ErrorCode::InvalidValue,
+                                format!("{p}.target_m"),
+                                "只有滑块关节用 target_m；铰链请用 target_deg",
+                            ));
+                        }
+                        if a.speed_deg_s.is_some() {
+                            out.push(Diagnostic::warn_code(
+                                ErrorCode::Ineffective,
+                                format!("{p}.speed_deg_s"),
+                                "target_m 不支持 speed_deg_s；滑块会立即设到目标",
+                            ));
+                        }
+                    }
                 }
                 if let Some(v) = a.speed_deg_s {
                     if !v.is_finite() || v <= 0.0 {
@@ -7104,11 +7205,27 @@ impl SceneDoc {
                         ));
                     }
                 }
+                if let Some(v) = a.speed_m_s {
+                    if !v.is_finite() || v <= 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{p}.speed_m_s"),
+                            "speed_m_s 必须是有限正数（米/秒）",
+                        ));
+                    }
+                    if a.target_m.is_none() {
+                        out.push(Diagnostic::warn_code(
+                            ErrorCode::Ineffective,
+                            format!("{p}.speed_m_s"),
+                            "speed_m_s 只和 target_m 一起用；铰链请用 speed_deg_s",
+                        ));
+                    }
+                }
                 if a.value.is_some() || a.point.is_some() || a.position.is_some() {
                     out.push(Diagnostic::warn_code(
                         ErrorCode::Ineffective,
                         &p,
-                        "joint_target 只用 joint / target_deg / speed_deg_s，value/point/position 会被忽略",
+                        "joint_target 只用 joint / target_deg / target_m / speed_deg_s，value/point/position 会被忽略",
                     ));
                 }
                 continue;

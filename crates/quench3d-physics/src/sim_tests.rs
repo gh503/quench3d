@@ -949,6 +949,7 @@ fn slider_joint_confines_motion_to_axis() {
         local_axis_a: Vec3::X,
         local_axis_b: Vec3::X,
         limits: None,
+        motor: None,
     });
     for _ in 0..120 {
         w.step(DT);
@@ -990,6 +991,7 @@ fn slider_limits_stop_axial_travel() {
         local_axis_a: Vec3::Y,
         local_axis_b: Vec3::Y,
         limits: Some((-0.5, 0.5)),
+        motor: None,
     });
     for _ in 0..240 {
         w.step(DT);
@@ -3024,4 +3026,48 @@ fn cone_apex_down_tips_over() {
         "翻倒后应基本停下，实际 {:?}",
         body.linear_velocity()
     );
+}
+
+#[test]
+fn slider_pd_drives_to_target_displacement() {
+    let mut w = PhysicsWorld::new();
+    let anchor = add_anchor(&mut w);
+    let start = 2.0f32;
+    let body = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.1),
+        })
+        .position(vec3(start, 0.0, 0.0))
+        .build(),
+    );
+    w.add_joint(Joint::Slider {
+        a: anchor,
+        b: body,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: vec3(-start, 0.0, 0.0),
+        local_axis_a: Vec3::X,
+        local_axis_b: Vec3::X,
+        limits: Some((-0.5, 1.0)),
+        motor: Some(HingeMotor::pd(0.5, 80.0, 8.0, 200.0)),
+    });
+    for _ in 0..600 {
+        w.step(DT);
+    }
+    let p = w.body(body).unwrap().position();
+    assert!(
+        (p.x - (start + 0.5)).abs() < 0.01,
+        "滑块伺服应到 x≈{}，实际 {}",
+        start + 0.5,
+        p.x
+    );
+    assert!(p.y.abs() < 0.01 && p.z.abs() < 0.01, "不应偏离滑轴：{p:?}");
+    let h = w.joint_handles()[0];
+    let tele = w.joint_telemetry(h, DT).unwrap();
+    assert!(tele.target.is_some(), "滑块遥测应带目标位移");
+    assert!(
+        (tele.coordinate - 0.5).abs() < 0.02,
+        "坐标 {}",
+        tele.coordinate
+    );
+    assert_all_finite(&w, "滑块伺服");
 }

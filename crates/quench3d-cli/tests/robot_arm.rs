@@ -127,7 +127,9 @@ fn joint_target_action_changes_the_target_at_runtime() {
         target: String::new(),
         joint: Some("shoulder".into()),
         target_deg: Some(0.0),
+        target_m: None,
         speed_deg_s: None,
+        speed_m_s: None,
         other: None,
         at_step: Some(500), // 1 s：肩从 35° 转到 0°
         at_time: None,

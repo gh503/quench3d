@@ -142,12 +142,18 @@ pub struct JointReport {
     /// 滑块位移（米）；只有滑块才有。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub displacement_m: Option<f32>,
-    /// 伺服目标角度（度）；没有伺服时不出现。
+    /// 伺服目标角度（度）；滑块没有这个字段（见 `target_m`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_deg: Option<f32>,
-    /// 目标 − 当前（度）；没有目标时不出现。
+    /// 目标 − 当前（度）；滑块没有这个字段（见 `error_m`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_deg: Option<f32>,
+    /// 滑块伺服目标位移（米）；只有滑块伺服才有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_m: Option<f32>,
+    /// 滑块目标 − 当前（米）；只有滑块伺服才有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_m: Option<f32>,
     /// 马达在最后一步施加的力矩（N·m；绕关节轴作用于 B，带符号）。
     pub torque_nm: f32,
     /// 限位状态：`ok` / `low` / `high`。
@@ -167,12 +173,18 @@ pub struct JointTraceSample {
     pub value: f32,
     /// 单位（`deg` 或 `m`）。
     pub unit: String,
-    /// 伺服目标（度）；没有目标时不出现。
+    /// 伺服目标（度）；滑块没有这个字段（见 `target_m`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_deg: Option<f32>,
-    /// 误差（度）；没有目标时不出现。
+    /// 误差（度）；滑块没有这个字段（见 `error_m`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_deg: Option<f32>,
+    /// 滑块伺服目标位移（米）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_m: Option<f32>,
+    /// 滑块误差（米）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_m: Option<f32>,
     /// 马达力矩（N·m）。
     pub torque_nm: f32,
 }
@@ -1162,6 +1174,10 @@ struct PreparedAction {
     joint: Option<JointHandle>,
     /// `joint_target` 的目标角（弧度）。
     target_angle: Option<f32>,
+    /// `joint_target` 的滑块目标位移（米）。
+    target_m: Option<f32>,
+    /// `joint_target` 的滑块最大速度（米/秒）。
+    speed_m_s: f32,
     /// `joint_target` 的最大角速度（rad/s）；0 = 立即。
     joint_speed: f32,
     /// `weld` 的另一端刚体。
@@ -1289,6 +1305,8 @@ impl Script {
                 rotation: a.rotation_deg.map(|r| euler_quat(Some(r))),
                 joint,
                 target_angle: a.target_deg.map(f32::to_radians),
+                target_m: a.target_m,
+                speed_m_s: a.speed_m_s.unwrap_or(0.0),
                 joint_speed: a.speed_deg_s.unwrap_or(0.0).to_radians(),
                 label: a.target.clone(),
                 other: match (&a.other, &handles) {
@@ -1533,7 +1551,22 @@ impl Script {
                 continue;
             }
             if a.kind == ActionKind::JointTarget {
-                let (Some(joint), Some(target)) = (a.joint, a.target_angle) else {
+                let Some(joint) = a.joint else { continue };
+                if let Some(target) = a.target_m {
+                    if a.speed_m_s > 0.0 {
+                        let current = world.joint_target(joint).unwrap_or(target);
+                        self.joint_moves.push(JointMove {
+                            joint,
+                            target,
+                            current,
+                            speed: a.speed_m_s,
+                        });
+                    } else {
+                        world.set_joint_target(joint, target);
+                    }
+                    continue;
+                }
+                let Some(target) = a.target_angle else {
                     continue;
                 };
                 if a.joint_speed > 0.0 {
@@ -2342,6 +2375,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 local_axis_a: axis_a,
                 local_axis_b: axis_b,
                 limits: j.limits.map(|l| (l[0], l[1])),
+                motor: build_slider_motor(j)?,
             },
         };
         let handle = world.add_joint(joint);
@@ -2374,6 +2408,24 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
 ///
 /// 两个都给时**伺服优先**（并且校验层会警告"motor_velocity 被忽略"），
 /// 因为"转到某角度停住"比"一直转"更具体，用户给了目标角显然想要前者。
+fn build_slider_motor(j: &JointDoc) -> Result<Option<HingeMotor>, RunError> {
+    let Some(target) = j.motor_target_m else {
+        return Ok(None);
+    };
+    let Some(kp) = j.motor_kp else {
+        return Err(RunError::scene(format!(
+            "关节 \"{}\" 给了 motor_target_m，但没有 motor_kp（滑块伺服需要 N/m 比例增益）",
+            j.name.as_deref().unwrap_or("?")
+        )));
+    };
+    Ok(Some(HingeMotor::pd(
+        target,
+        kp,
+        j.motor_kd.unwrap_or(0.0),
+        j.motor_max_torque.unwrap_or(0.0),
+    )))
+}
+
 fn build_hinge_motor(j: &JointDoc) -> Result<Option<HingeMotor>, RunError> {
     let max_impulse = j.motor_max_impulse.unwrap_or(f32::MAX);
     match (j.motor_target_deg, j.motor_velocity) {
@@ -2550,8 +2602,22 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
                 kind: t.kind.to_string(),
                 angle_deg,
                 displacement_m: if is_slider { Some(t.coordinate) } else { None },
-                target_deg: t.target.map(f32::to_degrees),
-                error_deg: t.target.map(|target| (target - t.coordinate).to_degrees()),
+                target_deg: if is_slider {
+                    None
+                } else {
+                    t.target.map(f32::to_degrees)
+                },
+                error_deg: if is_slider {
+                    None
+                } else {
+                    t.target.map(|target| (target - t.coordinate).to_degrees())
+                },
+                target_m: if is_slider { t.target } else { None },
+                error_m: if is_slider {
+                    t.target.map(|target| target - t.coordinate)
+                } else {
+                    None
+                },
                 torque_nm: t.motor_torque,
                 limit_state: limit_state.to_string(),
                 broken,
@@ -2564,6 +2630,8 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
                 displacement_m: None,
                 target_deg: j.target_deg,
                 error_deg: None,
+                target_m: None,
+                error_m: None,
                 torque_nm: 0.0,
                 limit_state: "ok".to_string(),
                 broken,
@@ -3234,8 +3302,22 @@ pub fn run_simulate_traced(
                 t.coordinate.to_degrees()
             },
             unit: if t.kind == "slider" { "m" } else { "deg" }.to_string(),
-            target_deg: t.target.map(f32::to_degrees),
-            error_deg: t.target.map(|x| (x - t.coordinate).to_degrees()),
+            target_deg: if t.kind == "slider" {
+                None
+            } else {
+                t.target.map(f32::to_degrees)
+            },
+            error_deg: if t.kind == "slider" {
+                None
+            } else {
+                t.target.map(|x| (x - t.coordinate).to_degrees())
+            },
+            target_m: if t.kind == "slider" { t.target } else { None },
+            error_m: if t.kind == "slider" {
+                t.target.map(|x| x - t.coordinate)
+            } else {
+                None
+            },
             torque_nm: t.motor_torque,
         })
     };

@@ -17,7 +17,7 @@
 | 角速度 | `motor_velocity` | rad/s |
 | 时间 | `simulate.dt` / `at_time` | 秒（s） |
 
-`joints[].angle_deg`、`target_deg`、`error_deg` 是度；`torque_nm` 是 N·m。滑块关节的轨迹用米（`unit: "m"`），铰链用度（`unit: "deg"`）。
+`joints[].angle_deg`、`target_deg`、`error_deg` 是度；`torque_nm` 是 N·m。滑块关节的位移/目标/误差分别是 `displacement_m`、`target_m`、`error_m`（米），`angle_deg` 为 0；`--trace` 里滑块 `unit: "m"`、`value` 是米，目标/误差用 `target_m`/`error_m`。滑块 `torque_nm` 实际是最大推力方向的力（N，字段名沿用铰链）。
 
 ## 2. 推荐参数（M1）
 
@@ -71,11 +71,31 @@ PD 力矩每个子步只施加一次（不是每个速度迭代一次）。`torq
 ```
 
 * `joint` 是 `joints[].name`；不写名字的关节是 `joint[i]`。
-* `target_deg` 必填，单位度。
-* `speed_deg_s` 可选：按这个最大角速度逐步逼近；不写 = 立即设到目标。
+* 铰链用 `target_deg`（度）；滑块/夹爪用 `target_m`（米），二选一。
+* `speed_deg_s` / `speed_m_s` 可选：按这个最大速度逐步逼近；不写 = 立即设到目标。
 * 动作在 `at_time`（按 `round(t/dt)` 折算）或 `at_step` 指定的外层步开始前触发。
-* 只支持铰链伺服（有 `motor_target_deg`/`motor_kp` 的 hinge）；滑块/固定关节会报校验错误。
+* 铰链伺服：`motor_target_deg` + `motor_kp`（N·m/rad）/`motor_kd`（N·m·s/rad）/`motor_max_torque`（N·m）。
+* 滑块伺服（夹爪开合）：`motor_target_m`（米）+ `motor_kp`（N/m）/`motor_kd`（N·s/m）/`motor_max_torque`（N，最大推力）。只写目标不写 `motor_kp` 会报错，不会静默不动。
 * 改目标只改 `target_angle`，不改增益/限幅；两端刚体自动唤醒。
+
+滑块伺服示例（夹爪）：
+
+```json
+{
+  "type": "slider", "name": "finger_l_slide",
+  "a": "gripper", "b": "finger_l", "axis": [0, 0, 1],
+  "limits": [0.0255, 0.04],
+  "motor_target_m": 0.04, "motor_kp": 1000, "motor_kd": 20,
+  "motor_max_torque": 5
+}
+```
+
+```json
+{"type": "joint_target", "joint": "finger_l_slide",
+ "target_m": 0.0255, "speed_m_s": 0.005, "at_time": 1.2}
+```
+
+单位是**米**，不是毫米；`motor_max_torque` 名字沿用铰链字段，但在滑块上是最大推力 N。
 
 `weld` / `release` 是实验性的运行时固定约束（`target` + `other`），当前**不建议**用于产品场景：在关节链 + 接触同时存在时求解器可能产生很大冲量，M1 抓取 fixture 改用场景内固定关节。
 
@@ -179,6 +199,7 @@ node tools/check_web.mjs
 | P0-2 断开显式标记 | **PASS** | `joint_count=0`，`joints[0].broken=true`（e2e 已断言） |
 | P0-3 `joint_target` 运行时改目标 | **PASS** | 1 s 时把肩 35°→0°，2 s 后 0.7° |
 | P0-3 抓取场景/脚本 | **PASS（带理想化）** | 方块从 y=0.061 抬到 0.207（+0.146 m），相对夹爪滑移 0；手指从 ±0.04 合到 ±0.028 |
+| P0-3 滑块位置伺服 | **PASS（单元）** | `slider_pd_drives_to_target_displacement`：目标 0.5 m，600 步后误差 <1 cm |
 | P0-3 **真实摩擦夹持** | **FAIL / 未实现** | fixture 中方块从 t=0 就与夹爪用**场景固定关节**连接，是理想真空/刚性抓取；手指闭合是视觉动作，不靠摩擦。动态手指 + 力闭合在接触求解下会弹出方块，未解决 |
 | P1-1 `objects[].visual` | **PASS（功能与整机渲染）/ PARTIAL（精确装配）** | `visual` 支持 STL/GLB/GLTF/OBJ，挂成主物体子节点；加/不加 visual 的模拟 `states` 逐位相同；整机 STL 渲染 33,318 三角形 / 11 object。局部对位是手工近似，不是官方 CAD 装配，见 §8 |
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |
@@ -258,12 +279,12 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * 不启动 winit/GPU；页面自己画模型。Web Serial 仍完全由页面 JS 管，引擎不碰串口。
 * `web/robot.html` 是滑杆示例：改 yaw/shoulder/elbow，`setJointTarget` + 60 次 `step(1/60)`，用 `getBodyTransform` 画关节骨架；状态栏打印 `getJointStates`。
 * `tools/check_web.mjs` 在 Node 里真的实例化 wasm、装载 `modkit_arm_drive` 场景、跑 120 步，断言 shoulder=20.00°、`link2` 矩阵 16 个有限数、未知刚体返回空数组。
-* wasm 体积：**13,532,726 字节**（约 13.2 MiB；P0 基线 13,449,106，+83.6 KB）。这是把完整编辑器 + 物理 + 关节 API 打进同一个 example 的代价；只做物理的页面可以用 `wasm-opt`/裁剪入口再降。
+* wasm 体积：**13,539,804 字节**（约 13.2 MiB；P0 基线 13,449,106，+90.7 KB）。这是把完整编辑器 + 物理 + 关节 API 打进同一个 example 的代价；只做物理的页面可以用 `wasm-opt`/裁剪入口再降。
 * **60 fps 规模没有实测**。这个 API 每步只做 CPU 物理；页面渲染由 JS 负责。已知上限：单场景 3 铰链 + 2 滑块在 1/60 下每步 <1 ms（P0 fixture 的 CPU 量级），但没有 1000 刚体/60 fps 的基准，不能宣称。
 
 ## 11. 门禁结果
 
-`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，875 个测试 0 失败，wasm 13,532,726 字节（P0 基线 13,449,106，+83.6 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
+`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，876 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
 
 ## 12. 确定性
 
