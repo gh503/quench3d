@@ -41,6 +41,11 @@
 
 ### 新增
 
+- **运行期稳定错误码（引擎 M1 第 8 片）**：CLI 与 MCP 的 `error` 新增 `code` 字段，
+  由 `report::runtime_code(kind)` 统一映射（scene_runtime / environment_unavailable /
+  output_exists / golden_mismatch / unknown_camera / io_error / network_error / invalid），
+  未登记类别收口到 `runtime_error`。report 单测、CLI e2e、MCP 单测验证三处一致。
+  M1 最后一项据此完成。
 - **输入动作映射与触屏手势（引擎 M1 第 7 片）**：`ActionBinding` 统一键盘/鼠标/手柄
   按键/手柄轴，支持运行时 `rebind_action` 与跨帧 pressed/released；新增双指
   `pinch_delta`、多指 `swipe_delta`。单测覆盖重绑定旧键失效、手柄按键/轴边界、捏合与

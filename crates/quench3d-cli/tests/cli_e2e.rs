@@ -67,6 +67,37 @@ fn version_and_help_are_friendly() {
 }
 
 #[test]
+fn runtime_errors_carry_stable_machine_codes() {
+    let dir = temp_dir("runtime_codes");
+    let missing = dir.join("does-not-exist.json");
+    let r = run(&["validate", missing.to_str().unwrap(), "--json"]);
+    assert_ne!(r.code, 0);
+    assert_eq!(r.json()["error"]["code"], "invalid");
+
+    let scene = dir.join("scene.json");
+    let generated = run(&["example", "--out", scene.to_str().unwrap()]);
+    assert_eq!(generated.code, 0, "{}", generated.stdout);
+    let output = dir.join("already-there.png");
+    std::fs::write(&output, b"not a png").unwrap();
+    let r = run(&[
+        "render",
+        scene.to_str().unwrap(),
+        "--out",
+        output.to_str().unwrap(),
+        "--no-clobber",
+        "--width",
+        "8",
+        "--height",
+        "8",
+        "--json",
+    ]);
+    assert_eq!(r.code, 2, "no-clobber 是输入冲突：{}", r.stdout);
+    let env = r.json();
+    assert_eq!(env["error"]["kind"], "output_exists");
+    assert_eq!(env["error"]["code"], "output_exists");
+}
+
+#[test]
 fn migrate_upgrades_in_place_with_backup_and_never_touches_invalid_input() {
     let dir = temp_dir("migrate");
     let path = dir.join("old.scene.json");

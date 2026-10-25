@@ -1671,5 +1671,6 @@ mod tests {
             .unwrap();
         assert_eq!(response["result"]["isError"], true);
         assert_eq!(response["result"]["structuredContent"]["kind"], "invalid");
+        assert_eq!(response["result"]["structuredContent"]["code"], "invalid");
     }
 }

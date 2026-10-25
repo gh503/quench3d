@@ -32,6 +32,26 @@
 码表故意做得**窄**（十几个）而不是「一条诊断一个码」：252 个调用点如果各有各的码，
 既没法保证稳定，agent 也没法穷举。`code` 说性质、`path` 说位置，两个合起来才是完整定位。
 
+## 运行期错误码
+
+`validate` 之外的命令（`render` / `simulate` / `migrate` / MCP 工具）失败时，错误对象也带
+`code`，与 `kind` 并存：
+
+| `code` | 什么时候 |
+| --- | --- |
+| `invalid` | 参数/场景输入不合法（改输入可重试） |
+| `scene_runtime` | 场景在装配或运行期失败（引用、资源、父子关系等） |
+| `environment_unavailable` | 没有可用 GPU/平台后端 |
+| `output_exists` | `--no-clobber` 命中了已存在的输出 |
+| `golden_mismatch` | 黄金图逐像素比较超差 |
+| `unknown_camera` | `--camera` 指定了不存在的相机 |
+| `io_error` | 读写文件失败（权限、目录、编码） |
+| `network_error` | 大模型/HTTP/解析类外部服务错误 |
+| `runtime_error` | 未登记类别的稳定兜底 |
+
+`kind` 仍用于退出码映射；`code` 是给 agent 分支的稳定契约。新增类别时在
+`crates/quench3d-cli/src/report.rs::runtime_code` 登记，不要直接复用文案。
+
 ## 码表
 
 <!-- BEGIN GENERATED TABLE（内容由 quench3d schema --json 生成，勿手工编辑） -->

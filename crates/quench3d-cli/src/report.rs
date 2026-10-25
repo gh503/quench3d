@@ -28,7 +28,9 @@ pub const EXIT_NETWORK: i32 = 4;
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorInfo {
     /// 类别：`scene` / `invalid` / `environment` / `network` / `io` / `runtime`。
-    pub kind: String,
+    pub kind: &'static str,
+    /// **稳定**的机器可读码，跨 CLI / MCP / 报告一致；agent 按它分支，不按文案。
+    pub code: &'static str,
     /// 人可读说明。
     pub message: String,
     /// 相关 JSON 路径（如果有）。
@@ -38,19 +40,25 @@ pub struct ErrorInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     /// 校验诊断（如果有）。
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub diagnostics: Vec<crate::scene_doc::Diagnostic>,
+    #[serde(skip_serializing_if = "diagnostics_is_empty", default)]
+    pub diagnostics: Box<[crate::scene_doc::Diagnostic]>,
+}
+
+fn diagnostics_is_empty(diagnostics: &[crate::scene_doc::Diagnostic]) -> bool {
+    diagnostics.is_empty()
 }
 
 impl ErrorInfo {
     /// 只带类别的错误。
-    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(kind: &'static str, message: impl Into<String>) -> Self {
+        let code = runtime_code(kind);
         Self {
-            kind: kind.into(),
+            kind,
+            code,
             message: message.into(),
             path: None,
             hint: None,
-            diagnostics: Vec::new(),
+            diagnostics: Box::default(),
         }
     }
 
@@ -68,13 +76,14 @@ impl ErrorInfo {
 
     /// 附带校验诊断。
     pub fn with_diagnostics(mut self, diags: Vec<crate::scene_doc::Diagnostic>) -> Self {
-        self.diagnostics = diags;
+        self.diagnostics = diags.into_boxed_slice();
         self
     }
 
     /// 由运行期错误构造（保留路径与建议——agent 靠这两样决定下一步）。
     pub fn from_run(e: &crate::runner::RunError) -> Self {
         let mut info = Self::new(e.kind, e.message.clone());
+        info.code = runtime_code(e.kind);
         if let Some(path) = &e.path {
             info = info.at(path.clone());
         }
@@ -92,7 +101,7 @@ impl ErrorInfo {
 
     /// 对应的退出码。
     pub fn exit_code(&self) -> i32 {
-        match self.kind.as_str() {
+        match self.kind {
             // 输出已存在（--no-clobber）与场景不合法同属"输入有问题，改参数再跑"，都是 2
             "invalid" | "scene" | "output_exists" | "unknown_camera" => EXIT_INVALID,
             "environment" => EXIT_ENVIRONMENT,
@@ -133,6 +142,26 @@ pub fn doc_error_info(e: &crate::scene_doc::DocError) -> ErrorInfo {
         }
         DocError::Json(je) => ErrorInfo::new("invalid", format!("JSON 语法错误: {je}"))
             .hint("检查括号、逗号与引号；可用 `quench3d example` 打印模板对照"),
+    }
+}
+
+/// 运行期错误类别 → 稳定机器码。
+///
+/// 码是**契约**：CLI 的 `error.code`、MCP 的 `structuredContent.code`、CI 脚本的
+/// `jq -r .error.code` 都读它。新增类别时在这里加一条，别让 agent 去猜 `kind` 文案。
+pub fn runtime_code(kind: &str) -> &'static str {
+    match kind {
+        "scene" => "scene_runtime",
+        "invalid" => "invalid",
+        "environment" => "environment_unavailable",
+        "output_exists" => "output_exists",
+        "golden_mismatch" => "golden_mismatch",
+        "unknown_camera" => "unknown_camera",
+        "io" => "io_error",
+        "network" | "config" | "http" | "parse" => "network_error",
+        "runtime" => "runtime_error",
+        // 未登记类别仍然给一个稳定兜底，不把内部字符串直接漏给 agent。
+        _ => "runtime_error",
     }
 }
 
@@ -243,5 +272,32 @@ mod tests {
         assert_eq!(v["ok"], false);
         assert_eq!(v["error"]["hint"], "装驱动");
         assert_eq!(env.exit_code(), EXIT_ENVIRONMENT);
+    }
+
+    #[test]
+    fn runtime_error_codes_are_stable_and_shared_by_cli_and_mcp() {
+        for (kind, code) in [
+            ("scene", "scene_runtime"),
+            ("invalid", "invalid"),
+            ("environment", "environment_unavailable"),
+            ("output_exists", "output_exists"),
+            ("golden_mismatch", "golden_mismatch"),
+            ("unknown_camera", "unknown_camera"),
+            ("io", "io_error"),
+            ("network", "network_error"),
+            ("something_new", "runtime_error"),
+        ] {
+            assert_eq!(runtime_code(kind), code, "kind={kind}");
+            assert_eq!(ErrorInfo::new(kind, "x").code, code);
+        }
+
+        let info = ErrorInfo::from_run(&crate::runner::RunError::scene("场景里没有刚体"));
+        assert_eq!(info.code, "scene_runtime");
+        let info = ErrorInfo::from_run(&crate::runner::RunError::output_exists(
+            std::path::Path::new("/tmp/out.png"),
+        ));
+        assert_eq!(info.code, "output_exists");
+        let v: Value = serde_json::from_str(&Envelope::fail("render", info, 1).to_json()).unwrap();
+        assert_eq!(v["error"]["code"], "output_exists");
     }
 }
