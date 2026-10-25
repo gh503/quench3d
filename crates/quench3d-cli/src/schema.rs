@@ -134,6 +134,19 @@ pub fn schema() -> Value {
                 "examples": ["quench3d validate scene.json --json"]
             },
             {
+                "name": "migrate",
+                "summary": "把旧 version 的场景就地升级到当前版本：先备份、校验通过后原子写，失败不碰原文件",
+                "args": [
+                    { "name": "scene", "type": "path", "required": true, "description": "场景 JSON 路径" },
+                    { "name": "--out", "type": "path", "required": false, "description": "写到新文件而不是就地升级（不备份原文件）" }
+                ],
+                "output": "{ scene, out, from_version, version, migrated, backup? }",
+                "examples": [
+                    "quench3d migrate old.scene.json --json",
+                    "quench3d migrate old.scene.json --out upgraded.scene.json --json"
+                ]
+            },
+            {
                 "name": "export",
                 "summary": "把场景里的图元物体导出为 Wavefront OBJ + MTL、按扩展名 .gltf/.glb 导出单文件 glTF 2.0（.gltf 用 base64 内嵌 buffer，.glb 用二进制 BIN chunk），或 .stl 导出二进制 STL；导入的 models[]、凸包、缺贴图会列进 skipped",
                 "args": [

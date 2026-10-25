@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **场景迁移 CLI（引擎 M1 第 5 片）**：`quench3d migrate <scene> [--out]` 把旧 version
+  场景升级到 v2；先校验再写，就地升级前备份 `.bak`（冲突则 `.bak.N`），临时文件 +
+  rename 原子替换；失败不碰原文件。CLI e2e 覆盖带 `parent` 的 v1 升级、坏 JSON 不写盘、
+  `--out` 不改源文件。
 - **贴图引用计数（引擎 M1 第 4 片）**：`AssetCache` 按 `MaterialDesc` 记录材质引用的
   去重贴图，材质释放时减引用，最后一个引用消失才 `remove_texture`；GPU e2e 覆盖两个材质
   共用一张贴图，删第一个贴图保留、删最后一个回收。M1 逐资源释放据此勾完成（边界：模型

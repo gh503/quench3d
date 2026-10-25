@@ -67,6 +67,85 @@ fn version_and_help_are_friendly() {
 }
 
 #[test]
+fn migrate_upgrades_in_place_with_backup_and_never_touches_invalid_input() {
+    let dir = temp_dir("migrate");
+    let path = dir.join("old.scene.json");
+    let original = r#"{
+      "format": "quench3d.scene",
+      "version": 1,
+      "objects": [
+        { "name": "child", "shape": { "type": "sphere", "radius": 0.4 },
+          "body": "static", "parent": "parent" }
+      ]
+    }"#;
+    std::fs::write(&path, original).expect("写 v1 场景");
+    let r = run(&["migrate", path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let env = r.json();
+    assert_eq!(env["ok"], true);
+    assert_eq!(env["data"]["from_version"], 1);
+    assert_eq!(env["data"]["version"], 2);
+    assert_eq!(env["data"]["migrated"], true);
+    let backup = env["data"]["backup"].as_str().expect("必须报告备份路径");
+    assert_eq!(
+        std::fs::read_to_string(backup).expect("备份必须可读"),
+        original,
+        "备份必须是迁移前的逐字节副本"
+    );
+    let upgraded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(upgraded["version"], 2);
+    assert!(
+        upgraded["objects"][0].get("parent").is_none(),
+        "v1 的 parent 迁移后必须删掉"
+    );
+
+    // 非法输入：退出码非 0，原文件逐字节不变，也不产生备份。
+    let bad = dir.join("bad.scene.json");
+    let bad_text = "{ not json";
+    std::fs::write(&bad, bad_text).expect("写坏场景");
+    let r = run(&["migrate", bad.to_str().unwrap(), "--json"]);
+    assert_ne!(r.code, 0);
+    assert_eq!(std::fs::read_to_string(&bad).unwrap(), bad_text);
+    let mut baks = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        if entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("bad.scene.json.bak")
+        {
+            baks += 1;
+        }
+    }
+    assert_eq!(baks, 0, "失败时不能留下备份/半成品");
+}
+
+#[test]
+fn migrate_out_writes_a_new_file_without_touching_the_source() {
+    let dir = temp_dir("migrate_out");
+    let path = dir.join("source.scene.json");
+    let out = dir.join("upgraded.scene.json");
+    let original = r#"{"version":1,"objects":[]}"#;
+    std::fs::write(&path, original).expect("写 v1");
+    let r = run(&[
+        "migrate",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let env = r.json();
+    assert_eq!(env["data"]["migrated"], true);
+    assert!(env["data"]["backup"].is_null());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    let upgraded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(upgraded["version"], 2);
+}
+
+#[test]
 fn schema_json_describes_every_command() {
     let r = run(&["schema", "--json"]);
     assert_eq!(r.code, 0);

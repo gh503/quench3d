@@ -295,7 +295,7 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 
 ## 11. 门禁结果
 
-`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，888 个测试 0 失败，wasm 13,556,612 字节（P0 基线 13,449,106，+107.5 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web/browser-bench 全部 PASS。
+`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，890 个测试 0 失败，wasm 13,556,612 字节（P0 基线 13,449,106，+107.5 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web/browser-bench 全部 PASS。
 
 ## 12. 确定性
 

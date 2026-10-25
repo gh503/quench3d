@@ -11,7 +11,7 @@ use std::time::Instant;
 use quench3d_cli::llm::LlmClient;
 use quench3d_cli::report::{self, Envelope, ErrorInfo, EXIT_INVALID, EXIT_OK, EXIT_RUNTIME};
 use quench3d_cli::runner;
-use quench3d_cli::scene_doc::{SceneDoc, Severity};
+use quench3d_cli::scene_doc::{SceneDoc, Severity, VERSION as SCENE_VERSION};
 use quench3d_cli::schema;
 use serde_json::{json, Value};
 
@@ -364,6 +364,100 @@ fn dispatch(args: &Args) -> i32 {
                     EXIT_OK
                 }
             }
+        }
+        "migrate" => {
+            let started = Instant::now();
+            let Some(path) = args.positional.first() else {
+                return missing(
+                    args,
+                    "migrate",
+                    "需要场景文件路径",
+                    "quench3d migrate scene.json --json",
+                );
+            };
+            let path = PathBuf::from(path);
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    let info = ErrorInfo::new(
+                        "io_error",
+                        format!("无法读取场景文件 {}: {e}", path.display()),
+                    )
+                    .hint("确认路径与读权限");
+                    return fail(args, "migrate", info, started);
+                }
+            };
+            let from_version = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("version").and_then(Value::as_u64))
+                .unwrap_or(SCENE_VERSION as u64);
+            let doc = match SceneDoc::from_json(&text) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    return fail(args, "migrate", report::doc_error_info(&e), started);
+                }
+            };
+            let diags = doc.validate();
+            if diags.iter().any(|d| d.severity == Severity::Error) {
+                let info = ErrorInfo::new("invalid_scene", "场景校验失败，未写入任何文件")
+                    .hint("先跑 `quench3d validate` 修正错误；原文件没有被修改")
+                    .with_diagnostics(diags);
+                return fail(args, "migrate", info, started);
+            }
+            let out = args
+                .flag_str("--out")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| path.clone());
+            let in_place = out == path;
+            let needs_upgrade = from_version < SCENE_VERSION as u64;
+            let mut backup = None;
+            if in_place && needs_upgrade {
+                let backup_path = scene_backup_path(&path);
+                if let Err(e) = std::fs::copy(&path, &backup_path) {
+                    let info =
+                        ErrorInfo::new("io_error", format!("无法备份 {}: {e}", path.display()))
+                            .hint("原文件没有被修改；确认目录可写后重试");
+                    return fail(args, "migrate", info, started);
+                }
+                backup = Some(backup_path);
+            }
+            let migrated = needs_upgrade || !in_place;
+            if migrated {
+                let text = format!("{}\n", doc.to_json_pretty());
+                if let Err(e) = write_atomic(&out, &text) {
+                    let info =
+                        ErrorInfo::new("io_error", format!("无法写入 {}: {e}", out.display()))
+                            .hint("原文件没有被修改；确认目录可写后重试");
+                    return fail(args, "migrate", info, started);
+                }
+            }
+            let value = json!({
+                "scene": path,
+                "out": out,
+                "from_version": from_version,
+                "version": SCENE_VERSION,
+                "migrated": migrated,
+                "backup": backup,
+            });
+            finish(args, "migrate", Ok(value), started, |v| {
+                if v["migrated"].as_bool().unwrap_or(false) {
+                    println!(
+                        "已迁移 {}：v{} → v{}",
+                        v["scene"].as_str().unwrap_or_default(),
+                        v["from_version"],
+                        v["version"]
+                    );
+                    if let Some(b) = v["backup"].as_str() {
+                        println!("备份：{b}");
+                    }
+                } else {
+                    println!(
+                        "{} 已是 v{}，未改动",
+                        v["scene"].as_str().unwrap_or_default(),
+                        v["version"]
+                    );
+                }
+            })
         }
         "validate" => {
             let started = Instant::now();
@@ -2047,6 +2141,47 @@ fn fail(args: &Args, command: &str, error: ErrorInfo, started: Instant) -> i32 {
     envelope.exit_code()
 }
 
+/// 迁移前的备份路径：`scene.json.bak`；已存在就找第一个空闲的 `.bak.N`。
+fn scene_backup_path(path: &std::path::Path) -> PathBuf {
+    let mut base = path.as_os_str().to_os_string();
+    base.push(".bak");
+    let candidate = PathBuf::from(base.clone());
+    if !candidate.exists() {
+        return candidate;
+    }
+    for n in 1..=9999 {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".bak.{n}"));
+        let candidate = PathBuf::from(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // 极端情况下退回覆盖 `.bak`，不让迁移因为备份名空间耗尽而失败。
+    PathBuf::from(base)
+}
+
+/// 同目录原子写：先写临时文件，再 rename；失败时删临时文件。
+fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "scene.json".into());
+    let tmp = match parent {
+        Some(dir) => dir.join(format!(".{file_name}.tmp.{}", std::process::id())),
+        None => PathBuf::from(format!(".{file_name}.tmp.{}", std::process::id())),
+    };
+    std::fs::write(&tmp, text)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 fn finish(
     args: &Args,
     command: &str,
@@ -2082,6 +2217,7 @@ fn help_text() -> String {
   doctor                环境自检：平台、CPU、GPU 适配器、图形后端
   info <模型>            检查 glTF/GLB/OBJ：网格/材质/顶点/三角形/包围盒
   validate <场景>        校验场景 JSON，返回带路径的诊断
+  migrate <场景>         升级旧 version 场景：先备份，再原子写；失败不碰原文件
   export <场景> [模型.obj|模型.gltf|模型.glb] 把图元物体导出为 OBJ + MTL 或单文件 glTF 2.0/GLB
   render <场景>          无窗口渲染成 PNG（可先步进物理）
   movie <场景>           录制仿真视频：PNG 序列 + trace.jsonl（交 ffmpeg），或直接出 GIF/APNG
