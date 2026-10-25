@@ -41,6 +41,12 @@
 
 ### 新增
 
+- **真实摩擦夹持（第 119 轮）**：新增
+  `tests/fixtures/modkit_arm_friction_grasp.scene.json` 与
+  `friction_gripper_lifts_the_cube_ten_centimetres_without_slip`。40 mm 方块
+  不再用任何场景关节挂接，两个滑块手指靠接触摩擦夹住；抬升 64° 后方块
+  +0.103 m，相对夹爪滑移 <0.7 mm。旧 `modkit_arm_grasp` 的理想固定关节
+  fixture 保留，只用于脚本时序回归。
 - **滑块位置伺服（第 188 轮）**：`joints[].motor_target_m`（米）+ `motor_kp`
   （N/m）/`motor_kd`（N·s/m）/`motor_max_torque`（N，最大推力），
   `joint_target` 动作可用 `target_m` + `speed_m_s` 驱动夹爪开合；报告/轨迹给

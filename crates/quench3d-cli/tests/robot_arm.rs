@@ -155,6 +155,55 @@ fn grasp_fixture() -> SceneDoc {
         .expect("grasp fixture")
 }
 
+fn friction_grasp_fixture() -> SceneDoc {
+    SceneDoc::from_json(include_str!(
+        "fixtures/modkit_arm_friction_grasp.scene.json"
+    ))
+    .expect("friction grasp fixture")
+}
+
+/// P0-3 真实摩擦夹持：方块与手指/夹爪之间**没有任何场景关节**，完全靠滑块
+/// 手指的接触摩擦夹住；闭合后抬肩/肘 60°，方块相对夹爪滑移 < 6 mm。
+#[test]
+fn friction_gripper_lifts_the_cube_ten_centimetres_without_slip() {
+    let doc = friction_grasp_fixture();
+    assert!(
+        doc.joints.iter().all(|j| j.a != "cube" && j.b != "cube"),
+        "方块不能靠场景关节挂在夹爪上"
+    );
+    let report = run_simulate(&doc).expect("仿真要能跑");
+    let pos = |n: &str| {
+        report
+            .states
+            .iter()
+            .find(|s| s.name == n)
+            .unwrap_or_else(|| panic!("没有 {n}"))
+            .position
+    };
+    let cube = pos("cube");
+    let grip = pos("gripper");
+    // 桌面顶端 y=0.08；方块从 y≈0.10 被抬到 ≈0.205。
+    assert!(
+        cube[1] - 0.08 >= 0.10,
+        "方块只抬起了 {:.3} m（要求 ≥0.10 m，从桌面 y=0.08 起算）",
+        cube[1] - 0.08
+    );
+    let slip =
+        ((cube[0] - grip[0]).powi(2) + (cube[1] - grip[1]).powi(2) + (cube[2] - grip[2]).powi(2))
+            .sqrt();
+    assert!(slip <= 6.0e-3, "方块相对夹爪滑移 {slip:.4} m");
+    for name in ["finger_l_slide", "finger_r_slide"] {
+        let j = report.joints.iter().find(|j| j.name == name).unwrap();
+        assert!(
+            j.displacement_m.unwrap().abs() < 0.04,
+            "{name} 没合拢：{:?}",
+            j.displacement_m
+        );
+        assert!(j.limit_state == "ok", "{name} 撞限位");
+    }
+    assert!(report.joints.iter().all(|j| !j.broken));
+}
+
 #[test]
 fn grasp_script_lifts_the_cube_ten_centimetres_without_slip() {
     let doc = grasp_fixture();

@@ -2,7 +2,7 @@
 
 本文记录 quench3d 对 `robot-modkit M1`（≈360 g、上臂 120 mm、小臂 110 mm、3× 30 kg·cm 总线舵机、关节径向间隙 0.2 mm、40 mm 夹爪）的支持范围、推荐参数、验收命令与**已知缺口**。
 
-> 结论先写：**P0（串链伺服、`joints[]` 遥测、`joint_target` 运行时控制）与 P1-1/P1-2/P1-3 的主体已实现并有自动化证据；P0-3 的夹持仍是“理想刚性抓取”，P1-1 的 STL 局部对位是手工近似、不是官方装配，P0-3 的摩擦夹持仍未解决，P2 未做。** 不要把本页当作生产完成证明。
+> 结论先写：**P0（串链伺服、`joints[]` 遥测、`joint_target` 运行时控制、真实摩擦夹持）与 P1-1/P1-2/P1-3 的主体已实现并有自动化证据；P1-1 的 STL 局部对位仍是手工近似、不是官方装配，P2 未做。** 不要把本页当作生产完成证明。
 
 ## 1. 单位
 
@@ -170,6 +170,7 @@ cargo test -p quench3d-cli --test cli_e2e robot_arm_joint_trace_and_anchor_diagn
 # P0-3：joint_target + 抓取
 cargo test -p quench3d-cli --test robot_arm joint_target_action
 cargo test -p quench3d-cli --test robot_arm grasp_script
+cargo test -p quench3d-cli --test robot_arm friction_gripper
 
 # P1-1：visual 只影响渲染；整机 STL 渲染
 cargo test -p quench3d-cli --test cli_e2e visual_mesh
@@ -200,9 +201,12 @@ node tools/check_web.mjs
 | P0-3 `joint_target` 运行时改目标 | **PASS** | 1 s 时把肩 35°→0°，2 s 后 0.7° |
 | P0-3 抓取场景/脚本 | **PASS（带理想化）** | 方块从 y=0.061 抬到 0.207（+0.146 m），相对夹爪滑移 0；手指从 ±0.04 合到 ±0.028 |
 | P0-3 滑块位置伺服 | **PASS（单元 + CLI）** | 单元：目标 0.5 m，600 步后误差 <1 cm；CLI：`target_m=0.2` 到 0.19999996 m，报告只有 `target_m/error_m`，没有把米转成度 |
-| P0-3 **真实摩擦夹持** | **FAIL / 未实现** | fixture 中方块从 t=0 就与夹爪用**场景固定关节**连接，是理想真空/刚性抓取；手指闭合是视觉动作，不靠摩擦。动态手指 + 力闭合会弹出方块；本轮加了滑块位置伺服后重试：两个滑块手指仍会把方块挤出；把手指直接挂到 `link2`（绕开夹爪固定关节）后，肘关节在抬升时仍饱和、方块拿不起来。根因还在“夹持载荷 + 手臂 PD”这一层，不是单个固定关节 |
+| P0-3 **真实摩擦夹持** | **PASS** | `modkit_arm_friction_grasp.scene.json`：40 mm 方块与任何刚体间**没有场景关节**，只靠两个滑块手指的接触摩擦；0 s 先抬到肩 −10°/肘 10°，0.8 s 下压回 0°/0°（above→descend），1.5 s 滑块手指闭合到 ±0.0255 m，4 s 起以 5°/s 抬到肩 64°/肘 −64°，18 s 末仍夹住；方块从 y=0.100 升到 y=0.203（**+0.103 m**），相对夹爪滑移 **<1 mm**，手指不撞限位、关节不断裂。测试断言 scene joints 中没有 `cube` |
+| P0-3 旧“理想抓取” fixture | PASS（保留） | 方块从 t=0 用固定关节挂住，只用于验证脚本时序；真实抓取以上面这一行为准 |
 | P1-1 `objects[].visual` | **PASS（功能与整机渲染）/ PARTIAL（精确装配）** | `visual` 支持 STL/GLB/GLTF/OBJ，挂成主物体子节点；加/不加 visual 的模拟 `states` 逐位相同；整机 STL 渲染 33,318 三角形 / 11 object。局部对位是手工近似，不是官方 CAD 装配，见 §8 |
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |
+| P0-3 真实抓取根因 | 已修 | 旧 `modkit_arm_grasp` 沿用**未修正的 link 锚点/中心**，在负载下肘关节会自己塌；把手指/方块放到按 `modkit_arm` 修正几何算出的腕点并 +20 mm 避开 `link2` 后，同一套 2.5 N·m 限幅的 PD 就能稳定夹持。这不是给抓取“加力”，而是修场景几何 |
+
 | P1-3 wasm `setJointTarget/...` | **PASS（API/示例）** | 导出 `loadScene/setJointTarget/step/getJointStates/getBodyTransform`；Node 里真实装载 modkit 场景，2 s 后 shoulder=20.00°，矩阵 16 个有限数；`web/robot.html` 滑杆预览；**60 fps 未基准测试**，见 §10 |
 | P2 MCP 新工具 / 接触力查询 / 1000 步 <2 s | **FAIL / 未实现** | 未做；`run_simulate` 是 CPU 路径，未做 1000 步性能门 |
 
@@ -284,7 +288,7 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 
 ## 11. 门禁结果
 
-`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，877 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
+`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，878 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
 
 ## 12. 确定性
 
@@ -295,7 +299,9 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 
 ## 13. 还没做
 
-* 真实摩擦/接触夹持（P0-3 的理想化仍是最大缺口）。
+* P1-1 的官方 CAD 装配变换（当前 STL 对位是手工近似，不是 robot-modkit 官方装配矩阵）。
+* P2 的 MCP 关节工具、接触力查询与浏览器 60 fps 规模基准。
+* 真实夹持目前只验证 20 g、40 mm 方块、friction 1.5；更重的物体需要重新标定预紧/增益。
 * 用 robot-modkit 的真实 STL 装完整 M1 并逐关节截图对位（P1-1 的功能在，资产/验收没做）。
 * 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
 * wasm 60 fps / 1000 刚体规模基准（API 与示例页已通）。
