@@ -230,13 +230,24 @@ impl Gizmo {
             self.hover = None;
             return false;
         }
+        // Alt+左键是"无论指针在哪都转视角"的逃生键：不要让手柄抢走这次拖动。
+        // 已经在拖手柄时按 Alt 不打断当前操作。
+        if self.drag.is_none() && ui.input(|i| i.modifiers.alt) {
+            self.hover = None;
+            return false;
+        }
         // 父+子同时选中时，变换写在最上层被选中的祖先上；子物体跟着层级走。
         let driver = doc.drag_driver(engine, index);
 
-        let pointer_abs = ui.input(|i| i.pointer.hover_pos());
-        // 统一用**视口局部坐标**：`world_to_screen` 给的就是视口坐标，
-        // 命中测试与绘制都 +rect.min 变回 egui 绝对坐标。
-        let pointer = pointer_abs.map(|p| p - rect.min);
+        // 3D 画在整张窗口纹理上；`world_to_screen` 也给窗口坐标。因此命中测试、
+        // 绘制和指针都用**窗口绝对坐标**，不能再减 `rect.min`（那会让手柄整体
+        // 往左上偏，点选和对不上）。
+        let pointer = ui
+            .input(|i| i.pointer.hover_pos())
+            .map(|p| EVec2::new(p.x, p.y));
+        let ppp = ui.ctx().pixels_per_point().max(0.01);
+        let (pw, ph) = engine.gpu.size();
+        let viewport = Vec2::new(pw as f32 / ppp, ph as f32 / ppp);
         let down = ui.input(|i| i.pointer.primary_down());
         let pressed = ui.input(|i| i.pointer.primary_pressed());
         let released = ui.input(|i| i.pointer.primary_released());
@@ -260,7 +271,7 @@ impl Gizmo {
         }
 
         let pivot = self.pivot_position(engine, doc, driver);
-        let screen = Screen::project(self, engine, rect, driver, pivot);
+        let screen = Screen::project(self, engine, viewport, driver, pivot);
 
         // ---- 1. 已经在拖：每帧从 start_transform 重算 ----
         if self.drag.is_some() {
@@ -404,7 +415,7 @@ impl Gizmo {
 
         // ---- 2. 没在拖：算悬停；按在把手上就开拖 ----
         self.hover = match pointer {
-            Some(p) if rect.contains(rect.min + p) => screen.hit(self, p, PICK_RADIUS_PX),
+            Some(p) if rect.contains(egui::pos2(p.x, p.y)) => screen.hit(self, p, PICK_RADIUS_PX),
             _ => None,
         };
 
@@ -432,7 +443,7 @@ impl Gizmo {
         }
 
         self.paint(ui, engine, doc, rect, &screen, None);
-        self.hover.is_some() && rect.contains(rect.min + pointer)
+        self.hover.is_some() && rect.contains(egui::pos2(pointer.x, pointer.y))
     }
 
     /// 按当前轴心设置求旋转/缩放中心。
@@ -500,7 +511,8 @@ impl Gizmo {
         hud: Option<String>,
     ) {
         let painter = ui.painter_at(rect);
-        let offset = rect.min.to_vec2();
+        // 投影已经是窗口绝对坐标，不再加视口偏移。
+        let offset = EVec2::ZERO;
         let active = self.drag.as_ref().map(|d| d.handle).or(self.hover);
         let axis_hi = |i: usize| active == Some(Handle::Axis(i));
         let name = doc
@@ -726,16 +738,21 @@ struct Screen {
 
 impl Screen {
     /// 把轴心、三根轴、旋转圆全部投影到屏幕。
-    fn project(gizmo: &Gizmo, engine: &Engine, rect: Rect, index: usize, pivot: Vec3) -> Screen {
+    fn project(
+        gizmo: &Gizmo,
+        engine: &Engine,
+        viewport: Vec2,
+        index: usize,
+        pivot: Vec3,
+    ) -> Screen {
         // 手柄的轴方向仍取主选物体的世界朝向（多选时不强行统一各物体的旋转）。
         let world = engine.scene.world_transform(index);
         let q = world.rotation;
-        let camera = engine
-            .orbit
-            .camera(rect.width().max(1.0) / rect.height().max(1.0));
+        // 与真正渲染用的是同一台相机（含飞行相机），否则手柄会飘。
+        let camera = engine.camera();
         // 注意：这里的 `Vec2` 是引擎（glam）的，egui 的别名成 `EVec2`。
         // `world_to_screen` 收的是引擎 Vec2，返回的也是引擎 Vec2。
-        let vp = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
+        let vp = viewport;
         let to_screen = |world: Vec3| camera.world_to_screen(world, vp);
 
         let axes = match gizmo.space {

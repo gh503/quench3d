@@ -1193,3 +1193,81 @@ fn shape_contains_texture(shape: &egui::Shape, texture_id: egui::TextureId) -> b
         _ => false,
     }
 }
+
+/// 视口点击必须回填**窗口绝对坐标**：3D 画在整张窗口纹理上，面板只是盖在上面。
+/// 如果这里回填的是 `pos - rect.min`，点选就会整体往左上偏。
+#[test]
+fn viewport_click_uses_window_coordinates() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let ctx = egui::Context::default();
+    let mut doc = Doc::new();
+    doc.selected = None;
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::new();
+    let screen = egui::vec2(1280.0, 900.0);
+    let run = |ctx: &egui::Context,
+               engine: &mut Engine,
+               doc: &mut Doc,
+               view: &mut Viewport,
+               gizmo: &mut Gizmo,
+               camera: &mut CameraFeed,
+               events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            let _ = ui::panels(ui, engine, doc, view, gizmo, camera);
+        })
+        .textures_delta
+        .clear();
+    };
+    // 第一帧只布局，拿到中央视口矩形。
+    run(
+        &ctx,
+        &mut engine,
+        &mut doc,
+        &mut view,
+        &mut gizmo,
+        &mut camera,
+        vec![],
+    );
+    let click = view.rect.center();
+    assert!(
+        click.x > view.rect.width() * 0.5,
+        "测试前提：中央视口不是以窗口左上角为原点"
+    );
+    run(
+        &ctx,
+        &mut engine,
+        &mut doc,
+        &mut view,
+        &mut gizmo,
+        &mut camera,
+        vec![
+            egui::Event::PointerMoved(click),
+            egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+    let got = view.click.expect("点击应回填到 Viewport");
+    assert!(
+        (got.x - click.x).abs() < 0.5 && (got.y - click.y).abs() < 0.5,
+        "点击坐标必须是窗口绝对坐标：期望 {click:?}，实际 {got:?}（视口左上角 {:?}）",
+        view.rect.min
+    );
+}

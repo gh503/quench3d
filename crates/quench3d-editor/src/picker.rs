@@ -160,14 +160,14 @@ impl FilePicker {
                         Ok(entries) => {
                             for entry in entries {
                                 if entry.is_dir {
-                                    if ui.button(format!("📁 {}", entry.name)).clicked() {
+                                    if ui.button(format!("[目录] {}", entry.name)).clicked() {
                                         self.dir = entry.path;
                                         self.error = None;
                                     }
                                 } else if ui
                                     .selectable_label(
                                         self.filename == entry.name,
-                                        format!("📄 {}", entry.name),
+                                        format!("[文件] {}", entry.name),
                                     )
                                     .clicked()
                                 {

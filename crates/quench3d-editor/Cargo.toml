@@ -52,3 +52,7 @@ web-sys = { version = "0.3", features = [
     "MediaDevices", "MediaStream", "MediaStreamConstraints",
     "HtmlMediaElement", "HtmlVideoElement", "CanvasRenderingContext2d", "ImageData",
 ] }
+
+[dev-dependencies]
+# 只用于测试：读内嵌 TTF 的 cmap，保证界面源码里的汉字都有字形。
+ab_glyph = "0.2"

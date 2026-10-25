@@ -17,8 +17,11 @@ pub struct Viewport {
     /// 指针是否悬停在视口上。
     pub hovered: bool,
     /// 本帧内是否发生了"点击"（按下并抬起且几乎没移动）。
+    ///
+    /// 坐标是**窗口坐标**（egui 点，原点在客户区左上角），不是视口局部坐标：
+    /// 3D 场景画在整张窗口纹理上，UI 面板只是盖在上面，拾取必须和整张纹理对齐。
     pub click: Option<Vec2>,
-    /// 指针在视口里的局部坐标（仅悬停且没被 gizmo 接管时）。
+    /// 指针的窗口坐标（仅悬停且没被 gizmo 接管时）。同 [`Viewport::click`]。
     pub hover: Option<Vec2>,
     /// 左键是否正在视口里拖动（用来把左键拖动当转视角）。
     pub dragging: bool,
@@ -207,9 +210,9 @@ fn top_bar(
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 let (play_label, play_hint) = if engine.paused {
-                    ("▶ 播放", "继续推进物理")
+                    ("播放", "继续推进物理")
                 } else {
-                    ("⏸ 暂停", "冻结物理与仿真时间")
+                    ("暂停", "冻结物理与仿真时间")
                 };
                 if ui.button(play_label).on_hover_text(play_hint).clicked() {
                     engine.paused = !engine.paused;
@@ -220,14 +223,14 @@ fn top_bar(
                     };
                 }
                 if ui
-                    .button("⏭ 单步")
+                    .button("单步")
                     .on_hover_text("推进一个固定物理步长（暂停时也能用）")
                     .clicked()
                 {
                     doc.step_once(engine);
                 }
                 if ui
-                    .button("⟲ 重置")
+                    .button("重置")
                     .on_hover_text("所有物体回到基线状态（位置 / 朝向 / 速度）")
                     .clicked()
                 {
@@ -239,14 +242,14 @@ fn top_bar(
                 let can_undo = doc.history.can_undo();
                 let can_redo = doc.history.can_redo();
                 if ui
-                    .add_enabled(can_undo, egui::Button::new("↶"))
+                    .add_enabled(can_undo, egui::Button::new("撤销"))
                     .on_hover_text("撤销（Ctrl+Z）")
                     .clicked()
                 {
                     doc.undo(engine);
                 }
                 if ui
-                    .add_enabled(can_redo, egui::Button::new("↷"))
+                    .add_enabled(can_redo, egui::Button::new("重做"))
                     .on_hover_text("重做（Ctrl+Shift+Z / Ctrl+Y）")
                     .clicked()
                 {
@@ -536,9 +539,9 @@ fn playback_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     ui.menu_button("播放", |ui| {
         ui.set_min_width(170.0);
         let (label, hint) = if engine.paused {
-            ("▶ 播放", "继续推进物理")
+            ("播放", "继续推进物理")
         } else {
-            ("⏸ 暂停", "冻结物理与仿真时间")
+            ("暂停", "冻结物理与仿真时间")
         };
         if ui.button(label).on_hover_text(hint).clicked() {
             engine.paused = !engine.paused;
@@ -550,7 +553,7 @@ fn playback_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.close();
         }
         if ui
-            .button("⏭ 单步")
+            .button("单步")
             .on_hover_text("推进一个固定物理步长（暂停时也能用）")
             .clicked()
         {
@@ -558,7 +561,7 @@ fn playback_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.close();
         }
         if ui
-            .button("⟲ 重置")
+            .button("重置")
             .on_hover_text("所有物体回到基线状态（位置 / 朝向 / 速度）")
             .clicked()
         {
@@ -568,7 +571,7 @@ fn playback_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             ui.close();
         }
         if ui
-            .button("☀ 唤醒全部")
+            .button("唤醒全部")
             .on_hover_text("把所有睡着的刚体叫醒（速度保持为零）")
             .clicked()
         {
@@ -612,6 +615,36 @@ fn view_menu(
                 ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
                 ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
             });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("重置视角")
+                .on_hover_text("回到默认的斜俯视；不改变场景内容")
+                .clicked()
+            {
+                engine.camera_mode = CameraMode::Orbit;
+                engine.orbit = OrbitCamera::default();
+            }
+            if ui.button("聚焦选中").on_hover_text("快捷键 F").clicked() {
+                doc.focus_selected(engine);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("前视").clicked() {
+                engine.camera_mode = CameraMode::Orbit;
+                engine.orbit.pitch = 0.0;
+                engine.orbit.yaw = 0.0;
+            }
+            if ui.button("右视").clicked() {
+                engine.camera_mode = CameraMode::Orbit;
+                engine.orbit.pitch = 0.0;
+                engine.orbit.yaw = std::f32::consts::FRAC_PI_2;
+            }
+            if ui.button("俯视").clicked() {
+                engine.camera_mode = CameraMode::Orbit;
+                engine.orbit.pitch = std::f32::consts::FRAC_PI_2 - 0.01;
+                engine.orbit.yaw = 0.0;
+            }
+        });
         if ui.button("摄像头预览…").clicked() {
             camera.toolbar(ui);
         }
@@ -931,7 +964,7 @@ fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Opti
                 doc.drag_source = None;
             }
         }
-        if ui.small_button("⌖").on_hover_text("聚焦").clicked() {
+        if ui.small_button("聚焦").on_hover_text("聚焦").clicked() {
             focus = Some(index);
         }
     });
@@ -1188,7 +1221,7 @@ fn draw_subtree(
         .default_open(true)
         .show(ui, |ui| {
             if ui
-                .small_button("⌖ 整组聚焦")
+                .small_button("整组聚焦")
                 .on_hover_text("把相机对准这个模型的全部子网格")
                 .clicked()
             {
@@ -1604,7 +1637,11 @@ fn camera_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             if !names.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label("命名视角");
-                    if ui.button("◀").on_hover_text("上一台（循环）").clicked() {
+                    if ui
+                        .button("上一台")
+                        .on_hover_text("上一台（循环）")
+                        .clicked()
+                    {
                         doc.cycle_named_camera(engine, -1);
                     }
                     let current = doc
@@ -1628,7 +1665,11 @@ fn camera_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                 }
                             }
                         });
-                    if ui.button("▶").on_hover_text("下一台（循环）").clicked() {
+                    if ui
+                        .button("下一台")
+                        .on_hover_text("下一台（循环）")
+                        .clicked()
+                    {
                         doc.cycle_named_camera(engine, 1);
                     }
                 });
@@ -4530,29 +4571,24 @@ fn viewport(
             view.hover = if view.gizmo_active {
                 None
             } else {
-                response
-                    .hover_pos()
-                    .map(|p| Vec2::new(p.x - rect.left(), p.y - rect.top()))
+                response.hover_pos().map(|p| Vec2::new(p.x, p.y))
             };
             if response.clicked() && !view.gizmo_active {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    let local = Vec2::new(pos.x - rect.left(), pos.y - rect.top());
-                    view.click = Some(local);
+                    // 3D 是整窗纹理：用窗口绝对坐标，不能减视口偏移。
+                    view.click = Some(Vec2::new(pos.x, pos.y));
                     view.additive =
                         ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl);
                 }
             }
             // Shift/Ctrl + 左键拖动 = 框选（不转视角；app 层在按下时已经让路）。
-            let additive_drag = ui.input(|i| {
-                i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl
-            });
+            let additive_drag =
+                ui.input(|i| i.modifiers.shift || i.modifiers.command || i.modifiers.ctrl);
             if response.drag_started() && additive_drag && !gizmo_took {
                 view.box_select_start = response.interact_pointer_pos();
             }
             if let Some(start) = view.box_select_start {
-                let current = ui
-                    .input(|i| i.pointer.interact_pos())
-                    .unwrap_or(start);
+                let current = ui.input(|i| i.pointer.interact_pos()).unwrap_or(start);
                 let rect_select = egui::Rect::from_two_pos(start, current);
                 ui.painter().rect_filled(
                     rect_select,
@@ -4565,15 +4601,17 @@ fn viewport(
                     egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 160, 255)),
                     egui::StrokeKind::Inside,
                 );
-                let released = response.drag_stopped()
-                    || !ui.input(|i| i.pointer.primary_down());
+                let released = response.drag_stopped() || !ui.input(|i| i.pointer.primary_down());
                 if released {
                     if rect_select.width() >= 3.0 || rect_select.height() >= 3.0 {
+                        // 与点选同一套坐标：3D 是整窗纹理，框选也用窗口绝对坐标。
+                        let ppp = ui.ctx().pixels_per_point().max(0.01);
+                        let (pw, ph) = engine.gpu.size();
                         doc.select_in_rect(
                             engine,
-                            Vec2::new(rect.width().max(1.0), rect.height().max(1.0)),
-                            Vec2::new(rect_select.min.x - rect.left(), rect_select.min.y - rect.top()),
-                            Vec2::new(rect_select.max.x - rect.left(), rect_select.max.y - rect.top()),
+                            Vec2::new(pw as f32 / ppp, ph as f32 / ppp),
+                            Vec2::new(rect_select.min.x, rect_select.min.y),
+                            Vec2::new(rect_select.max.x, rect_select.max.y),
                             true,
                         );
                     }
@@ -4584,7 +4622,7 @@ fn viewport(
             // 左上角提示：当前相机模式与操作。
             let hint = match engine.camera_mode {
                 CameraMode::Orbit => {
-                    "轨道相机：左键拖动 / 中键拖动 / Alt+左键 旋转，滚轮缩放，右键拖动平移；Shift+左键拖动框选"
+                    "轨道相机：在空白处左键拖动旋转 · 右键拖动平移 · 滚轮缩放 · Shift+左键拖动框选"
                 }
                 CameraMode::Fly => "飞行相机：右键拖动看向，WASD 移动，Q/E 升降",
             };
@@ -4616,7 +4654,10 @@ fn viewport(
                     1 => egui::pos2(rect.left() + margin.x, rect.bottom() - size.y - margin.y),
                     2 => egui::pos2(rect.right() - size.x - margin.x, rect.top() + margin.y),
                     3 => egui::pos2(rect.left() + margin.x, rect.top() + margin.y),
-                    _ => egui::pos2(rect.right() - size.x - margin.x, rect.bottom() - size.y - margin.y),
+                    _ => egui::pos2(
+                        rect.right() - size.x - margin.x,
+                        rect.bottom() - size.y - margin.y,
+                    ),
                 };
                 let pip_rect = egui::Rect::from_min_size(min, size);
                 painter.image(
@@ -4681,8 +4722,8 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
         .resizable(false)
         .show(ctx, |ui| {
             ui.label(RichText::new("相机").strong());
-            ui.label("左键拖动 / 中键拖动 / Alt+左键：旋转视角");
-            ui.label("右键拖动：平移（飞行模式下是转头）");
+            ui.label("在空白处左键拖动 / 中键拖动 / Alt+左键：自由旋转视角");
+            ui.label("右键拖动：平移焦点（飞行模式下是转头）");
             ui.label("滚轮：推近拉远");
             ui.label("Tab：切换轨道 / 飞行相机");
             ui.label("画中画：相机面板选第二台命名相机，并可选右下/左下/右上/左上；点小窗可把主相机切过去（桌面端约 5 Hz 预览）");
@@ -4691,7 +4732,7 @@ fn help_window(ctx: &egui::Context, doc: &mut Doc) {
             ui.label(RichText::new("编辑").strong());
             ui.label("左键点击：选中物体；Shift/Ctrl+左键拖动：框选");
             ui.label("Ctrl+C / Ctrl+V：复制 / 粘贴（编辑器内部剪贴板）");
-            ui.label("场景树里的 ⌖ / F：把相机对准这个物体");
+            ui.label("场景树里的「聚焦」按钮 / F：把相机对准这个物体");
             ui.label("属性面板：改名称 / 变换 / 颜色 / 材质 / 物理参数");
             ui.add_space(6.0);
             ui.label(RichText::new("变换手柄").strong());

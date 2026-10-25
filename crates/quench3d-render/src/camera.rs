@@ -281,7 +281,9 @@ impl Default for OrbitCamera {
             focus: Vec3::ZERO,
             distance: 12.0,
             yaw: 0.6,
-            pitch: -0.4,
+            // 相机在焦点**上方**俯视。曾经的 -0.4 把相机放到地平线以下仰视，
+            // 默认场景看起来像倒过来；新场景应当一进来就是正常的斜俯视。
+            pitch: 0.4,
             min_distance: 0.2,
             max_distance: 5000.0,
             sensitivity: 0.006,
@@ -349,6 +351,20 @@ impl OrbitCamera {
                 self.pan_speed * self.distance * input.dt * if input.boost { 4.0 } else { 1.0 };
             self.focus += (right * pan.x + Vec3::Y * pan.y + flat * pan.z) * speed;
         }
+    }
+
+    /// 按屏幕像素位移平移焦点（右键拖动）。
+    ///
+    /// `delta` 的单位是**渲染像素**（y 向下），`viewport_height` 也是像素。
+    /// 拖右 → 场景跟着右移 → 焦点左移；拖下 → 场景下移 → 焦点上移。
+    pub fn pan_screen(&mut self, delta: Vec2, viewport_height: f32) {
+        if viewport_height <= 0.0 || !delta.x.is_finite() || !delta.y.is_finite() {
+            return;
+        }
+        let camera = self.camera(1.0);
+        let world_per_px = 2.0 * self.distance * (self.fov_y * 0.5).tan() / viewport_height;
+        self.focus -= camera.right() * (delta.x * world_per_px);
+        self.focus += camera.up() * (delta.y * world_per_px);
     }
 
     /// 让相机框住包围盒。
@@ -484,6 +500,27 @@ mod tests {
         assert!(f.intersects_aabb(&Aabb::new(vec3(-1.0, -1.0, -11.0), vec3(1.0, 1.0, -9.0))));
         assert!(!f.intersects_aabb(&Aabb::new(vec3(-1.0, -1.0, 9.0), vec3(1.0, 1.0, 11.0))));
         assert!(!f.intersects_aabb(&Aabb::new(vec3(100.0, 0.0, -10.0), vec3(102.0, 2.0, -8.0))));
+    }
+
+    #[test]
+    fn default_orbit_starts_above_the_focus() {
+        let o = OrbitCamera::default();
+        let c = o.camera(1.0);
+        assert!(
+            c.position.y > o.focus.y,
+            "默认相机应在焦点上方，实际 {:?}",
+            c.position
+        );
+        assert!(c.forward().y < 0.0, "默认相机应朝下看");
+    }
+
+    #[test]
+    fn pan_screen_moves_focus_opposite_the_drag() {
+        let mut o = OrbitCamera::default();
+        let before = o.focus;
+        o.pan_screen(Vec2::new(10.0, 4.0), 600.0);
+        assert!(o.focus.x < before.x, "右拖应让焦点左移");
+        assert!(o.focus.y > before.y, "下拖应让焦点上移");
     }
 
     #[test]

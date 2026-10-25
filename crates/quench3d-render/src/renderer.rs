@@ -5,9 +5,10 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use quench3d_math::{Aabb, Mat4, Transform, Vec3, Vec4};
+use quench3d_math::{Aabb, Mat4, Ray, Transform, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, Frustum};
@@ -571,6 +572,8 @@ struct GpuMesh {
     prev_position_buffer: Option<wgpu::Buffer>,
     /// 上一帧位置（CPU 侧镜像，更新时用来填 `prev_position_buffer`）。
     last_positions: Vec<[f32; 3]>,
+    /// 可选保留的 CPU 网格（编辑器做逐三角形拾取；缺省丢弃，省内存）。
+    cpu: Option<Arc<MeshData>>,
 }
 
 /// GPU 材质。
@@ -1383,6 +1386,11 @@ pub struct RendererOptions {
     /// 注意：只在 `add_mesh*` 时生成，运行中把开关从 false 改成 true 不会给
     /// 已上传的网格补 LOD；需要重新载入场景。
     pub auto_lod: bool,
+    /// 上传时保留一份 CPU 网格（缺省 `false`，只给编辑器逐三角形拾取用）。
+    ///
+    /// 保留后每个网格多占一份顶点/索引内存；大场景请只在编辑器打开。没有保留时
+    /// 拾取自动退回包围盒，行为仍是旧的（可能把空处当成命中）。
+    pub keep_cpu_meshes: bool,
 }
 
 impl Default for RendererOptions {
@@ -1408,12 +1416,13 @@ impl Default for RendererOptions {
             oit: false,
             gpu_culling: false,
             auto_lod: false,
+            keep_cpu_meshes: false,
         }
     }
 }
 
 /// 把一个 CPU 网格上传成 GPU 网格（含空 `auto_lod`）。
-fn upload_gpu_mesh(device: &wgpu::Device, mesh: &MeshData, name: &str) -> GpuMesh {
+fn upload_gpu_mesh(device: &wgpu::Device, mesh: &MeshData, name: &str, keep_cpu: bool) -> GpuMesh {
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("quench3d-vertices"),
         contents: bytemuck::cast_slice(&mesh.vertices),
@@ -1433,6 +1442,7 @@ fn upload_gpu_mesh(device: &wgpu::Device, mesh: &MeshData, name: &str) -> GpuMes
         auto_lod: Vec::new(),
         prev_position_buffer: None,
         last_positions: mesh.vertices.iter().map(|v| v.position).collect(),
+        cpu: keep_cpu.then(|| Arc::new(mesh.clone())),
     }
 }
 
@@ -3571,7 +3581,12 @@ impl Renderer {
 
     /// 上传网格并命名（调试用）。
     pub fn add_mesh_named(&mut self, ctx: &GpuContext, mesh: &MeshData, name: &str) -> MeshId {
-        let id = self.meshes.insert(upload_gpu_mesh(&ctx.device, mesh, name));
+        let id = self.meshes.insert(upload_gpu_mesh(
+            &ctx.device,
+            mesh,
+            name,
+            self.options.keep_cpu_meshes,
+        ));
         if self.options.auto_lod && mesh.triangle_count() >= 500 {
             let mut levels = Vec::new();
             let mut previous = mesh.triangle_count();
@@ -3589,6 +3604,7 @@ impl Renderer {
                     &ctx.device,
                     &coarse,
                     &format!("{name}-lod{}", levels.len() + 1),
+                    false,
                 )));
                 levels.push(index);
             }
@@ -3926,6 +3942,55 @@ impl Renderer {
             mesh.bounds = Aabb::new(min, max);
         }
         true
+    }
+
+    /// 这个网格有没有保留 CPU 数据（决定拾取能否做逐三角形检测）。
+    pub fn has_cpu_mesh(&self, id: MeshId) -> bool {
+        self.meshes.get(id).is_some_and(|m| m.cpu.is_some())
+    }
+
+    /// 对某个网格做逐三角形射线检测（模型矩阵把射线变到局部空间）。
+    ///
+    /// 返回沿 `ray.dir` 的最近命中参数 `t`；网格没有保留 CPU 数据（见
+    /// [`RendererOptions::keep_cpu_meshes`]）时返回 `None`，调用方应退回包围盒。
+    /// 不做背面剔除：从内部/背面点击也应选中，这与渲染的双面语义一致。
+    pub fn raycast_mesh(&self, id: MeshId, model: &Mat4, ray: &Ray) -> Option<f32> {
+        let cpu = self.meshes.get(id)?.cpu.as_ref()?;
+        let inv = model.inverse();
+        let origin = inv.transform_point3(ray.origin);
+        let dir = inv.transform_vector3(ray.dir);
+        let mut best: Option<f32> = None;
+        for &[a, b, c] in cpu.indices.as_chunks::<3>().0 {
+            let va = cpu.vertices.get(a as usize)?;
+            let vb = cpu.vertices.get(b as usize)?;
+            let vc = cpu.vertices.get(c as usize)?;
+            let v0 = Vec3::from_array(va.position);
+            let v1 = Vec3::from_array(vb.position);
+            let v2 = Vec3::from_array(vc.position);
+            let e1 = v1 - v0;
+            let e2 = v2 - v0;
+            let p = dir.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1e-8 {
+                continue;
+            }
+            let inv_det = 1.0 / det;
+            let tvec = origin - v0;
+            let u = tvec.dot(p) * inv_det;
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
+            let q = tvec.cross(e1);
+            let v = dir.dot(q) * inv_det;
+            if v < 0.0 || u + v > 1.0 {
+                continue;
+            }
+            let t = e2.dot(q) * inv_det;
+            if t > 1e-5 && best.map(|b| t < b).unwrap_or(true) {
+                best = Some(t);
+            }
+        }
+        best
     }
 
     /// 网格信息 `(名称, 索引数, 包围盒)`。

@@ -1641,10 +1641,30 @@ impl Doc {
             };
             // 细小物体（薄板、细杆）的包围盒可能退化成一条线，撑开一点更好点。
             let bounds = bounds.grown(0.02);
-            if let Some(t) = ray.intersect_aabb(&bounds) {
-                if best.map(|(_, bt)| t < bt).unwrap_or(true) {
-                    best = Some((index, t));
+            let Some(entry) = ray.intersect_aabb(&bounds) else {
+                continue;
+            };
+            if best.map(|(_, bt)| entry >= bt).unwrap_or(false) {
+                continue;
+            }
+            // 有 CPU 网格时按真实三角形命中；包围盒只当粗筛。否则退回旧行为。
+            // 这一步修的是「点空白处却选中旁边物体」——旋转过的长条/薄板
+            // 包围盒会覆盖大片实际没有面的区域。
+            let world = engine.scene.world_transform(index);
+            let t = if engine.renderer.has_cpu_mesh(object.mesh) {
+                // 有 CPU 网格就以三角形为准；打不中说明这个包围盒只是包住了空处。
+                match engine
+                    .renderer
+                    .raycast_mesh(object.mesh, &world.matrix(), ray)
+                {
+                    Some(t) => t,
+                    None => continue,
                 }
+            } else {
+                entry
+            };
+            if best.map(|(_, bt)| t < bt).unwrap_or(true) {
+                best = Some((index, t));
             }
         }
         best.map(|(index, _)| index)
@@ -1652,7 +1672,8 @@ impl Doc {
 
     /// 框选：把**屏幕中心点**落在 `min..max` 矩形里的可见物体选进来。
     ///
-    /// `min/max` 是相对视口左上角的像素坐标，`viewport` 是视口像素尺寸。只按物体
+    /// `min/max` 是与 `viewport` 同一坐标系的屏幕坐标（编辑器传窗口坐标/窗口尺寸，
+    /// 因为 3D 画在整张窗口纹理上）。只按物体
     /// **中心**判断（不做逐三角形/包围盒嵌套），所以大物体的边缘可能落在框内但中心
     /// 在框外——这是有意的便宜实现，和 Blender 的"框选中心"口径一致。
     ///

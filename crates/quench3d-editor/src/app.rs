@@ -101,7 +101,11 @@ impl Default for EditorConfig {
             msaa_samples: 4,
             vsync: true,
             canvas_id: "quench3d-canvas".to_string(),
-            renderer: quench3d::render::RendererOptions::default(),
+            // 编辑器要逐三角形拾取，保留一份 CPU 网格；运行时不渲染这份数据。
+            renderer: quench3d::render::RendererOptions {
+                keep_cpu_meshes: true,
+                ..Default::default()
+            },
             demo_scene: true,
             startup_scene: None,
         }
@@ -116,6 +120,10 @@ impl Default for EditorConfig {
 struct EditorGame {
     /// 左键拖动是否当作转视角（在视口里按下才算）。
     orbit_with_left: bool,
+    /// 右键拖动是否当作平移（在视口里按下才算）。
+    pan_with_right: bool,
+    /// 视口高度（**渲染像素**），右键平移的像素→世界换算用。
+    viewport_height: f32,
     /// egui 是否想要键盘（输入框聚焦时，快捷键要让路）。
     keys_enabled: bool,
 }
@@ -127,7 +135,16 @@ impl Game for EditorGame {
             || (engine.input.alt && engine.input.mouse_button_down(MouseButton::Left));
         let camera_input = engine.input.camera_input(dt, orbit_drag);
         match engine.camera_mode {
-            CameraMode::Orbit => engine.orbit.update(&camera_input),
+            CameraMode::Orbit => {
+                engine.orbit.update(&camera_input);
+                // 右键拖 = 平移焦点，不旋转。放在 `update` 之后，避免同一帧
+                // 的鼠标位移既转又移。
+                if self.pan_with_right {
+                    engine
+                        .orbit
+                        .pan_screen(engine.input.mouse_delta, self.viewport_height);
+                }
+            }
             CameraMode::Fly => engine.fly.update(&camera_input),
         }
     }
@@ -402,6 +419,8 @@ impl Inner {
             engine,
             game: EditorGame {
                 orbit_with_left: false,
+                pan_with_right: false,
+                viewport_height: 1.0,
                 keys_enabled: true,
             },
             doc,
@@ -519,6 +538,8 @@ impl Inner {
         // ---- 2. 引擎一帧：物理 + 提交绘制指令 ----
         let mut game = std::mem::take(&mut self.game);
         game.keys_enabled = keys_enabled;
+        game.viewport_height =
+            (self.viewport.rect.height() * full_output.pixels_per_point).max(1.0);
         self.engine.tick(&mut game, dt);
         self.game = game;
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
@@ -615,17 +636,21 @@ impl Inner {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let size = (frame.texture.width(), frame.texture.height());
+        // 3D 画在**整张窗口纹理**上（中央面板是透明的，左右面板盖住两侧）。
+        // 相机与拾取都必须用窗口宽高比/窗口坐标；把鼠标坐标当成中央视口局部
+        // 坐标会让点选整体偏左、偏上，越靠边缘越明显。
         self.engine.render_to(&texture_view, size);
         #[cfg(not(target_arch = "wasm32"))]
         self.capture_pip();
 
         // 拾取：用这一帧的相机与视口矩形。
-        if let Some(local) = self.viewport.click {
-            let viewport = Vec2::new(
-                self.viewport.rect.width().max(1.0),
-                self.viewport.rect.height().max(1.0),
-            );
-            let ray = self.engine.camera().screen_ray(local, viewport);
+        let ppp = self.egui_ctx.pixels_per_point().max(0.01);
+        let window_points = {
+            let (w, h) = self.engine.gpu.size();
+            Vec2::new(w as f32 / ppp, h as f32 / ppp)
+        };
+        if let Some(pos) = self.viewport.click {
+            let ray = self.engine.camera().screen_ray(pos, window_points);
             let picked = self.doc.pick(&self.engine, &ray);
             if self.viewport.additive {
                 if let Some(index) = picked {
@@ -642,12 +667,8 @@ impl Inner {
         {
             None
         } else {
-            self.viewport.hover.and_then(|local| {
-                let viewport = Vec2::new(
-                    self.viewport.rect.width().max(1.0),
-                    self.viewport.rect.height().max(1.0),
-                );
-                let ray = self.engine.camera().screen_ray(local, viewport);
+            self.viewport.hover.and_then(|pos| {
+                let ray = self.engine.camera().screen_ray(pos, window_points);
                 self.doc.pick(&self.engine, &ray)
             })
         };
@@ -723,7 +744,7 @@ impl Inner {
             let cjk_ok = self.egui_ctx.fonts_mut(|f| {
                 f.has_glyphs(
                     &egui::FontId::proportional(14.0),
-                    "场景物体物理材质密度摩擦弹性暂停播放单步重置添加删除清空网格阴影坐标轴",
+                    "场景物体物理材质密度摩擦弹性暂停播放单步重置添加删除清空网格阴影坐标轴渲染轨道相机视图聚焦",
                 )
             });
             log::info!("编辑器字体：中文子集可用 = {cjk_ok}");
@@ -1029,12 +1050,21 @@ fn install_fonts(ctx: &egui::Context) {
             "../assets/ui-font.ttf"
         ))),
     );
+    // 符号（箭头、≈/≠/≥、弯引号…）来自 DejaVu 的子集。egui 自带的 Ubuntu
+    // 字体没有箭头，中文子集也不含非汉字符号；不补这一层，界面里就会冒出
+    // 一排豆腐块。放在中文后面，汉字仍由中文字体负责。
+    fonts.font_data.insert(
+        "quench3d-symbols".to_string(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/ui-symbols.ttf"
+        ))),
+    );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts
             .families
             .entry(family)
             .or_default()
-            .push("quench3d-cjk".to_string());
+            .extend(["quench3d-cjk".to_string(), "quench3d-symbols".to_string()]);
     }
     ctx.set_fonts(fonts);
 }
@@ -1288,6 +1318,7 @@ impl EditorApp {
                 if !focused {
                     engine.input.on_focus_lost();
                     inner.game.orbit_with_left = false;
+                    inner.game.pan_with_right = false;
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1441,11 +1472,21 @@ impl EditorApp {
                             {
                                 inner.game.orbit_with_left = true;
                             }
+                            if b == MouseButton::Right
+                                && pointer_in_viewport
+                                && !inner.viewport.gizmo_active
+                                && engine.camera_mode == CameraMode::Orbit
+                            {
+                                inner.game.pan_with_right = true;
+                            }
                         }
                         ElementState::Released => {
                             engine.input.on_mouse_up(b);
                             if b == MouseButton::Left {
                                 inner.game.orbit_with_left = false;
+                            }
+                            if b == MouseButton::Right {
+                                inner.game.pan_with_right = false;
                             }
                         }
                     }
@@ -2298,5 +2339,66 @@ mod texture_edit_tests {
             None
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use ab_glyph::Font;
+
+    /// 界面字体子集必须覆盖**编辑器源码里出现的每一个汉字**。
+    ///
+    /// 这条测试是给未来的人看的：菜单里加一个生僻字、却忘了重新生成
+    /// `assets/ui-font.ttf`，界面上就会出现「x 染」这种豆腐块。字体子集没有
+    /// 任何运行时兜底（egui 自带字体一个汉字都没有），所以必须在 CI 里红一次。
+    #[test]
+    fn ui_font_covers_every_cjk_character_in_editor_sources() {
+        let font = ab_glyph::FontRef::try_from_slice(include_bytes!("../assets/ui-font.ttf"))
+            .expect("内嵌字体必须是有效 TTF");
+        let sources = [
+            ("app.rs", include_str!("app.rs")),
+            ("autosave.rs", include_str!("autosave.rs")),
+            ("camera.rs", include_str!("camera.rs")),
+            ("doc.rs", include_str!("doc.rs")),
+            ("gizmo.rs", include_str!("gizmo.rs")),
+            ("history.rs", include_str!("history.rs")),
+            ("layout.rs", include_str!("layout.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("picker.rs", include_str!("picker.rs")),
+            ("scene_io.rs", include_str!("scene_io.rs")),
+            ("ui.rs", include_str!("ui.rs")),
+        ];
+        let mut missing = Vec::new();
+        for (path, src) in sources {
+            for ch in src.chars() {
+                let code = ch as u32;
+                let cjk = (0x3400..=0x4DBF).contains(&code)
+                    || (0x4E00..=0x9FFF).contains(&code)
+                    || (0xF900..=0xFAFF).contains(&code);
+                if cjk && font.glyph_id(ch).0 == 0 {
+                    missing.push(format!("{path}: {ch} (U+{code:04X})"));
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "界面字体缺少 {} 个汉字，请重新生成 assets/ui-font.ttf：{}",
+            missing.len(),
+            missing.join(", ")
+        );
+
+        // 符号字体补的是 egui 默认字体没有的箭头/数学符号。
+        let symbols = ab_glyph::FontRef::try_from_slice(include_bytes!("../assets/ui-symbols.ttf"))
+            .expect("内嵌符号字体必须是有效 TTF");
+        for ch in "→←↑↓↔§°±·×Δ—…≈≠≥".chars() {
+            assert_ne!(
+                symbols.glyph_id(ch).0,
+                0,
+                "符号字体缺少 {ch}（U+{:04X}）",
+                ch as u32
+            );
+        }
     }
 }
