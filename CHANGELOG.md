@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **盒投影贴花（引擎 M2 第六项的一片）**：`Renderer::draw_decal(DecalDesc)`。全屏
+  pass 用场景深度重建世界坐标，投进贴花局部盒，所以贴在地面/斜坡/已有深度上，而不是
+  浮空透明四边形；带 alpha 混合，可一次画多个。GPU e2e 验证地面中心变红、盒外逐位
+  不变、移除后逐位回基线，并覆盖 MSAA=4 的解析深度路径。场景 JSON 暂未暴露贴花。
 - **线性距离雾（引擎 M2 第六项的一片）**：`FogParams::with_linear(start, end)`，
   场景 JSON 支持 `lighting.fog.mode = "linear"` + `start`/`end`。起点之前逐位无雾，
   终点处完全雾色；缺省仍是指数雾，`density = 0` 仍等于关闭。GPU 像素 e2e 验证，

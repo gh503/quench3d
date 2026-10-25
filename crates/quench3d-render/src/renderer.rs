@@ -1278,6 +1278,35 @@ struct CustomPostPipeline {
     hdr: wgpu::RenderPipeline,
 }
 
+/// 一个盒投影贴花实例。
+///
+/// `transform` 的局部空间是 `[-0.5, 0.5]^3`，沿局部 Y 轴投影；通常把 Y 轴对准
+/// 接收面的法线，`scale` 的 x/z 决定贴花覆盖的宽高。
+#[derive(Clone, Copy, Debug)]
+pub struct DecalDesc {
+    /// 贴花纹理。
+    pub texture: TextureId,
+    /// 位置 / 旋转 / 尺寸。
+    pub transform: Transform,
+    /// 颜色倍乘（RGBA，alpha 控制不透明度）。
+    pub color: Vec4,
+}
+
+impl DecalDesc {
+    /// 从纹理、位置、尺寸构造一个面向 +Y 的贴花。
+    pub fn new(texture: TextureId, position: Vec3, size: Vec3) -> Self {
+        Self {
+            texture,
+            transform: Transform {
+                position,
+                scale: size,
+                ..Transform::IDENTITY
+            },
+            color: Vec4::ONE,
+        }
+    }
+}
+
 /// 渲染器创建选项。
 #[derive(Clone, Copy, Debug)]
 pub struct RendererOptions {
@@ -1397,6 +1426,101 @@ fn prev_position_layout() -> wgpu::VertexBufferLayout<'static> {
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &ATTRS,
     }
+}
+
+const DECAL_WGSL: &str = include_str!("shaders/decal.wgsl");
+
+/// 贴花 uniform：逆视图投影 + 逆模型 + 颜色。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct DecalParams {
+    inv_view_proj: [[f32; 4]; 4],
+    inv_model: [[f32; 4]; 4],
+    color: [f32; 4],
+}
+
+fn decal_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("quench3d-decal-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn create_decal_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("quench3d-decal-shader"),
+        source: wgpu::ShaderSource::Wgsl(DECAL_WGSL.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("quench3d-decal-pipeline-layout"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("quench3d-decal"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: HDR_FORMAT,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Quench3D 渲染器。
@@ -1529,6 +1653,9 @@ pub struct Renderer {
     skin_palette: Vec<[[f32; 4]; 4]>,
     /// 上一帧的关节矩阵：TAA 运动向量对蒙皮网格也要用上一帧姿态。
     prev_skin_palette: Vec<[[f32; 4]; 4]>,
+    decals: Vec<DecalDesc>,
+    decal_layout: wgpu::BindGroupLayout,
+    decal_pipeline: wgpu::RenderPipeline,
     staging: Vec<(InstanceRaw, Aabb)>,
     /// GPU 剔除缓冲（`options.gpu_culling` 打开且后端支持 compute 时才有）。
     gpu_cull: Option<GpuCull>,
@@ -2890,7 +3017,12 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let decal_layout = decal_bind_group_layout(device);
+        let decal_pipeline = create_decal_pipeline(device, &decal_layout);
         Self {
+            decals: Vec::new(),
+            decal_layout,
+            decal_pipeline,
             frame_layout,
             shadow_bind_layout,
             material_layout,
@@ -3618,6 +3750,19 @@ impl Renderer {
         self.batches.clear();
         self.batch_index.clear();
         self.lines.clear();
+        self.decals.clear();
+    }
+
+    /// 提交一个盒投影贴花。必须在 `begin_frame()` 之后、`render()` 之前调用。
+    pub fn draw_decal(&mut self, decal: DecalDesc) {
+        if self.textures.get(decal.texture).is_some() {
+            self.decals.push(decal);
+        }
+    }
+
+    /// 清空本帧的贴花（`begin_frame()` 也会清）。
+    pub fn clear_decals(&mut self) {
+        self.decals.clear();
     }
 
     /// 提交一次绘制。
@@ -3721,16 +3866,16 @@ impl Renderer {
         // 否则要么管线建不出来，要么着色器读了没绑的资源。
         let ssao_on = self.ssao_active();
         let custom_on = !self.custom_posts.is_empty();
-        let depth_needed = ssao_on || custom_on;
-        let ssao_depth_ready = ssao_on == self.resolved_depth_view.is_some();
+        let decals_on = !self.decals.is_empty() && self.depth_texture_read;
+        let depth_needed = ssao_on || custom_on || decals_on;
+        let depth_ready = depth_needed == self.resolved_depth_view.is_some();
         let taa_ready = self.taa_pipeline.is_none() || self.taa_current.is_some();
         let custom_ready = self.custom_posts.is_empty()
             || (self.custom_ping_view.is_some()
                 && self.custom_post_ldr_bind_groups.len() == self.custom_posts.len());
         if self.target_size == size
             && self.depth_view.is_some()
-            && ssao_depth_ready
-            && (custom_on == self.resolved_depth_view.is_some())
+            && depth_ready
             && taa_ready
             && custom_ready
         {
@@ -4697,6 +4842,7 @@ impl Renderer {
         let ssao = self.options.ssao;
         let ssao_on = self.ssao_active();
         let custom_on = !self.custom_posts.is_empty();
+        let decals_on = !self.decals.is_empty() && self.depth_texture_read;
         // 半球采样点要投回屏幕（proj）、深度要反投影成视空间位置（inv_proj）
         let proj = camera.projection_matrix();
         let inv_proj = proj.inverse();
@@ -5362,7 +5508,7 @@ impl Renderer {
         // ---------- 深度解析（可选：开了 SSAO 且 MSAA > 1） ----------
         // 把多采样深度的第 0 号采样搬到单采样深度贴图，供后处理按像素读取。
         // 三个都要有：绑定组/目标视图（跟着 `ssao_on` 建）与管线（GL 上是 `None`）。
-        if ssao_on || custom_on {
+        if ssao_on || custom_on || decals_on {
             if let (Some(pipeline), Some(bind_group), Some(resolved)) = (
                 &self.depth_resolve_pipeline,
                 &self.depth_resolve_bind_group,
@@ -5387,6 +5533,73 @@ impl Renderer {
                 pass.set_bind_group(0, bind_group, &[]);
                 pass.draw(0..3, 0..1);
                 stats.post_passes += 1;
+            }
+        }
+
+        // ---------- 盒投影贴花（可选） ----------
+        // 全屏三角形 + 场景深度重建世界坐标；贴在已经写进深度的任意表面上，而不是
+        // 浮在空中的透明四边形。带 alpha 混合，直接写 HDR 中间目标。
+        if decals_on && !self.decals.is_empty() {
+            if let (Some(depth), Some(color)) = (&self.resolved_depth_view, &self.hdr_view) {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quench3d-decal-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: color,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.decal_pipeline);
+                for decal in &self.decals {
+                    let Some(texture) = self.textures.get(decal.texture) else {
+                        continue;
+                    };
+                    let params = DecalParams {
+                        inv_view_proj: camera.view_projection().inverse().to_cols_arrays(),
+                        inv_model: decal.transform.matrix().inverse().to_cols_arrays(),
+                        color: decal.color.to_array(),
+                    };
+                    let uniform =
+                        ctx.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("quench3d-decal-uniform"),
+                                contents: bytemuck::bytes_of(&params),
+                                usage: wgpu::BufferUsages::UNIFORM,
+                            });
+                    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("quench3d-decal-bind-group"),
+                        layout: &self.decal_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&texture.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(depth),
+                            },
+                        ],
+                    });
+                    pass.set_bind_group(0, &bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                    stats.draw_calls += 1;
+                }
             }
         }
 
