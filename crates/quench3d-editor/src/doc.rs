@@ -1540,7 +1540,7 @@ impl Doc {
             }
             was_model_mesh |= self.model_of_object(index).is_some();
             children += engine.scene.children_of(index).len();
-            let Some(object) = engine.scene.remove(index) else {
+            let Some(object) = engine.remove_object(index) else {
                 continue;
             };
             names.push(object.name.clone());

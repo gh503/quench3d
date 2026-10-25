@@ -2812,6 +2812,41 @@ impl AssetCache {
         id
     }
 
+    /// 释放一个由本缓存命名上传的网格。返回是否命中了缓存条目。
+    ///
+    /// 内置单位图元（cube/sphere/...）不在命名表里，不会被释放；共享网格要由
+    /// 调用方先确认没有其他物体/动画仍引用它。
+    pub fn release_mesh(&mut self, renderer: &mut quench3d_render::Renderer, id: MeshId) -> bool {
+        let Some(name) = self
+            .meshes
+            .iter()
+            .find(|(_, cached)| **cached == id)
+            .map(|(name, _)| name.clone())
+        else {
+            return false;
+        };
+        self.meshes.remove(&name);
+        renderer.remove_mesh(id)
+    }
+
+    /// 释放一个由本缓存命名的材质。返回是否命中了缓存条目。
+    pub fn release_material(
+        &mut self,
+        renderer: &mut quench3d_render::Renderer,
+        id: MaterialId,
+    ) -> bool {
+        let Some(name) = self
+            .materials
+            .iter()
+            .find(|(_, cached)| **cached == id)
+            .map(|(name, _)| name.clone())
+        else {
+            return false;
+        };
+        self.materials.remove(&name);
+        renderer.remove_material(id)
+    }
+
     /// 缓存统计。
     pub fn cached_counts(&self) -> (usize, usize) {
         (self.meshes.len(), self.materials.len())

@@ -1066,6 +1066,100 @@ fn fluids_survive_editor_roundtrip() {
     assert_eq!(f.max_particles, 1200);
 }
 
+/// 删物体时联动释放命名网格/材质：反复增删后缓存与渲染器计数都回到基线。
+#[test]
+fn removing_objects_releases_cached_mesh_and_material() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let baseline_assets = engine.assets.cached_counts();
+    let baseline_gpu = engine.renderer.resource_counts();
+    for round in 0..8 {
+        let mesh = engine.assets.mesh(
+            &mut engine.renderer,
+            &engine.gpu,
+            &format!("release-object-mesh-{round}"),
+            &quench3d::render::MeshData::cube(0.3),
+        );
+        let material = engine.assets.material(
+            &mut engine.renderer,
+            &engine.gpu,
+            &format!("release-object-material-{round}"),
+            MaterialDesc::new(Vec4::new(0.2, 0.6, 0.9, 1.0)).pbr(0.0, 0.4),
+        );
+        let object = engine.scene.add_named(
+            mesh,
+            material,
+            Transform::IDENTITY,
+            &format!("release-object-{round}"),
+        );
+        assert_eq!(
+            engine.assets.cached_counts(),
+            (baseline_assets.0 + 1, baseline_assets.1 + 1)
+        );
+        assert!(engine.remove_object(object).is_some());
+        assert_eq!(
+            engine.assets.cached_counts(),
+            baseline_assets,
+            "第 {round} 轮删物体后命名缓存没有回落"
+        );
+        assert_eq!(
+            engine.renderer.resource_counts(),
+            baseline_gpu,
+            "第 {round} 轮删物体后 GPU 资源没有回落"
+        );
+    }
+}
+
+/// 单场景内逐资源释放：反复上传/删除网格、材质、贴图，资源计数必须回到基线，
+/// 旧句柄必须失效，复用后的新句柄不能与旧句柄相同。
+#[test]
+fn per_resource_release_returns_to_baseline_and_invalidates_stale_handles() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let baseline = engine.renderer.resource_counts();
+    let mut previous_mesh = None;
+    for round in 0..16 {
+        let mesh = engine.renderer.add_mesh_named(
+            &engine.gpu,
+            &quench3d::render::MeshData::cube(0.25),
+            "release-probe",
+        );
+        let texture = engine.renderer.add_texture(
+            &engine.gpu,
+            &quench3d::render::ImageData::checker(2, 2, [255; 4], [0; 4]),
+            true,
+        );
+        let material = engine.renderer.add_material(
+            &engine.gpu,
+            MaterialDesc::new(Vec4::new(0.8, 0.2, 0.1, 1.0)).pbr(0.0, 0.5),
+        );
+        assert_eq!(
+            engine.renderer.resource_counts(),
+            (baseline.0 + 1, baseline.1 + 1, baseline.2 + 1),
+            "第 {round} 轮上传后计数不对"
+        );
+        if let Some(old) = previous_mesh {
+            assert_ne!(mesh, old, "复用槽位必须换句柄（代次递增）");
+            assert!(
+                engine.renderer.mesh_info(old).is_none(),
+                "旧网格句柄在复用后必须失效"
+            );
+        }
+        assert!(engine.renderer.remove_mesh(mesh));
+        assert!(!engine.renderer.remove_mesh(mesh), "重复释放必须返回 false");
+        assert!(engine.renderer.remove_material(material));
+        assert!(engine.renderer.remove_texture(texture));
+        assert_eq!(
+            engine.renderer.resource_counts(),
+            baseline,
+            "第 {round} 轮释放后资源计数没有回到基线"
+        );
+        previous_mesh = Some(mesh);
+    }
+}
+
 /// 反复"打开"同一份场景，渲染器资源表必须回到同一规模。
 ///
 /// 以前载入只清 `Scene`，不清 `Renderer` 的网格/材质/贴图：每打开一次就把上一份

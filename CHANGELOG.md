@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **逐资源释放接入场景删除（引擎 M1 第 3 片）**：`AssetCache::release_mesh/release_material`
+  与 `Engine::remove_object` 联动，编辑器删物体时在没有其他物体/粒子引用的情况下释放
+  命名网格/材质；两条 GPU e2e 覆盖 16 轮 add/remove 与 8 轮加物体再删，句柄与资源计数
+  都回到基线。贴图仍只有底层 `remove_texture` API，场景级引用表未做。
 - **逐资源释放（引擎 M1 第 2 片）**：网格/材质/贴图改为带代次的槽表，
   低 20 位下标 + 高 12 位代次；新增 `remove_mesh/remove_material/remove_texture`，
   旧句柄释放后失效、复用不会复活；`mesh_count` 等只数活资源。两条单测覆盖

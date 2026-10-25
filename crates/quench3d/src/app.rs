@@ -735,6 +735,34 @@ fn advance_clock(
 
 // 固定步长累加器的只读访问（调试/UI 用）。
 impl Engine {
+    /// 删除场景物体，并在没有其他引用时释放它的命名网格/材质。
+    ///
+    /// 只处理 `AssetCache` 里**按名字上传**的资源；内置图元和仍被其他物体/粒子
+    /// 引用的资源会保留。物理刚体由调用方按返回的物体自行删除（编辑器删除路径
+    /// 已经这么做）。
+    pub fn remove_object(&mut self, index: usize) -> Option<crate::SceneObject> {
+        let object = self.scene.remove(index)?;
+        let mesh_used = self.scene.objects.iter().any(|o| o.mesh == object.mesh);
+        if !mesh_used {
+            self.assets.release_mesh(&mut self.renderer, object.mesh);
+        }
+        let material_used = self
+            .scene
+            .objects
+            .iter()
+            .any(|o| o.material == object.material)
+            || self
+                .scene
+                .particles
+                .iter()
+                .any(|p| p.material == object.material);
+        if !material_used {
+            self.assets
+                .release_material(&mut self.renderer, object.material);
+        }
+        Some(object)
+    }
+
     /// 尚未消费的固定步长余量（秒）。
     pub fn pending_steps(&self) -> f32 {
         self.accumulator
