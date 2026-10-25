@@ -3,7 +3,7 @@
 > 目的：把「功能存在」和「功能真的改变状态 / 画面」分开。每一项都给出**能重跑的命令**
 > 与判据；没有自动化证据的项标「未覆盖」，不写成绿。
 >
-> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **864** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
+> 最近一次全量结果：`tools/verify_all.sh` 全绿；门禁 **866** 个测试、0 失败、3 ignored；GPU 蒙皮有调色板填充与 CPU/GPU 像素对照；
 > wasm 构建 + `check_web.mjs` + WebGL2 启动 + Web UI 按键探针 + 摄像头纯函数测试都通过。
 
 ## 0. 一条命令
@@ -35,6 +35,7 @@ tools/verify_editor_features.sh
 | 点光 / 聚光阴影 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d-render --test point_lights` | 有/无投影的像素差 |
 | Bloom | `cargo test -p quench3d-render --test post_pipeline bloom` | 亮区外溢、关闭时参数无效 |
 | FXAA | `cargo test -p quench3d-render --test post_pipeline fxaa` | 边缘变平滑、平面不变 |
+| 相机运动模糊 | `cargo test -p quench3d-render --test post_pipeline camera_motion_blur` + `cargo test -p quench3d-cli --lib invalid_motion_blur` | 相机 A→B 的两帧序列：开/关各渲 B 帧，>20 像素变化；场景格式 samples=0/shutter=3/max_blur=-1 均报错；UI 按 M 状态翻转 |
 | 最大绘制距离 | `cargo test -p quench3d-render --test post_pipeline max_draw_distance` + `cargo test -p quench3d-cli --test cli_e2e scene_render_max_draw_distance` | 引擎像素测试：限 80 m 只画近物；场景格式 → CLI：写 30 m 报告 `instances=1/distance_culled=1`，不写则 2 个；0 被校验拒绝 |
 | 编辑器选中包围盒 | `cargo test -p quench3d-editor --lib selection_boxes_draw_twelve_edges_each` + `tools/probe_web_ui.sh` | 两个盒子 24 条边；默认场景按 H 后 `selection=true → false`，截图哈希变化，再按恢复 |
 | 编辑器悬停高亮 | `tools/probe_web_ui.sh` | 鼠标扫到 `@420,160`，`hovered` 从无变为 `#0`，青色 AABB 使截图变化；离开视口恢复 |

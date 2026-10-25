@@ -248,6 +248,12 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         enabled: Some(opts.taa.enabled),
         feedback: Some(opts.taa.feedback),
     });
+    lighting.motion_blur = Some(quench3d_cli::scene_doc::MotionBlurDoc {
+        enabled: Some(opts.motion_blur.enabled),
+        shutter: Some(opts.motion_blur.shutter),
+        samples: Some(opts.motion_blur.samples),
+        max_blur: Some(opts.motion_blur.max_blur),
+    });
     lighting.ssao = Some(quench3d_cli::scene_doc::SsaoDoc {
         enabled: Some(opts.ssao.enabled),
         radius: Some(opts.ssao.radius),
@@ -962,6 +968,7 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     engine.renderer.options.bloom = runner::bloom_options(&doc);
     engine.renderer.options.fxaa = runner::fxaa_options(&doc);
     engine.renderer.options.taa = runner::taa_options(&doc);
+    engine.renderer.options.motion_blur = runner::motion_blur_options(&doc);
     engine.renderer.options.ssao = runner::ssao_options(&doc);
     engine.renderer.options.dof = runner::dof_options(&doc);
     let name = doc.name.clone().unwrap_or_else(|| "scene".to_string());

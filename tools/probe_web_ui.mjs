@@ -265,6 +265,8 @@ async function main() {
   await sleep(250);
   // 默认场景有选中物体，H 的橙色包围盒应当真的改变画面。
   await toggle("选中包围盒 H", "h", "KeyH", 72, true);
+  // 运动模糊只影响"相机在动"的画面，静止场景没像素差异；只验开关状态。
+  await toggle("相机运动模糊 M", "m", "KeyM", 77, false);
   // 默认场景的亮度足够区分 ACES/Reinhard：要求状态与画面都变。
   await toggle("色调 T", "t", "KeyT", 84);
   // K 只移动 3D 光标/切轴心；默认选中物可能正好在原点，所以只验状态。

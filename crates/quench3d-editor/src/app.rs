@@ -590,6 +590,7 @@ impl Inner {
             probes: self.doc.show_probes,
             selection: self.doc.show_selection,
             hovered: self.doc.hovered.unwrap_or(usize::MAX),
+            motion_blur: self.engine.renderer.options.motion_blur.enabled,
             tonemap: self.engine.renderer.options.tonemap.label(),
             recovery: self.doc.recovery.is_some(),
             objects: self.engine.scene.len(),
@@ -1084,6 +1085,8 @@ struct UiDebugState {
     selection: bool,
     /// 悬停命中的物体下标（`usize::MAX` = 没命中）。
     hovered: usize,
+    /// 相机运动模糊开关。
+    motion_blur: bool,
     /// 当前色调映射算子的标签。
     tonemap: &'static str,
     /// 是否挂着自动保存恢复点（Web 端 localStorage / 桌面文件）。
@@ -1123,6 +1126,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         probes,
         selection,
         hovered,
+        motion_blur,
         tonemap,
         recovery,
         objects,
@@ -1143,7 +1147,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};hovered={hovered};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};hovered={hovered};motion_blur={motion_blur};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
@@ -1317,6 +1321,17 @@ impl EditorApp {
                                 }
                                 _ => {}
                             }
+                        }
+                        // M：相机运动模糊（只影响相机移动时的画面）。
+                        if code == KeyCode::KeyM && !engine.input.ctrl {
+                            let enabled = &mut engine.renderer.options.motion_blur.enabled;
+                            *enabled = !*enabled;
+                            inner.doc.status = if *enabled {
+                                "相机运动模糊：开".to_string()
+                            } else {
+                                "相机运动模糊：关".to_string()
+                            };
+                            return;
                         }
                         if code == KeyCode::KeyF {
                             inner.doc.focus_selected(engine);

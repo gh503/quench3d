@@ -1704,6 +1704,68 @@ fn max_draw_distance_culls_only_far_instances() {
     );
 }
 
+/// 相机运动模糊：同一段相机运动，开关打开后画面必须真的变软/拖影。
+#[test]
+fn camera_motion_blur_changes_a_moving_camera() {
+    let Some(mut ctx) = context(1, "相机运动模糊（真的创建 wgpu 上下文）") else {
+        return;
+    };
+    let mut renderer = Renderer::new(
+        &ctx,
+        RendererOptions {
+            grid: false,
+            shadows: false,
+            sky: false,
+            ..Default::default()
+        },
+    );
+    let cube = renderer.add_mesh(&ctx, &MeshData::cube(2.0));
+    let mat = renderer.add_material(&ctx, MaterialDesc::from_srgb(1.0, 1.0, 1.0, 1.0).unlit());
+    let lighting = Lighting::default();
+    let mut camera = Camera::perspective(W as f32 / H as f32);
+    camera.position = vec3(0.0, 0.0, 6.0);
+    camera.look_at(Vec3::ZERO);
+    let mut moved = camera;
+    moved.position = vec3(1.2, 0.25, 6.0);
+    moved.look_at(Vec3::ZERO);
+
+    // 先建立 A 帧历史，再渲染 B 帧；off 与 on 都从同一个 A 帧出发。
+    renderer.begin_frame();
+    renderer.draw(cube, mat, InstanceDesc::new(Transform::IDENTITY));
+    let _ = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("A 帧");
+    renderer.begin_frame();
+    renderer.draw(cube, mat, InstanceDesc::new(Transform::IDENTITY));
+    let off = renderer
+        .capture(&mut ctx, W, H, &moved, &lighting)
+        .expect("关闭运动模糊的 B 帧");
+
+    renderer.options.motion_blur.enabled = true;
+    renderer.options.motion_blur.shutter = 1.0;
+    renderer.options.motion_blur.samples = 8;
+    renderer.options.motion_blur.max_blur = 32.0;
+    renderer.begin_frame();
+    renderer.draw(cube, mat, InstanceDesc::new(Transform::IDENTITY));
+    let _ = renderer
+        .capture(&mut ctx, W, H, &camera, &lighting)
+        .expect("重置到 A 帧");
+    renderer.begin_frame();
+    renderer.draw(cube, mat, InstanceDesc::new(Transform::IDENTITY));
+    let on = renderer
+        .capture(&mut ctx, W, H, &moved, &lighting)
+        .expect("打开运动模糊的 B 帧");
+
+    let changed = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel(&off, x, y) != pixel(&on, x, y))
+        .count();
+    assert!(
+        changed > 20,
+        "相机运动时运动模糊应当改变画面，实际 {changed} 像素"
+    );
+}
+
 /// morph / CPU 变形的 TAA 运动向量：必须记录上一帧顶点位置，不能拿当前网格硬猜。
 #[test]
 fn taa_motion_vectors_follow_morphed_vertices() {

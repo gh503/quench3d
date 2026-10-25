@@ -2461,6 +2461,12 @@ pub struct LightingDoc {
     /// **不写 = 关闭**（像素与加这个功能之前一致）；需要可读深度且未开 MSAA。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taa: Option<TaaDoc>,
+    /// 相机运动模糊。
+    ///
+    /// **不写 = 关闭**；只跟相机运动有关（物体自身运动不在内），天空不模糊，
+    /// 需要可读深度（原生后端；GL/WebGL2 会忽略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_blur: Option<MotionBlurDoc>,
     /// SSAO（屏幕空间环境光遮蔽）。
     ///
     /// **不写 = 关闭**（像素与加这个功能之前逐位相同）；写了这一节就是打开。
@@ -2627,6 +2633,24 @@ pub struct TaaDoc {
     /// 历史权重（0~0.98），缺省 0.9；越大越平滑、越容易拖影。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<f32>,
+}
+
+/// 相机运动模糊配置。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MotionBlurDoc {
+    /// 是否启用，缺省 true（写了这一节就是想开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 快门比例（0~2），缺省 0.5。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutter: Option<f32>,
+    /// 采样数（1~16），缺省 8。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<u32>,
+    /// 单像素最大拖影长度，缺省 24。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_blur: Option<f32>,
 }
 
 /// Bloom（泛光）配置。
@@ -7115,6 +7139,35 @@ impl SceneDoc {
         }
 
         // FXAA：阈值必须落在 (0, 1) 这个量级，否则要么永远不触发要么糊成一片
+        if let Some(m) = &self.lighting.motion_blur {
+            if let Some(shutter) = m.shutter {
+                if !shutter.is_finite() || !(0.0..=2.0).contains(&shutter) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.motion_blur.shutter",
+                        "快门比例必须在 0..=2 之间",
+                    ));
+                }
+            }
+            if let Some(samples) = m.samples {
+                if !(1..=16).contains(&samples) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.motion_blur.samples",
+                        "采样数必须在 1..=16 之间",
+                    ));
+                }
+            }
+            if let Some(max_blur) = m.max_blur {
+                if !max_blur.is_finite() || !(0.0..=256.0).contains(&max_blur) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        "lighting.motion_blur.max_blur",
+                        "最大拖影必须在 0..=256 像素之间",
+                    ));
+                }
+            }
+        }
         if let Some(f) = &self.lighting.fxaa {
             let enabled = f.enabled.unwrap_or(true);
             for (key, value) in [
@@ -8133,6 +8186,27 @@ mod tests {
     }
 
     #[test]
+    fn invalid_motion_blur_is_rejected() {
+        let doc = SceneDoc::from_json(
+            r#"{"lighting":{"motion_blur":{"samples":0,"shutter":3.0,"max_blur":-1}}}"#,
+        )
+        .unwrap();
+        let diags = doc.validate();
+        for path in [
+            "lighting.motion_blur.samples",
+            "lighting.motion_blur.shutter",
+            "lighting.motion_blur.max_blur",
+        ] {
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.severity == Severity::Error && d.path == path),
+                "{path} 应当报错：{diags:?}"
+            );
+        }
+    }
+
+    #[test]
     fn dynamic_plane_is_rejected() {
         let doc =
             SceneDoc::from_json(r#"{"objects":[{"shape":{"type":"plane"},"body":"dynamic"}]}"#)
@@ -8149,6 +8223,7 @@ mod tests {
             "objects": [{"name":"b","shape":{"type":"sphere","radius":0.4},
                          "position":[1,2,3],"body":"dynamic","restitution":0.5}],
             "simulate": {"steps": 60},
+            "lighting": {"motion_blur": {"enabled": true, "shutter": 0.75}},
             "render": {"output":"x.png","width":320,"height":240,"auto_lod":true,
                        "max_draw_distance": 120}
         }"#;
@@ -8164,6 +8239,11 @@ mod tests {
             again.render.max_draw_distance,
             Some(120.0),
             "最大绘制距离要往返"
+        );
+        assert_eq!(
+            again.lighting.motion_blur.as_ref().and_then(|m| m.shutter),
+            Some(0.75),
+            "运动模糊要往返"
         );
     }
 
@@ -9913,14 +9993,16 @@ mod tests {
     fn post_processing_survives_the_round_trip_through_renderer_options() {
         // 与级联那条同理：编辑器载入时用 runner 的映射写进 RendererOptions，存盘时从
         // RendererOptions 写回。少了这条，"编辑器里勾掉 FXAA、存盘却还开着"只能靠肉眼发现。
-        use crate::runner::{bloom_options, fxaa_options, ssao_options};
+        use crate::runner::{bloom_options, fxaa_options, motion_blur_options, ssao_options};
         let doc = SceneDoc::from_value(json!({ "lighting": {
             "bloom": { "enabled": false, "intensity": 1.25, "threshold": 2.5 },
             "fxaa": { "enabled": true, "edge_threshold": 0.08, "edge_threshold_min": 0.02 },
-            "ssao": { "enabled": true, "radius": 1.5, "bias": 0.05, "strength": 0.9, "samples": 24 }
+            "ssao": { "enabled": true, "radius": 1.5, "bias": 0.05, "strength": 0.9, "samples": 24 },
+            "motion_blur": { "enabled": true, "shutter": 0.8, "samples": 6, "max_blur": 18 }
         }}))
         .unwrap();
         let (b, f, a) = (bloom_options(&doc), fxaa_options(&doc), ssao_options(&doc));
+        let m = motion_blur_options(&doc);
         assert!(
             !b.enabled && (b.intensity - 1.25).abs() < 1e-6 && (b.threshold - 2.5).abs() < 1e-6
         );
@@ -9928,6 +10010,8 @@ mod tests {
         assert!((f.edge_threshold_min - 0.02).abs() < 1e-6);
         assert!(a.enabled && (a.radius - 1.5).abs() < 1e-6 && (a.bias - 0.05).abs() < 1e-6);
         assert!((a.strength - 0.9).abs() < 1e-6 && a.samples == 24);
+        assert!(m.enabled && (m.shutter - 0.8).abs() < 1e-6 && m.samples == 6);
+        assert!((m.max_blur - 18.0).abs() < 1e-6);
         // 写回（编辑器就是这么干的）：值从渲染器选项回到文档，一个不丢
         let written = (
             BloomDoc {
@@ -9957,13 +10041,16 @@ mod tests {
         assert!(!bloom_options(&plain).enabled);
         assert!(!fxaa_options(&plain).enabled);
         assert!(!ssao_options(&plain).enabled);
+        assert!(!motion_blur_options(&plain).enabled);
         // 写了 `{}` 空节 = "就是想开"，其余字段取缺省（文档里写明的语义）
-        let bare =
-            SceneDoc::from_value(json!({ "lighting": { "bloom": {}, "fxaa": {}, "ssao": {} } }))
-                .unwrap();
+        let bare = SceneDoc::from_value(
+            json!({ "lighting": { "bloom": {}, "fxaa": {}, "ssao": {}, "motion_blur": {} } }),
+        )
+        .unwrap();
         assert!(bloom_options(&bare).enabled);
         assert!(fxaa_options(&bare).enabled);
         assert!(ssao_options(&bare).enabled);
+        assert!(motion_blur_options(&bare).enabled);
         assert!((bloom_options(&bare).intensity - 0.6).abs() < 1e-6);
     }
 

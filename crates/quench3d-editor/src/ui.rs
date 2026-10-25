@@ -706,6 +706,34 @@ fn render_menu(ui: &mut Ui, engine: &mut Engine) {
             ui.checkbox(&mut engine.renderer.options.taa.motion_vectors, "运动向量")
                 .on_hover_text("物体的 TAA 重投影；关掉只保留深度反投影，运动物体会更容易拖影");
         });
+        ui.checkbox(
+            &mut engine.renderer.options.motion_blur.enabled,
+            "相机运动模糊（M）",
+        )
+        .on_hover_text("只模糊相机运动；需要可读深度，GL/WebGL2 上不生效");
+        ui.add_enabled_ui(engine.renderer.options.motion_blur.enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("快门");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.motion_blur.shutter)
+                        .speed(0.01)
+                        .range(0.0..=2.0),
+                );
+                ui.label("采样");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.motion_blur.samples)
+                        .speed(1.0)
+                        .range(1..=16),
+                );
+                ui.label("最大");
+                ui.add(
+                    egui::DragValue::new(&mut engine.renderer.options.motion_blur.max_blur)
+                        .speed(1.0)
+                        .range(0.0..=256.0)
+                        .suffix("px"),
+                );
+            });
+        });
         ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）");
         ui.checkbox(
             &mut engine.renderer.options.ssao.enabled,

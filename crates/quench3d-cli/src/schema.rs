@@ -1135,6 +1135,10 @@ pub fn json_schema() -> Value {
         def(&["enabled", "focus", "aperture", "max_blur"]),
     );
     defs.insert(
+        "motionBlur".into(),
+        def(&["enabled", "shutter", "samples", "max_blur"]),
+    );
+    defs.insert(
         "grade".into(),
         def(&["saturation", "contrast", "temperature"]),
     );
@@ -1165,6 +1169,7 @@ pub fn json_schema() -> Value {
             "ssao",
             "dof",
             "grade",
+            "motion_blur",
         ]),
     );
     defs.insert(
@@ -1387,6 +1392,7 @@ animations: [{ target, loop?, start?, speed?, weight?, position?: {times,values}
              point_lights: [ { position: [x,y,z], color: [r,g,b]（线性）, intensity: 12, radius: 18, cast_shadows: false } ],
              spot_lights: [ { position: [x,y,z], direction: [0,-1,0], intensity: 12, radius: 18, inner_deg: 20, outer_deg: 30,
                               cast_shadows: false } ],
+             motion_blur: { enabled: true, shutter: 0.5, samples: 8, max_blur: 24 },
              fog: { color: [r,g,b]（线性）, density: 0.03 },
              shadow_quality: { strength: 0.85, radius: 28 },
              sky_colors: { zenith: [r,g,b], horizon: [r,g,b], ground: [r,g,b] }（线性）,
@@ -1406,6 +1412,7 @@ animations: [{ target, loop?, start?, speed?, weight?, position?: {times,values}
 - render: { output: "scene.png", width: 960, height: 600, msaa: 4, auto_lod: false,
             max_draw_distance: 200 }
   // auto_lod=true 时高面数非蒙皮网格在上传时生成 1/2、1/4 两档，按距离切换；缺省 false。
+  // lighting.motion_blur：只做相机运动模糊（需要可读深度；GL/WebGL2 忽略）。
   // max_draw_distance：实例包围盒最近点超过它就不画；不写 = 不限；不是遮挡剔除。
 
 硬性要求：

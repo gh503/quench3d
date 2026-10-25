@@ -4124,6 +4124,20 @@ pub fn taa_options(doc: &SceneDoc) -> quench3d::render::TaaOptions {
     }
 }
 
+/// 把场景里的运动模糊配置翻成渲染器选项（缺省关闭）。
+pub fn motion_blur_options(doc: &SceneDoc) -> quench3d::render::MotionBlurOptions {
+    let Some(m) = &doc.lighting.motion_blur else {
+        return quench3d::render::MotionBlurOptions::default();
+    };
+    let defaults = quench3d::render::MotionBlurOptions::default();
+    quench3d::render::MotionBlurOptions {
+        enabled: m.enabled.unwrap_or(true),
+        shutter: m.shutter.unwrap_or(defaults.shutter),
+        samples: m.samples.unwrap_or(defaults.samples),
+        max_blur: m.max_blur.unwrap_or(defaults.max_blur),
+    }
+}
+
 /// 把场景里的 FXAA 配置翻成渲染器选项（缺省关闭）。编辑器共用，理由见 [`bloom_options`]。
 pub fn fxaa_options(doc: &SceneDoc) -> quench3d::render::FxaaOptions {
     let Some(f) = &doc.lighting.fxaa else {
@@ -4574,6 +4588,7 @@ fn run_render_single(
             bloom: bloom_options(doc),
             fxaa: fxaa_options(doc),
             taa: taa_options(doc),
+            motion_blur: motion_blur_options(doc),
             ssao: ssao_options(doc),
             dof: dof_options(doc),
             shadow_cascades: shadow_cascades(doc),

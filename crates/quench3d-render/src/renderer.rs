@@ -121,8 +121,8 @@ fn post_wgsl_for(ssao: bool) -> Cow<'static, str> {
     }
     debug_assert!(!dropping, "post.wgsl 的 {GL_DEPTH_BEGIN} 区段没有闭合");
     debug_assert_eq!(
-        regions, 4,
-        "post.wgsl 的深度区段应当是 4 段（绑定 / 函数 / SSAO 调用点 / DoF 调用点）"
+        regions, 5,
+        "post.wgsl 的深度区段应当是 5 段（绑定 / 函数 / 运动模糊 / SSAO 调用点 / DoF 调用点）"
     );
     out.shrink_to_fit();
     Cow::Owned(out)
@@ -560,6 +560,10 @@ pub struct PostUniforms {
     pub dof: [f32; 4],
     /// 调色：x = 饱和度，y = 对比度，z = 色温，w = 开关（0 = 完全跳过）。
     pub grade: [f32; 4],
+    /// 运动模糊：x = 开关（0/1），y = 快门，z = 采样数，w = 最大拖影像素。
+    pub motion_blur: [f32; 4],
+    /// 上一帧的 view-proj（不含 TAA 抖动）：把当前视空间位置投回上一帧屏幕。
+    pub prev_view_proj: [[f32; 4]; 4],
 }
 
 /// 运动向量 pass 的参数：当前帧（含抖动）与上一帧的 view-proj。
@@ -719,6 +723,34 @@ impl Default for TaaOptions {
     }
 }
 
+/// 相机运动模糊配置（后处理，只跟相机运动有关）。
+///
+/// 实现：用当前帧深度反投影出视空间位置，乘上一帧的 view-proj 得到上一帧屏幕 UV，
+/// 在当前 HDR 上沿这段位移做多次采样。**不包含物体自身运动**（那需要逐像素运动向量，
+/// 目前只有 TAA 的运动 pass 有）；也不模糊天空（深度 = 1）。
+#[derive(Clone, Copy, Debug)]
+pub struct MotionBlurOptions {
+    /// 是否启用（缺省关闭）。
+    pub enabled: bool,
+    /// 快门比例（0~2）：位移乘这个系数，越大拖影越长。
+    pub shutter: f32,
+    /// 采样数（1~16）：越多越平滑，代价是每像素多次 HDR 读取。
+    pub samples: u32,
+    /// 单像素最大拖影长度（屏幕像素），防止快速转场拉出整屏条纹。
+    pub max_blur: f32,
+}
+
+impl Default for MotionBlurOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            shutter: 0.5,
+            samples: 8,
+            max_blur: 24.0,
+        }
+    }
+}
+
 /// SSAO（屏幕空间环境光遮蔽）配置。
 ///
 /// 实现是**深度-only** 的：没有法线缓冲，法线由视空间位置的屏幕导数重建；
@@ -865,6 +897,8 @@ pub struct RendererOptions {
     pub tonemap: Tonemap,
     /// 时域抗锯齿（缺省关闭）。
     pub taa: TaaOptions,
+    /// 相机运动模糊（缺省关闭；只读深度，原生后端生效）。
+    pub motion_blur: MotionBlurOptions,
     /// 最大绘制距离（米，缺省 `INFINITY` = 不限）。
     ///
     /// 按实例包围盒到相机的**最近点**判断：完全在距离外的实例不提交绘制。
@@ -896,6 +930,7 @@ impl Default for RendererOptions {
             dof: DofOptions::default(),
             tonemap: Tonemap::default(),
             taa: TaaOptions::default(),
+            motion_blur: MotionBlurOptions::default(),
             max_draw_distance: f32::INFINITY,
             auto_lod: false,
         }
@@ -1115,6 +1150,9 @@ pub struct Renderer {
     taa_warned: bool,
     /// 当前帧的抖动（NDC 单位）；关闭 TAA 时是 0。
     taa_jitter: [f32; 2],
+    /// 上一帧的 view-proj 与相机位姿（运动模糊用；与 TAA 的抖动分开）。
+    motion_prev_view_proj: Mat4,
+    motion_prev_camera: Option<(Vec3, Vec3)>,
     /// 单采样深度（SSAO 的输入）。`sample_count == 1` 时就是主 pass 那一张，
     /// 多采样时是 `depth_resolve.wgsl` 写出来的那一张。
     ///
@@ -2484,6 +2522,8 @@ impl Renderer {
             taa_was_active: false,
             taa_warned: false,
             taa_jitter: [0.0, 0.0],
+            motion_prev_view_proj: Mat4::IDENTITY,
+            motion_prev_camera: None,
             resolved_depth_view: None,
             dummy_depth_view,
             bloom_a_view: None,
@@ -3765,6 +3805,16 @@ impl Renderer {
         self.ensure_instance_capacity(&ctx.device, self.staging.len().max(1));
         self.ensure_line_capacity(&ctx.device, self.lines.vertices.len().max(1));
 
+        let camera_view_proj = camera.view_projection();
+        // 运动模糊：首帧、切镜（位置跳 >2m 或朝向夹角 >60°）不做，避免拉出整屏条纹。
+        let motion_cut = self
+            .motion_prev_camera
+            .is_some_and(|(last_pos, last_forward)| {
+                (camera.position - last_pos).length() > 2.0
+                    || camera.forward().dot(last_forward) < 0.5
+            });
+        let motion_blur_on =
+            self.options.motion_blur.enabled && self.motion_prev_camera.is_some() && !motion_cut;
         // TAA：先决定本帧是否生效、算子像素抖动，再把抖动乘进主 pass 的 view-proj。
         let taa_on = self.taa_active();
         if taa_on && !self.taa_was_active {
@@ -3961,6 +4011,17 @@ impl Renderer {
                     1.0
                 },
             ],
+            motion_blur: [
+                if motion_blur_on { 1.0 } else { 0.0 },
+                self.options.motion_blur.shutter.clamp(0.0, 2.0),
+                self.options.motion_blur.samples.clamp(1, 16) as f32,
+                self.options.motion_blur.max_blur.clamp(0.0, 256.0),
+            ],
+            prev_view_proj: if motion_blur_on {
+                self.motion_prev_view_proj.to_cols_arrays()
+            } else {
+                Mat4::IDENTITY.to_cols_arrays()
+            },
         };
         ctx.queue
             .write_buffer(&self.post_uniform, 0, bytemuck::bytes_of(&post));
@@ -4676,6 +4737,8 @@ impl Renderer {
         }
 
         ctx.queue.submit(Some(encoder.finish()));
+        self.motion_prev_view_proj = camera_view_proj;
+        self.motion_prev_camera = Some((camera.position, camera.forward()));
         self.stats = stats;
         stats
     }
@@ -5213,7 +5276,7 @@ mod tests {
 
     #[test]
     fn post_uniforms_size_matches_wgsl_layout() {
-        assert_eq!(std::mem::size_of::<PostUniforms>(), 384);
+        assert_eq!(std::mem::size_of::<PostUniforms>(), 464);
         assert_eq!(std::mem::size_of::<PostUniforms>() % 16, 0);
     }
 

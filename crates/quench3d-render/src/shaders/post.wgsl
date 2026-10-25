@@ -75,6 +75,10 @@ struct PostParams {
     dof: vec4<f32>,
     // 调色：x = 饱和度，y = 对比度，z = 色温，w = 开关（0 = 完全跳过）
     grade: vec4<f32>,
+    // 运动模糊：x = 开关（0/1），y = 快门，z = 采样数，w = 最大拖影像素
+    motion_blur: vec4<f32>,
+    // 上一帧 view-proj（不含 TAA 抖动）
+    prev_view_proj: mat4x4<f32>,
 };
 
 /// Narkowicz 2015 的 ACES 近似。
@@ -227,6 +231,41 @@ fn fs_main(in: PostOut) -> @location(0) vec4<f32> {
     // `in.position.xy` 已经是像素中心（+0.5），不用再加
     let uv = in.position.xy * texel;
     var hdr = textureLoad(hdr_texture, coord, 0).rgb;
+
+    //@gl-depth-begin
+    // 相机运动模糊：当前像素的视空间位置 → 上一帧屏幕 UV → 沿位移采样 HDR。
+    // 天空（深度 = 1）跳过；位移为 0 时直接保留原值，保证静止画面不软。
+    if (post.motion_blur.x > 0.5) {
+        let depth = textureLoad(depth_texture, coord, 0);
+        if (depth < 1.0) {
+            let p = view_pos(uv, depth);
+            let prev_clip = post.prev_view_proj * vec4<f32>(p, 1.0);
+            if (prev_clip.w > 1e-4) {
+                let prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
+                var velocity = uv - prev_uv;
+                let limit = post.motion_blur.w * texel;
+                let limit_len = length(limit);
+                let velocity_len = length(velocity);
+                if (velocity_len > 1e-5 && limit_len > 1e-5) {
+                    if (velocity_len > limit_len) {
+                        velocity = velocity * (limit_len / velocity_len);
+                    }
+                    let count = clamp(i32(post.motion_blur.z), 1, 16);
+                    let shutter = clamp(post.motion_blur.y, 0.0, 2.0);
+                    let size = vec2<i32>(post.target_texel.zw) - vec2<i32>(1);
+                    var sum = vec3<f32>(0.0);
+                    for (var i = 0; i < count; i += 1) {
+                        let t = f32(i) / f32(max(count - 1, 1)) - 0.5;
+                        let suv = clamp(uv + velocity * shutter * t, vec2<f32>(0.0), vec2<f32>(1.0));
+                        let sc = clamp(vec2<i32>(suv * post.target_texel.zw), vec2<i32>(0), size);
+                        sum = sum + textureLoad(hdr_texture, sc, 0).rgb;
+                    }
+                    hdr = sum / f32(count);
+                }
+            }
+        }
+    }
+    //@gl-depth-end
 
     //@gl-depth-begin
     // SSAO 先乘上去（在 bloom 之前：自发光/亮区的外溢不该被环境光遮蔽压暗）
