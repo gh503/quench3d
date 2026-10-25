@@ -352,6 +352,12 @@ pub struct RigidBody {
     /// 缺省等于 `friction`（只用老字段的行为完全不变）；想表达"推得动但推不住"
     /// 就把它设得比 `friction` 大（真实世界里木头/橡胶就是这么干的）。
     pub static_friction: f32,
+    /// 滚动阻力系数（米，0 = 无滚动阻力）。
+    ///
+    /// 接触求解器在法向冲量上附加一个角冲量上限 `rolling_friction * jn`，
+    /// 抑制球/轮子/圆柱的纯滚动。它是**滚动阻力**，不是滚动摩擦锥；缺省 0
+    /// 时完全不执行，旧场景逐位不变。
+    pub rolling_friction: f32,
     /// 摩擦系数的合成规则；`None` = 没指定，用世界的缺省规则。
     ///
     /// 为什么要区分"没指定"和"指定成几何平均"：两端都写了规则时得有个确定的
@@ -742,6 +748,7 @@ pub struct BodyBuilder {
     friction: f32,
     /// `None` = 跟随 `friction`（在 `build()` 里定下来）。
     static_friction: Option<f32>,
+    rolling_friction: f32,
     friction_combine: Option<CombineRule>,
     restitution_combine: Option<CombineRule>,
     linear_damping: f32,
@@ -768,6 +775,7 @@ impl BodyBuilder {
             restitution: 0.0,
             friction: 0.5,
             static_friction: None,
+            rolling_friction: 0.0,
             friction_combine: None,
             restitution_combine: None,
             linear_damping: 0.0,
@@ -878,6 +886,14 @@ impl BodyBuilder {
     pub fn static_friction(mut self, f: f32) -> Self {
         if f.is_finite() {
             self.static_friction = Some(f.max(0.0));
+        }
+        self
+    }
+
+    /// 滚动阻力系数（米，>= 0；缺省 0 = 关闭）。
+    pub fn rolling_friction(mut self, f: f32) -> Self {
+        if f.is_finite() {
+            self.rolling_friction = f.max(0.0);
         }
         self
     }
@@ -1018,6 +1034,7 @@ impl BodyBuilder {
             restitution: self.restitution,
             friction: self.friction,
             static_friction: self.static_friction.unwrap_or(self.friction),
+            rolling_friction: self.rolling_friction,
             friction_combine: self.friction_combine,
             restitution_combine: self.restitution_combine,
             linear_damping: self.linear_damping,

@@ -2237,6 +2237,9 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             .friction(friction)
             // 静摩擦缺省跟随动摩擦：只写 `friction` 的场景行为完全不变
             .static_friction(o.static_friction.unwrap_or(friction));
+        if let Some(rf) = o.rolling_friction {
+            builder = builder.rolling_friction(rf);
+        }
         if let Some(r) = o.friction_combine {
             builder = builder.friction_combine(r.into());
         }
@@ -6092,6 +6095,18 @@ mod tests {
             !parse(r#", "receive_shadows": false"#).objects[0].receive_shadows,
             "显式 false 应关掉接收阴影"
         );
+    }
+
+    #[test]
+    fn rolling_friction_is_wired_from_scene_doc() {
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "球", "body": "dynamic",
+                 "shape": { "type": "sphere" }, "rolling_friction": 0.25 } ] }"#,
+        )
+        .unwrap();
+        let build = build_world(&doc).unwrap();
+        let b = build.world.bodies().next().unwrap().1;
+        assert!((b.rolling_friction - 0.25).abs() < 1e-6);
     }
 
     /// Z-up 资产必须先转成 Y-up，再套用户旋转；顺序反了物体会"躺"在错误方向。

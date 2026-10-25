@@ -239,6 +239,45 @@ fn slide_distance(w: &PhysicsWorld, b: crate::BodyHandle, n: Vec3, start: Vec3) 
 }
 
 #[test]
+fn rolling_friction_slows_a_rolling_sphere() {
+    // 同一颗球、同一初始角速度，只差 rolling_friction：有滚动阻力的一侧
+    // 必须转得更慢、走得更近。
+    fn run(rolling: f32) -> (Vec3, Vec3) {
+        let mut world = PhysicsWorld::new();
+        add_ground(&mut world, 0.9, 0.0);
+        let ball = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+                .position(vec3(0.0, 0.5, 0.0))
+                .friction(0.9)
+                .rolling_friction(rolling)
+                .linear_damping(0.0)
+                .angular_damping(0.0),
+        );
+        world.body_mut(ball).unwrap().angular_velocity = Vec3::Z * 12.0;
+        for _ in 0..180 {
+            world.step(DT);
+        }
+        let b = world.body(ball).unwrap();
+        (b.position(), b.angular_velocity)
+    }
+    let (p0, w0) = run(0.0);
+    let (p1, w1) = run(1.0);
+    assert!(p0.is_finite() && p1.is_finite());
+    assert!(
+        w1.length() < w0.length() - 0.5,
+        "滚动阻力应降低角速度：{} vs {}",
+        w1.length(),
+        w0.length()
+    );
+    assert!(
+        p1.x > p0.x + 0.05,
+        "滚动阻力应减少位移：{} vs {}",
+        p1.x,
+        p0.x
+    );
+}
+
+#[test]
 fn incline_high_friction_does_not_slide() {
     let (mut w, b, n, start) = incline_world(0.9);
     for _ in 0..120 {

@@ -1034,6 +1034,8 @@ NaN 刚体  : 0
   聚光图取一半、点光每面再取一半。显存约为 `resolution² × 4 B` 的量级。
 * `objects[].static_friction` 缺省**跟随 `friction`**（只管动摩擦的老场景行为逐位不变）；
   想表达"推得动、但推住之后不会慢慢滑"就把它写得比 `friction` 大。
+* `objects[].rolling_friction` 是滚动阻力（米，缺省 0 = 关闭），只对设置了它的
+  球/轮子/圆柱生效；编辑器属性面板也能改。
 * `models[].animation` 是**视觉**动画：`{ "name": "走路", "start": 0, "speed": 1, "loop": true,
   "blend": { "name": "跑步", "weight": 0.5, "fade": 0.25 } }`。名字在资产里存不存在**只有装载后才知道**
   （`validate` 不读资产），所以 `validate` 只查结构（名字非空、`speed > 0`、`start >= 0`、

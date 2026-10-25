@@ -528,6 +528,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             restitution: body.map(|b| b.restitution),
             friction: body.map(|b| b.friction),
             static_friction: body.map(|b| b.static_friction),
+            rolling_friction: body.map(|b| b.rolling_friction).filter(|v| *v > 0.0),
             // 合成规则：编辑器能改（见光照面板下面的物理段），导出时从刚体读回来，
             // 这样"载入带规则的场景 → 存盘"不会把规则丢掉。
             friction_combine: body

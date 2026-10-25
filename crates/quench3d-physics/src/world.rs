@@ -1464,6 +1464,7 @@ impl PhysicsWorld {
                     materials.push(solver::ContactMaterial {
                         dynamic_friction: b.friction,
                         static_friction: b.static_friction,
+                        rolling_friction: b.rolling_friction,
                         restitution: b.restitution,
                         friction_combine: b.friction_combine,
                         restitution_combine: b.restitution_combine,
@@ -1474,6 +1475,7 @@ impl PhysicsWorld {
                     materials.push(solver::ContactMaterial {
                         dynamic_friction: 0.0,
                         static_friction: 0.0,
+                        rolling_friction: 0.0,
                         restitution: 0.0,
                         friction_combine: None,
                         restitution_combine: None,

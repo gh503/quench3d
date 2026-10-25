@@ -4447,6 +4447,25 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
                                         }
                                     }
                                 }
+                                let mut rolling_friction = object
+                                    .body
+                                    .and_then(|h| engine.world.body(h))
+                                    .map(|b| b.rolling_friction)
+                                    .unwrap_or(0.0);
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut rolling_friction, 0.0..=0.5)
+                                            .text("滚动阻力"),
+                                    )
+                                    .on_hover_text("球/轮子/圆柱的纯滚动阻力（米），0 = 关闭")
+                                    .changed()
+                                {
+                                    if let Some(h) = object.body {
+                                        if let Some(b) = engine.world.body_mut(h) {
+                                            b.rolling_friction = rolling_friction;
+                                        }
+                                    }
+                                }
                                 // 合成规则：和别的物体接触时听谁的（缺省 = 世界规则）
                                 let mut f_rule = object
                                     .body

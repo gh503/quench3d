@@ -262,6 +262,8 @@ pub struct CameraFeed {
     recon_auto: bool,
     /// 已重建的摄像头帧号。
     recon_frame: u64,
+    /// 上次重建用的体素尺寸（改尺寸后同一帧也要重建）。
+    recon_voxel_used: f32,
     /// 生成的网格/物体句柄（会话内复用，避免每次点击都新增物体）。
     recon_mesh: Option<MeshId>,
     recon_object: Option<usize>,
@@ -303,6 +305,7 @@ impl CameraFeed {
             recon_requested: false,
             recon_auto: false,
             recon_frame: u64::MAX,
+            recon_voxel_used: 0.0,
             recon_mesh: None,
             recon_object: None,
             recon_voxel: 0.03,
@@ -383,7 +386,10 @@ impl CameraFeed {
             .and_then(|i| engine.scene.objects.get(i))
             .zip(self.recon_mesh)
             .is_some_and(|(o, id)| o.generated && o.mesh == id);
-        if object_ok && self.recon_frame == frame.json.frame {
+        if object_ok
+            && self.recon_frame == frame.json.frame
+            && self.recon_voxel_used == self.recon_voxel
+        {
             self.recon_status = format!("已是最新（帧 {}）", frame.json.frame);
             return;
         }
@@ -427,6 +433,7 @@ impl CameraFeed {
         };
         if engine.renderer.update_mesh_data(&engine.gpu, id, &mesh) {
             self.recon_frame = frame.json.frame;
+            self.recon_voxel_used = self.recon_voxel;
             self.recon_status = format!(
                 "已生成 {triangles} 个三角形（帧 {}，体素 {:.1} cm）",
                 frame.json.frame,

@@ -807,6 +807,7 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         restitution: o.restitution.or(t.restitution),
         friction: o.friction.or(t.friction),
         static_friction: o.static_friction.or(t.static_friction),
+        rolling_friction: o.rolling_friction.or(t.rolling_friction),
         friction_combine: o.friction_combine.or(t.friction_combine),
         restitution_combine: o.restitution_combine.or(t.restitution_combine),
         velocity: o.velocity.or(t.velocity),
@@ -1638,6 +1639,9 @@ pub struct ObjectDoc {
     /// 木头 0.4/0.5、橡胶 0.6/1.0 之类）。写 0 = 放下就开始滑。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub static_friction: Option<f32>,
+    /// 滚动阻力系数（米，>= 0），缺省 0 = 关闭；适合球/轮子/圆柱。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolling_friction: Option<f32>,
     /// 这个物体的摩擦系数合成规则（覆盖 `physics.friction_combine`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub friction_combine: Option<CombineRuleDoc>,
@@ -5599,6 +5603,15 @@ impl SceneDoc {
                             .with_hint("真实材质通常静摩擦 ≥ 动摩擦（想「推不动」就写大一点）"),
                         );
                     }
+                }
+            }
+            if let Some(rf) = o.rolling_friction {
+                if !rf.is_finite() || rf < 0.0 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.rolling_friction"),
+                        "滚动阻力系数必须是非负数",
+                    ));
                 }
             }
             if o.friction_combine.is_some() && o.body == BodyKind::None {

@@ -370,6 +370,8 @@ pub(crate) struct SolverContact {
     pub k_tangent: [f32; 2],
     /// 摩擦系数。
     pub friction: f32,
+    /// 滚动阻力系数（米）。
+    pub rolling_friction: f32,
     /// 恢复目标速度。
     /// 恢复系数偏置。
     pub restitution_bias: f32,
@@ -399,6 +401,8 @@ pub(crate) struct ContactMaterial {
     pub dynamic_friction: f32,
     /// 静摩擦系数（相对切向速度很小时用）。
     pub static_friction: f32,
+    /// 滚动阻力系数（米）。
+    pub rolling_friction: f32,
     /// 恢复系数。
     pub restitution: f32,
     /// 摩擦的合成规则；`None` = 这一端没指定。
@@ -489,6 +493,7 @@ impl ContactSolver {
             );
             let friction_dynamic = friction_rule.combine(ma.dynamic_friction, mb.dynamic_friction);
             let friction_static = friction_rule.combine(ma.static_friction, mb.static_friction);
+            let rolling_friction = ma.rolling_friction.max(mb.rolling_friction);
             let restitution = restitution_rule.combine(ma.restitution, mb.restitution);
             for cp in &m.points {
                 let (position, normal, penetration) = (cp.position, cp.normal, cp.penetration);
@@ -573,6 +578,7 @@ impl ContactSolver {
                     k_normal,
                     k_tangent: [k1, k2],
                     friction,
+                    rolling_friction,
                     restitution_bias,
                     speculative_bias,
                     penetration,
@@ -661,8 +667,40 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
             d = new - c.normal_impulse;
             c.normal_impulse = new;
             apply_impulse(views, c.a, c.b, c.ra, c.rb, c.normal * d);
+
+            // 滚动阻力：用角冲量把相对角速度往 0 拉，上限与法向冲量成正比；
+            // 缺省 0 时这条分支完全不会进入，历史结果逐位不变。
+            if c.rolling_friction > 0.0 && c.normal_impulse > 0.0 {
+                let wa = views[c.a].ang;
+                let wb = views[c.b].ang;
+                let wrel = wb - wa;
+                // 标量近似 1/trace(invI_a + invI_b)，避免为每个接触求 3x3 逆。
+                let k = views[c.a].inv_i_world_mat.cols[0].x
+                    + views[c.a].inv_i_world_mat.cols[1].y
+                    + views[c.a].inv_i_world_mat.cols[2].z
+                    + views[c.b].inv_i_world_mat.cols[0].x
+                    + views[c.b].inv_i_world_mat.cols[1].y
+                    + views[c.b].inv_i_world_mat.cols[2].z;
+                if k.is_finite() && k > 1e-9 {
+                    let limit = c.rolling_friction * c.normal_impulse * 0.5;
+                    let dl = (wrel * (-1.0 / k)).clamp_length(limit);
+                    apply_angular_impulse(views, c.a, c.b, dl);
+                }
+            }
         }
     }
+}
+
+/// 对两个刚体施加等大反向的纯角冲量（`l` 给 B，`-l` 给 A）。
+#[inline]
+fn apply_angular_impulse(views: &mut [BodyView], a: usize, b: usize, l: Vec3) {
+    if !l.is_finite() {
+        return;
+    }
+    let ia = views[a].inv_i_world(l);
+    let ib = views[b].inv_i_world(l);
+    views[a].ang -= ia;
+    views[b].ang += ib;
 }
 
 /// 对一组接触做松弛（实现见 [`ContactSolver::relax`]）。
