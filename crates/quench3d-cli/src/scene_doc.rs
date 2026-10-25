@@ -7812,6 +7812,7 @@ impl SceneDoc {
             } else {
                 let lower = path.to_ascii_lowercase();
                 if !(lower.ends_with(".hdr")
+                    || lower.ends_with(".exr")
                     || lower.ends_with(".png")
                     || lower.ends_with(".jpg")
                     || lower.ends_with(".jpeg"))
@@ -7819,7 +7820,7 @@ impl SceneDoc {
                     out.push(Diagnostic::warn_code(
                         ErrorCode::InvalidValue,
                         "lighting.environment_map",
-                        format!("建议使用 .hdr/.png/.jpg 环境贴图，当前是 \"{path}\""),
+                        format!("建议使用 .hdr/.exr/.png/.jpg 环境贴图，当前是 \"{path}\""),
                     ));
                 }
                 if self.resolve_asset(path).is_none() {

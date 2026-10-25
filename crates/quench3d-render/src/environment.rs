@@ -66,6 +66,8 @@ impl EnvironmentMap {
             .unwrap_or_default();
         let map = if ext == "hdr" {
             Self::from_hdr(bytes)?
+        } else if ext == "exr" {
+            Self::from_exr(bytes)?
         } else {
             Self::from_ldr(bytes)?
         };
@@ -85,6 +87,40 @@ impl EnvironmentMap {
             intensity: 1.0,
             rotation: 0.0,
         })
+    }
+
+    /// 解码 OpenEXR（经 [`crate::hdr_image::FloatImage`]；只支持 scanline/NONE/RLE）。
+    pub fn from_exr(bytes: &[u8]) -> Result<Self, String> {
+        let image = crate::hdr_image::FloatImage::from_exr(bytes)?;
+        Ok(Self {
+            width: image.width as usize,
+            height: image.height as usize,
+            pixels: image.rgba.iter().map(|p| [p[0], p[1], p[2]]).collect(),
+            intensity: 1.0,
+            rotation: 0.0,
+        })
+    }
+
+    /// 编码 Radiance HDR（平铺 RGBE）。
+    pub fn to_hdr(&self) -> Vec<u8> {
+        self.to_float_image().to_hdr()
+    }
+
+    /// 编码 OpenEXR（HALF RGB、无压缩）。
+    pub fn to_exr(&self) -> Result<Vec<u8>, String> {
+        self.to_float_image().to_exr()
+    }
+
+    fn to_float_image(&self) -> crate::hdr_image::FloatImage {
+        crate::hdr_image::FloatImage::from_rgba32f(
+            self.width as u32,
+            self.height as u32,
+            self.pixels
+                .iter()
+                .map(|p| [p[0], p[1], p[2], 1.0])
+                .collect(),
+        )
+        .expect("EnvironmentMap 的尺寸与像素数一致")
     }
 
     /// 解码 PNG/JPEG 等 LDR 图；sRGB 通道转线性。
@@ -416,6 +452,29 @@ mod tests {
             bytes.extend_from_slice(&[rgb[0], rgb[1], rgb[2], exp]);
         }
         bytes
+    }
+
+    #[test]
+    fn exr_and_hdr_environment_round_trip() {
+        let map = EnvironmentMap {
+            width: 2,
+            height: 1,
+            pixels: vec![[0.25, 0.5, 4.0], [8.0, 0.0, 0.125]],
+            intensity: 1.0,
+            rotation: 0.0,
+        };
+        let exr = map.to_exr().unwrap();
+        let back = EnvironmentMap::from_exr(&exr).unwrap();
+        assert_eq!((back.width, back.height), (2, 1));
+        for (a, b) in map.pixels.iter().zip(&back.pixels) {
+            for c in 0..3 {
+                assert!((a[c] - b[c]).abs() <= 1e-6, "{a:?} vs {b:?}");
+            }
+        }
+        let hdr = map.to_hdr();
+        let back = EnvironmentMap::from_hdr(&hdr).unwrap();
+        assert_eq!((back.width, back.height), (2, 1));
+        assert!((back.pixels[1][0] - 8.0).abs() < 0.1);
     }
 
     #[test]

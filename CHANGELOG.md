@@ -41,6 +41,12 @@
 
 ### 新增
 
+- **HDR/EXR 浮点图像与 Rgba16Float 贴图（M2 第四项的一片）**：`FloatImage`
+  支持 Radiance `.hdr`（平铺 RGBE 编码）与 OpenEXR 读写（scanline、HALF/FLOAT/UINT、
+  NONE/RLE 解压；写盘 HALF 无压缩，RLE 解码含预测器逆变换与奇偶反交错）。
+  `EnvironmentMap` 可直接读 `.exr`、导出 `.hdr/.exr`。新增
+  `Renderer::add_texture_float` 上传 `Rgba16Float` + 盒式 mip；GPU e2e 验证线性
+  亮度 4.0 的贴图不会被 8 位路径截断。KTX2/Basis 与块压缩仍未做。
 - **加权混合 OIT（引擎 M2 第六项收尾）**：`RendererOptions.oit`（缺省关闭，旧场景
   逐位不变）。非水面半透明走 `fs_oit`，写累积色 + 透射率两张单采样目标（独立混合），
   最后全屏合成到已解析 HDR；结果与绘制顺序无关。GPU e2e 用同深度红/蓝半透明交换

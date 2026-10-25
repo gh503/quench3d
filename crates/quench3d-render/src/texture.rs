@@ -273,7 +273,119 @@ pub struct GpuTexture {
     pub mip_levels: u32,
 }
 
+fn texture_sampler(device: &wgpu::Device, options: TextureOptions) -> wgpu::Sampler {
+    let (min_filter, mag_filter, mipmap_filter) = match options.filter {
+        Filter::Nearest => (
+            wgpu::FilterMode::Nearest,
+            wgpu::FilterMode::Nearest,
+            wgpu::MipmapFilterMode::Nearest,
+        ),
+        Filter::Linear => (
+            wgpu::FilterMode::Linear,
+            wgpu::FilterMode::Linear,
+            if options.mipmaps {
+                wgpu::MipmapFilterMode::Linear
+            } else {
+                wgpu::MipmapFilterMode::Nearest
+            },
+        ),
+    };
+    let address = if options.repeat {
+        wgpu::AddressMode::Repeat
+    } else {
+        wgpu::AddressMode::ClampToEdge
+    };
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("quench3d-sampler"),
+        address_mode_u: address,
+        address_mode_v: address,
+        address_mode_w: address,
+        mag_filter,
+        min_filter,
+        mipmap_filter,
+        // 各向异性过滤要求所有过滤模式都是线性
+        anisotropy_clamp: if matches!(options.filter, Filter::Linear) && options.mipmaps {
+            8
+        } else {
+            1
+        },
+        ..Default::default()
+    })
+}
+
 impl GpuTexture {
+    /// 上传浮点图像（`Rgba16Float`，线性，不做 sRGB 转换）。
+    ///
+    /// 用于 HDR/EXR 贴图。`Rgba16Float` 在 WebGPU 核心里可过滤；WebGL2 后端
+    /// 若缺少半浮点线性过滤，纹理会退化为最近邻（采样器由 wgpu 校验）。
+    pub fn upload_float(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &crate::hdr_image::FloatImage,
+        options: TextureOptions,
+    ) -> Self {
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let chain = if options.mipmaps {
+            image.generate_mip_chain()
+        } else {
+            vec![(image.width, image.height, image.rgba.clone())]
+        };
+        let mip_levels = chain.len() as u32;
+        let (w, h) = (image.width.max(1), image.height.max(1));
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(options.label),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: mip_levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (level, (lw, lh, pixels)) in chain.iter().enumerate() {
+            let mut bytes = Vec::with_capacity(pixels.len() * 8);
+            for p in pixels {
+                for c in p {
+                    bytes.extend_from_slice(
+                        &half::f16::from_f32(c.clamp(-65504.0, 65504.0)).to_le_bytes(),
+                    );
+                }
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(lw * 8),
+                    rows_per_image: Some(*lh),
+                },
+                wgpu::Extent3d {
+                    width: *lw,
+                    height: *lh,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = texture_sampler(device, options);
+        Self {
+            texture,
+            view,
+            sampler,
+            size: (w, h),
+            mip_levels,
+        }
+    }
+
     /// 上传图像到 GPU。
     pub fn upload(
         device: &wgpu::Device,
@@ -333,43 +445,7 @@ impl GpuTexture {
         }
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let (min_filter, mag_filter, mipmap_filter) = match options.filter {
-            Filter::Nearest => (
-                wgpu::FilterMode::Nearest,
-                wgpu::FilterMode::Nearest,
-                wgpu::MipmapFilterMode::Nearest,
-            ),
-            Filter::Linear => (
-                wgpu::FilterMode::Linear,
-                wgpu::FilterMode::Linear,
-                if options.mipmaps {
-                    wgpu::MipmapFilterMode::Linear
-                } else {
-                    wgpu::MipmapFilterMode::Nearest
-                },
-            ),
-        };
-        let address = if options.repeat {
-            wgpu::AddressMode::Repeat
-        } else {
-            wgpu::AddressMode::ClampToEdge
-        };
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("quench3d-sampler"),
-            address_mode_u: address,
-            address_mode_v: address,
-            address_mode_w: address,
-            mag_filter,
-            min_filter,
-            mipmap_filter,
-            // 各向异性过滤要求所有过滤模式都是线性
-            anisotropy_clamp: if matches!(options.filter, Filter::Linear) && options.mipmaps {
-                8
-            } else {
-                1
-            },
-            ..Default::default()
-        });
+        let sampler = texture_sampler(device, options);
 
         Self {
             texture,

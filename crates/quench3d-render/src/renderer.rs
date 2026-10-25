@@ -13,6 +13,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::{Camera, Frustum};
 use crate::context::{vertex_layout, FrameError, GpuContext};
 use crate::environment::{EnvironmentCube, EnvironmentMap};
+use crate::hdr_image::FloatImage;
 use crate::light::{Lighting, PointLight, SpotLight, MAX_POINT_LIGHTS};
 use crate::lines::{DebugLines, LineVertex};
 use crate::material::{MaterialDesc, MaterialId, MeshId, TextureId};
@@ -3683,6 +3684,20 @@ impl Renderer {
             crate::texture::TextureOptions::data()
         };
         let texture = GpuTexture::upload(&ctx.device, &ctx.queue, image, options);
+        self.textures.insert(texture)
+    }
+
+    /// 上传一张线性浮点贴图（`Rgba16Float`，自动生成 mip）。HDR/EXR 用。
+    pub fn add_texture_float(&mut self, ctx: &GpuContext, image: &FloatImage) -> TextureId {
+        let texture = GpuTexture::upload_float(
+            &ctx.device,
+            &ctx.queue,
+            image,
+            crate::texture::TextureOptions {
+                srgb: false,
+                ..crate::texture::TextureOptions::data()
+            },
+        );
         self.textures.insert(texture)
     }
 

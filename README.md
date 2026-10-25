@@ -688,7 +688,7 @@ quench3d::write_png(&image, "out.png")?;
 | LOD | 静态高模自动生成 1/2、1/4 两档（`render.auto_lod`，顶点聚类，非蒙皮），按批次包围盒距离切换；手工 `models[].lods` 仍可用；`O` 开关。蒙皮/动画网格不自动生成，无遮挡剔除 |
 | 运动模糊 | 相机运动模糊（`lighting.motion_blur`，缺省关；深度反投影 + 上一帧 view-proj，原生后端；物体自身运动不糊） |
 | 阴影 | 太阳：单张（级联时 2×2 图集）`Depth32Float` 阴影贴图（分辨率是渲染器构造参数 `RendererOptions::shadow_map_size`，**不在场景文件里**），按纹素对齐的正交拟合，3×3 PCF（硬件比较采样）；阴影强度（`.strength`）与覆盖半径（`.radius`）可从场景文件调；**级联阴影** `.cascades`（1~4，缺省 1 = 单级老行为）+ `.split_lambda`（0~1）：多级按视锥 PSSM 切段，主 pass 按视空间深度选级。**局部光阴影**：`SpotLight.cast_shadows`（一张透视 2D 深度图，视锥 = 外锥角）与 `PointLight.cast_shadows`（**立方体阴影**：`texture_depth_2d_array` 6 层，每层 90°，面选择 + 面内 uv 是 CPU 纯函数、WGSL 逐字镜像，靠"公式 == 矩阵"的 CPU 测试保证两边一致）；聚光**每帧最多 4 盏**（4 层深度数组，逐层 pass）、点光每帧 1 盏（6 面数组）；两者都缺省 `false`（老场景像素逐位不变），两套图互相独立 |
-| 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **IBL 环境贴图**（`lighting.environment_map`，等距柱状 HDR/PNG/JPEG → 64px 7 级预滤波 cubemap，按粗糙度采样）或解析式环境高光（不写贴图时；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。IBL 没有精确 PMREM/GGX、没有屏幕空间反射 |
+| 光照 | 1 个平行光 + 最多 **8** 盏局部光（点光源与聚光灯共享名额、点光源优先；`MAX_POINT_LIGHTS`，与 WGSL 数组长度一致；超出部分给出警告后忽略），平滑衰减到半径处归零，聚光灯有内外锥角的平滑过渡，环境光 + 程序化天空 + **IBL 环境贴图**（`lighting.environment_map`，等距柱状 HDR/EXR/PNG/JPEG → 64px 7 级预滤波 cubemap，按粗糙度采样）或解析式环境高光（不写贴图时；`RendererOptions.environment` 可关，缺省开）；**指数距离雾**（`lighting.fog`，不写 = 关闭）。IBL 没有精确 PMREM/GGX、没有屏幕空间反射 |
 | 天空/地面 | 全屏三角形程序化天空（三个渐变颜色可从 `lighting.sky_colors` 调）+ 解析无限网格（`fwidth` 抗锯齿 + 深度写入） |
 | 批处理 | 不透明按 (材质, 网格) 分批 + 实例化（160 字节/实例）+ 逐实例视锥剔除；超过 `render.max_draw_distance` 的实例按包围盒最近点剔除（`RenderStats.distance_culled` / 报告同名字段，不是遮挡剔除）；**半透明按相机距离全局由远到近逐实例绘制**（按实例 AABB 中心排序，不再按批次/材质 id 顺序）；`RendererOptions.oit`（缺省关闭）可切到 WBOIT，非水面半透明与绘制顺序无关，GL/WebGL2 自动回退旧排序 |
 | 其它 | MSAA（1/2/4/8；GL/WebGL2 上按能力夹到 1）、Alpha 混合与 Alpha 裁剪、无光照材质、调试线段/接触点/包围盒 |
@@ -1437,7 +1437,7 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 910 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 917 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

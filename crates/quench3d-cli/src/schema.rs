@@ -590,7 +590,7 @@ pub fn scene_grammar() -> Value {
             "ambient": "环境光强度",
             "ambient_color": "环境光颜色 [r,g,b]（**线性空间**），缺省跟随预设",
             "exposure": "曝光",
-            "environment_map": "IBL 环境贴图：等距柱状 .hdr / .png / .jpg（相对场景文件解析）。不写 = 解析式天空（旧场景像素不变）；写了按预滤波 cubemap 采样，太阳/局部光仍叠加",
+            "environment_map": "IBL 环境贴图：等距柱状 .hdr / .exr / .png / .jpg（相对场景文件解析）。不写 = 解析式天空（旧场景像素不变）；写了按预滤波 cubemap 采样，太阳/局部光仍叠加",
             "environment_intensity": "环境贴图强度倍率，缺省 1",
             "environment_rotation_deg": "环境贴图绕 Y 轴旋转（度），缺省 0",
             "sky": "是否绘制天空，缺省 true",

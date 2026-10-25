@@ -45,6 +45,7 @@ pub mod cascade;
 pub mod color;
 pub mod context;
 pub mod environment;
+pub mod hdr_image;
 pub mod light;
 pub mod lines;
 pub mod material;
@@ -64,6 +65,7 @@ pub use crate::light::{
     MAX_POINT_LIGHTS,
 };
 pub use context::{FrameError, GpuContext, GpuInitError, GpuOptions, OffscreenTarget};
+pub use hdr_image::FloatImage;
 pub use lines::{DebugLines, LineVertex};
 pub use material::{MaterialDesc, MaterialId, MeshId, TextureId};
 pub use mesh::{MeshData, Vertex};
@@ -86,6 +88,7 @@ pub mod prelude {
     pub use crate::camera::{Camera, CameraInput, FlyCamera, OrbitCamera, Projection};
     pub use crate::color;
     pub use crate::context::{FrameError, GpuContext, GpuOptions};
+    pub use crate::hdr_image::FloatImage;
     pub use crate::light::SpotLight;
     pub use crate::light::{
         ColorGrade, DirectionalLight, FogParams, Lighting, PointLight, SkyParams,

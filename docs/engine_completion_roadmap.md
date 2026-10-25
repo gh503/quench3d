@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**910 通过 / 0 失败 / 3 ignored**
-- wasm：**13,646,202 字节**
+- 测试：**917 通过 / 0 失败 / 3 ignored**
+- wasm：**13,646,344 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -96,6 +96,13 @@
   - 未做：真实 GPU 60 fps 实测、GPU 侧透明/阴影剔除、遮挡剔除。
 - [ ] 遮挡剔除 / 自动 LOD / 多视口。
 - [ ] 压缩纹理（KTX2/Basis）与浮点纹理；EXR/HDR 读写。
+  - 已做：`FloatImage`（线性 RGBA f32）读写 Radiance `.hdr` 与 OpenEXR
+    （scanline、HALF/FLOAT/UINT、NONE/RLE 解压；写盘 HALF 无压缩）。HDR 用
+    平铺 RGBE 编码；EXR 的 RLE 含预测器逆变换与奇偶字节反交错。`EnvironmentMap`
+    现在也能读 `.exr` 并导出 `.hdr`/`.exr`。
+  - 已做：`Rgba16Float` 浮点贴图上传（`Renderer::add_texture_float`，盒式 mip），
+    GPU e2e 验证线性亮度 4.0 的贴图不会被 8 位路径截断。
+  - 未做：KTX2/Basis 压缩纹理、块压缩格式、PIZ/ZIP/tiled EXR。
 - [ ] FBX/USD 至少一条导入链；材质节点图或等价的自定义着色器层。
 - [x] 透明排序/OIT、投影贴花、多盏投影阴影、线性雾距离。
   - 已做：线性雾 `FogParams::with_linear(start, end)` / 场景 `lighting.fog.mode = "linear"`

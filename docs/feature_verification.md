@@ -46,6 +46,8 @@ tools/verify_editor_features.sh
 | 水面后处理 | `cargo test -p quench3d-render --test post_pipeline water` | 开/关、波强/泡沫/折射都改变像素 |
 | 解析式环境高光 | `cargo test -p quench3d-render --test post_pipeline analytic_environment` | 金属球开关像素不同 |
 | 透明排序 | `cargo test -p quench3d-render --test post_pipeline transparent` | 远蓝后画、近红先画仍得到正确混合 |
+| HDR/EXR | `cargo test -p quench3d-render --lib hdr_image` | RGBE 与 EXR HALF 往返；RLE 逆变换；不支持压缩/截断明确报错；盒式 mip |
+| 浮点贴图 | `cargo test -p quench3d-render --test float_texture` | 线性 4.0 绿光 tonemap 后仍明显亮绿（8 位路径会截断到 1.0） |
 | WBOIT | `cargo test -p quench3d-render --test oit` | 同深度红/蓝半透明交换材质顺序后中心差 ≤4；关掉 OIT 的对照组两种顺序不同；MSAA=4 走解析深度 |
 | 网格深度 | `cargo test -p quench3d-render --test post_pipeline grid_writes_depth` | 地面下方线段被遮住、上方可见 |
 | 骨骼蒙皮（GPU）+ 调色板 | `QUENCH3D_GPU_TESTS=1 cargo test -p quench3d --test model_loading gpu_skinning` | 手搓 GLB 的 `skins/JOINTS_0/WEIGHTS_0` 被解析；纯蒙皮实例提交后 `skin_palette_len()>0`；t=0 与 t=0.25 的 64×64 渲染**像素确实变化** |
