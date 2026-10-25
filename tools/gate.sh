@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # quench3d 的唯一门禁入口：本地跑一次 = CI 跑的那几件事。
 #
-#   tools/gate.sh              # 全套（fmt + clippy×2 + 测试 + wasm + check_web）
+#   tools/gate.sh              # 全套（fmt + clippy×2 + 测试 + wasm + check_web + 浏览器 bench）
 #   tools/gate.sh --fast       # 跳过 wasm 构建与 check_web（改纯 Rust 时够用）
 #   GATE_SKIP_WEB=1 tools/gate.sh
 #   QUENCH3D_GPU_TESTS=0 tools/gate.sh   # 没有显卡的机器：不跑"真建 wgpu 上下文"的测试
@@ -120,6 +120,21 @@ else
   else
     bad check-web
     tail -n 20 "$LOG_DIR/gate-web.log"
+  fi
+
+  # 浏览器 wasm 基准需要本机 Chrome；CI 没装就跳过，不把“没浏览器”算红。
+  if command -v "${CHROME:-google-chrome}" >/dev/null 2>&1; then
+    step "浏览器 wasm 基准（check_browser.mjs）"
+    if node tools/check_browser.mjs >"$LOG_DIR/gate-browser.log" 2>&1; then
+      ok browser-bench
+      cat "$LOG_DIR/gate-browser.log"
+    else
+      bad browser-bench
+      tail -n 20 "$LOG_DIR/gate-browser.log"
+    fi
+  else
+    printf '\n== 浏览器 wasm 基准 ==\n'
+    printf 'SKIP 没找到 %s（可用 CHROME=... 指定）\n' "${CHROME:-google-chrome}"
   fi
 fi
 

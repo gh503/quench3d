@@ -202,14 +202,15 @@ node tools/check_web.mjs
 | P0-3 抓取场景/脚本 | **PASS（带理想化）** | 方块从 y=0.061 抬到 0.207（+0.146 m），相对夹爪滑移 0；手指从 ±0.04 合到 ±0.028 |
 | P0-3 滑块位置伺服 | **PASS（单元 + CLI）** | 单元：目标 0.5 m，600 步后误差 <1 cm；CLI：`target_m=0.2` 到 0.19999996 m，报告只有 `target_m/error_m`，没有把米转成度 |
 | P0-3 **真实摩擦夹持** | **PASS** | `modkit_arm_friction_grasp.scene.json`：40 mm 方块与任何刚体间**没有场景关节**，只靠两个滑块手指的接触摩擦；0 s 先抬到肩 −10°/肘 10°，0.8 s 下压回 0°/0°（above→descend），1.5 s 滑块手指闭合到 ±0.0255 m，4 s 起以 5°/s 抬到肩 64°/肘 −64°，18 s 末仍夹住；方块从 y=0.100 升到 y=0.203（**+0.103 m**），相对夹爪滑移 **<1 mm**，手指不撞限位、关节不断裂。测试断言 scene joints 中没有 `cube` |
+| P0-3 100 g 加严 | **PASS** | `modkit_arm_friction_grasp_100g.scene.json`：预紧 ±0.0248 m、手指 kp 8000 / 限力 12 N，抬升 **0.101 m**、滑移 **<0.3 mm**，无 cube 关节；200 g 同参数只到 0.098 m，未声称 |
 | P0-3 旧“理想抓取” fixture | PASS（保留） | 方块从 t=0 用固定关节挂住，只用于验证脚本时序；真实抓取以上面这一行为准 |
 | P1-1 `objects[].visual` | **PASS（功能与整机渲染）** | `visual` 支持 STL/GLB/GLTF/OBJ，挂成主物体子节点；加/不加 visual 的模拟 `states` 逐位相同；整机 STL 渲染 33,318 三角形 / 11 object；立柱已修正为 90 mm 竖直。上游没有官方装配矩阵，对位按官方尺寸（base 90 / l1 120 / l2 110 / link_bar 100）推导，见 §8 |
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |
 | P0-3 真实抓取根因 | 已修 | 旧 `modkit_arm_grasp` 沿用**未修正的 link 锚点/中心**，在负载下肘关节会自己塌；把手指/方块放到按 `modkit_arm` 修正几何算出的腕点并 +20 mm 避开 `link2` 后，同一套 2.5 N·m 限幅的 PD 就能稳定夹持。这不是给抓取“加力”，而是修场景几何 |
 
-| P1-3 wasm `setJointTarget/...` | **PASS（API/示例）** | 导出 `loadScene/setJointTarget/step/getJointStates/getBodyTransform`；Node 里真实装载 modkit 场景，2 s 后 shoulder=20.00°，矩阵 16 个有限数；`web/robot.html` 滑杆预览；wasm/Node 1000 步 1.106 s（纯物理）；桌面 1000 刚体 0.153 ms/步；浏览器渲染帧率未测，见 §10 |
+| P1-3 wasm `setJointTarget/...` | **PASS（API/示例）** | 导出 `loadScene/setJointTarget/step/getJointStates/getBodyTransform`；Node 里真实装载 modkit 场景，2 s 后 shoulder=20.00°，矩阵 16 个有限数；`web/robot.html` 滑杆预览；wasm/Node 1000 步 1.106 s；headless Chrome 1000 步 0.81–1.07 s（0.81–1.07 ms/步）；Canvas 预览 0.09 ms/帧（CPU 绘制，非 wgpu）；桌面 1000 刚体 0.153 ms/步，见 §10 |
 | P2 MCP `joint_target` | **PASS** | `quench3d_joint_target`：铰链 `target_deg` / 滑块 `target_m`，移除同关节的脚本动作后步进，返回 `joints[]`；单测用 modkit drive 场景到 20°±2° |
-| P2 1000 步 <2 s | **PASS** | wasm/Node 1000 步 **1.106 s**；桌面 bench 1000 刚体 0.153 ms/步 |
+| P2 1000 步 <2 s | **PASS** | wasm/Node 1000 步 **1.106 s**；headless Chrome **0.81–1.07 s**；桌面 bench 1000 刚体 0.153 ms/步 |
 | P2 接触力查询 | **PASS** | `simulate --json` 新增 `contact_forces[]`（名字、法线、位置、冲量、`force_n=impulse/fixed_dt`、sensor）；MCP `quench3d_query_contact` 可按 `min_force_n` 过滤 |
 
 ## 8. P1-1：`objects[].visual`
@@ -287,11 +288,12 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * `tools/check_web.mjs` 在 Node 里真的实例化 wasm、装载 `modkit_arm_drive` 场景、跑 120 步，断言 shoulder=20.00°、`link2` 矩阵 16 个有限数、未知刚体返回空数组。
 * wasm 体积：**13,539,804 字节**（约 13.2 MiB；P0 基线 13,449,106，+90.7 KB）。这是把完整编辑器 + 物理 + 关节 API 打进同一个 example 的代价；只做物理的页面可以用 `wasm-opt`/裁剪入口再降。
 * **桌面物理规模**：`quench3d bench` 在本机 1000 刚体 **0.153 ms/步**（睡眠开启），4 刚体轨迹 3.1–3.6 ms/2404 采样；4 自由度手臂 + 手指只有约 10 个刚体，物理远低于 1 ms/步，60 fps 的 16.7 ms 预算主要留给 JS/wgpu 渲染。
-* **wasm/Node 实测**（`node tools/check_web.mjs`，每次门禁都跑）：1000 步 **1106 ms（1.106 ms/步，纯物理等效 904 fps）**，低于 P2 的 1000 步 <2 s；这仍**不含**浏览器 wgpu 渲染，页面 60 fps 不能由它单独证明。
+* **wasm/Node 实测**（`node tools/check_web.mjs`，每次门禁都跑）：1000 步 **1106 ms（1.106 ms/步，纯物理等效 904 fps）**，低于 P2 的 1000 步 <2 s。
+* **真实浏览器实测**（`node tools/check_browser.mjs`，headless Chrome，装了 Chrome 的门禁会跑）：1000 步本机多轮 **809–1069 ms（0.81–1.07 ms/步，纯物理等效约 935–1237 fps）**；同一页的 Canvas 2D 预览 **0.09–0.10 ms/帧**。这两个都是 CPU 数字，**不是 wgpu 全渲染帧率**；页面 60 fps 仍需带 GPU 的浏览器实测。
 
 ## 11. 门禁结果
 
-`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，880 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
+`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，881 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web/browser-bench 全部 PASS。
 
 ## 12. 确定性
 
@@ -304,7 +306,7 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 
 * robot-modkit 上游没有提交 `cad/out/` 或官方装配矩阵；当前 STL 对位按官方尺寸推导，逐孔/逐螺柱的 CAD 装配仍需上游导出已装配资产后才能替换。
 * 浏览器 wgpu 渲染下的 60 fps 实测（wasm/Node 的 1000 步 1.106 s 已测；1000 刚体的 wasm 规模没测）。
-* 真实夹持目前只验证 20 g、40 mm 方块、friction 1.5；更重的物体需要重新标定预紧/增益。
+* 真实夹持已验证 20 g 与 100 g、40 mm 方块、friction 2.0；200 g 同套参数只抬起 0.098 m，更重物体仍需重新标定预紧/增益。
 * 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
 * MCP `simulate_steps` 已由 `quench3d_simulate.steps` 覆盖；`joint_target` 与 `query_contact` 已加。
 * 关节径向间隙 0.2 mm 的建模（当前铰链是理想约束，没有间隙）。

@@ -41,6 +41,13 @@
 
 ### 新增
 
+- **真实浏览器基准（第 121 轮）**：`tools/check_browser.mjs` 用 headless Chrome
+  跑 `web/robot.html?bench=1`，wasm 物理 1000 步本机 **0.81–1.07 s**（0.81–1.07 ms/步），
+  Canvas 2D 预览 **0.09 ms/帧**；门禁有 Chrome 就自动跑，没有则 SKIP。
+  这不是 wgpu 全渲染帧率，文档已分开写。
+- **100 g 真实摩擦夹持**：新增 `modkit_arm_friction_grasp_100g.scene.json`，
+  预紧 ±0.0248 m、手指 kp 8000 / 限力 12 N，抬升 0.101 m、滑移 <0.3 mm；
+  20 g 原 fixture 保持不动。
 - **接触力查询（第 120 轮）**：`simulate --json` 的 `contact_forces[]` 给出
   物体名、法线、接触点、冲量与 `force_n=impulse/fixed_dt`；MCP
   `quench3d_query_contact` 可按 `min_force_n` 过滤。

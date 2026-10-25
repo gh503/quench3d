@@ -46,7 +46,8 @@ quench3d/
 │   ├── ascii_preview.py  把渲染结果转成 ASCII / 数值检查（无浏览器环境下的视觉验证）
 │   ├── ab_bench.sh       配对 A/B 基准（同会话多次取最小，避开机器噪声）
 │   ├── mock_llm_server.py 假 OpenAI 服务：没有本地模型也能试 ask / chat
-│   └── check_web.mjs     检查 Web 产物：页面 import 的符号、wasm 能否实例化
+│   ├── check_web.mjs     检查 Web 产物：页面 import 的符号、wasm 能否实例化
+│   └── check_browser.mjs 可选：headless Chrome 的 wasm 1000 步 + Canvas 预览基准
 ├── docs/
 │   └── island_parallel_plan.md  island 并行求解设计稿（三步均已落地，见 §8.6 / §8.7）
 ├── .github/workflows/ci.yml  三平台 + wasm 的 CI 矩阵
@@ -1423,18 +1424,20 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
   ```bash
   tools/build_web.sh physics_playground   # 编译 wasm + wasm-bindgen 打包到 web/pkg/
   node tools/check_web.mjs                # 检查页面 import 的符号、wasm 能否实例化
+  node tools/check_browser.mjs            # 可选：headless Chrome 里跑 1000 步 + Canvas 预览基准
   python3 -m http.server 8000 --directory web   # 然后浏览器打开 http://localhost:8000/
   ```
 
   `check_web.mjs` 会读 `web/index.html` 的 import、核对胶水代码导出的符号、
   真正实例化一次 wasm 并确认 Rust 导出与内存都在——它能挡住「打包漏文件 /
   页面 import 了不存在的函数 / wasm 损坏」。CI 的 wasm 任务就是这么跑的
-  （浏览器内的渲染仍需真实浏览器 + GPU）。
+  （浏览器内的 wgpu 渲染帧率仍需带 GPU 的真实浏览器；`check_browser.mjs` 只测
+  wasm 物理与 Canvas 2D 预览，没装 Chrome 会自动跳过）。
 
 ## 7. 测试与验证
 
 ```bash
-cargo test --workspace         # 880 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
+cargo test --workspace         # 881 个测试通过（另 3 个 ignored；物理/CLI/渲染/数学/门面/编辑器 + doctest），0 失败
 cargo clippy --workspace --all-targets     # 0 警告（含 examples / tests）
 cargo fmt --all --check                    # 0 差异
 cargo test -p quench3d-physics  # 只看物理（含 200 体宽相、5 秒长跑稳定性、确定性）

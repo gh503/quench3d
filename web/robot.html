@@ -106,6 +106,26 @@ async function main() {
   for (let i = 0; i < 120; i++) step(1 / 60);
   draw(); refreshStatus();
 
+  // ?bench=1：浏览器内 wasm 物理 1000 步 + Canvas 预览 120 帧的实测。
+  // 这不是 wgpu 全渲染帧率，只用于回答“wasm 物理在浏览器里是否够快”。
+  if (new URLSearchParams(location.search).has("bench")) {
+    const t0 = performance.now();
+    for (let i = 0; i < 1000; i++) step(1 / 60);
+    const physicsMs = performance.now() - t0;
+    const t1 = performance.now();
+    for (let i = 0; i < 120; i++) draw();
+    const drawMs = performance.now() - t1;
+    const result = {
+      physics_1000_steps_ms: +physicsMs.toFixed(1),
+      physics_ms_per_step: +(physicsMs / 1000).toFixed(4),
+      canvas_120_frames_ms: +drawMs.toFixed(1),
+      canvas_ms_per_frame: +(drawMs / 120).toFixed(4),
+      ua: navigator.userAgent.includes("HeadlessChrome") ? "headless-chrome" : "chrome",
+    };
+    document.title = "bench-ok " + JSON.stringify(result);
+    statusEl.textContent = "BENCH " + JSON.stringify(result);
+  }
+
   for (const name of ["yaw", "shoulder", "elbow"]) {
     const input = document.getElementById(name);
     const out = document.getElementById(name + "-v");

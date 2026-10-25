@@ -204,6 +204,45 @@ fn friction_gripper_lifts_the_cube_ten_centimetres_without_slip() {
     assert!(report.joints.iter().all(|j| !j.broken));
 }
 
+fn friction_grasp_100g_fixture() -> SceneDoc {
+    SceneDoc::from_json(include_str!(
+        "fixtures/modkit_arm_friction_grasp_100g.scene.json"
+    ))
+    .expect("100 g friction grasp fixture")
+}
+
+/// 同一套滑块手指，把方块从 20 g 加到 100 g：预紧提到 ±0.0248 m、手指
+/// kp 8000 / 限力 12 N，仍然抬过 10 cm，滑移 <1 mm。
+#[test]
+fn friction_gripper_also_holds_a_hundred_gram_cube() {
+    let doc = friction_grasp_100g_fixture();
+    assert!(
+        doc.joints.iter().all(|j| j.a != "cube" && j.b != "cube"),
+        "方块不能靠场景关节挂在夹爪上"
+    );
+    let report = run_simulate(&doc).expect("仿真要能跑");
+    let pos = |n: &str| {
+        report
+            .states
+            .iter()
+            .find(|s| s.name == n)
+            .unwrap_or_else(|| panic!("没有 {n}"))
+            .position
+    };
+    let cube = pos("cube");
+    let grip = pos("gripper");
+    assert!(
+        cube[1] - 0.08 >= 0.10,
+        "100 g 方块只抬起了 {:.3} m",
+        cube[1] - 0.08
+    );
+    let slip =
+        ((cube[0] - grip[0]).powi(2) + (cube[1] - grip[1]).powi(2) + (cube[2] - grip[2]).powi(2))
+            .sqrt();
+    assert!(slip <= 6.0e-3, "100 g 方块滑移 {slip:.4} m");
+    assert!(report.joints.iter().all(|j| !j.broken));
+}
+
 #[test]
 fn grasp_script_lifts_the_cube_ten_centimetres_without_slip() {
     let doc = grasp_fixture();
