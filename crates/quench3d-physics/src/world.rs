@@ -2075,17 +2075,45 @@ impl PhysicsWorld {
                         .body(handle)
                         .is_some_and(|other| !other.sensor && other.groups.interacts(groups))
             };
-            // 为什么不用保守推进扫掠（`shape_cast`）：它按"到任意方向最近物体的距离"推进，
-            // 贴着地面滑行的子弹会被脚下的地面一直拖着（每步只推进地面距离那么远），
-            // 而且一旦最近的是"擦身而过"的物体，返回的命中就不该拦——试过，
-            // 加了地面之后子弹照样穿墙（见 sim_tests 的同名回归用例）。
-            // 中心射线只报告**沿运动方向**的命中，没有这个问题，而且一次查询就够。
-            let Some(hit) = self.raycast_filtered(b.transform.position, dir, total + reach, filter)
-            else {
+            // 中心射线。不用保守推进扫掠（`shape_cast`）：它按"到任意方向最近物体的
+            // 距离"推进，贴着地面滑行的子弹会被地面拖住，而且最近点不在运动路径上时
+            // 会直接越过真正的碰撞点（实测一个旋转盒的角撞矮墙会漏）。
+            let mut best: Option<(f32, Vec3)> = None;
+            if let Some(hit) =
+                self.raycast_filtered(b.transform.position, dir, total + reach, filter)
+            {
+                let travel = (hit.distance - reach).clamp(0.0, total);
+                best = Some((travel, hit.normal));
+            }
+            // 盒子只有角会撞上矮墙时，中心射线会从上方掠过：补 8 条角射线。
+            // 只对盒子做（球/胶囊的中心射线已足够），且仍是一次查询/角，代价可控。
+            if let Shape::Box { half_extents } = &b.shape {
+                for sx in [-1.0f32, 1.0] {
+                    for sy in [-1.0f32, 1.0] {
+                        for sz in [-1.0f32, 1.0] {
+                            let local = Vec3::new(
+                                half_extents.x * sx,
+                                half_extents.y * sy,
+                                half_extents.z * sz,
+                            );
+                            let offset = b.transform.rotation.mul_vec3(local);
+                            let origin = b.transform.position + offset;
+                            let Some(hit) =
+                                self.raycast_filtered(origin, dir, total + reach, filter)
+                            else {
+                                continue;
+                            };
+                            let travel = (hit.distance - offset.dot(dir)).clamp(0.0, total);
+                            if best.is_none_or(|(t, _)| travel < t) {
+                                best = Some((travel, hit.normal));
+                            }
+                        }
+                    }
+                }
+            }
+            let Some((travel, n)) = best else {
                 continue;
             };
-            let travel = (hit.distance - reach).clamp(0.0, total);
-            let n = hit.normal;
             // 朝表面运动的法向分量（负 = 正在靠近）
             let mn = motion.dot(n);
             if mn >= -1e-6 {

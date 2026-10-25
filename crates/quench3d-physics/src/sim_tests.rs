@@ -1404,6 +1404,49 @@ fn ccd_works_while_skimming_a_ground_plane() {
     );
 }
 
+/// CCD 的角射线：旋转盒子只有下角会撞矮墙，中心射线从墙顶掠过。
+#[test]
+fn ccd_catches_a_corner_only_hit() {
+    fn run(rotation: Quat) -> f32 {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: vec3(0.05, 0.2, 2.0),
+            })
+            .position(Vec3::ZERO)
+            .build(),
+        );
+        let b = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            })
+            .position(vec3(-2.0, 0.8, 0.0))
+            .rotation(rotation)
+            .linear_velocity(vec3(600.0, 0.0, 0.0))
+            .gravity_scale(0.0)
+            .ccd(true)
+            .build(),
+        );
+        for _ in 0..10 {
+            w.step(DT);
+        }
+        assert_all_finite(&w, "角 CCD");
+        w.body(b).unwrap().position().x
+    }
+    // 不转：盒底 0.3 m 高于墙顶 0.2 m，中心/角射线都从墙顶掠过 → 应该穿过去。
+    let straight = run(Quat::IDENTITY);
+    assert!(
+        straight > 5.0,
+        "前提：不转的盒子应穿过去，实际 x = {straight}"
+    );
+    // 转 45°：下角降到 0.093 m，角射线必须拦住。
+    let rotated = run(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4));
+    assert!(
+        rotated < 1.0,
+        "角射线应把旋转盒子拦在矮墙附近，实际 x = {rotated}"
+    );
+}
+
 /// CCD 也要遵守碰撞分组：分组不匹配的墙，扫掠时就得当作不存在。
 #[test]
 fn ccd_respects_collision_groups() {
