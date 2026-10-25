@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use quench3d_math::{Transform, Vec2, Vec3, Vec4};
-use quench3d_physics::{BodyHandle, JointVisual, PhysicsWorld};
+use quench3d_physics::{BodyHandle, JointVisual, PhysicsSnapshot, PhysicsWorld};
 use quench3d_render::{
     Camera, FlyCamera, FrameError, GpuContext, GpuOptions, Lighting, OrbitCamera, RenderStats,
     Renderer, RendererOptions,
@@ -735,6 +735,21 @@ fn advance_clock(
 
 // 固定步长累加器的只读访问（调试/UI 用）。
 impl Engine {
+    /// 生成物理运行时快照（刚体/关节/速度/睡眠/热启动缓存/流体/步数）。
+    pub fn snapshot(&self) -> PhysicsSnapshot {
+        self.world.snapshot()
+    }
+
+    /// 恢复物理快照，并把场景可视物体同步到恢复后的位姿。
+    ///
+    /// 引擎自己的固定步长累加器会清零：快照里的时间状态由物理世界恢复，
+    /// 不把恢复前那一帧的余量带进来（否则恢复后第一帧会多走）。
+    pub fn restore(&mut self, snapshot: PhysicsSnapshot) {
+        self.world.restore(snapshot);
+        self.scene.sync_from_physics(&self.world);
+        self.accumulator = 0.0;
+    }
+
     /// 删除场景物体，并在没有其他引用时释放它的命名网格/材质。
     ///
     /// 只处理 `AssetCache` 里**按名字上传**的资源；内置图元和仍被其他物体/粒子

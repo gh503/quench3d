@@ -133,6 +133,7 @@ struct Contact {
 }
 
 /// 一个粒子流体。
+#[derive(Clone, Debug)]
 pub struct Fluid {
     desc: FluidDesc,
     positions: Vec<Vec3>,

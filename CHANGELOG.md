@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **物理运行时快照/恢复（引擎 M1 第 6 片）**：`PhysicsWorld::snapshot/restore` 与
+  `Engine::snapshot/restore`，覆盖刚体全状态、关节与热启动冲量、接触缓存、水域/流体、
+  累加器、步数、事件队列和上一子步差分表；物理单测验证恢复后刚体逐位相等，且从同一
+  快照再跑 30 步两次轨迹逐位一致。
 - **场景迁移 CLI（引擎 M1 第 5 片）**：`quench3d migrate <scene> [--out]` 把旧 version
   场景升级到 v2；先校验再写，就地升级前备份 `.bak`（冲突则 `.bak.N`），临时文件 +
   rename 原子替换；失败不碰原文件。CLI e2e 覆盖带 `parent` 的 v1 升级、坏 JSON 不写盘、

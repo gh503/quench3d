@@ -2330,6 +2330,109 @@ pub(crate) fn collide_shape_with_body(
     Some(ContactManifold { points })
 }
 
+/// 物理世界的运行时快照。
+///
+/// 保存的是**状态**而不是场景配置：刚体槽位/世代、位置/旋转/速度、睡眠计时、
+/// 关节槽位与热启动冲量、接触热启动缓存、世界累加器、步数、事件队列与上一子步的
+/// 接触/睡眠差分表。恢复后查询用的句柄仍然有效（槽位布局原样还原）。
+///
+/// 不保存求解器临时缓冲（`scratch_*`、`manifolds`、`pairs`）——它们在下一步开头重建；
+/// 需要跨步保留的热启动数据在 `cache` 与关节 `impulses` 里。
+#[derive(Clone, Debug)]
+pub struct PhysicsSnapshot {
+    bodies: Vec<BodySlot>,
+    free: Vec<u32>,
+    joints: Vec<JointSlot>,
+    joint_free: Vec<u32>,
+    gravity: Vec3,
+    collisions_enabled: bool,
+    waters: Vec<WaterVolume>,
+    fluids: Vec<Fluid>,
+    fixed_dt: f32,
+    accumulator: f32,
+    step_count: u64,
+    cache: ContactCache,
+    sensor_pairs_prev: Vec<(u32, u32)>,
+    touch_pairs_prev: Vec<(u32, u32)>,
+    sleeping_prev: Vec<bool>,
+    events: Vec<PhysicsEvent>,
+    events_dropped: u64,
+    broken_joints: Vec<JointHandle>,
+}
+
+impl PhysicsWorld {
+    /// 生成运行时快照。O(刚体数 + 关节数 + 接触缓存 + 粒子数)。
+    pub fn snapshot(&self) -> PhysicsSnapshot {
+        PhysicsSnapshot {
+            bodies: self.bodies.clone(),
+            free: self.free.clone(),
+            joints: self.joints.clone(),
+            joint_free: self.joint_free.clone(),
+            gravity: self.gravity,
+            collisions_enabled: self.collisions_enabled,
+            waters: self.waters.clone(),
+            fluids: self.fluids.clone(),
+            fixed_dt: self.fixed_dt,
+            accumulator: self.accumulator,
+            step_count: self.step_count,
+            cache: self.cache.clone(),
+            sensor_pairs_prev: self.sensor_pairs_prev.clone(),
+            touch_pairs_prev: self.touch_pairs_prev.clone(),
+            sleeping_prev: self.sleeping_prev.clone(),
+            events: self.events.clone(),
+            events_dropped: self.events_dropped,
+            broken_joints: self.broken_joints.clone(),
+        }
+    }
+
+    /// 恢复快照。世界内容、刚体/关节状态、热启动缓存与步数都回到快照点。
+    ///
+    /// 快照里的槽位布局会整体替换当前世界；快照创建时的 `BodyHandle`/`JointHandle`
+    /// 恢复后仍然有效。当前世界的临时查询缓存会被丢弃并让 `version` 递增。
+    pub fn restore(&mut self, snapshot: PhysicsSnapshot) {
+        self.bodies = snapshot.bodies;
+        self.free = snapshot.free;
+        self.joints = snapshot.joints;
+        self.joint_free = snapshot.joint_free;
+        self.gravity = snapshot.gravity;
+        self.collisions_enabled = snapshot.collisions_enabled;
+        self.waters = snapshot.waters;
+        self.fluids = snapshot.fluids;
+        self.fixed_dt = snapshot.fixed_dt;
+        self.accumulator = snapshot.accumulator;
+        self.step_count = snapshot.step_count;
+        self.cache = snapshot.cache;
+        self.sensor_pairs_prev = snapshot.sensor_pairs_prev;
+        self.touch_pairs_prev = snapshot.touch_pairs_prev;
+        self.sleeping_prev = snapshot.sleeping_prev;
+        self.events = snapshot.events;
+        self.events_dropped = snapshot.events_dropped;
+        self.broken_joints = snapshot.broken_joints;
+
+        // 下一步会重建这些；留着会让查询/绘制短暂看到快照之后的世界。
+        self.sensor_pairs.clear();
+        self.sensor_events.clear();
+        self.contacts.clear();
+        self.manifolds.clear();
+        self.pairs.clear();
+        self.proxies.clear();
+        self.wake_list.clear();
+        self.islands = Islands::default();
+        self.contact_solver = ContactSolver::default();
+        self.joint_solver = JointSolver::default();
+        self.scratch_views.clear();
+        self.scratch_materials.clear();
+        self.scratch_pre_velocities.clear();
+        self.scratch_actuated.clear();
+        self.scratch_joint_entries.clear();
+        self.scratch_joint_impulses.clear();
+        self.parallel_used = false;
+
+        // 查询索引靠版本号判断是否过期：恢复等于换了一份世界，必须失效。
+        self.version = self.version.wrapping_add(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2462,5 +2565,91 @@ mod tests {
         // 删除刚体后不返回悬空关节。
         w.remove_body(b);
         assert!(w.joint_visuals().is_empty());
+    }
+
+    #[test]
+    fn snapshot_restore_round_trips_body_joint_and_step_state() {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::new(0.0, -9.81, 0.0));
+        let ground = w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(2.0),
+            })
+            .position(Vec3::new(0.0, -2.5, 0.0))
+            .build(),
+        );
+        let a = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.25),
+            })
+            .position(Vec3::new(0.0, 0.8, 0.0))
+            .build(),
+        );
+        let b = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.25),
+            })
+            .position(Vec3::new(1.0, 0.8, 0.0))
+            .build(),
+        );
+        let joint = w.add_joint(Joint::Hinge {
+            a,
+            b,
+            local_anchor_a: Vec3::new(0.5, 0.0, 0.0),
+            local_anchor_b: Vec3::new(-0.5, 0.0, 0.0),
+            local_axis_a: Vec3::Z,
+            local_axis_b: Vec3::Z,
+            limits: Some((-0.5, 0.5)),
+            motor: Some(crate::joints::HingeMotor {
+                target_velocity: 0.0,
+                max_impulse: 0.2,
+                target_angle: Some(0.25),
+                stiffness: 8.0,
+                damping: 1.0,
+                kp: 0.0,
+                kd: 0.0,
+                max_torque: 0.0,
+            }),
+        });
+
+        for _ in 0..120 {
+            w.step(1.0 / 60.0);
+        }
+        let snapshot = w.snapshot();
+        let step_count = w.step_count;
+        let ground_body = w.body(ground).cloned().expect("ground");
+        let a_body = w.body(a).cloned().expect("a");
+        let b_body = w.body(b).cloned().expect("b");
+        let target = w.joint_target(joint);
+        assert!(a_body.position().y < 0.8, "120 步后应当已经下落");
+
+        for _ in 0..45 {
+            w.step(1.0 / 60.0);
+        }
+        assert_ne!(w.body(a), Some(&a_body), "快照后世界必须真的变了");
+
+        w.restore(snapshot.clone());
+        assert_eq!(w.step_count, step_count);
+        assert_eq!(w.body(ground), Some(&ground_body));
+        assert_eq!(w.body(a), Some(&a_body), "刚体位姿/速度/睡眠必须逐位还原");
+        assert_eq!(w.body(b), Some(&b_body));
+        assert_eq!(w.joint_target(joint), target);
+        assert_eq!(w.joint_count(), 1);
+
+        // 从同一快照再跑 30 步，必须与第一次恢复后的 30 步逐位一致
+        // （热启动缓存也属于快照；只还原位姿会让第二步开始分叉）。
+        for _ in 0..30 {
+            w.step(1.0 / 60.0);
+        }
+        let first_a = w.body(a).cloned().expect("a after first continuation");
+        let first_b = w.body(b).cloned().expect("b after first continuation");
+        let first_steps = w.step_count;
+        w.restore(snapshot);
+        for _ in 0..30 {
+            w.step(1.0 / 60.0);
+        }
+        assert_eq!(w.body(a), Some(&first_a), "恢复后的轨迹必须逐位可重复");
+        assert_eq!(w.body(b), Some(&first_b));
+        assert_eq!(w.step_count, first_steps);
     }
 }
