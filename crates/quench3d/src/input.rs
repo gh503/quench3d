@@ -1,6 +1,6 @@
 //! 输入状态：把窗口事件归一化成每帧可查询的状态，并生成相机输入。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use quench3d_math::{Vec2, Vec3};
 use quench3d_render::CameraInput;
@@ -60,6 +60,31 @@ impl Default for GamepadState {
     }
 }
 
+/// 一条动作绑定：键盘键、鼠标键、手柄按键或手柄轴方向。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ActionBinding {
+    /// 键盘键。
+    Key(KeyCode),
+    /// 鼠标键。
+    Mouse(MouseButton),
+    /// 手柄按键：`pad` 是 0..4 的槽位，`button` 是位图里的位号（0..32）。
+    GamepadButton {
+        /// 手柄槽位。
+        pad: u8,
+        /// 位号。
+        button: u8,
+    },
+    /// 手柄轴方向：轴值超过 `+0.5`（`positive`）或低于 `-0.5` 时算按下。
+    GamepadAxis {
+        /// 手柄槽位。
+        pad: u8,
+        /// 轴号。
+        axis: u8,
+        /// 是否取正方向。
+        positive: bool,
+    },
+}
+
 /// 一帧的输入状态。
 #[derive(Clone, Debug, Default)]
 pub struct Input {
@@ -89,6 +114,10 @@ pub struct Input {
     touches: Vec<TouchPoint>,
     /// 上一帧的触屏点（用来判断“这一帧还按着”）。
     touches_prev: Vec<TouchPoint>,
+    /// 上一帧手柄状态（动作的 pressed/released 边界）。
+    gamepads_prev: [GamepadState; 4],
+    /// 动作名 → 绑定列表。宿主可运行时重绑定。
+    bindings: HashMap<String, Vec<ActionBinding>>,
 }
 
 impl Input {
@@ -109,6 +138,7 @@ impl Input {
         self.mouse_delta = Vec2::ZERO;
         self.scroll_delta = 0.0;
         self.touches_prev = std::mem::take(&mut self.touches);
+        self.gamepads_prev = self.gamepads;
     }
 
     /// 按键是否按下。
@@ -201,6 +231,189 @@ impl Input {
             dt,
             boost: self.shift,
             dragging: orbit_drag,
+        }
+    }
+
+    /// 给动作追加一条绑定（同一个动作可以有多条）。
+    pub fn bind_action(&mut self, action: impl Into<String>, binding: ActionBinding) {
+        self.bindings
+            .entry(action.into())
+            .or_default()
+            .push(binding);
+    }
+
+    /// 清空一个动作的全部绑定。
+    pub fn clear_action(&mut self, action: &str) {
+        self.bindings.remove(action);
+    }
+
+    /// 把动作的 `old` 绑定换成 `new`；`old` 不存在时返回 `false` 且不改动。
+    pub fn rebind_action(&mut self, action: &str, old: ActionBinding, new: ActionBinding) -> bool {
+        let Some(list) = self.bindings.get_mut(action) else {
+            return false;
+        };
+        let Some(slot) = list.iter().position(|b| *b == old) else {
+            return false;
+        };
+        list[slot] = new;
+        true
+    }
+
+    /// 一个动作的绑定列表（调试/设置界面用）。
+    pub fn action_bindings(&self, action: &str) -> Option<&[ActionBinding]> {
+        self.bindings.get(action).map(Vec::as_slice)
+    }
+
+    /// 动作是否按住。
+    pub fn action_down(&self, action: &str) -> bool {
+        self.bindings
+            .get(action)
+            .is_some_and(|list| list.iter().any(|b| self.binding_active(*b, false)))
+    }
+
+    /// 动作本帧是否刚按下（键盘/鼠标/手柄都按上一帧状态判边界）。
+    pub fn action_pressed(&self, action: &str) -> bool {
+        self.bindings
+            .get(action)
+            .is_some_and(|list| list.iter().any(|b| self.binding_active(*b, true)))
+    }
+
+    /// 动作本帧是否刚抬起。
+    pub fn action_released(&self, action: &str) -> bool {
+        self.bindings.get(action).is_some_and(|list| {
+            list.iter()
+                .any(|b| self.binding_was_active(*b) && !self.binding_active(*b, false))
+        })
+    }
+
+    fn binding_active(&self, binding: ActionBinding, pressed: bool) -> bool {
+        match binding {
+            ActionBinding::Key(key) => {
+                if pressed {
+                    self.key_pressed(key)
+                } else {
+                    self.key_down(key)
+                }
+            }
+            ActionBinding::Mouse(button) => {
+                if pressed {
+                    self.mouse_button_pressed(button)
+                } else {
+                    self.mouse_button_down(button)
+                }
+            }
+            ActionBinding::GamepadButton { pad, button } => {
+                if button >= 32 {
+                    return false;
+                }
+                let mask = 1u32 << button;
+                let now = self.gamepad_buttons(pad as usize) & mask != 0;
+                if pressed {
+                    let before = self
+                        .gamepads_prev
+                        .get(pad as usize)
+                        .filter(|g| g.connected)
+                        .map_or(0, |g| g.buttons)
+                        & mask
+                        != 0;
+                    now && !before
+                } else {
+                    now
+                }
+            }
+            ActionBinding::GamepadAxis {
+                pad,
+                axis,
+                positive,
+            } => {
+                let axis_value = |gamepad: &GamepadState| -> f32 {
+                    gamepad.axes.get(axis as usize).copied().unwrap_or(0.0)
+                        * if positive { 1.0 } else { -1.0 }
+                };
+                let now = self
+                    .gamepads
+                    .get(pad as usize)
+                    .filter(|g| g.connected)
+                    .is_some_and(|g| axis_value(g) >= 0.5);
+                if pressed {
+                    let before = self
+                        .gamepads_prev
+                        .get(pad as usize)
+                        .filter(|g| g.connected)
+                        .is_some_and(|g| axis_value(g) >= 0.5);
+                    now && !before
+                } else {
+                    now
+                }
+            }
+        }
+    }
+
+    fn binding_was_active(&self, binding: ActionBinding) -> bool {
+        match binding {
+            ActionBinding::GamepadButton { pad, button } => {
+                button < 32
+                    && self
+                        .gamepads_prev
+                        .get(pad as usize)
+                        .filter(|g| g.connected)
+                        .is_some_and(|g| g.buttons & (1u32 << button) != 0)
+            }
+            ActionBinding::Key(key) => self.key_released(key),
+            ActionBinding::Mouse(button) => self.mouse_button_released(button),
+            ActionBinding::GamepadAxis {
+                pad,
+                axis,
+                positive,
+            } => self
+                .gamepads_prev
+                .get(pad as usize)
+                .filter(|g| g.connected)
+                .is_some_and(|g| {
+                    let value = g.axes.get(axis as usize).copied().unwrap_or(0.0)
+                        * if positive { 1.0 } else { -1.0 };
+                    value >= 0.5
+                }),
+        }
+    }
+
+    /// 双指捏合的帧间距离变化（当前两指距离 − 上一帧同两指距离）。
+    pub fn pinch_delta(&self) -> f32 {
+        let active: Vec<&TouchPoint> = self
+            .touches
+            .iter()
+            .filter(|t| t.phase != TouchPhase::Ended)
+            .collect();
+        let Some((first, second)) = active.first().zip(active.get(1)) else {
+            return 0.0;
+        };
+        let Some(prev_first) = self.touches_prev.iter().find(|t| t.id == first.id) else {
+            return 0.0;
+        };
+        let Some(prev_second) = self.touches_prev.iter().find(|t| t.id == second.id) else {
+            return 0.0;
+        };
+        (first.position - second.position).length()
+            - (prev_first.position - prev_second.position).length()
+    }
+
+    /// 单指/多指拖动的帧间平均位移（逻辑像素）。
+    pub fn swipe_delta(&self) -> Vec2 {
+        let mut sum = Vec2::ZERO;
+        let mut count = 0usize;
+        for touch in &self.touches {
+            if touch.phase == TouchPhase::Ended {
+                continue;
+            }
+            if let Some(prev) = self.touches_prev.iter().find(|t| t.id == touch.id) {
+                sum += touch.position - prev.position;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            Vec2::ZERO
+        } else {
+            sum / count as f32
         }
     }
 
@@ -423,5 +636,83 @@ mod tests {
         assert!(!input.touch_down(7));
         input.begin_frame();
         assert!(input.touches().is_empty(), "Ended 只保留一帧");
+    }
+
+    #[test]
+    fn action_rebinding_stops_the_old_binding() {
+        let mut input = Input::new();
+        input.bind_action("jump", ActionBinding::Key(KeyCode::Space));
+        input.on_key_down(KeyCode::Space);
+        assert!(input.action_down("jump"));
+        assert!(input.action_pressed("jump"));
+        input.begin_frame();
+        assert!(!input.action_pressed("jump"), "按住不算刚按下");
+        assert!(input.rebind_action(
+            "jump",
+            ActionBinding::Key(KeyCode::Space),
+            ActionBinding::Key(KeyCode::KeyJ)
+        ));
+        input.on_key_up(KeyCode::Space);
+        assert!(!input.action_down("jump"), "重绑定后旧键必须失效");
+        input.on_key_down(KeyCode::KeyJ);
+        assert!(input.action_down("jump"));
+        assert!(input.action_pressed("jump"));
+        assert!(
+            !input.rebind_action(
+                "jump",
+                ActionBinding::Key(KeyCode::KeyQ),
+                ActionBinding::Key(KeyCode::KeyK)
+            ),
+            "不存在的旧绑定不能假装成功"
+        );
+    }
+
+    #[test]
+    fn gamepad_bindings_report_pressed_and_released_edges() {
+        let mut input = Input::new();
+        input.bind_action("fire", ActionBinding::GamepadButton { pad: 0, button: 1 });
+        input.bind_action(
+            "forward",
+            ActionBinding::GamepadAxis {
+                pad: 0,
+                axis: 1,
+                positive: true,
+            },
+        );
+        input.on_gamepad_connected(0, true);
+        input.on_gamepad_buttons(0, 0b10);
+        input.on_gamepad_axis(0, 1, 0.75);
+        assert!(input.action_down("fire"));
+        assert!(input.action_pressed("fire"));
+        assert!(input.action_down("forward"));
+        input.begin_frame();
+        assert!(!input.action_pressed("fire"), "按住不算刚按下");
+        assert!(!input.action_pressed("forward"));
+        input.on_gamepad_buttons(0, 0);
+        input.on_gamepad_axis(0, 1, 0.0);
+        assert!(input.action_released("fire"));
+        assert!(input.action_released("forward"));
+        assert!(!input.action_down("fire"));
+        // 未连接的手柄不触发。
+        input.on_gamepad_connected(0, false);
+        input.on_gamepad_buttons(0, 0b10);
+        assert!(!input.action_down("fire"));
+    }
+
+    #[test]
+    fn pinch_and_swipe_follow_two_fingers() {
+        let mut input = Input::new();
+        input.on_touch(1, Vec2::new(0.0, 0.0), TouchPhase::Started);
+        input.on_touch(2, Vec2::new(10.0, 0.0), TouchPhase::Started);
+        input.begin_frame();
+        input.on_touch(1, Vec2::new(0.0, 0.0), TouchPhase::Moved);
+        input.on_touch(2, Vec2::new(15.0, 0.0), TouchPhase::Moved);
+        assert!((input.pinch_delta() - 5.0).abs() < 1e-6);
+        let swipe = input.swipe_delta();
+        assert!((swipe.x - 2.5).abs() < 1e-6);
+        assert_eq!(swipe.y, 0.0);
+        // 少于两指没有捏合。
+        input.on_touch_end(2, Vec2::new(15.0, 0.0));
+        assert_eq!(input.pinch_delta(), 0.0);
     }
 }

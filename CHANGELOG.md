@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **输入动作映射与触屏手势（引擎 M1 第 7 片）**：`ActionBinding` 统一键盘/鼠标/手柄
+  按键/手柄轴，支持运行时 `rebind_action` 与跨帧 pressed/released；新增双指
+  `pinch_delta`、多指 `swipe_delta`。单测覆盖重绑定旧键失效、手柄按键/轴边界、捏合与
+  滑动距离。M1 输入项据此勾完成（平台手柄后端仍由宿主注入）。
 - **物理运行时快照/恢复（引擎 M1 第 6 片）**：`PhysicsWorld::snapshot/restore` 与
   `Engine::snapshot/restore`，覆盖刚体全状态、关节与热启动冲量、接触缓存、水域/流体、
   累加器、步数、事件队列和上一子步差分表；物理单测验证恢复后刚体逐位相等，且从同一

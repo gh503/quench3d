@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**891 通过 / 0 失败 / 3 ignored**
-- wasm：**13,556,612 字节**
+- 测试：**894 通过 / 0 失败 / 3 ignored**
+- wasm：**13,557,014 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -47,9 +47,14 @@
     也在快照里，不只是位姿）；同一快照可重复恢复。
   - 边界：物理没有 RNG（无随机状态可存）；恢复会丢弃查询缓存并递增 `version`，未保存
     `scratch_*`/`manifolds`（下一步重建）。
-- [ ] 输入抽象：键鼠/手柄/触屏/重绑定，宿主可注入。
-  - 已做：手柄 4 槽位状态与轴/按键注入、触屏生命周期（`Input` 单测），winit `Touch` 已接到主循环。
-  - 未做：重绑定、真实平台手柄后端、触屏手势（捏合/滑动）与移动端 UI。
+- [x] 输入抽象：键鼠/手柄/触屏/重绑定，宿主可注入。
+  - `ActionBinding`（键盘/鼠标/手柄按键/手柄轴）+ `bind_action/rebind_action/clear_action`；
+    `action_down/pressed/released` 统一处理键鼠与手柄边界（手柄保存上一帧状态）。
+  - 触屏：4 槽手柄注入、`TouchPoint` 生命周期、`pinch_delta`/`swipe_delta`；winit `Touch`
+    已接主循环。
+  - 行为证据（`Input` 单测）：重绑定后旧键失效/新键生效、按住不算 pressed、手柄
+    button/axis 的 pressed/released、双指捏合 5px 与平均滑动 2.5px、单指不产生捏合。
+  - 边界：手柄由宿主注入（未接 gilrs/SDL 等平台后端）；移动端 UI 不在引擎层。
 - [ ] 统一错误码覆盖运行期路径（不只 `validate`）。
 
 ### M2 渲染架构（8–12 人月）

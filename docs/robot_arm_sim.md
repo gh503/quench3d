@@ -288,14 +288,14 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * 不启动 winit/GPU；页面自己画模型。Web Serial 仍完全由页面 JS 管，引擎不碰串口。
 * `web/robot.html` 是滑杆示例：改 yaw/shoulder/elbow，`setJointTarget` + 60 次 `step(1/60)`，用 `getBodyTransform` 画关节骨架；状态栏打印 `getJointStates`。
 * `tools/check_web.mjs` 在 Node 里真的实例化 wasm、装载 `modkit_arm_drive` 场景、跑 120 步，断言 shoulder=20.00°、`link2` 矩阵 16 个有限数、未知刚体返回空数组。
-* wasm 体积：**13,556,612 字节**（约 13.2 MiB；P0 基线 13,449,106，+107.5 KB）。这是把完整编辑器 + 物理 + 关节 API 打进同一个 example 的代价；只做物理的页面可以用 `wasm-opt`/裁剪入口再降。
+* wasm 体积：**13,557,014 字节**（约 13.2 MiB；P0 基线 13,449,106，+107.9 KB）。这是把完整编辑器 + 物理 + 关节 API 打进同一个 example 的代价；只做物理的页面可以用 `wasm-opt`/裁剪入口再降。
 * **桌面物理规模**：`quench3d bench` 在本机 1000 刚体 **0.153 ms/步**（睡眠开启），4 刚体轨迹 3.1–3.6 ms/2404 采样；4 自由度手臂 + 手指只有约 10 个刚体，物理远低于 1 ms/步，60 fps 的 16.7 ms 预算主要留给 JS/wgpu 渲染。
 * **wasm/Node 实测**（`node tools/check_web.mjs`，每次门禁都跑）：1000 步 **1106 ms（1.106 ms/步，纯物理等效 904 fps）**，低于 P2 的 1000 步 <2 s。
 * **真实浏览器实测**（`node tools/check_browser.mjs`，headless Chrome，装了 Chrome 的门禁会跑）：1000 步本机多轮 **809–1069 ms（0.81–1.07 ms/步，纯物理等效约 935–1237 fps）**；同一页的 Canvas 2D 预览 **0.09–0.10 ms/帧**。这两个都是 CPU 数字，**不是 wgpu 全渲染帧率**；页面 60 fps 仍需带 GPU 的浏览器实测。
 
 ## 11. 门禁结果
 
-`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，891 个测试 0 失败，wasm 13,556,612 字节（P0 基线 13,449,106，+107.5 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web/browser-bench 全部 PASS。
+`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，894 个测试 0 失败，wasm 13,557,014 字节（P0 基线 13,449,106，+107.9 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web/browser-bench 全部 PASS。
 
 ## 12. 确定性
 
