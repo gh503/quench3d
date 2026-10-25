@@ -503,6 +503,12 @@ pub struct SceneDoc {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhysicsDoc {
+    /// 求解模式，缺省 `normal`。
+    ///
+    /// `drive` = 关节回放：忽略场景重力、关闭宽相/窄相/接触求解，只跑关节与积分。
+    /// 用于逐帧确定性的机械臂预览/截图；碰撞形状仍可写，但不产生接触。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PhysicsModeDoc>,
     /// 摩擦系数的**缺省**合成规则（两端都没显式指定时用），缺省 `geometric_mean`。
     ///
     /// 这个缺省是历史行为：`sqrt(fa × fb)`。想改成"取小/取大/平均/相乘"就在这里写，
@@ -534,6 +540,18 @@ pub struct PhysicsDoc {
     /// 位置修正迭代次数（0~32，缺省引擎的 4）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_iterations: Option<u32>,
+}
+
+/// 物理求解模式（场景文件里的写法）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhysicsModeDoc {
+    /// 正常物理：重力 + 接触 + 关节。
+    #[serde(rename = "normal")]
+    Normal,
+    /// 运动学回放：无重力、无接触，只解关节。
+    #[serde(rename = "drive")]
+    Drive,
 }
 
 /// 摩擦/恢复系数的合成规则（场景文件里的写法）。
@@ -803,6 +821,7 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         cast_shadows: o.cast_shadows && t.cast_shadows,
         receive_shadows: o.receive_shadows && t.receive_shadows,
         scale: o.scale.or(t.scale),
+        visual: o.visual.clone().or_else(|| t.visual.clone()),
         collision_layer: o.collision_layer.or(t.collision_layer),
         collides_with: o.collides_with.clone().or_else(|| t.collides_with.clone()),
         sensor: o.sensor.or(t.sensor),
@@ -1506,6 +1525,23 @@ pub struct InstanceDoc {
     pub scale: Option<[f32; 3]>,
 }
 
+/// 物体的外观网格（碰撞仍由 `shape`/`shapes` 决定）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisualDoc {
+    /// 网格文件路径（`.stl` / `.glb` / `.gltf` / `.obj`），相对场景文件。
+    pub path: PathBuf,
+    /// 相对刚体/物体原点的位置（米），缺省原点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f32; 3]>,
+    /// 相对刚体/物体原点的欧拉角（度，XYZ），缺省 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<[f32; 3]>,
+    /// 均匀缩放，缺省 1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+}
+
 /// 一个图元物体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1553,6 +1589,12 @@ pub struct ObjectDoc {
     /// 显示缩放倍率（只影响渲染，不影响碰撞），缺省 `[1, 1, 1]`；**不受父物体缩放影响**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<[f32; 3]>,
+    /// 用外部网格替换这个物体的**外观**（碰撞仍用 `shape`/`shapes`）。
+    ///
+    /// 网格随刚体位姿走：挂在刚体上就是刚体局部坐标；没有刚体时是物体局部坐标。
+    /// 支持 `.stl` / `.glb` / `.gltf` / `.obj`；路径相对场景文件解析。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual: Option<VisualDoc>,
     /// 材质名（引用 `materials`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
@@ -5355,6 +5397,54 @@ impl SceneDoc {
                         format!("{p}.scale"),
                         "缩放必须是正有限数",
                     ));
+                }
+            }
+            if let Some(v) = &o.visual {
+                let vp = format!("{p}.visual");
+                let ext = v
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !matches!(ext.as_str(), "stl" | "glb" | "gltf" | "obj") {
+                    out.push(
+                        Diagnostic::error_code(
+                            ErrorCode::InvalidValue,
+                            format!("{vp}.path"),
+                            format!(
+                                "visual 只支持 .stl / .glb / .gltf / .obj，当前扩展名是 \"{ext}\""
+                            ),
+                        )
+                        .with_hint("换成受支持的网格文件；碰撞体仍由 shape/shapes 决定"),
+                    );
+                }
+                if let Some(q) = &v.position {
+                    if !finite3(q) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{vp}.position"),
+                            "visual.position 必须是有限数",
+                        ));
+                    }
+                }
+                if let Some(q) = &v.rotation_deg {
+                    if !finite3(q) {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{vp}.rotation_deg"),
+                            "visual.rotation_deg 必须是有限数",
+                        ));
+                    }
+                }
+                if let Some(q) = v.scale {
+                    if !q.is_finite() || q <= 0.0 {
+                        out.push(Diagnostic::error_code(
+                            ErrorCode::OutOfRange,
+                            format!("{vp}.scale"),
+                            "visual.scale 必须是有限正数",
+                        ));
+                    }
                 }
             }
             if let Some(m) = &o.material {

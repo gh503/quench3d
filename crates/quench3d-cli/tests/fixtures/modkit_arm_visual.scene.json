@@ -1,0 +1,279 @@
+{
+  "format": "quench3d.scene",
+  "version": 2,
+  "name": "modkit M1 · STL visual assembly",
+  "gravity": [
+    0,
+    -9.81,
+    0
+  ],
+  "ground": {
+    "size": 4,
+    "material": "floor"
+  },
+  "materials": {
+    "floor": {
+      "color": [
+        0.55,
+        0.58,
+        0.62
+      ],
+      "roughness": 0.9
+    },
+    "steel": {
+      "color": [
+        0.55,
+        0.58,
+        0.62
+      ],
+      "metallic": 0.8,
+      "roughness": 0.3
+    },
+    "orange": {
+      "color": [
+        0.95,
+        0.52,
+        0.09
+      ],
+      "roughness": 0.5
+    },
+    "joint": {
+      "color": [
+        0.18,
+        0.22,
+        0.25
+      ],
+      "roughness": 0.6
+    }
+  },
+  "objects": [
+    {
+      "name": "chassis",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.24,
+          0.005,
+          0.2
+        ]
+      },
+      "position": [
+        0,
+        0.0025,
+        0
+      ],
+      "material": "steel",
+      "body": "static",
+      "visual": {
+        "path": "meshes/m1_chassis.stl",
+        "scale": 1.0
+      }
+    },
+    {
+      "name": "column",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.04,
+          0.09,
+          0.04
+        ]
+      },
+      "position": [
+        0,
+        0.05,
+        0
+      ],
+      "material": "joint",
+      "body": "static",
+      "visual": {
+        "path": "meshes/m1_column.stl",
+        "scale": 1.0
+      }
+    },
+    {
+      "name": "yaw",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.05,
+          0.03,
+          0.05
+        ]
+      },
+      "position": [
+        0.025,
+        0.105,
+        0
+      ],
+      "material": "orange",
+      "body": "dynamic",
+      "mass": 0.08,
+      "visual": {
+        "path": "meshes/m1_yaw.stl",
+        "scale": 1.0
+      }
+    },
+    {
+      "name": "link1",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.12,
+          0.02,
+          0.03
+        ]
+      },
+      "position": [
+        0.11,
+        0.105,
+        0
+      ],
+      "material": "orange",
+      "body": "dynamic",
+      "mass": 0.09,
+      "friction": 0.6,
+      "visual": {
+        "path": "meshes/m1_link1.stl",
+        "scale": 1.0
+      }
+    },
+    {
+      "name": "link2",
+      "shape": {
+        "type": "box",
+        "size": [
+          0.11,
+          0.02,
+          0.03
+        ]
+      },
+      "position": [
+        0.225,
+        0.105,
+        0
+      ],
+      "material": "orange",
+      "body": "dynamic",
+      "mass": 0.07,
+      "friction": 0.6,
+      "visual": {
+        "path": "meshes/m1_link2.stl",
+        "scale": 1.0
+      }
+    }
+  ],
+  "joints": [
+    {
+      "type": "hinge",
+      "a": "column",
+      "b": "yaw",
+      "axis": [
+        0,
+        1,
+        0
+      ],
+      "anchor_a": [
+        0,
+        0.055,
+        0
+      ],
+      "anchor_b": [
+        -0.025,
+        0,
+        0
+      ],
+      "limits": [
+        -2.09,
+        2.09
+      ],
+      "motor_target_deg": 0.0,
+      "name": "yaw",
+      "motor_kp": 12.0,
+      "motor_kd": 0.08,
+      "motor_max_torque": 2.5
+    },
+    {
+      "type": "hinge",
+      "a": "yaw",
+      "b": "link1",
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "anchor_a": [
+        0.025,
+        0,
+        0
+      ],
+      "anchor_b": [
+        -0.06,
+        0,
+        0
+      ],
+      "limits": [
+        -0.4363323129985824,
+        1.7453292519943295
+      ],
+      "motor_target_deg": 35.0,
+      "break_torque": 2.941995,
+      "name": "shoulder",
+      "motor_kp": 12.0,
+      "motor_kd": 0.4,
+      "motor_max_torque": 2.5
+    },
+    {
+      "type": "hinge",
+      "a": "link1",
+      "b": "link2",
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "anchor_a": [
+        0.06,
+        0,
+        0
+      ],
+      "anchor_b": [
+        -0.055,
+        0,
+        0
+      ],
+      "limits": [
+        -2.6179938779914944,
+        0.08726646259971647
+      ],
+      "motor_target_deg": -55.0,
+      "break_torque": 2.941995,
+      "name": "elbow",
+      "motor_kp": 12.0,
+      "motor_kd": 0.15,
+      "motor_max_torque": 2.5
+    }
+  ],
+  "camera": {
+    "position": [
+      0.55,
+      0.35,
+      0.55
+    ],
+    "look_at": [
+      0.12,
+      0.12,
+      0
+    ],
+    "fov_deg": 45
+  },
+  "simulate": {
+    "steps": 600,
+    "dt": 0.008333333333333333
+  },
+  "physics": {
+    "substeps": 8,
+    "solver_iterations": 10,
+    "position_iterations": 4
+  }
+}

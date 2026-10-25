@@ -78,3 +78,149 @@ fn main() {}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     quench3d_editor::run(quench3d_editor::EditorConfig::default())
 }
+
+// ---------------------------------------------------------------------------
+// 无窗口机械臂 API（P1-3）
+// ---------------------------------------------------------------------------
+//
+// 浏览器里除了完整编辑器，还需要一个**不启动 winit/GPU** 的入口：页面自己画
+// 模型（Three.js/Babylon/自绘），只把 quench3d 当关节/物理求解器。下面这几个
+// 导出就是那条最小接口；`loadScene` 是配套的装载入口（没有场景就没有关节）。
+
+/// wasm 里保存的物理世界 + 最近一次 step 的 dt。
+#[cfg(target_arch = "wasm32")]
+struct WebRobot {
+    build: quench3d_cli::runner::WorldBuild,
+    dt: f32,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WEB_ROBOT: std::cell::RefCell<Option<WebRobot>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 装载一个 `quench3d.scene` 文本（不建 GPU、不开窗口）。
+///
+/// 页面随后用 [`setJointTarget`] / [`step`] / [`getJointStates`] / [`getBodyTransform`]。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = loadScene)]
+pub fn load_scene(text: &str) -> Result<(), wasm_bindgen::JsValue> {
+    let doc = quench3d_cli::scene_doc::SceneDoc::from_json(text)
+        .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("场景解析失败: {e}")))?;
+    let build = quench3d_cli::runner::build_world(&doc)
+        .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("建世界失败: {e}")))?;
+    let dt = doc.simulate.dt;
+    WEB_ROBOT.with(|slot| *slot.borrow_mut() = Some(WebRobot { build, dt }));
+    Ok(())
+}
+
+/// 设置一个铰链关节的目标角（**度**）。找不到/不是铰链返回 `false`。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = setJointTarget)]
+pub fn set_joint_target(joint: &str, target_deg: f64) -> bool {
+    if !target_deg.is_finite() {
+        return false;
+    }
+    WEB_ROBOT.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let Some(robot) = guard.as_mut() else {
+            return false;
+        };
+        let Some(handle) = robot
+            .build
+            .joints
+            .iter()
+            .find(|j| j.name == joint)
+            .map(|j| j.handle)
+        else {
+            return false;
+        };
+        robot
+            .build
+            .world
+            .set_joint_target(handle, (target_deg as f32).to_radians())
+    })
+}
+
+/// 推进一个外层步（秒）。内部按场景的 `physics.substeps` 再切子步。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = step)]
+pub fn step(dt: f64) {
+    if !dt.is_finite() || dt <= 0.0 {
+        return;
+    }
+    WEB_ROBOT.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        if let Some(robot) = guard.as_mut() {
+            robot.dt = dt as f32;
+            robot.build.step(1, robot.dt);
+        }
+    });
+}
+
+/// 所有关节的当前状态，JSON 数组字符串。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = getJointStates)]
+pub fn get_joint_states() -> String {
+    WEB_ROBOT.with(|slot| {
+        let guard = slot.borrow();
+        let Some(robot) = guard.as_ref() else {
+            return "[]".to_string();
+        };
+        let sub_dt = robot.dt / robot.build.substeps.max(1) as f32;
+        let broken = robot.build.world.broken_joints();
+        let states: Vec<serde_json::Value> = robot
+            .build
+            .joints
+            .iter()
+            .map(|j| {
+                let is_broken = broken.contains(&j.handle);
+                match robot.build.world.joint_telemetry(j.handle, sub_dt) {
+                    Some(t) if !is_broken => {
+                        let error = t.target.map(|target| (target - t.coordinate).to_degrees());
+                        serde_json::json!({
+                            "name": j.name,
+                            "kind": t.kind,
+                            "angle_deg": t.coordinate.to_degrees(),
+                            "target_deg": t.target.map(f32::to_degrees),
+                            "error_deg": error,
+                            "torque_nm": t.motor_torque,
+                            "broken": false,
+                        })
+                    }
+                    _ => serde_json::json!({
+                        "name": j.name,
+                        "kind": j.kind,
+                        "angle_deg": 0.0,
+                        "target_deg": j.target_deg,
+                        "error_deg": null,
+                        "torque_nm": 0.0,
+                        "broken": is_broken,
+                    }),
+                }
+            })
+            .collect();
+        serde_json::to_string(&states).unwrap_or_else(|_| "[]".to_string())
+    })
+}
+
+/// 一个刚体的世界矩阵（列主序 16 个 f32，可直接喂 WebGL/Three.js）。
+///
+/// 名字不存在（或没有装场景）返回空数组，不抛异常 —— 页面每帧轮询时更好处理。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = getBodyTransform)]
+pub fn get_body_transform(name: &str) -> Vec<f32> {
+    WEB_ROBOT.with(|slot| {
+        let guard = slot.borrow();
+        let Some(robot) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let Some(handle) = robot.build.handles.get(name).copied() else {
+            return Vec::new();
+        };
+        let Some(body) = robot.build.world.body(handle) else {
+            return Vec::new();
+        };
+        body.transform().matrix().to_cols_array().to_vec()
+    })
+}

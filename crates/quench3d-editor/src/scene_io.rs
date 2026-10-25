@@ -411,11 +411,15 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         //
         // 查的是**合并后的底稿**（`base`）：片段里的物体/材质也要能被继承到，
         // 否则「载入带 include + 贴图的场景 → 随手存一次」会把片段物体的贴图清零。
-        let inherited = base
+        let source_object = base
             .objects
             .iter()
-            .find(|o| o.name.as_deref() == Some(name.as_str()))
+            .find(|o| o.name.as_deref() == Some(name.as_str()));
+        let inherited = source_object
             .and_then(|source| base.materials.get(source.material.as_deref()?).cloned());
+        // `visual` 不在编辑器的可编辑字段里：存盘时按同名物体从底稿继承，
+        // 避免"打开带外观网格的场景 → 随手存一次 → 外观没了"。
+        let inherited_visual = source_object.and_then(|source| source.visual.clone());
         let base = engine
             .renderer
             .material(object.material)
@@ -508,6 +512,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
                 object.transform.scale.y,
                 object.transform.scale.z,
             ]),
+            visual: inherited_visual,
             material: Some(material_name),
             body: body_kind,
             density: None,

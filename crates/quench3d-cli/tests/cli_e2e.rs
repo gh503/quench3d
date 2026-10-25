@@ -8058,3 +8058,125 @@ fn robot_arm_joint_trace_and_anchor_diagnostic() {
         "上游 modkit 场景的锚点错位必须报 warning：{diags:?}"
     );
 }
+
+/// P1-1：`objects[].visual` 只影响外观，不参与物理。同一场景加/不加 visual，
+/// 模拟状态必须逐位一致；扩展名不在白名单要在校验阶段报错。
+#[test]
+fn visual_mesh_is_render_only_and_extension_is_validated() {
+    let scene = "tests/fixtures/visual_mesh.scene.json";
+    let v = run(&["validate", scene, "--json"]);
+    assert_eq!(v.code, 0, "visual 场景应通过校验: {}", v.stdout);
+
+    let with = run(&["simulate", scene, "--json"]);
+    assert_eq!(with.code, 0, "{}", with.stderr);
+
+    // 去掉 visual 写一份临时场景，物理结果必须完全一样。
+    let doc: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), scene)).unwrap(),
+    )
+    .unwrap();
+    let mut plain = doc.clone();
+    plain["objects"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("visual");
+    let dir = temp_dir("visual");
+    let plain_path = dir.join("plain.json");
+    std::fs::write(&plain_path, serde_json::to_vec(&plain).unwrap()).unwrap();
+    let without = run(&["simulate", plain_path.to_str().unwrap(), "--json"]);
+    assert_eq!(without.code, 0, "{}", without.stderr);
+    assert_eq!(
+        with.json()["data"]["states"],
+        without.json()["data"]["states"],
+        "visual 不能改变物理状态"
+    );
+
+    // 不支持的扩展名：校验阶段就报，而不是渲染时才发现。
+    let mut bad = doc;
+    bad["objects"][0]["visual"]["path"] = serde_json::json!("cube.fbx");
+    let bad_path = dir.join("bad.json");
+    std::fs::write(&bad_path, serde_json::to_vec(&bad).unwrap()).unwrap();
+    let r = run(&["validate", bad_path.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 2, "不支持的 visual 扩展名要报错: {}", r.stdout);
+    let env = r.json();
+    let diags = env["data"]["diagnostics"].clone();
+    assert!(
+        diags.to_string().contains(".stl"),
+        "错误信息要列出支持的格式: {diags}"
+    );
+}
+
+/// P1-2：`physics.mode:"drive"` 关闭重力与接触，只回放关节目标；同一场景跑两次，
+/// 逐帧位置 + 四元数必须逐位相同（用作截图/视频的确定性输入）。
+#[test]
+fn drive_mode_replays_joint_targets_without_contacts_deterministically() {
+    let args = [
+        "simulate",
+        "tests/fixtures/modkit_arm_drive.scene.json",
+        "--json",
+        "--trace",
+        "link2",
+    ];
+    let a = run(&args);
+    let b = run(&args);
+    assert_eq!(a.code, 0, "{}", a.stderr);
+    assert_eq!(b.code, 0, "{}", b.stderr);
+    let da = &a.json()["data"];
+    let db = &b.json()["data"];
+    assert_eq!(da["drive"], true);
+    assert_eq!(da["gravity"], serde_json::json!([0.0, 0.0, 0.0]));
+    assert_eq!(da["contacts"], 0, "drive 模式不许生成接触");
+    assert_eq!(da["states"], db["states"], "两次回放状态要逐位相同");
+    let sa = da["trajectories"][0]["samples"].as_array().unwrap();
+    let sb = db["trajectories"][0]["samples"].as_array().unwrap();
+    assert_eq!(sa.len(), 301);
+    assert_eq!(sa, sb, "逐帧位置/四元数要逐位相同");
+    let last = sa.last().unwrap();
+    assert!(last["rotation"].as_array().unwrap().len() == 4);
+    let shoulder = da["joints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["name"] == "shoulder")
+        .unwrap();
+    assert!((shoulder["angle_deg"].as_f64().unwrap() - 35.0).abs() < 0.01);
+}
+
+/// P1-1 整机：用 robot-modkit 的真实 STL 拼出 M1，渲染器要把 5 个外观网格挂到
+/// 对应刚体上（三角形数远大于图元），且 `simulate` 结果与去掉 visual 的同一场景
+/// 逐位相同。没有 GPU 的机器只校验装载/模拟，渲染失败按环境跳过。
+#[test]
+fn modkit_arm_visual_meshes_attach_and_render() {
+    let scene = "tests/fixtures/modkit_arm_visual.scene.json";
+    let v = run(&["validate", scene, "--json"]);
+    assert_eq!(v.code, 0, "{}", v.stdout);
+
+    let rendered = run(&[
+        "render",
+        scene,
+        "--out",
+        "target/tmp/modkit_arm_visual.png",
+        "--width",
+        "320",
+        "--height",
+        "240",
+        "--json",
+    ]);
+    if rendered.code == 0 {
+        let d = &rendered.json()["data"];
+        assert!(
+            d["triangles"].as_u64().unwrap() > 30_000,
+            "STL 整机的三角形数应远大于图元：{d}"
+        );
+        assert!(
+            d["objects"].as_u64().unwrap() >= 10,
+            "5 个刚体 + 5 个外观网格 + 地面：{d}"
+        );
+    } else {
+        let msg = format!("{}{}", rendered.stdout, rendered.stderr);
+        assert!(
+            msg.contains("GPU") || msg.contains("adapter") || msg.contains("wgpu"),
+            "渲染失败只能是环境缺 GPU，不能是网格加载/挂载错误：{msg}"
+        );
+    }
+}

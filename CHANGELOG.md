@@ -41,6 +41,17 @@
 
 ### 新增
 
+- **机械臂外观网格 `objects[].visual`（第 187 轮）**：可选 `{path, position?,
+  rotation_deg?, scale?}`，支持 STL/GLB/GLTF/OBJ；网格挂成刚体的子节点，碰撞仍用
+  `shape/shapes`。加/不加 visual 的 `simulate` 状态逐位相同；编辑器存盘按同名物体
+  继承 visual。夹具 `tests/fixtures/visual_mesh.scene.json` + `cube.stl`。
+- **运动学回放 `physics.mode:"drive"`（第 187 轮）**：重力归零、关闭宽相/窄相/接触，
+  只解关节；`SimReport.drive`、`--trace` 采样新增四元数。两次回放 301 帧逐位相同
+  （`drive_mode_replays_joint_targets_without_contacts_deterministically`）。
+- **wasm 机械臂 API（第 187 轮）**：`loadScene/setJointTarget/step/getJointStates/
+  getBodyTransform`，`web/robot.html` 滑杆示例；`check_web.mjs` 在 Node 里真跑
+  modkit 场景（2 s 后 shoulder=20.00°）。wasm 13,532,726 字节。
+
 - **robot-modkit M1 机械臂（第 186 轮）**：铰链伺服新增 SI 扭矩级 PD
   （`motor_kp` / `motor_kd` / `motor_max_torque`，N·m/rad、N·m·s/rad、N·m），
   `physics.substeps` / `solver_iterations` / `position_iterations` 可调；

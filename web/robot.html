@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>quench3d · M1 机械臂 wasm 预览</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #11151c; color: #d8dee9; }
+  header { padding: 12px 18px; border-bottom: 1px solid #26303d; }
+  h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  main { display: grid; grid-template-columns: 300px 1fr; gap: 18px; padding: 18px; }
+  aside { background: #171d26; border: 1px solid #26303d; border-radius: 10px; padding: 14px; }
+  label { display: grid; grid-template-columns: 72px 1fr 52px; gap: 8px; align-items: center; margin: 10px 0; }
+  input[type=range] { width: 100%; }
+  output { text-align: right; font-variant-numeric: tabular-nums; color: #9fd3ff; }
+  canvas { width: 100%; height: 460px; background: #0b0e13; border: 1px solid #26303d; border-radius: 10px; }
+  pre { margin: 10px 0 0; font-size: 11px; color: #8fa3b8; white-space: pre-wrap; }
+  .note { color: #8fa3b8; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>robot-modkit M1 · 纯 wasm 关节预览</h1>
+  <div class="note">滑杆改目标 → <code>setJointTarget()</code> → <code>step()</code> → <code>getJointStates()/getBodyTransform()</code>。没有 GPU、没有序列口。</div>
+</header>
+<main>
+  <aside>
+    <label>yaw <input id="yaw" type="range" min="-90" max="90" value="0"><output id="yaw-v">0°</output></label>
+    <label>shoulder <input id="shoulder" type="range" min="0" max="90" value="35"><output id="shoulder-v">35°</output></label>
+    <label>elbow <input id="elbow" type="range" min="-120" max="0" value="-55"><output id="elbow-v">-55°</output></label>
+    <pre id="status">加载 wasm…</pre>
+  </aside>
+  <canvas id="view" width="900" height="460"></canvas>
+</main>
+<script type="module">
+import init, { loadScene, setJointTarget, step, getJointStates, getBodyTransform } from "./pkg/quench3d_web.js";
+
+const canvas = document.getElementById("view");
+const ctx = canvas.getContext("2d");
+const statusEl = document.getElementById("status");
+
+function project(p) {
+  // 简单固定相机：绕 Y 转 35°，再抬 25°；正交投影足够看清关节。
+  const cy = Math.cos(0.6), sy = Math.sin(0.6);
+  const x = p[0] * cy - p[2] * sy;
+  const z = p[0] * sy + p[2] * cy;
+  const y = p[1];
+  return [canvas.width / 2 + x * 1050, canvas.height / 2 - (y * Math.cos(0.42) - z * Math.sin(0.42)) * 1050];
+}
+
+function draw() {
+  const objs = ["yaw", "link1", "link2", "column", "chassis"];
+  const pts = {};
+  for (const n of objs) {
+    const m = getBodyTransform(n);
+    if (m && m.length === 16) pts[n] = [m[12], m[13], m[14]];
+  }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // 地面参考网格
+  ctx.strokeStyle = "#1d2a38";
+  ctx.lineWidth = 1;
+  for (let i = -5; i <= 5; i++) {
+    let a = project([i * 0.1, 0, -0.5]), b = project([i * 0.1, 0, 0.5]);
+    ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+    a = project([-0.5, 0, i * 0.1]); b = project([0.5, 0, i * 0.1]);
+    ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+  }
+  const chain = [pts.column, pts.yaw, pts.link1, pts.link2].filter(Boolean);
+  ctx.strokeStyle = "#66c2ff";
+  ctx.lineWidth = 10;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  chain.forEach((p, i) => (i ? ctx.lineTo(...project(p)) : ctx.moveTo(...project(p))));
+  ctx.stroke();
+  // 夹爪方向：link2 的局部 +X
+  const m = getBodyTransform("link2");
+  if (m && m.length === 16) {
+    const tip = [m[12] + m[0] * 0.13, m[13] + m[1] * 0.13, m[14] + m[2] * 0.13];
+    ctx.strokeStyle = "#ffcc66";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(...project([m[12], m[13], m[14]]));
+    ctx.lineTo(...project(tip));
+    ctx.stroke();
+  }
+  for (const [n, p] of Object.entries(pts)) {
+    ctx.fillStyle = n.startsWith("link") ? "#ff8f5a" : "#7de2b8";
+    ctx.beginPath();
+    ctx.arc(...project(p), 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function refreshStatus() {
+  const states = JSON.parse(getJointStates());
+  statusEl.textContent = states
+    .map((s) => `${s.name.padEnd(9)} ${s.angle_deg.toFixed(1).padStart(6)}° → ${s.target_deg?.toFixed(1) ?? "-"}°  τ=${s.torque_nm.toFixed(2)} N·m`)
+    .join("\n");
+}
+
+async function main() {
+  await init();
+  const scene = await (await fetch("./robot_arm.scene.json")).text();
+  loadScene(scene);
+  // 先跑 120 步让初始目标到位
+  for (let i = 0; i < 120; i++) step(1 / 60);
+  draw(); refreshStatus();
+
+  for (const name of ["yaw", "shoulder", "elbow"]) {
+    const input = document.getElementById(name);
+    const out = document.getElementById(name + "-v");
+    input.addEventListener("input", () => {
+      out.textContent = input.value + "°";
+      setJointTarget(name, Number(input.value));
+      // 滑杆拖动时直接跑 1 秒（60 步），让预览跟手。
+      for (let i = 0; i < 60; i++) step(1 / 60);
+      draw(); refreshStatus();
+    });
+  }
+}
+main().catch((e) => { statusEl.textContent = "加载失败：" + e; });
+</script>
+</body>
+</html>

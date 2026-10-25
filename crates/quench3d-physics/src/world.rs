@@ -294,6 +294,8 @@ pub struct PhysicsWorld {
     parallel_used: bool,
     joint_free: Vec<u32>,
     gravity: Vec3,
+    /// 是否生成接触约束（`false` = drive/运动学回放：不跑宽相/窄相/接触求解）。
+    collisions_enabled: bool,
     /// 水域（浮力环境）：不写就是空，行为与没有这一节时逐位相同。
     waters: Vec<WaterVolume>,
     /// 粒子流体（CPU PBF）：不写就是空，没有 `fluids` 时物理行为逐位不变。
@@ -458,6 +460,7 @@ impl PhysicsWorld {
             parallel_used: false,
             joint_free: Vec::new(),
             gravity,
+            collisions_enabled: true,
             waters: Vec::new(),
             fluids: Vec::new(),
             fixed_dt: DEFAULT_FIXED_DT,
@@ -509,6 +512,24 @@ impl PhysicsWorld {
     /// 当前重力。
     pub fn gravity(&self) -> Vec3 {
         self.gravity
+    }
+
+    /// 开/关接触生成。关掉后不跑宽相/窄相/接触求解，`contacts()` 为空；
+    /// 关节、PD 伺服、积分器仍工作（用于运动学回放）。
+    pub fn set_collisions_enabled(&mut self, enabled: bool) {
+        self.collisions_enabled = enabled;
+        if !enabled {
+            self.contacts.clear();
+            self.manifolds.clear();
+            self.sensor_pairs.clear();
+            self.touch_pairs.clear();
+        }
+        self.version = self.version.wrapping_add(1);
+    }
+
+    /// 接触生成是否开启。
+    pub fn collisions_enabled(&self) -> bool {
+        self.collisions_enabled
     }
 
     /// 固定步长。
@@ -1770,6 +1791,14 @@ impl PhysicsWorld {
         wake.clear();
         sensor_pairs.clear();
         touch_pairs.clear();
+        if !self.collisions_enabled {
+            self.manifolds = manifolds;
+            self.contacts = contacts;
+            self.wake_list = wake;
+            self.sensor_pairs = sensor_pairs;
+            self.touch_pairs = touch_pairs;
+            return;
+        }
 
         // --- 代理 ---
         self.proxies.clear();
@@ -2323,6 +2352,28 @@ mod tests {
         assert_eq!(w.gravity(), vec3(0.0, -1.0, 0.0));
         w.set_gravity(Vec3::splat(f32::NAN));
         assert_eq!(w.gravity(), vec3(0.0, -1.0, 0.0), "NaN 应被忽略");
+    }
+
+    #[test]
+    fn collisions_can_be_disabled_for_drive_playback() {
+        let mut w = PhysicsWorld::new();
+        w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+        let ball = w.add_body(
+            BodyBuilder::dynamic(sphere(0.5))
+                .position(vec3(0.0, 0.4, 0.0))
+                .build(),
+        );
+        w.set_collisions_enabled(false);
+        assert!(!w.collisions_enabled());
+        w.step(1.0 / 60.0);
+        assert!(w.contacts().is_empty(), "drive 模式不许生成接触");
+        assert!(
+            w.body(ball).unwrap().position().y < 0.4,
+            "无接触时球应继续下落"
+        );
+        // 重新打开后接触恢复；这里只验证状态开关，不要求它把已经穿过去的球推回来。
+        w.set_collisions_enabled(true);
+        assert!(w.collisions_enabled());
     }
 
     #[test]

@@ -226,6 +226,9 @@ pub struct SimReport {
     pub sleeping: usize,
     /// 接触流形数。
     pub contacts: usize,
+    /// 是否运动学回放（`physics.mode: "drive"`：无重力、无接触）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drive: bool,
     /// 关节数（**跑完之后**还剩几个）。
     pub joint_count: usize,
     /// 每个关节的运行时遥测（按场景 `joints[]` 顺序，含断开的）。
@@ -281,6 +284,8 @@ pub struct TraceSample {
     pub speed: f32,
     /// 相对初始位置的位移（米）。
     pub displacement: f32,
+    /// 姿态四元数 `[x, y, z, w]`（逐帧位姿回放/截图用）。
+    pub rotation: [f32; 4],
     /// 姿态倾斜角（度）：0 表示站得笔直，90 表示躺平。
     pub tilt_deg: f32,
     /// 是否已休眠。
@@ -2050,6 +2055,12 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     if let Some(g) = doc.gravity {
         world.set_gravity(v3(g));
     }
+    // `drive`：运动学回放。重力归零、关闭接触生成，关节/PD 仍解 —— 用于 60 fps
+    // 预览与逐帧截图，避免地面/夹爪接触把回放结果带偏。
+    if doc.physics.mode == Some(crate::scene_doc::PhysicsModeDoc::Drive) {
+        world.set_gravity(Vec3::ZERO);
+        world.set_collisions_enabled(false);
+    }
     // 水域（浮力环境）：先装进物理世界，后续所有步进路径（simulate/render/movie/编辑器）
     // 都自动生效。参数不可用的水域在校验阶段已经报错，这里再挡一次而不是静默忽略。
     for (i, w) in doc.waters.iter().enumerate() {
@@ -2601,6 +2612,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         dynamic,
         sleeping,
         contacts: build.world.contacts().len(),
+        drive: !build.world.collisions_enabled(),
         joint_count: build.world.joint_count(),
         joints: joint_reports,
         joint_traces: Vec::new(),
@@ -3305,6 +3317,12 @@ fn sample(
         step,
         time,
         position: arr(p),
+        rotation: [
+            body.rotation().x,
+            body.rotation().y,
+            body.rotation().z,
+            body.rotation().w,
+        ],
         speed: body.linear_velocity.length(),
         displacement: (p - v3(start)).length(),
         tilt_deg: tilt,
@@ -3570,6 +3588,44 @@ pub fn setup_visuals(
             engine.scene.objects[child].receive_shadows = o.receive_shadows;
         }
         doc_to_scene.push(index);
+
+        // `visual`：外观网格挂在主物体下面，主物体由刚体驱动 → 网格自动跟随，
+        // 不需要每帧再同步一次。碰撞仍用 `shape/shapes`，这里纯渲染。
+        let Some(v) = &o.visual else { continue };
+        let main = index;
+        let resolved = resolve_model_path(doc, &format!("objects[{i}].visual.path"), &v.path)?;
+        let model = match load_model_cached(&resolved) {
+            Ok(model) => model,
+            Err(e) => {
+                let mut err = RunError::io(format!(
+                    "加载 visual 网格 {} 失败: {e}（支持 .stl/.glb/.gltf/.obj）",
+                    v.path.display()
+                ));
+                err.path = Some(format!("objects[{i}].visual"));
+                return Err(err);
+            }
+        };
+        let local = Transform::new(
+            v3(v.position.unwrap_or([0.0; 3])),
+            euler_quat(v.rotation_deg),
+            Vec3::splat(v.scale.unwrap_or(1.0)),
+        );
+        let visual_objects = engine.add_model(
+            &model,
+            Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
+        );
+        for (k, vi) in visual_objects.iter().enumerate() {
+            let obj = &mut engine.scene.objects[*vi];
+            // `add_model` 展开的根节点：只把根挂到主物体，模型内部层级保持原样。
+            if obj.parent.is_none() {
+                obj.transform = local;
+                obj.parent = Some(main);
+            }
+            obj.name = format!("{name}#visual{k}");
+            obj.visible = o.visible;
+            obj.cast_shadows = o.cast_shadows;
+            obj.receive_shadows = o.receive_shadows;
+        }
     }
 
     // 父子：文件里用**名字**写（父物体可以排在子物体后面，顺序不该成为限制），

@@ -342,6 +342,7 @@ pub fn scene_grammar() -> Value {
             "name": "场景名（可选）",
             "gravity": "[x, y, z]，缺省 [0, -9.81, 0]",
             "physics": {
+                "mode": ["normal（缺省：重力 + 接触 + 关节）", "drive（运动学回放：无重力、无宽相/窄相/接触，只解关节；用于逐帧确定性预览）"],
                 "substeps": "每个 simulate 步内部再切几个等长子步（1~32，缺省 1 = 历史行为）；子步长 = simulate.dt/substeps",
                 "solver_iterations": "速度迭代次数（1~64，缺省 10）",
                 "position_iterations": "位置修正迭代次数（0~32，缺省 4）",
@@ -456,6 +457,7 @@ pub fn scene_grammar() -> Value {
             "position": "[x, y, z]，缺省原点；有 parent 时是局部的",
             "rotation_deg": "欧拉角 XYZ，单位度",
             "scale": "显示缩放（只影响渲染，不影响碰撞）；不受父物体缩放影响",
+            "visual": "外观网格：{ path, position?, rotation_deg?, scale? }，支持 .stl/.glb/.gltf/.obj，路径相对场景；网格挂在刚体上跟随位姿，碰撞仍用 shape/shapes",
             "material": "材质名（缺省灰色）",
             "body": ["none（纯显示，缺省）", "static", "dynamic", "kinematic"],
             "density": "kg/m³，缺省 1000",
@@ -711,6 +713,7 @@ pub fn json_schema() -> Value {
             "position",
             "rotation_deg",
             "scale",
+            "visual",
             "material",
             "body",
             "density",
@@ -868,6 +871,10 @@ pub fn json_schema() -> Value {
         });
         d
     });
+    defs.insert(
+        "visual".into(),
+        def(&["path", "position", "rotation_deg", "scale"]),
+    );
     defs.insert("model".into(), {
         let mut d = def(&[
             "path",
@@ -1198,6 +1205,7 @@ pub fn json_schema() -> Value {
     defs.insert(
         "physics".into(),
         def(&[
+            "mode",
             "friction_combine",
             "restitution_combine",
             "static_friction_speed",

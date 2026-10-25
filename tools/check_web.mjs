@@ -306,6 +306,47 @@ if (!defaultBinding && namedFromGlue.size === 0) {
       bad("胶水没有导出 model_bytes_probe()：无法验证 Web 端能否加载模型");
     }
 
+    // P1-3：无窗口机械臂 API。用 CLI 的 modkit 场景在 Node 里真的装载、改目标、
+    // 步进、读关节状态与世界矩阵 —— 这是「wasm 导出不是空壳」的硬证据。
+    const robotApis = ["loadScene", "setJointTarget", "step", "getJointStates", "getBodyTransform"];
+    const missingRobot = robotApis.filter((n) => typeof exported[n] !== "function");
+    if (missingRobot.length > 0) {
+      bad(`胶水缺少机械臂 API：${missingRobot.join("、")}`);
+    } else {
+      const scenePath = join(
+        resolve(root, ".."),
+        "crates/quench3d-cli/tests/fixtures/modkit_arm_drive.scene.json",
+      );
+      try {
+        exported.loadScene(readFileSync(scenePath, "utf8"));
+        const okTarget = exported.setJointTarget("shoulder", 20.0);
+        // 一次 step 只走 1/60 s；让它跑 2 s 再看角度（PD 的收敛时间尺度）。
+        for (let i = 0; i < 120; i++) exported.step(1 / 60);
+        const states = JSON.parse(exported.getJointStates());
+        const m = exported.getBodyTransform("link2");
+        const shoulder = states.find((s) => s.name === "shoulder");
+        if (!okTarget) {
+          bad("setJointTarget(\"shoulder\", 20) 返回 false");
+        } else if (!shoulder || Math.abs(shoulder.angle_deg - 20) > 2) {
+          bad(`wasm 步进后 shoulder 不在 20° 附近：${JSON.stringify(shoulder)}`);
+        } else if (!Array.isArray(m) && !(m instanceof Float32Array)) {
+          bad("getBodyTransform(\"link2\") 没有返回矩阵");
+        } else if (m.length !== 16 || !m.every(Number.isFinite)) {
+          bad(`getBodyTransform(\"link2\") 矩阵不合法：${m}`);
+        } else {
+          ok(
+            `机械臂 wasm API 可用：shoulder=${shoulder.angle_deg.toFixed(2)}°，` +
+              `link2 矩阵 ${m.length} 个有限数`,
+          );
+        }
+        if (exported.getBodyTransform("不存在").length !== 0) {
+          bad("getBodyTransform(未知名字) 应返回空数组");
+        }
+      } catch (e) {
+        bad(`机械臂 wasm API 调用失败：${String(e).slice(0, 160)}`);
+      }
+    }
+
     // 浏览器里才有的 API 在 Node 里必然缺失；默认不调用 start()，避免刷屏
     if (process.argv.includes("--call-start")) {
       try {
