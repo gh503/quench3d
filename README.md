@@ -1385,7 +1385,9 @@ quench3d chat                     # 交互模式：:help / :tools / :reset / :qu
 ```
 
 暴露的工具：`quench3d_schema`、`quench3d_doctor`、`quench3d_info`、`quench3d_validate`、
-`quench3d_render`、`quench3d_movie`、`quench3d_simulate`、`quench3d_query`、`quench3d_ask`。
+`quench3d_render`、`quench3d_movie`、`quench3d_simulate`、`quench3d_joint_target`、`quench3d_query_contact`、`quench3d_query`、`quench3d_ask`。`quench3d_joint_target` 把某个关节目标改成
+`target_deg`（铰链）/`target_m`（滑块）后步进并返回 `joints[]` 遥测；每次调用独立，
+同关节的场景 `joint_target` 动作会被移除，避免脚本把目标改回去。
 
 四个对 agent 特别有用的细节：
 

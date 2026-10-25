@@ -41,6 +41,14 @@
 
 ### 新增
 
+- **接触力查询（第 120 轮）**：`simulate --json` 的 `contact_forces[]` 给出
+  物体名、法线、接触点、冲量与 `force_n=impulse/fixed_dt`；MCP
+  `quench3d_query_contact` 可按 `min_force_n` 过滤。
+- **MCP `quench3d_joint_target`（第 120 轮）**：铰链 `target_deg` / 滑块
+  `target_m`，移除同关节的脚本 `joint_target` 动作后步进，返回 `joints[]`；
+  `node tools/check_web.mjs` 增加 wasm 1000 步性能门（实测 1.106 s < 2 s）。
+- **M1 立柱 STL 朝向修正**：`m1_column.stl` 从横躺改为 90 mm 竖直（y 0.005–0.095 m），
+  与 `column` 刚体包围盒对齐；README 记录上游无官方装配矩阵、当前变换按官方尺寸推导。
 - **真实摩擦夹持（第 119 轮）**：新增
   `tests/fixtures/modkit_arm_friction_grasp.scene.json` 与
   `friction_gripper_lifts_the_cube_ten_centimetres_without_slip`。40 mm 方块

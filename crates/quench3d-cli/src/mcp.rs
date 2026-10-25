@@ -27,7 +27,7 @@ use crate::generate::{generate, GenerateOptions};
 use crate::llm::{LlmClient, LlmConfig};
 use crate::report::ErrorInfo;
 use crate::runner;
-use crate::scene_doc::{SceneDoc, Severity};
+use crate::scene_doc::{ActionKind, SceneDoc, Severity};
 
 /// MCP 协议版本（与客户端协商，取双方都支持的一个）。
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -347,6 +347,145 @@ impl McpServer {
                             "structuredContent": serde_json::to_value(&report).unwrap_or(Value::Null),
                             "isError": false
                         }))
+                    }
+                    Err(e) => Ok(error_result(&ErrorInfo::from_run(&e))),
+                }
+            }
+            "quench3d_joint_target" => {
+                let mut doc = match scene_from_args(args) {
+                    Ok(d) => d,
+                    Err(info) => return Ok(error_result(&info)),
+                };
+                let joint = match arg_str(args, "joint") {
+                    Some(j) => j,
+                    None => {
+                        return Ok(error_result(
+                            &ErrorInfo::new("invalid", "quench3d_joint_target 需要 joint 参数")
+                                .hint("传关节名，例如 shoulder"),
+                        ))
+                    }
+                };
+                let target_deg = args.get("target_deg").and_then(|v| v.as_f64());
+                let target_m = args.get("target_m").and_then(|v| v.as_f64());
+                if target_deg.is_some() == target_m.is_some() {
+                    return Ok(error_result(
+                        &ErrorInfo::new("invalid", "target_deg 与 target_m 必须恰好给一个")
+                            .hint("铰链用 target_deg（度），滑块用 target_m（米）"),
+                    ));
+                }
+                let Some(j) = doc
+                    .joints
+                    .iter_mut()
+                    .find(|j| j.name.as_deref() == Some(&joint))
+                else {
+                    return Ok(error_result(
+                        &ErrorInfo::new("invalid", format!("场景里没有关节 {joint}"))
+                            .hint("先用 quench3d_validate 或 quench3d_simulate 看关节名"),
+                    ));
+                };
+                // 工具的语义是“现在就改成这个目标”：同关节的场景 joint_target
+                // 动作若继续存在会在后面的步里把目标改回去，所以先移除。
+                doc.actions.retain(|a| {
+                    !(a.kind == ActionKind::JointTarget && a.joint.as_deref() == Some(&joint))
+                });
+                if let Some(v) = target_deg {
+                    j.motor_target_deg = Some(v as f32);
+                } else if let Some(v) = target_m {
+                    j.motor_target_m = Some(v as f32);
+                }
+                if let Some(steps) = args.get("steps").and_then(|v| v.as_u64()) {
+                    doc.simulate.steps = steps as u32;
+                }
+                if let Some(dt) = args.get("dt").and_then(|v| v.as_f64()) {
+                    doc.simulate.dt = dt as f32;
+                }
+                match runner::run_simulate(&doc) {
+                    Ok(report) => {
+                        let target = target_deg
+                            .map(|v| format!("{v}°"))
+                            .or_else(|| target_m.map(|v| format!("{v} m")))
+                            .unwrap_or_default();
+                        let j = report.joints.iter().find(|x| x.name == joint);
+                        let text = format!(
+                            "把 {joint} 目标设为 {target}，步进 {} 步（dt={:.5}s）
+{}",
+                            report.steps,
+                            report.dt,
+                            j.map(|j| format!(
+                                "角度 {:.2}° · 目标 {:?}° · 误差 {:?}° · 力矩 {:.3} N·m · 限位 {}",
+                                j.angle_deg, j.target_deg, j.error_deg, j.torque_nm, j.limit_state
+                            ))
+                            .unwrap_or_else(|| "报告里没有这个关节".to_string())
+                        );
+                        Ok(structured_result(
+                            &text,
+                            json!({
+                                "joint": joint,
+                                "target_deg": target_deg,
+                                "target_m": target_m,
+                                "steps": report.steps,
+                                "dt": report.dt,
+                                "joints": report.joints,
+                                "states": report.states,
+                            }),
+                        ))
+                    }
+                    Err(e) => Ok(error_result(&ErrorInfo::from_run(&e))),
+                }
+            }
+            "quench3d_query_contact" => {
+                let mut doc = match scene_from_args(args) {
+                    Ok(d) => d,
+                    Err(info) => return Ok(error_result(&info)),
+                };
+                if let Some(steps) = args.get("steps").and_then(|v| v.as_u64()) {
+                    doc.simulate.steps = steps as u32;
+                }
+                if let Some(dt) = args.get("dt").and_then(|v| v.as_f64()) {
+                    doc.simulate.dt = dt as f32;
+                }
+                let min_force = args
+                    .get("min_force_n")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32;
+                match runner::run_simulate(&doc) {
+                    Ok(report) => {
+                        let all = report.contact_forces;
+                        let hits: Vec<_> = all
+                            .iter()
+                            .filter(|c| c.force_n >= min_force)
+                            .cloned()
+                            .collect();
+                        let mut text = format!(
+                            "步进 {} 步（dt={:.5}s）：{} 个接触流形，{} 个力 ≥ {:.3} N\n",
+                            report.steps,
+                            report.dt,
+                            all.len(),
+                            hits.len(),
+                            min_force
+                        );
+                        for c in hits.iter().take(20) {
+                            text.push_str(&format!(
+                                "- {} ↔ {}：{:.3} N（冲量 {:.5} N·s）@ ({:.3},{:.3},{:.3}){}\n",
+                                c.a,
+                                c.b,
+                                c.force_n,
+                                c.impulse,
+                                c.point[0],
+                                c.point[1],
+                                c.point[2],
+                                if c.sensor { " [sensor]" } else { "" }
+                            ));
+                        }
+                        Ok(structured_result(
+                            &text,
+                            json!({
+                                "steps": report.steps,
+                                "dt": report.dt,
+                                "contacts": all.len(),
+                                "contact_forces": hits,
+                            }),
+                        ))
                     }
                     Err(e) => Ok(error_result(&ErrorInfo::from_run(&e))),
                 }
@@ -854,6 +993,33 @@ fn annotate_tools(tools: &mut [Value]) {
                     ("models", "array"),
                 ]),
             ),
+            "quench3d_joint_target" => (
+                true,
+                false,
+                false,
+                true,
+                props(&[
+                    ("joint", "string"),
+                    ("target_deg", "number"),
+                    ("target_m", "number"),
+                    ("steps", "integer"),
+                    ("dt", "number"),
+                    ("joints", "array"),
+                    ("states", "array"),
+                ]),
+            ),
+            "quench3d_query_contact" => (
+                true,
+                false,
+                false,
+                true,
+                props(&[
+                    ("steps", "integer"),
+                    ("dt", "number"),
+                    ("contacts", "integer"),
+                    ("contact_forces", "array"),
+                ]),
+            ),
             "quench3d_query" => (
                 true,
                 false,
@@ -1040,6 +1206,41 @@ fn raw_tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "quench3d_joint_target",
+            "title": "MCP 关节目标 + 步进",
+            "description": "把指定关节的目标改成 target_deg（铰链，度）或 target_m（滑块，米），再步进并返回 joints[] 遥测。每次调用独立，不保存跨调用状态。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scene": { "description": "场景对象或 JSON 字符串", "type": ["object", "string"] },
+                    "scene_path": { "type": "string" },
+                    "joint": { "type": "string", "description": "关节名，例如 shoulder" },
+                    "target_deg": { "type": "number", "description": "铰链目标（度）" },
+                    "target_m": { "type": "number", "description": "滑块目标（米）" },
+                    "steps": { "type": "integer", "description": "覆盖 simulate.steps" },
+                    "dt": { "type": "number", "description": "覆盖 simulate.dt" }
+                },
+                "required": ["joint"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "quench3d_query_contact",
+            "title": "查询接触力",
+            "description": "步进场景后返回逐接触对的法向力（impulse / fixed_dt），可按最小力过滤；传感器接触 force_n=0。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "scene": { "description": "场景对象或 JSON 字符串", "type": ["object", "string"] },
+                    "scene_path": { "type": "string" },
+                    "steps": { "type": "integer", "description": "覆盖 simulate.steps" },
+                    "dt": { "type": "number", "description": "覆盖 simulate.dt" },
+                    "min_force_n": { "type": "number", "description": "只返回 force_n ≥ 这个值的接触（缺省 0）" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "quench3d_query",
             "title": "几何查询：射线 / 形状重叠（不需要 GPU，只读）",
             "description": "在场景上做一次查询，不改动场景、不渲染。ray 给 \"ox,oy,oz,dx,dy,dz\"（配合 all 返回沿路的全部命中，按距离升序；缺省只给最近的一个）；overlap 给 \"sphere:0.5\" / \"box:1,2,1\" / \"capsule:0.6,0.3\" / \"cylinder:0.5,0.5\" / \"cone:0.5,0.5\" / \"plane:0,1,0\"，可接 @x,y,z 与 ~rx,ry,rz（度）。层过滤是单向的（mask 只看被查方在不在掩码里）；sensors=false 可排除触发区。",
@@ -1215,7 +1416,9 @@ mod tests {
             "quench3d_info",
             "quench3d_validate",
             "quench3d_simulate",
+            "quench3d_joint_target",
             "quench3d_query",
+            "quench3d_query_contact",
         ];
         for n in read_only {
             let t = by_name(n);
@@ -1239,7 +1442,7 @@ mod tests {
         assert_eq!(t["annotations"]["idempotentHint"], false, "ask 不幂等");
         assert_eq!(
             tools.len(),
-            9,
+            11,
             "工具数量变了就要同步这份断言：{}",
             tools.len()
         );
@@ -1322,6 +1525,89 @@ mod tests {
         assert_eq!(structured["bodies"], 2, "地面 + 球");
         let y = structured["states"][1]["position"][1].as_f64().unwrap();
         assert!((0.4..0.7).contains(&y), "球应停在半径高度附近，实际 {y}");
+    }
+
+    #[test]
+    fn joint_target_tool_sets_and_steps_the_servo() {
+        let mut server = McpServer::new();
+        let response = server
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                "params": {
+                    "name": "quench3d_joint_target",
+                    "arguments": {
+                        "scene_path": "tests/fixtures/modkit_arm_drive.scene.json",
+                        "joint": "shoulder",
+                        "target_deg": 20,
+                        "steps": 600
+                    }
+                }
+            }))
+            .unwrap();
+        let result = &response["result"];
+        assert_eq!(result["isError"], false, "{}", result);
+        let structured = &result["structuredContent"];
+        assert_eq!(structured["steps"], 600, "steps 覆盖要生效");
+        let j = &structured["joints"][0];
+        let shoulder = structured["joints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["name"] == "shoulder")
+            .unwrap();
+        let angle = shoulder["angle_deg"].as_f64().unwrap();
+        assert!(
+            (angle - 20.0).abs() < 2.0,
+            "肩应到 20°±2°，实际 {angle}：{j}"
+        );
+        assert_eq!(shoulder["target_deg"], 20.0);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("20°"), "{text}");
+    }
+
+    #[test]
+    fn query_contact_tool_returns_forces_with_names() {
+        let mut server = McpServer::new();
+        let response = server
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 13, "method": "tools/call",
+                "params": {
+                    "name": "quench3d_query_contact",
+                    "arguments": {
+                        "steps": 240,
+                        "min_force_n": 0.01,
+                        "scene": {
+                            "ground": { "size": 20 },
+                            "objects": [{
+                                "name": "球", "shape": { "type": "box", "size": [1.0, 1.0, 1.0] },
+                                "position": [0, 0.5, 0], "body": "dynamic", "mass": 0.5
+                            }],
+                            "actions": [{
+                                "type": "force", "target": "球", "value": [0, -10, 0],
+                                "at_time": 0, "steps": 240
+                            }]
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        let result = &response["result"];
+        assert_eq!(result["isError"], false, "{}", result);
+        let structured = &result["structuredContent"];
+        let contacts = structured["contact_forces"].as_array().unwrap();
+        assert!(!contacts.is_empty(), "球落地后应有接触：{structured}");
+        let c = contacts
+            .iter()
+            .find(|c| c["force_n"].as_f64().unwrap() > 0.0);
+        let c = c.expect("至少有一个非零法向力");
+        assert!(c["a"] == "球" || c["b"] == "球", "接触对要带物体名：{c}");
+        assert_eq!(c["sensor"], false);
+        assert!(
+            structured["contacts"].as_u64().unwrap() >= contacts.len() as u64,
+            "过滤后的数量不能超过总数"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("N（冲量"), "{text}");
     }
 
     #[test]

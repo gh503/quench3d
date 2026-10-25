@@ -238,6 +238,9 @@ pub struct SimReport {
     pub sleeping: usize,
     /// 接触流形数。
     pub contacts: usize,
+    /// 逐接触对（含法向、位置、本步冲量与等效法向力）；没有接触时不出现。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact_forces: Vec<ContactForceReport>,
     /// 是否运动学回放（`physics.mode: "drive"`：无重力、无接触）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drive: bool,
@@ -281,6 +284,25 @@ pub struct SimReport {
     /// 模型动画的**装载后**对账（场景里没写 `models[].animation` 时这个字段不出现）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelReport>,
+}
+
+/// 一个接触对的力/冲量读数（P2 接触力查询）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactForceReport {
+    /// 接触对 A 端物体名。
+    pub a: String,
+    /// 接触对 B 端物体名。
+    pub b: String,
+    /// 本步累计法向冲量（N·s）。
+    pub impulse: f32,
+    /// 等效法向力 = `impulse / physics fixed dt`（N）。
+    pub force_n: f32,
+    /// 代表接触位置（米）。
+    pub point: [f32; 3],
+    /// 由 A 指向 B 的法线。
+    pub normal: [f32; 3],
+    /// 是否是传感器接触（不做求解，`force_n` 恒为 0）。
+    pub sensor: bool,
 }
 
 /// 轨迹采样点。
@@ -2653,6 +2675,33 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         }
     }
 
+    let contact_forces = {
+        let mut by_handle: std::collections::BTreeMap<(u32, u32), String> = Default::default();
+        for (name, handle) in &build.handles {
+            by_handle.insert((handle.index, handle.generation), name.clone());
+        }
+        let name_of = |h: BodyHandle| {
+            by_handle
+                .get(&(h.index, h.generation))
+                .cloned()
+                .unwrap_or_else(|| format!("body#{}", h.index))
+        };
+        let inv_dt = 1.0 / build.world.fixed_dt().max(1.0e-6);
+        build
+            .world
+            .contacts()
+            .iter()
+            .map(|c| ContactForceReport {
+                a: name_of(c.a),
+                b: name_of(c.b),
+                impulse: c.impulse,
+                force_n: c.impulse * inv_dt,
+                point: arr(c.point),
+                normal: arr(c.normal),
+                sensor: c.sensor,
+            })
+            .collect::<Vec<_>>()
+    };
     SimReport {
         probes: Vec::new(),
         sensors: Vec::new(),
@@ -2680,6 +2729,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
         dynamic,
         sleeping,
         contacts: build.world.contacts().len(),
+        contact_forces,
         drive: !build.world.collisions_enabled(),
         joint_count: build.world.joint_count(),
         joints: joint_reports,

@@ -275,7 +275,7 @@ pub fn schema() -> Value {
                     { "name": "--model", "type": "string", "required": false, "description": "模型名" },
                     { "name": "--max-rounds", "type": "u32", "required": false, "description": "工具往返上限，缺省 6" }
                 ],
-                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate", "quench3d_query"],
+                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate", "quench3d_joint_target", "quench3d_query_contact", "quench3d_query"],
                 "output": "{ prompt, answer, rounds, usage, tools[{name,ok,arguments,summary}], result }",
                 "examples": [
                     "quench3d chat \"三层箱子塔五秒后还在原地吗\" --json",
@@ -305,7 +305,7 @@ pub fn schema() -> Value {
                 "summary": "以 MCP（Model Context Protocol）服务器方式运行，通过 stdio 暴露上述工具给支持 MCP 的 agent",
                 "args": [],
                 "protocol": "JSON-RPC 2.0 / MCP，方法：initialize, tools/list, tools/call, ping",
-                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate", "quench3d_query", "quench3d_ask"],
+                "tools": ["quench3d_schema", "quench3d_doctor", "quench3d_info", "quench3d_validate", "quench3d_render", "quench3d_movie", "quench3d_simulate", "quench3d_joint_target", "quench3d_query_contact", "quench3d_query", "quench3d_ask"],
                 "examples": ["quench3d mcp"]
             }
         ],

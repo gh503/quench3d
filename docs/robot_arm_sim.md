@@ -2,7 +2,7 @@
 
 本文记录 quench3d 对 `robot-modkit M1`（≈360 g、上臂 120 mm、小臂 110 mm、3× 30 kg·cm 总线舵机、关节径向间隙 0.2 mm、40 mm 夹爪）的支持范围、推荐参数、验收命令与**已知缺口**。
 
-> 结论先写：**P0（串链伺服、`joints[]` 遥测、`joint_target` 运行时控制、真实摩擦夹持）与 P1-1/P1-2/P1-3 的主体已实现并有自动化证据；P1-1 的 STL 局部对位仍是手工近似、不是官方装配，P2 未做。** 不要把本页当作生产完成证明。
+> 结论先写：**P0（串链伺服、`joints[]` 遥测、`joint_target` 运行时控制、真实摩擦夹持）与 P1-1/P1-2/P1-3 的主体已实现并有自动化证据；P1-1 的 STL 局部对位是从官方尺寸推导并对位，但上游没有官方装配矩阵；P2 完成了 MCP `joint_target`、`query_contact` 与 1000 步性能门。** 不要把本页当作生产完成证明。
 
 ## 1. 单位
 
@@ -207,8 +207,10 @@ node tools/check_web.mjs
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |
 | P0-3 真实抓取根因 | 已修 | 旧 `modkit_arm_grasp` 沿用**未修正的 link 锚点/中心**，在负载下肘关节会自己塌；把手指/方块放到按 `modkit_arm` 修正几何算出的腕点并 +20 mm 避开 `link2` 后，同一套 2.5 N·m 限幅的 PD 就能稳定夹持。这不是给抓取“加力”，而是修场景几何 |
 
-| P1-3 wasm `setJointTarget/...` | **PASS（API/示例）** | 导出 `loadScene/setJointTarget/step/getJointStates/getBodyTransform`；Node 里真实装载 modkit 场景，2 s 后 shoulder=20.00°，矩阵 16 个有限数；`web/robot.html` 滑杆预览；桌面 `bench` 1000 刚体 0.153 ms/步；浏览器 60 fps 未实测，见 §10 |
-| P2 MCP 新工具 / 接触力查询 / 1000 步 <2 s | **FAIL / 未实现** | 未做；`run_simulate` 是 CPU 路径，未做 1000 步性能门 |
+| P1-3 wasm `setJointTarget/...` | **PASS（API/示例）** | 导出 `loadScene/setJointTarget/step/getJointStates/getBodyTransform`；Node 里真实装载 modkit 场景，2 s 后 shoulder=20.00°，矩阵 16 个有限数；`web/robot.html` 滑杆预览；wasm/Node 1000 步 1.106 s（纯物理）；桌面 1000 刚体 0.153 ms/步；浏览器渲染帧率未测，见 §10 |
+| P2 MCP `joint_target` | **PASS** | `quench3d_joint_target`：铰链 `target_deg` / 滑块 `target_m`，移除同关节的脚本动作后步进，返回 `joints[]`；单测用 modkit drive 场景到 20°±2° |
+| P2 1000 步 <2 s | **PASS** | wasm/Node 1000 步 **1.106 s**；桌面 bench 1000 刚体 0.153 ms/步 |
+| P2 接触力查询 | **PASS** | `simulate --json` 新增 `contact_forces[]`（名字、法线、位置、冲量、`force_n=impulse/fixed_dt`、sensor）；MCP `quench3d_query_contact` 可按 `min_force_n` 过滤 |
 
 ## 8. P1-1：`objects[].visual`
 
@@ -285,11 +287,11 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * `tools/check_web.mjs` 在 Node 里真的实例化 wasm、装载 `modkit_arm_drive` 场景、跑 120 步，断言 shoulder=20.00°、`link2` 矩阵 16 个有限数、未知刚体返回空数组。
 * wasm 体积：**13,539,804 字节**（约 13.2 MiB；P0 基线 13,449,106，+90.7 KB）。这是把完整编辑器 + 物理 + 关节 API 打进同一个 example 的代价；只做物理的页面可以用 `wasm-opt`/裁剪入口再降。
 * **桌面物理规模**：`quench3d bench` 在本机 1000 刚体 **0.153 ms/步**（睡眠开启），4 刚体轨迹 3.1–3.6 ms/2404 采样；4 自由度手臂 + 手指只有约 10 个刚体，物理远低于 1 ms/步，60 fps 的 16.7 ms 预算主要留给 JS/wgpu 渲染。
-* **浏览器 60 fps 仍未实测**：这个 API 每步只做 CPU 物理，页面渲染由 JS 负责；wasm 下没有 1000 刚体/60 fps 基准，不能宣称。
+* **wasm/Node 实测**（`node tools/check_web.mjs`，每次门禁都跑）：1000 步 **1106 ms（1.106 ms/步，纯物理等效 904 fps）**，低于 P2 的 1000 步 <2 s；这仍**不含**浏览器 wgpu 渲染，页面 60 fps 不能由它单独证明。
 
 ## 11. 门禁结果
 
-`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，878 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
+`CARGO_NET_OFFLINE=true bash tools/gate.sh`：**全绿**，880 个测试 0 失败，wasm 13,539,804 字节（P0 基线 13,449,106，+90.7 KB），fmt/clippy（原生 + wasm32）/doc/license/check_web 全部 PASS。
 
 ## 12. 确定性
 
@@ -301,10 +303,10 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 ## 13. 还没做
 
 * P1-1 的官方 CAD 装配变换（当前 STL 对位是手工近似，不是 robot-modkit 官方装配矩阵）。
-* P2 的 MCP 关节工具、接触力查询与浏览器 60 fps 规模基准。
+* 浏览器 wgpu 渲染下的 60 fps 仍需要真实浏览器测得。
 * 真实夹持目前只验证 20 g、40 mm 方块、friction 1.5；更重的物体需要重新标定预紧/增益。
 * 用 robot-modkit 的真实 STL 装完整 M1 并逐关节截图对位（P1-1 的功能在，资产/验收没做）。
 * 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
-* wasm 60 fps / 1000 刚体规模基准（API 与示例页已通）。
-* MCP `joint_target/simulate_steps/query_contact`、接触力查询、批量性能门。
+* 浏览器 wgpu 渲染下的 60 fps 实测（wasm/Node 的 1000 步 1.106 s 已测；1000 刚体的 wasm 规模没测）。
+* MCP `simulate_steps` 已由 `quench3d_simulate.steps` 覆盖；`joint_target` 与 `query_contact` 已加。
 * 关节径向间隙 0.2 mm 的建模（当前铰链是理想约束，没有间隙）。

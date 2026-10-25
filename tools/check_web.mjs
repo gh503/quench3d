@@ -342,6 +342,20 @@ if (!defaultBinding && namedFromGlue.size === 0) {
         if (exported.getBodyTransform("不存在").length !== 0) {
           bad("getBodyTransform(未知名字) 应返回空数组");
         }
+        // P2：离线批量 1000 步 <2 s。这里量的是 Node 里的 wasm CPU 物理；
+        // 浏览器渲染帧率还要加 wgpu/JS 开销，不能把这条数字当成 60 fps 证明。
+        const t0 = process.hrtime.bigint();
+        for (let i = 0; i < 1000; i++) exported.step(1 / 60);
+        const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+        const per = ms / 1000;
+        if (ms >= 2000) {
+          bad(`wasm 物理 1000 步耗时 ${ms.toFixed(1)} ms，超过 P2 的 2 s 上限`);
+        } else {
+          ok(
+            `wasm 物理 1000 步 ${ms.toFixed(1)} ms（${per.toFixed(3)} ms/步；` +
+              `纯物理等效 ${(1000 / per).toFixed(0)} fps，不含渲染）`,
+          );
+        }
       } catch (e) {
         bad(`机械臂 wasm API 调用失败：${String(e).slice(0, 160)}`);
       }
