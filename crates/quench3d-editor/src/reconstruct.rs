@@ -18,6 +18,63 @@ pub const MAX_VOXELS: usize = 300_000;
 /// 平滑表面的最大格数（最长轴）；再高对摄像头点云没有意义，还会卡住 UI。
 pub const MAX_SURFACE_CELLS: u32 = 160;
 
+/// 去掉坐标两端各 `trim` 比例的离群点（默认 0.5%）。
+///
+/// 单目深度图经常有少量飞点；不剔掉会把整个包围盒撑大，Surface Nets 的格距
+/// 随之变粗、主体糊成一团。按每轴独立分位数裁剪，保留同时落在三轴范围内的点；
+/// 点数太少（<64）时原样返回，避免把稀疏轮廓裁没。
+pub fn trim_outliers(points: &[Vec3], trim: f32) -> Vec<Vec3> {
+    let trim = if trim.is_finite() {
+        trim.clamp(0.0, 0.45)
+    } else {
+        0.0
+    };
+    let finite: Vec<Vec3> = points.iter().copied().filter(|p| p.is_finite()).collect();
+    if trim <= 0.0 || finite.len() < 64 {
+        return finite;
+    }
+    let n = finite.len();
+    let lo = ((n as f32 * trim).ceil() as usize).clamp(1, n / 4);
+    let hi = (n - 1).saturating_sub(lo);
+    let mut axes: [Vec<f32>; 3] = [
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    ];
+    for p in &finite {
+        axes[0].push(p.x);
+        axes[1].push(p.y);
+        axes[2].push(p.z);
+    }
+    let mut bounds = [(0.0f32, 0.0f32); 3];
+    for (axis, vals) in axes.iter_mut().enumerate() {
+        vals.sort_unstable_by(f32::total_cmp);
+        bounds[axis] = (vals[lo], vals[hi]);
+    }
+    let filtered: Vec<Vec3> = finite
+        .into_iter()
+        .filter(|p| {
+            p.x >= bounds[0].0
+                && p.x <= bounds[0].1
+                && p.y >= bounds[1].0
+                && p.y <= bounds[1].1
+                && p.z >= bounds[2].0
+                && p.z <= bounds[2].1
+        })
+        .collect();
+    if filtered.len() < 4 {
+        points.iter().copied().filter(|p| p.is_finite()).collect()
+    } else {
+        filtered
+    }
+}
+
+/// 体素表面 + 离群点裁剪（摄像头默认路径）。
+pub fn voxel_surface_robust(points: &[Vec3], voxel: f32) -> MeshData {
+    let filtered = trim_outliers(points, 0.005);
+    voxel_surface(&filtered, voxel)
+}
+
 /// 从点云生成体素表面网格。
 ///
 /// * `voxel`：体素边长（米），会夹到 `1e-4..=10`；
@@ -143,12 +200,10 @@ pub fn smooth_surface(points: &[Vec3], voxel: f32, iso: f32) -> MeshData {
         return MeshData::default();
     }
     let voxel = voxel.clamp(1e-3, 0.5);
+    let filtered = trim_outliers(points, 0.005);
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for p in points {
-        if !p.is_finite() {
-            continue;
-        }
+    for p in &filtered {
         min = min.min(*p);
         max = max.max(*p);
     }
@@ -160,7 +215,7 @@ pub fn smooth_surface(points: &[Vec3], voxel: f32, iso: f32) -> MeshData {
         return MeshData::default();
     }
     let resolution = ((span / voxel).ceil() as u32).clamp(8, MAX_SURFACE_CELLS);
-    let surface = extract_surface(points, voxel * 2.0, resolution, iso.clamp(0.05, 1.5));
+    let surface = extract_surface(&filtered, voxel * 2.0, resolution, iso.clamp(0.05, 1.5));
     if surface.is_empty() {
         return MeshData::default();
     }
@@ -243,6 +298,34 @@ mod tests {
         // 点云在原点附近，平滑网格不能跑到 bounds 之外太远。
         let b = mesh.aabb();
         assert!(b.min.x > -0.3 && b.max.x < 0.3);
+    }
+
+    #[test]
+    fn robust_trim_removes_a_far_outlier_before_reconstruction() {
+        let mut pts = Vec::new();
+        for z in -3..=3 {
+            for y in -3..=3 {
+                for x in -3..=3 {
+                    if x * x + y * y + z * z <= 10 {
+                        pts.push(Vec3::new(x as f32 * 0.04, y as f32 * 0.04, z as f32 * 0.04));
+                    }
+                }
+            }
+        }
+        let clean = pts.len();
+        pts.push(Vec3::new(1000.0, 1000.0, 1000.0));
+        let trimmed = trim_outliers(&pts, 0.005);
+        assert_eq!(
+            trimmed.len(),
+            clean - 1 + 1,
+            "只应被裁掉 1 个点（另一颗是新加的）"
+        );
+        assert!(trimmed.iter().all(|p| p.x < 10.0));
+        let smooth = smooth_surface(&pts, 0.04, 0.45);
+        let b = smooth.aabb();
+        assert!(b.max.x < 1.0, "飞点不能把包围盒撑到 1000 米：{b:?}");
+        let voxel = voxel_surface_robust(&pts, 0.04);
+        assert!(voxel.aabb().max.x < 1.0);
     }
 
     #[test]

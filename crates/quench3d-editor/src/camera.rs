@@ -405,7 +405,7 @@ impl CameraFeed {
         let mesh = if self.recon_smooth {
             crate::reconstruct::smooth_surface(points, self.recon_voxel, 0.45)
         } else {
-            crate::reconstruct::voxel_surface(points, self.recon_voxel)
+            crate::reconstruct::voxel_surface_robust(points, self.recon_voxel)
         };
         if mesh.indices.is_empty() {
             self.recon_status = "点云为空或体素太大，没有生成面".to_string();
