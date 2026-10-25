@@ -309,4 +309,4 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * 真实夹持已验证 20 g 与 100 g、40 mm 方块、friction 2.0；200 g 同套参数只抬起 0.098 m，更重物体仍需重新标定预紧/增益。
 * 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
 * MCP `simulate_steps` 已由 `quench3d_simulate.steps` 覆盖；`joint_target` 与 `query_contact` 已加。
-* 关节径向间隙 0.2 mm 的建模（当前铰链是理想约束，没有间隙）。
+* 关节径向间隙 0.2 mm 未建模：当前铰链是理想点约束，没有径向自由间隙。按 120 mm 连杆估算，0.2 mm 间隙对应末端约 `atan(0.2/120)=0.095°` 的角度不确定度，小于 ±1° 验收；但它会带来真实的回差/抖动，本页不把“理想铰链”说成“已含间隙”。
