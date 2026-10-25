@@ -201,8 +201,8 @@ fn selection_bounds(engine: &Engine, selected: &[usize]) -> Vec<quench3d::prelud
 fn draw_selection_boxes(
     lines: &mut quench3d::render::DebugLines,
     bounds: &[quench3d::prelude::Aabb],
+    color: quench3d::prelude::Vec4,
 ) {
-    let color = quench3d::prelude::Vec4::new(1.0, 0.55, 0.1, 1.0);
     for bounds in bounds {
         lines.aabb(bounds, color);
     }
@@ -532,7 +532,15 @@ impl Inner {
         if self.doc.show_selection {
             let selected = self.doc.selection();
             let bounds = selection_bounds(&self.engine, &selected);
-            draw_selection_boxes(&mut self.engine.renderer.lines, &bounds);
+            let hover = self
+                .doc
+                .hovered
+                .and_then(|index| selection_bounds(&self.engine, &[index]).pop());
+            let lines = &mut self.engine.renderer.lines;
+            draw_selection_boxes(lines, &bounds, Vec4::new(1.0, 0.55, 0.1, 1.0));
+            if let Some(hover) = hover {
+                draw_selection_boxes(lines, &[hover], Vec4::new(0.25, 0.85, 1.0, 1.0));
+            }
         }
         if self.gizmo.pivot == GizmoPivot::Cursor {
             let c = self.gizmo.cursor;
@@ -581,6 +589,7 @@ impl Inner {
             joints: self.engine.debug.joints,
             probes: self.doc.show_probes,
             selection: self.doc.show_selection,
+            hovered: self.doc.hovered.unwrap_or(usize::MAX),
             tonemap: self.engine.renderer.options.tonemap.label(),
             recovery: self.doc.recovery.is_some(),
             objects: self.engine.scene.len(),
@@ -625,6 +634,22 @@ impl Inner {
                 self.doc.select_only(picked);
             }
         }
+        // 悬停拾取：只做高亮，不改选择；指针在 gizmo/框选/转视角时不抢。
+        self.doc.hovered = if self.viewport.gizmo_active
+            || self.viewport.dragging
+            || self.viewport.box_select_start.is_some()
+        {
+            None
+        } else {
+            self.viewport.hover.and_then(|local| {
+                let viewport = Vec2::new(
+                    self.viewport.rect.width().max(1.0),
+                    self.viewport.rect.height().max(1.0),
+                );
+                let ray = self.engine.camera().screen_ray(local, viewport);
+                self.doc.pick(&self.engine, &ray)
+            })
+        };
 
         let screen = ScreenDescriptor {
             size_in_pixels: [size.0, size.1],
@@ -1057,6 +1082,8 @@ struct UiDebugState {
     probes: bool,
     /// 选中包围盒开关。
     selection: bool,
+    /// 悬停命中的物体下标（`usize::MAX` = 没命中）。
+    hovered: usize,
     /// 当前色调映射算子的标签。
     tonemap: &'static str,
     /// 是否挂着自动保存恢复点（Web 端 localStorage / 桌面文件）。
@@ -1095,6 +1122,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         joints,
         probes,
         selection,
+        hovered,
         tonemap,
         recovery,
         objects,
@@ -1115,7 +1143,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};hovered={hovered};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
@@ -1757,7 +1785,11 @@ mod probe_draw_tests {
             ),
         ];
         let mut lines = quench3d::render::DebugLines::new();
-        draw_selection_boxes(&mut lines, &bounds);
+        draw_selection_boxes(
+            &mut lines,
+            &bounds,
+            quench3d::prelude::Vec4::new(1.0, 0.55, 0.1, 1.0),
+        );
         assert_eq!(lines.line_count(), 24);
     }
 

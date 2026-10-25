@@ -209,6 +209,60 @@ async function main() {
   await toggle("关节 F11", "F11", "F11", 122, false);
   // 默认场景没有探针；B 只要求显示开关状态变化，线框绘制有 Rust 单测。
   await toggle("场景探针 B", "b", "KeyB", 66, false);
+  // 悬停高亮：鼠标扫过视口，命中物体时状态里的 hovered 要从"无"变成一个下标，
+  // 画面出现青色 AABB（已选中的橙色盒子会被青色盖一层，所以截图也必须变）。
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: 5,
+    y: 5,
+    button: "none",
+    buttons: 0,
+  });
+  await sleep(250);
+  const hoverBefore = await snap("hover-before");
+  let hoverFound = null;
+  for (const y of [160, 220, 280, 340, 400, 460, 520, 580]) {
+    for (const x of [340, 420, 500, 580, 660, 740, 820, 900]) {
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x,
+        y,
+        button: "none",
+        buttons: 0,
+      });
+      await sleep(90);
+      const state = await uiState();
+      const hit = Number(/hovered=(\d+)/.exec(state)?.[1] ?? "-1");
+      if (hit >= 0 && hit < 1_000_000) {
+        hoverFound = { x, y, hit };
+        break;
+      }
+    }
+    if (hoverFound) break;
+  }
+  if (!hoverFound) die("鼠标扫过视口没有命中任何物体（悬停高亮失效）");
+  await sleep(150);
+  const hoverAfter = await snap("hover-after");
+  if (hoverAfter === hoverBefore) {
+    die(`悬停命中物体 ${hoverFound.hit} 但画面没有变化`);
+  }
+  results.push({
+    label: `悬停高亮 @${hoverFound.x},${hoverFound.y} → #${hoverFound.hit}`,
+    before: hoverBefore,
+    after: hoverAfter,
+    changed: true,
+  });
+  console.log(
+    `PASS 悬停高亮：@${hoverFound.x},${hoverFound.y} → #${hoverFound.hit}，截图变化`,
+  );
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: 5,
+    y: 5,
+    button: "none",
+    buttons: 0,
+  });
+  await sleep(250);
   // 默认场景有选中物体，H 的橙色包围盒应当真的改变画面。
   await toggle("选中包围盒 H", "h", "KeyH", 72, true);
   // 默认场景的亮度足够区分 ACES/Reinhard：要求状态与画面都变。

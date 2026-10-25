@@ -18,6 +18,8 @@ pub struct Viewport {
     pub hovered: bool,
     /// 本帧内是否发生了"点击"（按下并抬起且几乎没移动）。
     pub click: Option<Vec2>,
+    /// 指针在视口里的局部坐标（仅悬停且没被 gizmo 接管时）。
+    pub hover: Option<Vec2>,
     /// 左键是否正在视口里拖动（用来把左键拖动当转视角）。
     pub dragging: bool,
     /// 这一帧指针被变换 gizmo 接管了（此时不要转视角、也不要拾取）。
@@ -34,6 +36,7 @@ impl Default for Viewport {
             rect: egui::Rect::NOTHING,
             hovered: false,
             click: None,
+            hover: None,
             dragging: false,
             gizmo_active: false,
             additive: false,
@@ -4496,6 +4499,13 @@ fn viewport(
             view.gizmo_active = gizmo_took || gizmo.is_dragging();
             view.hovered = response.hovered() || response.dragged();
             view.dragging = response.dragged() && !view.gizmo_active;
+            view.hover = if view.gizmo_active {
+                None
+            } else {
+                response
+                    .hover_pos()
+                    .map(|p| Vec2::new(p.x - rect.left(), p.y - rect.top()))
+            };
             if response.clicked() && !view.gizmo_active {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let local = Vec2::new(pos.x - rect.left(), pos.y - rect.top());

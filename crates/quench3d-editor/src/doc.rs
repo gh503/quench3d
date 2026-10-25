@@ -240,6 +240,8 @@ pub struct Doc {
     pub show_probes: bool,
     /// 是否画出选中物体的橙色包围盒。
     pub show_selection: bool,
+    /// 本帧指针悬停命中的物体（只影响高亮，不写场景）。
+    pub hovered: Option<usize>,
     /// 左/右面板宽度（使用偏好，不写进场景文件）。
     pub layout: crate::layout::Layout,
     /// 崩溃恢复文件的内容（`Some` = 工具栏显示"恢复 / 丢弃"）。
@@ -961,6 +963,7 @@ impl Doc {
             show_help: false,
             show_probes: false,
             show_selection: true,
+            hovered: None,
             layout: crate::layout::Layout::default(),
             recovery: None,
             needs_autosave: false,
