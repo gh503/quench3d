@@ -41,6 +41,11 @@
 
 ### 新增
 
+- **多盏投影聚光灯（引擎 M2 第六项的一片）**：聚光阴影图从单张 2D 深度图变成
+  **4 层深度数组**，`plan_spot_shadows` 每帧最多选 4 盏 `cast_shadows` 的聚光灯，
+  每层独立渲染 pass 与帧常量，shader 用 packed 下标匹配对应灯。GPU e2e 验证两盏灯
+  各压暗自己下方、关掉第二盏后右半边像素变化、两层图都真有遮挡物。旧的单灯 API
+  `plan_spot_shadow` / `read_spot_shadow_map` / `spot_shadow_view` 保持兼容。
 - **盒投影贴花（引擎 M2 第六项的一片）**：`Renderer::draw_decal(DecalDesc)`。全屏
   pass 用场景深度重建世界坐标，投进贴花局部盒，所以贴在地面/斜坡/已有深度上，而不是
   浮空透明四边形；带 alpha 混合，可一次画多个。GPU e2e 验证地面中心变红、盒外逐位

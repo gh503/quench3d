@@ -47,12 +47,15 @@ struct Frame {
     params2: vec4<f32>,
     // ---- 聚光灯阴影（整帧只支持一盏投影聚光灯，见 spot_shadow.rs）----
     // 世界 → 光的**透视**裁剪空间矩阵（与平行光那张图无关，是第二张深度图）
-    spot_shadow_matrix: mat4x4<f32>,
-    // x = 投影灯在 point_lights 里的下标（< 0 = 本帧没有聚光阴影）,
+    // 每层：世界 → 光的透视裁剪矩阵；没有灯的层写单位阵
+    spot_shadow_matrices: array<mat4x4<f32>, 4>,
+    // 每层：x = 投影灯在 point_lights 里的下标（< 0 = 这一层没有灯）,
     // y = near（米）, z = far（米 = 灯的影响半径）, w = 深度偏移（纹素个数）
-    spot_shadow_params: vec4<f32>,
-    // x = 1 / 贴图边长（纹素）, y = tan(fov / 2), z = 法线偏移（纹素个数）, w = 斜率因子
-    spot_shadow_texel: vec4<f32>,
+    spot_shadow_params: array<vec4<f32>, 4>,
+    // 每层：x = 1 / 贴图边长（纹素）, y = tan(fov / 2), z = 法线偏移（纹素个数）, w = 斜率因子
+    spot_shadow_texel: array<vec4<f32>, 4>,
+    // x = 本帧有效的聚光阴影层数
+    spot_shadow_count: vec4<f32>,
 
     // ---- 点光源阴影（6 层深度数组，整帧只支持一盏投影点光源，见 point_shadow.rs）----
     // 与聚光灯那套是**两套独立资源**：可以同时有一盏投影点光源 + 一盏投影聚光灯。

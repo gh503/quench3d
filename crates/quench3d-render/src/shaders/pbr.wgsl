@@ -6,7 +6,7 @@
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 // 聚光灯阴影图（第二张 2D 深度图，用同一个比较采样器）
-@group(1) @binding(2) var spot_shadow_map: texture_depth_2d;
+@group(1) @binding(2) var spot_shadow_map: texture_depth_2d_array;
 // 点光源阴影图：**6 层深度数组**（`+X, -X, +Y, -Y, +Z, -Z`），不是 `texture_depth_cube`
 // ——面/uv 的约定由 `point_shadow.rs::cube_face_uv` 定义，这里逐字镜像它（见下面的注释）。
 @group(1) @binding(3) var point_shadow_map: texture_depth_2d_array;
@@ -349,28 +349,31 @@ fn sample_point_shadow(
 //   2. 偏移在**世界空间**算（透视下纹素足迹随距离线性增长），再按 dz/dd 换算成
 //      归一化深度——镜像的是 `spot_shadow.rs` 的 `normalized_depth_bias`；
 //      常量不写死在这里，全部由 uniform 传进来（`spot_shadow_params` / `spot_shadow_texel`）；
-//   3. 没有级联选择（只有一盏灯、一张图）。
-fn sample_spot_shadow(world: vec3<f32>, n: vec3<f32>, n_dot_l: f32) -> f32 {
-    let idx = frame.spot_shadow_params.x;
-    // idx < 0 = 这一帧没有投影聚光灯（缺省路径：整个函数体不会被走到）
+//   3. 没有级联选择（每盏灯一层）。
+fn sample_spot_shadow(layer: i32, world: vec3<f32>, n: vec3<f32>, n_dot_l: f32) -> f32 {
+    let info = frame.spot_shadow_params[layer];
+    let idx = info.x;
+    // idx < 0 = 这一层没有投影聚光灯（缺省路径：整个函数体不会被走到）
     if (idx < 0.0) { return 1.0; }
-    let clip = frame.spot_shadow_matrix * vec4<f32>(world, 1.0);
+    let matrix = frame.spot_shadow_matrices[layer];
+    let texel_info = frame.spot_shadow_texel[layer];
+    let clip = matrix * vec4<f32>(world, 1.0);
     // 透视投影的 w = 沿光轴的深度；w <= 0 表示在灯后面/灯上，没有可比深度
     if (clip.w <= 1e-6) { return 1.0; }
     let axis_depth = clip.w;
-    let texel = frame.spot_shadow_texel.x;
+    let texel = texel_info.x;
     // 一个纹素在该距离上的世界大小（透视：与距离成正比）
-    let texel_world = 2.0 * frame.spot_shadow_texel.y * axis_depth * texel;
-    let near = frame.spot_shadow_params.y;
-    let far = frame.spot_shadow_params.z;
+    let texel_world = 2.0 * texel_info.y * axis_depth * texel;
+    let near = info.y;
+    let far = info.z;
     // z_ndc(d) = far / (far - near) * (1 - near / d) → dz/dd = far * near / ((far - near) d²)
     let dz_dd = far * near / (max(far - near, 1e-6) * axis_depth * axis_depth);
     // 深度偏移：世界空间固定纹素数 × 斜率因子（正对光源的面几乎不用偏移）
-    let slope = 1.0 - clamp(n_dot_l, 0.0, 1.0) * frame.spot_shadow_texel.w;
-    let depth_bias = texel_world * frame.spot_shadow_params.w * dz_dd * slope;
+    let slope = 1.0 - clamp(n_dot_l, 0.0, 1.0) * texel_info.w;
+    let depth_bias = texel_world * info.w * dz_dd * slope;
     // 法线偏移：沿接收面法线把采样点推开，斜面上最有效
-    let shifted = world + n * (texel_world * frame.spot_shadow_texel.z);
-    let clip2 = frame.spot_shadow_matrix * vec4<f32>(shifted, 1.0);
+    let shifted = world + n * (texel_world * texel_info.z);
+    let clip2 = matrix * vec4<f32>(shifted, 1.0);
     if (clip2.w <= 1e-6) { return 1.0; }
     let ndc = clip2.xyz / clip2.w;
     // 与 sample_shadow 同一套 V 翻转与越界判据（锥外/远平面外一律算"亮着"：
@@ -379,7 +382,7 @@ fn sample_spot_shadow(world: vec3<f32>, n: vec3<f32>, n_dot_l: f32) -> f32 {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
         return 1.0;
     }
-    return pcf_3x3(spot_shadow_map, uv, ndc.z - depth_bias, texel);
+    return pcf_3x3_array(spot_shadow_map, uv, layer, ndc.z - depth_bias, texel);
 }
 
 // 解析式环境：与 `sky.wgsl` 同一条渐变 + 太阳光晕。
@@ -553,8 +556,13 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
                     // 只有"这一盏就是投影灯"才采样阴影图（点光/聚光各自整帧最多一盏，
                     // 两套资源互不相干，所以两盏灯可以同时投影）
                     var shadow2 = 1.0;
-                    if (i == i32(frame.spot_shadow_params.x + 0.5) && in.receive_shadows > 0.5) {
-                        shadow2 = sample_spot_shadow(in.world_position, n, n_dot_l2);
+                    if (in.receive_shadows > 0.5) {
+                        for (var layer = 0; layer < 4; layer = layer + 1) {
+                            if (frame.spot_shadow_params[layer].x >= 0.0
+                                && i == i32(frame.spot_shadow_params[layer].x + 0.5)) {
+                                shadow2 = sample_spot_shadow(layer, in.world_position, n, n_dot_l2);
+                            }
+                        }
                     }
                     if (i == i32(frame.point_shadow_params.x + 0.5) && in.receive_shadows > 0.5) {
                         shadow2 = sample_point_shadow(i, in.world_position, n, n_dot_l2);

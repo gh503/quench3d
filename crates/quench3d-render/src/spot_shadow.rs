@@ -25,6 +25,9 @@ use quench3d_math::{Mat4, Vec3};
 
 use crate::light::{PointLight, SpotLight, MAX_POINT_LIGHTS};
 
+/// 一帧最多支持多少盏**投影聚光灯**（阴影图数组的层数）。
+pub const MAX_SPOT_SHADOWS: usize = 4;
+
 /// 近平面占影响半径的比例（1%）。
 ///
 /// 为什么按半径缩放而不是写死：影响半径从 2 米到 200 米都有，一个固定的小 near 在
@@ -152,6 +155,37 @@ pub fn spot_shadow_camera(light: &SpotLight) -> SpotShadowCamera {
     }
 }
 
+/// 选出这一帧所有负责投影的聚光灯（按数组顺序，最多 [`MAX_SPOT_SHADOWS`] 盏）。
+///
+/// 名额算法与 [`pick_spot_shadow`] 完全相同：点光源先占 [0, 8) 的名额，聚光灯
+/// 从 `points.len()` 开始排；被挤出局部光上限的灯既不照亮也不投影。
+pub fn pick_spot_shadows(
+    points: &[PointLight],
+    spots: &[SpotLight],
+    enabled: bool,
+) -> Vec<(usize, usize)> {
+    if !enabled {
+        return Vec::new();
+    }
+    let used_by_points = points.len().min(MAX_POINT_LIGHTS);
+    let mut out = Vec::new();
+    for (i, s) in spots.iter().enumerate() {
+        if !s.cast_shadows {
+            continue;
+        }
+        let packed = used_by_points + i;
+        if packed >= MAX_POINT_LIGHTS {
+            // 后面的灯只会更靠后，不可能再挤进名额。
+            break;
+        }
+        out.push((i, packed));
+        if out.len() == MAX_SPOT_SHADOWS {
+            break;
+        }
+    }
+    out
+}
+
 /// 选出这一帧负责投影的那盏聚光灯。
 ///
 /// 规则（**确定性**，见 `docs/production_readiness.md` §12.4）：
@@ -204,12 +238,23 @@ pub fn plan_spot_shadow(
     spots: &[SpotLight],
     enabled: bool,
 ) -> Option<SpotShadowPlan> {
-    let (spot_index, packed_index) = pick_spot_shadow(points, spots, enabled)?;
-    Some(SpotShadowPlan {
-        spot_index,
-        packed_index,
-        camera: spot_shadow_camera(&spots[spot_index]),
-    })
+    plan_spot_shadows(points, spots, enabled).into_iter().next()
+}
+
+/// 一帧的多盏聚光阴影计划（按数组顺序，最多 [`MAX_SPOT_SHADOWS`] 盏）。
+pub fn plan_spot_shadows(
+    points: &[PointLight],
+    spots: &[SpotLight],
+    enabled: bool,
+) -> Vec<SpotShadowPlan> {
+    pick_spot_shadows(points, spots, enabled)
+        .into_iter()
+        .map(|(spot_index, packed_index)| SpotShadowPlan {
+            spot_index,
+            packed_index,
+            camera: spot_shadow_camera(&spots[spot_index]),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -377,6 +422,43 @@ mod tests {
         let near_texel = cam.texel_world_size(map, 2.0);
         let far_texel = cam.texel_world_size(map, 16.0);
         assert!((far_texel / near_texel - 8.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn every_caster_gets_a_layer_up_to_the_limit() {
+        let mk = |shadows: bool, x: f32| {
+            SpotLight::new(
+                vec3(x, 5.0, 0.0),
+                vec3(0.0, -1.0, 0.0),
+                Vec3::ONE,
+                1.0,
+                10.0,
+                10.0,
+                20.0,
+            )
+            .with_cast_shadows(shadows)
+        };
+        let spots = vec![
+            mk(true, 0.0),
+            mk(false, 1.0),
+            mk(true, 2.0),
+            mk(true, 3.0),
+            mk(true, 4.0),
+            mk(true, 5.0),
+        ];
+        let picked = pick_spot_shadows(&[], &spots, true);
+        assert_eq!(picked, vec![(0, 0), (2, 2), (3, 3), (4, 4)], "最多 4 层");
+        let plans = plan_spot_shadows(&[], &spots, true);
+        assert_eq!(plans.len(), MAX_SPOT_SHADOWS);
+        for p in &plans {
+            assert!(p.camera.near > 0.0 && p.camera.far > p.camera.near);
+        }
+        // 兼容接口仍返回第一盏。
+        assert_eq!(
+            plan_spot_shadow(&[], &spots, true).map(|p| p.spot_index),
+            Some(0)
+        );
+        assert!(plan_spot_shadows(&[], &spots, false).is_empty());
     }
 
     #[test]
