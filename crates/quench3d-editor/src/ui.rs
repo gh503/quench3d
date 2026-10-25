@@ -593,6 +593,8 @@ fn view_menu(
             .on_hover_text("画出物理关节的锚点、连线与铰链/滑块轴");
         ui.checkbox(&mut doc.show_probes, "场景探针")
             .on_hover_text("画出 probes[] 的球形/盒形区域线框；探针本身只读，不碰物理");
+        ui.checkbox(&mut doc.show_selection, "选中包围盒")
+            .on_hover_text("给选中物体画橙色世界包围盒（快捷键 H）");
         ui.checkbox(&mut engine.debug.axes, "坐标轴");
         ui.checkbox(&mut engine.debug.lights, "灯光 gizmo");
         ui.separator();

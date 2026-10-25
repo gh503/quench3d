@@ -47,6 +47,9 @@
 - **画中画节流测试（第 181 轮）**：`pip_refresh_uploads_a_texture` 增加同帧不重复
   回读、过 12 帧恢复的断言。测试总数仍为 833。
 
+- **编辑器选中包围盒（第 113 轮）**：选中物体在视口画橙色世界 AABB，多选逐个画；
+  「视图」开关 / 快捷键 H，Web UI 探针验证截图与状态同步变化。
+
 - **最大绘制距离剔除（第 111 轮）**：`RendererOptions.max_draw_distance` 按实例包围盒
   最近点剔除远处实例，`RenderStats.distance_culled` 单独记账；编辑器「渲染」菜单可调。
   GPU 测试验证近处保留、远处消失且画面同步变化；场景格式 `render.max_draw_distance`

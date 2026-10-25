@@ -178,6 +178,36 @@ fn draw_probes(lines: &mut quench3d::render::DebugLines, probes: &[ProbeDoc]) {
     }
 }
 
+/// 选中物体的世界包围盒（只读场景/网格信息，不碰物理也不改材质）。
+fn selection_bounds(engine: &Engine, selected: &[usize]) -> Vec<quench3d::prelude::Aabb> {
+    let mut out = Vec::with_capacity(selected.len());
+    for &index in selected {
+        let Some(object) = engine.scene.objects.get(index) else {
+            continue;
+        };
+        if !object.visible {
+            continue;
+        }
+        let Some((_, _, local)) = engine.renderer.mesh_info(object.mesh) else {
+            continue;
+        };
+        let world = engine.scene.world_transform(index);
+        out.push(local.transformed(&world.matrix()));
+    }
+    out
+}
+
+/// 选中高亮：给每个选中物体画橙色世界包围盒。
+fn draw_selection_boxes(
+    lines: &mut quench3d::render::DebugLines,
+    bounds: &[quench3d::prelude::Aabb],
+) {
+    let color = quench3d::prelude::Vec4::new(1.0, 0.55, 0.1, 1.0);
+    for bounds in bounds {
+        lines.aabb(bounds, color);
+    }
+}
+
 /// 初始化完成后的全部状态。
 struct Inner {
     window: Arc<Window>,
@@ -499,6 +529,11 @@ impl Inner {
                 draw_probes(&mut self.engine.renderer.lines, &base.probes);
             }
         }
+        if self.doc.show_selection {
+            let selected = self.doc.selection();
+            let bounds = selection_bounds(&self.engine, &selected);
+            draw_selection_boxes(&mut self.engine.renderer.lines, &bounds);
+        }
         if self.gizmo.pivot == GizmoPivot::Cursor {
             let c = self.gizmo.cursor;
             let color = quench3d::prelude::Vec4::new(1.0, 0.75, 0.2, 1.0);
@@ -545,6 +580,7 @@ impl Inner {
             bones: self.engine.debug.bones,
             joints: self.engine.debug.joints,
             probes: self.doc.show_probes,
+            selection: self.doc.show_selection,
             tonemap: self.engine.renderer.options.tonemap.label(),
             recovery: self.doc.recovery.is_some(),
             objects: self.engine.scene.len(),
@@ -1019,6 +1055,8 @@ struct UiDebugState {
     joints: bool,
     /// 场景探针线框开关。
     probes: bool,
+    /// 选中包围盒开关。
+    selection: bool,
     /// 当前色调映射算子的标签。
     tonemap: &'static str,
     /// 是否挂着自动保存恢复点（Web 端 localStorage / 桌面文件）。
@@ -1056,6 +1094,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
         bones,
         joints,
         probes,
+        selection,
         tonemap,
         recovery,
         objects,
@@ -1076,7 +1115,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
@@ -1253,6 +1292,16 @@ impl EditorApp {
                         }
                         if code == KeyCode::KeyF {
                             inner.doc.focus_selected(engine);
+                            return;
+                        }
+                        // H：选中包围盒（编辑器自己的显示开关）。
+                        if code == KeyCode::KeyH && !engine.input.ctrl {
+                            inner.doc.show_selection = !inner.doc.show_selection;
+                            inner.doc.status = if inner.doc.show_selection {
+                                "选中包围盒：显示".to_string()
+                            } else {
+                                "选中包围盒：隐藏".to_string()
+                            };
                             return;
                         }
                         // B：场景探针线框（编辑器自己的显示开关，不写回场景）。
@@ -1694,6 +1743,23 @@ mod tests {
 #[cfg(test)]
 mod probe_draw_tests {
     use super::*;
+
+    #[test]
+    fn selection_boxes_draw_twelve_edges_each() {
+        let bounds = [
+            quench3d::prelude::Aabb::new(
+                quench3d::prelude::Vec3::ZERO,
+                quench3d::prelude::Vec3::ONE,
+            ),
+            quench3d::prelude::Aabb::new(
+                quench3d::prelude::Vec3::splat(-2.0),
+                quench3d::prelude::Vec3::splat(-1.0),
+            ),
+        ];
+        let mut lines = quench3d::render::DebugLines::new();
+        draw_selection_boxes(&mut lines, &bounds);
+        assert_eq!(lines.line_count(), 24);
+    }
 
     #[test]
     fn probes_draw_three_circles_and_one_box() {
