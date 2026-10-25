@@ -41,6 +41,11 @@
 
 ### 新增
 
+- **逐资源释放（引擎 M1 第 2 片）**：网格/材质/贴图改为带代次的槽表，
+  低 20 位下标 + 高 12 位代次；新增 `remove_mesh/remove_material/remove_texture`，
+  旧句柄释放后失效、复用不会复活；`mesh_count` 等只数活资源。两条单测覆盖
+  复用/旧句柄/重复释放/清空。边界：材质绑定组持有贴图 view，贴图显存延迟到材质释放；
+  LOD 槽位释放后留空不复用。
 - **输入抽象补齐手柄/触屏（引擎 M1 第 1 片）**：`Input` 新增 4 个手柄槽位
   （`on_gamepad_connected/axis/buttons`，轴值 clamp 到 ±1、NaN 归零）、触屏点
   `TouchPoint`/`TouchPhase` 与 `on_touch/on_touch_end`，winit `WindowEvent::Touch`

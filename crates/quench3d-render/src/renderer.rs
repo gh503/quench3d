@@ -435,6 +435,110 @@ struct Batch {
     cast_shadows: bool,
 }
 
+/// 资源句柄的索引位数：低 20 位下标，高 12 位代次。
+///
+/// 句柄仍是 `u32`（不破坏公开 API 与场景数据），但释放后的槽位**不会**让旧句柄
+/// 重新指到新资源：代次不同就查不到。1M 个资源槽、4095 次复用，足够长会话。
+const RESOURCE_INDEX_BITS: u32 = 20;
+const RESOURCE_INDEX_MASK: u32 = (1 << RESOURCE_INDEX_BITS) - 1;
+const RESOURCE_GENERATION_MASK: u32 = (1 << (32 - RESOURCE_INDEX_BITS)) - 1;
+
+fn resource_id(index: u32, generation: u32) -> u32 {
+    (generation << RESOURCE_INDEX_BITS) | (index & RESOURCE_INDEX_MASK)
+}
+
+fn resource_parts(id: u32) -> (usize, u32) {
+    (
+        (id & RESOURCE_INDEX_MASK) as usize,
+        id >> RESOURCE_INDEX_BITS,
+    )
+}
+
+/// 一个可释放、可复用下标的资源槽。
+struct ResourceSlot<T> {
+    value: Option<T>,
+    generation: u32,
+}
+
+/// 带代次的资源表：释放后槽位进 free list，复用时代次 +1，旧句柄失效。
+struct ResourceTable<T> {
+    slots: Vec<ResourceSlot<T>>,
+    free: Vec<usize>,
+}
+
+impl<T> Default for ResourceTable<T> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
+    }
+}
+
+impl<T> ResourceTable<T> {
+    fn insert(&mut self, value: T) -> u32 {
+        // 先找可复用槽；代次用完就永久退役（不回收旧句柄，宁可漏一个槽）。
+        while let Some(index) = self.free.pop() {
+            let slot = &mut self.slots[index];
+            if slot.generation >= RESOURCE_GENERATION_MASK {
+                continue;
+            }
+            slot.generation += 1;
+            slot.value = Some(value);
+            return resource_id(index as u32, slot.generation);
+        }
+        let index = self.slots.len();
+        self.slots.push(ResourceSlot {
+            value: Some(value),
+            generation: 0,
+        });
+        resource_id(index as u32, 0)
+    }
+
+    fn get(&self, id: u32) -> Option<&T> {
+        let (index, generation) = resource_parts(id);
+        let slot = self.slots.get(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.value.as_ref()
+    }
+
+    fn get_mut(&mut self, id: u32) -> Option<&mut T> {
+        let (index, generation) = resource_parts(id);
+        let slot = self.slots.get_mut(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.value.as_mut()
+    }
+
+    fn remove(&mut self, id: u32) -> Option<T> {
+        let (index, generation) = resource_parts(id);
+        let slot = self.slots.get_mut(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        let value = slot.value.take()?;
+        self.free.push(index);
+        Some(value)
+    }
+
+    fn len(&self) -> usize {
+        self.slots.iter().filter(|s| s.value.is_some()).count()
+    }
+
+    fn clear(&mut self) {
+        // 不把槽位清零：保留代次，清空值并把下标放回 free list。这样清空前的旧句柄
+        // 不会在重新上传后“复活”成同代次的新资源。
+        self.free.clear();
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            slot.value = None;
+            self.free.push(index);
+        }
+    }
+}
+
 /// GPU 网格。
 struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
@@ -1074,11 +1178,11 @@ pub struct Renderer {
     shadow_tile_size: u32,
 
     // 资源表
-    meshes: Vec<GpuMesh>,
-    /// 自动 LOD 的 GPU 网格（不占用户句柄空间）。
-    lod_meshes: Vec<GpuMesh>,
-    materials: Vec<GpuMaterial>,
-    textures: Vec<GpuTexture>,
+    meshes: ResourceTable<GpuMesh>,
+    /// 自动 LOD 的 GPU 网格（不占用户句柄空间；释放后槽位为空，不参与绘制）。
+    lod_meshes: Vec<Option<GpuMesh>>,
+    materials: ResourceTable<GpuMaterial>,
+    textures: ResourceTable<GpuTexture>,
     /// 环境贴图 IBL 的固定 cubemap（换图只覆写内容）；无图时全黑，shader 走解析式天空。
     environment_texture: wgpu::Texture,
     environment_params: wgpu::Buffer,
@@ -2456,10 +2560,10 @@ impl Renderer {
             shadow_frame_buffers,
             shadow_frame_bind_groups,
             shadow_tile_size,
-            meshes: Vec::new(),
+            meshes: ResourceTable::default(),
             lod_meshes: Vec::new(),
-            materials: Vec::new(),
-            textures: Vec::new(),
+            materials: ResourceTable::default(),
+            textures: ResourceTable::default(),
             environment_texture,
             environment_params,
             white_texture,
@@ -2667,7 +2771,9 @@ impl Renderer {
         self.add_mesh_named(ctx, mesh, "mesh")
     }
 
-    /// 丢弃所有场景资源（网格/材质/贴图），把句柄空间重置到 0。
+    /// 丢弃所有场景资源（网格/材质/贴图）。
+    ///
+    /// 槽位下标会复用、代次继续递增；**清空前的旧句柄不会复活**。
     ///
     /// **调用方必须先清空 `Scene` 与任何缓存了旧句柄的结构**（编辑器的
     /// `AssetCache` 就是这样一个结构），否则旧句柄会指向新上传的同号资源。
@@ -2701,7 +2807,7 @@ impl Renderer {
         bounds: &Aabb,
         camera_position: Vec3,
     ) -> Option<&GpuMesh> {
-        let base = self.meshes.get(mesh as usize)?;
+        let base = self.meshes.get(mesh)?;
         if !self.options.auto_lod || base.auto_lod.is_empty() {
             return Some(base);
         }
@@ -2719,11 +2825,42 @@ impl Renderer {
         }
         base.auto_lod
             .get(level - 1)
-            .and_then(|i| self.lod_meshes.get(*i))
+            .and_then(|i| self.lod_meshes.get(*i).and_then(Option::as_ref))
             .or(Some(base))
     }
 
-    /// 已上传的用户材质数量（测试/诊断用）。
+    /// 释放一个网格（连同它的自动 LOD）。返回是否真的释放了一个活句柄。
+    ///
+    /// 释放后旧 `MeshId` 立即失效；下标会进入空闲表，下次上传复用并递增代次。
+    /// 调用方必须先移除引用这个网格的实例，否则该实例会画不出来（不会 panic）。
+    pub fn remove_mesh(&mut self, id: MeshId) -> bool {
+        let Some(mesh) = self.meshes.remove(id) else {
+            return false;
+        };
+        for index in mesh.auto_lod {
+            if let Some(slot) = self.lod_meshes.get_mut(index) {
+                *slot = None;
+            }
+        }
+        true
+    }
+
+    /// 释放一个材质。返回是否真的释放了一个活句柄。
+    ///
+    /// 材质绑定组持有贴图 view 的强引用；要真正释放贴图显存，先释放引用它的材质。
+    pub fn remove_material(&mut self, id: MaterialId) -> bool {
+        self.materials.remove(id).is_some()
+    }
+
+    /// 释放一张用户贴图。返回是否真的释放了一个活句柄。
+    ///
+    /// 若还有材质绑定组引用这张贴图，驱动会继续持有底层纹理，直到材质被释放；
+    /// 本方法只保证句柄失效、资源表不再计数。
+    pub fn remove_texture(&mut self, id: TextureId) -> bool {
+        self.textures.remove(id).is_some()
+    }
+
+    /// 已上传的用户网格数量（测试/诊断用）。
     pub fn material_count(&self) -> usize {
         self.materials.len()
     }
@@ -2735,8 +2872,7 @@ impl Renderer {
 
     /// 上传网格并命名（调试用）。
     pub fn add_mesh_named(&mut self, ctx: &GpuContext, mesh: &MeshData, name: &str) -> MeshId {
-        let id = self.meshes.len() as MeshId;
-        self.meshes.push(upload_gpu_mesh(&ctx.device, mesh, name));
+        let id = self.meshes.insert(upload_gpu_mesh(&ctx.device, mesh, name));
         if self.options.auto_lod && mesh.triangle_count() >= 500 {
             let mut levels = Vec::new();
             let mut previous = mesh.triangle_count();
@@ -2750,14 +2886,16 @@ impl Renderer {
                 }
                 previous = coarse.triangle_count();
                 let index = self.lod_meshes.len();
-                self.lod_meshes.push(upload_gpu_mesh(
+                self.lod_meshes.push(Some(upload_gpu_mesh(
                     &ctx.device,
                     &coarse,
                     &format!("{name}-lod{}", levels.len() + 1),
-                ));
+                )));
                 levels.push(index);
             }
-            self.meshes[id as usize].auto_lod = levels;
+            if let Some(m) = self.meshes.get_mut(id) {
+                m.auto_lod = levels;
+            }
         }
         id
     }
@@ -2847,9 +2985,7 @@ impl Renderer {
             crate::texture::TextureOptions::data()
         };
         let texture = GpuTexture::upload(&ctx.device, &ctx.queue, image, options);
-        let id = self.textures.len() as TextureId;
-        self.textures.push(texture);
-        id
+        self.textures.insert(texture)
     }
 
     /// 创建材质，返回句柄。
@@ -2868,7 +3004,7 @@ impl Renderer {
     ) -> wgpu::BindGroup {
         let device = &ctx.device;
         let view_for = |id: Option<TextureId>, fallback: &GpuTexture| -> wgpu::TextureView {
-            match id.and_then(|i| self.textures.get(i as usize)) {
+            match id.and_then(|i| self.textures.get(i)) {
                 Some(t) => t.view.clone(),
                 None => fallback.view.clone(),
             }
@@ -2880,14 +3016,14 @@ impl Renderer {
         // AO 缺省是白图（r = 1），乘上去等于不压暗。
         let ao_view = view_for(desc.ao_texture, &self.white_texture);
         // 采样器统一使用基础色纹理的采样器（贴图参数差异对最终效果影响很小）
-        let sampler = self
-            .textures
-            .get(desc.base_color_texture.unwrap_or(u32::MAX) as usize)
+        let sampler = desc
+            .base_color_texture
+            .and_then(|id| self.textures.get(id))
             .map(|t| t.sampler.clone())
             .unwrap_or_else(|| self.white_texture.sampler.clone());
-        let data_sampler = self
-            .textures
-            .get(desc.normal_texture.unwrap_or(u32::MAX) as usize)
+        let data_sampler = desc
+            .normal_texture
+            .and_then(|id| self.textures.get(id))
             .map(|t| t.sampler.clone())
             .unwrap_or_else(|| self.flat_normal_texture.sampler.clone());
 
@@ -2950,19 +3086,17 @@ impl Renderer {
 
         let bind_group = self.build_material_bind_group(ctx, &desc, &uniform_buffer);
 
-        let id = self.materials.len() as MaterialId;
-        self.materials.push(GpuMaterial {
+        self.materials.insert(GpuMaterial {
             desc,
             bind_group,
             uniform_buffer,
             name: name.to_string(),
-        });
-        id
+        })
     }
 
     /// 覆盖已有材质的 GPU 常量（用于运行时调整颜色/粗糙度）。
     pub fn update_material(&mut self, ctx: &GpuContext, id: MaterialId, desc: MaterialDesc) {
-        if let Some(m) = self.materials.get_mut(id as usize) {
+        if let Some(m) = self.materials.get_mut(id) {
             let uniform = desc.to_uniform();
             ctx.queue
                 .write_buffer(&m.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -2981,10 +3115,10 @@ impl Renderer {
         slot: MaterialTextureSlot,
         texture: Option<TextureId>,
     ) -> bool {
-        if texture.is_some_and(|t| self.textures.get(t as usize).is_none()) {
+        if texture.is_some_and(|t| self.textures.get(t).is_none()) {
             return false;
         }
-        let Some(existing) = self.materials.get(id as usize) else {
+        let Some(existing) = self.materials.get(id) else {
             return false;
         };
         let mut desc = existing.desc.clone();
@@ -2995,9 +3129,11 @@ impl Renderer {
             MaterialTextureSlot::Emissive => desc.emissive_texture = texture,
             MaterialTextureSlot::Ao => desc.ao_texture = texture,
         }
-        let uniform_buffer = self.materials[id as usize].uniform_buffer.clone();
+        let Some(uniform_buffer) = self.materials.get(id).map(|m| m.uniform_buffer.clone()) else {
+            return false;
+        };
         let bind_group = self.build_material_bind_group(ctx, &desc, &uniform_buffer);
-        let Some(m) = self.materials.get_mut(id as usize) else {
+        let Some(m) = self.materials.get_mut(id) else {
             return false;
         };
         m.desc = desc;
@@ -3007,12 +3143,12 @@ impl Renderer {
 
     /// 读取材质描述。
     pub fn material(&self, id: MaterialId) -> Option<&MaterialDesc> {
-        self.materials.get(id as usize).map(|m| &m.desc)
+        self.materials.get(id).map(|m| &m.desc)
     }
 
     /// 材质名称（调试用）。
     pub fn material_name(&self, id: MaterialId) -> Option<&str> {
-        self.materials.get(id as usize).map(|m| m.name.as_str())
+        self.materials.get(id).map(|m| m.name.as_str())
     }
 
     /// 原地更新一个网格的顶点（CPU 蒙皮/形变用）；索引与拓扑保持不变。
@@ -3026,7 +3162,7 @@ impl Renderer {
         id: MeshId,
         vertices: &[crate::Vertex],
     ) -> bool {
-        let Some(mesh) = self.meshes.get_mut(id as usize) else {
+        let Some(mesh) = self.meshes.get_mut(id) else {
             return false;
         };
         // 先把**旧位置**写进上一帧位置缓冲，再覆盖当前顶点。morph / CPU 蒙皮
@@ -3082,7 +3218,7 @@ impl Renderer {
     /// 网格信息 `(名称, 索引数, 包围盒)`。
     pub fn mesh_info(&self, id: MeshId) -> Option<(&str, u32, Aabb)> {
         self.meshes
-            .get(id as usize)
+            .get(id)
             .map(|m| (m.name.as_str(), m.index_count, m.bounds))
     }
 
@@ -3105,7 +3241,7 @@ impl Renderer {
 
     /// 提交一次绘制。
     pub fn draw(&mut self, mesh: MeshId, material: MaterialId, instance: InstanceDesc) {
-        let bounds = match self.meshes.get(mesh as usize) {
+        let bounds = match self.meshes.get(mesh) {
             Some(m) => m.bounds.transformed(&instance.transform.matrix()),
             None => return,
         };
@@ -4064,7 +4200,7 @@ impl Renderer {
             let batch_first = write;
             let mut batch_count = 0u32;
             let mut shadow_any = false;
-            let desc = self.materials.get(batch.material as usize).map(|m| &m.desc);
+            let desc = self.materials.get(batch.material).map(|m| &m.desc);
             let alpha = desc.map(|d| d.needs_alpha_blend()).unwrap_or(false);
             let double = desc.map(|d| d.double_sided).unwrap_or(false);
             let unlit = desc.map(|d| d.unlit).unwrap_or(false);
@@ -4196,16 +4332,17 @@ impl Renderer {
                 pass.set_bind_group(1, &self.skin_bind_group, &[]);
                 pass.set_viewport(vx, vy, vs, vs, 0.0, 1.0);
                 pass.set_scissor_rect(vx as u32, vy as u32, vs as u32, vs as u32);
-                let mut current_mesh = u32::MAX;
+                let mut current_mesh: Option<u32> = None;
                 for (mesh, first, cnt) in &shadow_batches {
-                    if *mesh != current_mesh {
-                        let m = &self.meshes[*mesh as usize];
+                    let Some(m) = self.meshes.get(*mesh) else {
+                        continue;
+                    };
+                    if current_mesh != Some(*mesh) {
                         pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
                         pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        current_mesh = *mesh;
+                        current_mesh = Some(*mesh);
                     }
                     pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-                    let m = &self.meshes[*mesh as usize];
                     pass.draw_indexed(0..m.index_count, 0, *first..(*first + *cnt));
                     stats.shadow_draw_calls += 1;
                 }
@@ -4240,16 +4377,17 @@ impl Renderer {
             pass.set_bind_group(1, &self.skin_bind_group, &[]);
             pass.set_viewport(0.0, 0.0, size, size, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, self.spot_shadow_map_size, self.spot_shadow_map_size);
-            let mut current_mesh = u32::MAX;
+            let mut current_mesh: Option<u32> = None;
             for (mesh, first, cnt) in &shadow_batches {
-                if *mesh != current_mesh {
-                    let m = &self.meshes[*mesh as usize];
+                let Some(m) = self.meshes.get(*mesh) else {
+                    continue;
+                };
+                if current_mesh != Some(*mesh) {
                     pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
                     pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    current_mesh = *mesh;
+                    current_mesh = Some(*mesh);
                 }
                 pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-                let m = &self.meshes[*mesh as usize];
                 pass.draw_indexed(0..m.index_count, 0, *first..(*first + *cnt));
                 stats.spot_shadow_draw_calls += 1;
             }
@@ -4281,16 +4419,17 @@ impl Renderer {
                 pass.set_bind_group(1, &self.skin_bind_group, &[]);
                 pass.set_viewport(0.0, 0.0, size, size, 0.0, 1.0);
                 pass.set_scissor_rect(0, 0, self.point_shadow_map_size, self.point_shadow_map_size);
-                let mut current_mesh = u32::MAX;
+                let mut current_mesh: Option<u32> = None;
                 for (mesh, first, cnt) in &shadow_batches {
-                    if *mesh != current_mesh {
-                        let m = &self.meshes[*mesh as usize];
+                    let Some(m) = self.meshes.get(*mesh) else {
+                        continue;
+                    };
+                    if current_mesh != Some(*mesh) {
                         pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
                         pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        current_mesh = *mesh;
+                        current_mesh = Some(*mesh);
                     }
                     pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-                    let m = &self.meshes[*mesh as usize];
                     pass.draw_indexed(0..m.index_count, 0, *first..(*first + *cnt));
                     stats.point_shadow_draw_calls += 1;
                 }
@@ -4366,7 +4505,7 @@ impl Renderer {
                 let bounds = self.batches[batch_index].bounds;
                 let (Some(gm), Some(gmat)) = (
                     self.mesh_for_batch(mesh, &bounds, camera.position),
-                    self.materials.get(material as usize),
+                    self.materials.get(material),
                 ) else {
                     continue;
                 };
@@ -4402,7 +4541,7 @@ impl Renderer {
                     .unwrap_or(Aabb::EMPTY);
                 let (Some(gm), Some(gmat)) = (
                     self.mesh_for_batch(mesh, &bounds, camera.position),
-                    self.materials.get(material as usize),
+                    self.materials.get(material),
                 ) else {
                     continue;
                 };
@@ -5936,5 +6075,43 @@ mod tests {
         assert_eq!(raw.params[1], 0.2);
         assert_eq!(raw.params[2], 3.0);
         assert_eq!(raw.params[3], 1.0, "应标记为覆盖材质");
+    }
+
+    #[cfg(test)]
+    mod resource_table_tests {
+        use super::*;
+
+        #[test]
+        fn released_slots_are_reused_with_a_new_generation() {
+            let mut table: ResourceTable<u32> = ResourceTable::default();
+            let a = table.insert(10);
+            let b = table.insert(20);
+            assert_eq!(table.len(), 2);
+            assert_eq!(table.get(a), Some(&10));
+            assert_eq!(table.get(b), Some(&20));
+
+            assert_eq!(table.remove(a), Some(10));
+            assert_eq!(table.len(), 1);
+            assert!(table.get(a).is_none(), "释放后的旧句柄必须失效");
+
+            let c = table.insert(30);
+            assert_eq!(table.len(), 2);
+            assert_eq!(table.get(c), Some(&30));
+            assert_ne!(a, c, "复用同一槽位必须换代次，不能与旧句柄相同");
+            assert!(table.get(a).is_none(), "复用不能复活旧句柄");
+            assert_eq!(table.get(b), Some(&20));
+        }
+
+        #[test]
+        fn double_release_is_a_no_op_and_clear_resets() {
+            let mut table: ResourceTable<u32> = ResourceTable::default();
+            let id = table.insert(1);
+            assert!(table.remove(id).is_some());
+            assert!(table.remove(id).is_none(), "重复释放不能把槽位二次入队");
+            assert!(table.remove(0xffff_ffff).is_none());
+            table.clear();
+            assert_eq!(table.len(), 0);
+            assert!(table.get(id).is_none());
+        }
     }
 }
