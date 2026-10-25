@@ -444,6 +444,13 @@ struct GpuMesh {
     name: String,
     /// 自动 LOD 的低模句柄（`lod_meshes` 下标）；空 = 没有可用 LOD。
     auto_lod: Vec<usize>,
+    /// 上一帧的顶点位置（TAA 运动向量；morph / CPU 变形网格每帧更新）。
+    ///
+    /// `None` = 这个网格从上传后没变过，运动 pass 直接绑当前顶点缓冲（刚体
+    /// 位移由 `prev_model` 负责，不需要逐顶点历史）。
+    prev_position_buffer: Option<wgpu::Buffer>,
+    /// 上一帧位置（CPU 侧镜像，更新时用来填 `prev_position_buffer`）。
+    last_positions: Vec<[f32; 3]>,
 }
 
 /// GPU 材质。
@@ -906,6 +913,20 @@ fn upload_gpu_mesh(device: &wgpu::Device, mesh: &MeshData, name: &str) -> GpuMes
         bounds: mesh.aabb(),
         name: name.to_string(),
         auto_lod: Vec::new(),
+        prev_position_buffer: None,
+        last_positions: mesh.vertices.iter().map(|v| v.position).collect(),
+    }
+}
+
+/// 运动向量 pass 的第三段顶点缓冲：上一帧位置（`location 9`）。
+///
+/// 与主网格缓冲分开绑，静态网格直接绑当前缓冲，变形网格才绑 `prev_position_buffer`。
+fn prev_position_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![9 => Float32x3];
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<crate::Vertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRS,
     }
 }
 
@@ -2232,7 +2253,11 @@ impl Renderer {
                     module,
                     vs_entry: "vs_main",
                     fs_entry: Some("fs_main"),
-                    buffers: vec![mesh_buffer.clone(), Some(Self::motion_instance_layout())],
+                    buffers: vec![
+                        mesh_buffer.clone(),
+                        Some(Self::motion_instance_layout()),
+                        Some(prev_position_layout()),
+                    ],
                     targets: vec![Some(wgpu::ColorTargetState {
                         format: HDR_FORMAT,
                         blend: None,
@@ -2956,6 +2981,30 @@ impl Renderer {
         let Some(mesh) = self.meshes.get_mut(id as usize) else {
             return false;
         };
+        // 先把**旧位置**写进上一帧位置缓冲，再覆盖当前顶点。morph / CPU 蒙皮
+        // 每帧走这里，TAA 才能按顶点历史重投影，而不是拿当前姿态硬猜。
+        if mesh.last_positions.len() == vertices.len() && !vertices.is_empty() {
+            let old: Vec<[f32; 3]> = mesh.last_positions.clone();
+            let old_bytes: &[u8] = bytemuck::cast_slice(&old);
+            let needed = old_bytes.len() as wgpu::BufferAddress;
+            let buffer = match &mesh.prev_position_buffer {
+                Some(buffer) if buffer.size() >= needed => buffer,
+                _ => {
+                    mesh.prev_position_buffer =
+                        Some(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("quench3d-prev-positions"),
+                            size: needed,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        }));
+                    mesh.prev_position_buffer.as_ref().unwrap()
+                }
+            };
+            ctx.queue.write_buffer(buffer, 0, old_bytes);
+        } else {
+            mesh.prev_position_buffer = None;
+        }
+        mesh.last_positions = vertices.iter().map(|v| v.position).collect();
         let bytes = bytemuck::cast_slice(vertices);
         let needed = bytes.len() as wgpu::BufferAddress;
         if needed <= mesh.vertex_buffer.size() {
@@ -4349,11 +4398,6 @@ impl Renderer {
                 });
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, bind_group, &[]);
-                eprintln!(
-                    "MOTION pass batches={} visible={}",
-                    self.batches.len(),
-                    self.visible.len()
-                );
                 pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
                 for (batch_index, batch) in self.batches.iter().enumerate() {
                     let (first, count) = self.visible_ranges[batch_index];
@@ -4365,6 +4409,14 @@ impl Renderer {
                         continue;
                     };
                     pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
+                    // 变形网格有上一帧位置；静态网格直接绑当前缓冲（刚体位移交给 prev_model）。
+                    pass.set_vertex_buffer(
+                        2,
+                        gm.prev_position_buffer
+                            .as_ref()
+                            .unwrap_or(&gm.vertex_buffer)
+                            .slice(..),
+                    );
                     pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..gm.index_count, 0, first..(first + count));
                 }

@@ -1645,6 +1645,77 @@ fn taa_motion_vectors_change_moving_object_pixels() {
     );
 }
 
+/// morph / CPU 变形的 TAA 运动向量：必须记录上一帧顶点位置，不能拿当前网格硬猜。
+#[test]
+fn taa_motion_vectors_follow_morphed_vertices() {
+    let Some(mut ctx) = context(1, "morph TAA 运动向量（真的创建 wgpu 上下文）")
+    else {
+        return;
+    };
+    let run = |ctx: &mut GpuContext, motion: bool| -> Option<ImageData> {
+        let mut renderer = Renderer::new(
+            ctx,
+            RendererOptions {
+                grid: false,
+                shadows: false,
+                sky: false,
+                taa: TaaOptions {
+                    enabled: true,
+                    feedback: 0.9,
+                    motion_vectors: motion,
+                },
+                ..Default::default()
+            },
+        );
+        if !renderer.supports_taa() {
+            return None;
+        }
+        let mat = renderer.add_material(ctx, MaterialDesc::from_srgb(1.0, 1.0, 1.0, 1.0).unlit());
+        let base = vec![
+            quench3d_render::Vertex::new(vec3(-10.0, -10.0, 0.0), Vec3::Z, Vec2::ZERO),
+            quench3d_render::Vertex::new(vec3(10.0, -10.0, 0.0), Vec3::Z, Vec2::ZERO),
+            quench3d_render::Vertex::new(vec3(0.0, 10.0, 0.0), Vec3::Z, Vec2::ZERO),
+        ];
+        let mesh = renderer.add_mesh(ctx, &MeshData::from_parts(base.clone(), vec![0, 1, 2]));
+        let moved: Vec<_> = base
+            .iter()
+            .map(|v| {
+                let mut v = *v;
+                v.position[1] += 20.0;
+                v
+            })
+            .collect();
+        let mut camera = Camera::perspective(W as f32 / H as f32);
+        camera.position = vec3(0.0, 0.0, 60.0);
+        camera.look_at(Vec3::ZERO);
+        let lighting = Lighting::default();
+        let instance = || InstanceDesc::new(Transform::IDENTITY);
+
+        renderer.begin_frame();
+        renderer.draw(mesh, mat, instance());
+        let _first = renderer.capture(ctx, W, H, &camera, &lighting).ok()?;
+
+        assert!(renderer.update_mesh_vertices(ctx, mesh, &moved));
+        renderer.begin_frame();
+        renderer.draw(mesh, mat, instance());
+        renderer.capture(ctx, W, H, &camera, &lighting).ok()
+    };
+
+    let Some(with_motion) = run(&mut ctx, true) else {
+        eprintln!("跳过：当前后端不支持 TAA");
+        return;
+    };
+    let without_motion = run(&mut ctx, false).expect("同一后端第二次创建 TAA 应当成功");
+    let changed = (0..H)
+        .flat_map(|y| (0..W).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel(&with_motion, x, y) != pixel(&without_motion, x, y))
+        .count();
+    assert!(
+        changed > 10,
+        "morph 移动后开/关运动向量差异只有 {changed} 像素，上一帧顶点位置可能没记录"
+    );
+}
+
 /// 蒙皮网格的 TAA 运动向量：上一帧调色板必须参与重投影，否则只能按当前姿态算。
 #[test]
 fn taa_motion_vectors_follow_skinned_vertices() {

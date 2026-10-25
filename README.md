@@ -1939,9 +1939,9 @@ cargo test -p quench3d-physics --lib print_reference_table -- --ignored --nocapt
 * MCP：只实现 stdio 传输与工具（无 resources / prompts / HTTP SSE）。
 * 渲染后处理：HDR 中间目标 + `post.wgsl` + bloom + FXAA + SSAO + 景深 + **TAA**都在；
   TAA 用上一帧历史 + 运动向量重投影，相机每帧亚像素抖动；运动向量由每个实例的
-  `prev_model` 与上一帧 view-proj 生成；蒙皮网格再用上一帧调色板重投影，静态几何/
-  相机移动/刚体移动/蒙皮动画都准确；morph 变形与粒子仍只按当前姿态，会有一点拖影；
-  且只在能读深度、未开 MSAA 的原生后端生效。详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
+  `prev_model` 与上一帧 view-proj 生成；蒙皮网格再用上一帧调色板、morph/CPU 变形
+  网格用上一帧顶点位置重投影，静态几何/相机移动/刚体移动/蒙皮/morph 都准确；
+  粒子仍只按当前姿态，会有一点拖影；且只在能读深度、未开 MSAA 的原生后端生效。详见 [gap_analysis](docs/gap_analysis.md) P1 #25。
 * SSAO 是**深度-only**：没有法线缓冲（法线由深度重建），AO 直接在后处理里算完就用。
   缺省 16 抽样 + 交错梯度噪声，接触处有轻微颗粒；`lighting.ssao.denoise: true` 可开
   4 邻域双边去噪（按深度差保护边缘，AO 计算量 ×5，实测接触区粗糙度约减半）。

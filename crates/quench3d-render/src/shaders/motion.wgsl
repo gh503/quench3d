@@ -67,6 +67,7 @@ struct VertexIn {
     @location(5) model_1: vec4<f32>,
     @location(6) model_2: vec4<f32>,
     @location(7) model_3: vec4<f32>,
+    @location(9) prev_position: vec3<f32>,
     @location(10) joints: vec4<u32>,
     @location(11) weights: vec4<f32>,
     @location(12) skin: vec4<f32>,
@@ -99,7 +100,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     let prev = prev_matrix(in.prev_0, in.prev_1, in.prev_2);
     // 当前/上一帧都用同一套蒙皮顶点；当前帧用当前调色板，上一帧用上一帧调色板。
     var current_skinned = vec4<f32>(in.position, 1.0);
-    var prev_skinned = vec4<f32>(in.position, 1.0);
+    var prev_skinned = vec4<f32>(in.prev_position, 1.0);
     if (in.skin.y > 0.5) {
         current_skinned =
             current_skin_matrix(u32(in.skin.x), in.joints, in.weights) * current_skinned;
