@@ -429,8 +429,11 @@ struct FragOut {
     @location(1) mask: vec4<f32>,
 }
 
-@fragment
-fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut {
+/// 计算线性 HDR 颜色与 alpha（不含水面 mask）。
+///
+/// 抽成普通函数是为了让主 pass 与 OIT 两个 fragment 入口共用同一份着色，
+/// 避免"半透明走另一条简化光照"这种经典分叉。
+fn shade(in: VertexOut, front_facing: bool) -> vec4<f32> {
     let flags = u32(material.params.w + 0.5);
     let scale = max(material.params.z, 1e-4);
     // 先绕 (0.5, 0.5) 旋转，再平移，最后按 uv_scale 平铺。
@@ -640,8 +643,14 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
     lo = lo * frame.params2.z; // 曝光
     // 输出**线性 HDR**：tonemap 由后处理统一做（见 post.wgsl）。
     // 这样半透明/网格线的混合发生在线性空间，而不是"tonemap 之后再混"。
+    return vec4<f32>(lo, alpha);
+}
+
+@fragment
+fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut {
+    let color = shade(in, front_facing);
     var out: FragOut;
-    out.color = vec4<f32>(lo, alpha);
+    out.color = color;
     // alpha = 覆盖（0 或 1）：alpha 管线的 mask 走 ALPHA_BLENDING（为了避开
     // WebGL2 没有 INDEPENDENT_BLEND），非水面 alpha=0 保持目标值，水面 alpha=1 覆盖。
     out.mask = vec4<f32>(
@@ -650,5 +659,33 @@ fn fs_main(in: VertexOut, @builtin(front_facing) front_facing: bool) -> FragOut 
         0.0,
         material.params2.w,
     );
+    return out;
+}
+
+/// 加权混合 OIT（WBOIT）的两个附件：累积色 + 透射率。
+struct OitOut {
+    // rgb = Σ(color·α·w)，a = Σ(α·w)
+    @location(0) accum: vec4<f32>,
+    // r = 每片 alpha（用 Zero / OneMinusSrcAlpha 混合累乘）
+    @location(1) reveal: vec4<f32>,
+}
+
+/// OIT 半透明入口：只给非水面材质用（水面仍走旧 alpha 管线写 mask）。
+///
+/// 权重取 Morgan McGuire 的深度启发式：近处权重高、远处衰减，避免几十层玻璃
+/// 叠加时颜色被最后一片主导。所有混合都发生在单采样 HDR 目标上。
+@fragment
+fn fs_oit(in: VertexOut, @builtin(front_facing) front_facing: bool) -> OitOut {
+    let color = shade(in, front_facing);
+    let a = clamp(color.a, 0.0, 1.0);
+    let depth = max(length(frame.camera_pos.xyz - in.world_position), 0.1);
+    let w = a * clamp(
+        0.03 / (1e-5 + pow(depth / 200.0, 4.0)),
+        1e-2,
+        3e3,
+    );
+    var out: OitOut;
+    out.accum = vec4<f32>(color.rgb * w, a);
+    out.reveal = vec4<f32>(a, 0.0, 0.0, 0.0);
     return out;
 }

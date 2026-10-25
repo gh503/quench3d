@@ -140,6 +140,11 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// 而半透明与网格线都要混合。f16 的精度对"tonemap 之前"的值完全够用
 /// （相对误差 ~1e-3，落在 8 位输出的 1 个色阶以内，见 `post_pass` 的像素测试）。
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// WBOIT 的累积目标（rgb = Σ(color·α·w)，a = Σ(α·w)）。
+pub const OIT_ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// WBOIT 的透射率目标（r = 每片 alpha，用 Zero / OneMinusSrcAlpha 累乘）。
+pub const OIT_REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 /// 水面 mask（主 pass 第二颜色附件）：r = 1 表示水面平面覆盖，g = 水面世界高度。
 ///
 /// 用 `Rgba16Float` 而不是 8 位：g 要存世界 Y 坐标（浮点），8 位归一化会把水面
@@ -1360,6 +1365,11 @@ pub struct RendererOptions {
     /// 按实例包围盒到相机的**最近点**判断：完全在距离外的实例不提交绘制。
     /// 只做距离剔除，不是遮挡剔除；阴影 pass 也按同一距离裁剪。
     pub max_draw_distance: f32,
+    /// 加权混合 OIT（缺省关闭；只对**非水面**半透明生效，水面继续走旧 alpha 管线）。
+    ///
+    /// 打开后透明层不再依赖绘制顺序，适合玻璃叠玻璃；代价是多两张单采样目标和一个
+    /// 合成 pass。GL/WebGL2 没有独立混合，自动退回旧的顺序混合，像素与关闭时一致。
+    pub oit: bool,
     /// GPU 视锥剔除 + 间接绘制（缺省关闭）。
     ///
     /// 打开后不透明实例由 compute shader 剔除并压实到第二份实例缓冲，主 pass 用
@@ -1394,6 +1404,7 @@ impl Default for RendererOptions {
             taa: TaaOptions::default(),
             motion_blur: MotionBlurOptions::default(),
             max_draw_distance: f32::INFINITY,
+            oit: false,
             gpu_culling: false,
             auto_lod: false,
         }
@@ -1544,6 +1555,15 @@ pub struct Renderer {
     prev_skin_buffer: wgpu::Buffer,
     opaque_pipeline: wgpu::RenderPipeline,
     alpha_pipeline: wgpu::RenderPipeline,
+    /// WBOIT 半透明管线（仅原生后端；GL/WebGL2 没有独立混合，退回 `alpha_pipeline`）。
+    oit_pipeline: Option<wgpu::RenderPipeline>,
+    /// WBOIT 解析 pass。
+    oit_composite_pipeline: Option<wgpu::RenderPipeline>,
+    oit_composite_layout: Option<wgpu::BindGroupLayout>,
+    oit_supported: bool,
+    oit_accum_view: Option<wgpu::TextureView>,
+    oit_reveal_view: Option<wgpu::TextureView>,
+    oit_composite_bind_group: Option<wgpu::BindGroup>,
     /// 不剔除背面（材质的 `double_sided` 为真时使用）。
     ///
     /// 半透明不需要这条：`alpha_pipeline` 本来就是 `cull_mode: None`。
@@ -2687,6 +2707,126 @@ impl Renderer {
             },
         );
 
+        // WBOIT：两个附件需要**不同的混合状态**，WebGL2 没有独立混合 → 只在原生
+        // WebGPU 后端启用；GL/WebGL2 仍走 `alpha_pipeline`，像素与旧版本逐位相同。
+        let oit_supported = !matches!(
+            ctx.adapter_info.backend,
+            wgpu::Backend::Gl | wgpu::Backend::Noop
+        );
+        let oit_pipeline = oit_supported.then(|| {
+            let accum_blend = wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            };
+            let reveal_blend = wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            };
+            let accum = wgpu::ColorTargetState {
+                format: OIT_ACCUM_FORMAT,
+                blend: Some(wgpu::BlendState {
+                    color: accum_blend,
+                    alpha: accum_blend,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            };
+            let reveal = wgpu::ColorTargetState {
+                format: OIT_REVEAL_FORMAT,
+                blend: Some(wgpu::BlendState {
+                    color: reveal_blend,
+                    alpha: reveal_blend,
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            };
+            build_pipeline(
+                device,
+                PipelineSpec {
+                    label: "quench3d-alpha-oit",
+                    layout: &pbr_pipeline_layout,
+                    module: &pbr_module,
+                    vs_entry: "vs_main",
+                    fs_entry: Some("fs_oit"),
+                    buffers: vec![mesh_buffer.clone(), Some(instance_buffer_layout.clone())],
+                    targets: vec![Some(accum), Some(reveal)],
+                    depth: depth_state(false, wgpu::CompareFunction::Less, 0),
+                    sample_count: 1,
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                },
+            )
+        });
+
+        let oit_composite_layout = oit_supported.then(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("quench3d-oit-composite-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ],
+            })
+        });
+        let oit_composite_pipeline = oit_composite_layout.as_ref().map(|layout| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quench3d-oit-composite-shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/oit_composite.wgsl").into()),
+            });
+            let composite_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("quench3d-oit-composite-pipeline-layout"),
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
+            });
+            let blend = wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            };
+            build_pipeline(
+                device,
+                PipelineSpec {
+                    label: "quench3d-oit-composite",
+                    layout: &composite_layout,
+                    module: &shader,
+                    vs_entry: "vs_main",
+                    fs_entry: Some("fs_main"),
+                    buffers: vec![],
+                    targets: vec![Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState {
+                            color: blend,
+                            alpha: blend,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    depth: None,
+                    sample_count: 1,
+                    primitive: wgpu::PrimitiveState::default(),
+                },
+            )
+        });
+
         // 双面材质：不剔除背面（着色器按 front_facing 翻转法线，光照仍然正确）
         let opaque_double_pipeline = build_pipeline(
             device,
@@ -3068,6 +3208,13 @@ impl Renderer {
             prev_skin_buffer,
             opaque_pipeline,
             alpha_pipeline,
+            oit_pipeline,
+            oit_composite_pipeline,
+            oit_composite_layout,
+            oit_supported,
+            oit_accum_view: None,
+            oit_reveal_view: None,
+            oit_composite_bind_group: None,
             opaque_double_pipeline,
             shadow_pipeline,
             sky_pipeline,
@@ -3905,8 +4052,11 @@ impl Renderer {
         let ssao_on = self.ssao_active();
         let custom_on = !self.custom_posts.is_empty();
         let decals_on = !self.decals.is_empty() && self.depth_texture_read;
-        let depth_needed = ssao_on || custom_on || decals_on;
+        // OIT 在 MSAA > 1 时也要单采样深度（合成 pass 的 depth test 用）。
+        let oit_needed = self.oit_supported && self.options.oit;
+        let depth_needed = ssao_on || custom_on || decals_on || oit_needed;
         let depth_ready = depth_needed == self.resolved_depth_view.is_some();
+        let oit_ready = !oit_needed || self.oit_accum_view.is_some();
         let taa_ready = self.taa_pipeline.is_none() || self.taa_current.is_some();
         let custom_ready = self.custom_posts.is_empty()
             || (self.custom_ping_view.is_some()
@@ -3914,6 +4064,7 @@ impl Renderer {
         if self.target_size == size
             && self.depth_view.is_some()
             && depth_ready
+            && oit_ready
             && taa_ready
             && custom_ready
         {
@@ -3956,6 +4107,53 @@ impl Renderer {
         });
         let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
         self.hdr_view = Some(hdr_view.clone());
+
+        // WBOIT 的两个单采样目标。只有原生后端（独立混合可用）且开关打开才建。
+        if oit_needed {
+            let make = |label: &str, format: wgpu::TextureFormat| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+            };
+            let accum = make("quench3d-oit-accum", OIT_ACCUM_FORMAT);
+            let reveal = make("quench3d-oit-reveal", OIT_REVEAL_FORMAT);
+            let accum_view = accum.create_view(&wgpu::TextureViewDescriptor::default());
+            let reveal_view = reveal.create_view(&wgpu::TextureViewDescriptor::default());
+            self.oit_composite_bind_group = self.oit_composite_layout.as_ref().map(|layout| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("quench3d-oit-composite-bind-group"),
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&accum_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&reveal_view),
+                        },
+                    ],
+                })
+            });
+            self.oit_accum_view = Some(accum_view);
+            self.oit_reveal_view = Some(reveal_view);
+        } else {
+            self.oit_accum_view = None;
+            self.oit_reveal_view = None;
+            self.oit_composite_bind_group = None;
+        }
 
         // TAA 的当前输出/历史：两张同尺寸 HDR 纹理，历史每帧从当前复制。
         if self.taa_pipeline.is_some() {
@@ -5103,6 +5301,16 @@ impl Renderer {
                 .then_with(|| a.2.cmp(&b.2))
                 .then_with(|| a.3.cmp(&b.3))
         });
+        // WBOIT 只接管**非水面**半透明：水面材质仍要走旧 alpha 管线写 mask，
+        // 否则后处理的水面平面重建会整块消失。只有真有非水面半透明时才开。
+        let oit_on = self.oit_supported
+            && self.options.oit
+            && self.oit_pipeline.is_some()
+            && alpha_draws.iter().any(|(_, material, _, _)| {
+                self.materials
+                    .get(*material)
+                    .is_some_and(|m| !m.desc.water_mask)
+            });
 
         if !self.skin_palette.is_empty() {
             ctx.queue.write_buffer(
@@ -5460,6 +5668,10 @@ impl Renderer {
                 ) else {
                     continue;
                 };
+                // OIT 接管非水面半透明；这里只留下水面，继续写 mask。
+                if oit_on && !gmat.desc.water_mask {
+                    continue;
+                }
                 pass.set_pipeline(&self.alpha_pipeline);
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 pass.set_bind_group(1, &self.shadow_bind_group, &[]);
@@ -5558,7 +5770,7 @@ impl Renderer {
         // ---------- 深度解析（可选：开了 SSAO 且 MSAA > 1） ----------
         // 把多采样深度的第 0 号采样搬到单采样深度贴图，供后处理按像素读取。
         // 三个都要有：绑定组/目标视图（跟着 `ssao_on` 建）与管线（GL 上是 `None`）。
-        if ssao_on || custom_on || decals_on {
+        if ssao_on || custom_on || decals_on || oit_on {
             if let (Some(pipeline), Some(bind_group), Some(resolved)) = (
                 &self.depth_resolve_pipeline,
                 &self.depth_resolve_bind_group,
@@ -5650,6 +5862,122 @@ impl Renderer {
                     pass.draw(0..3, 0..1);
                     stats.draw_calls += 1;
                 }
+            }
+        }
+
+        // ---------- WBOIT：非水面半透明 + 合成 ----------
+        // 先写入 accum/reveal（单采样，独立混合），再一次性混到已解析的 HDR 目标。
+        // 这一步在贴花之后：贴花是不透明世界几何的延伸，必须先于透明层。
+        if oit_on {
+            if let (
+                Some(pipeline),
+                Some(accum_view),
+                Some(reveal_view),
+                Some(depth),
+                Some(composite),
+                Some(composite_bg),
+                Some(color),
+            ) = (
+                &self.oit_pipeline,
+                &self.oit_accum_view,
+                &self.oit_reveal_view,
+                &self.resolved_depth_view,
+                &self.oit_composite_pipeline,
+                &self.oit_composite_bind_group,
+                &self.hdr_view,
+            ) {
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("quench3d-oit-accum-pass"),
+                        color_attachments: &[
+                            Some(wgpu::RenderPassColorAttachment {
+                                view: accum_view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            }),
+                            Some(wgpu::RenderPassColorAttachment {
+                                view: reveal_view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                                        r: 1.0,
+                                        g: 1.0,
+                                        b: 1.0,
+                                        a: 1.0,
+                                    }),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            }),
+                        ],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: depth,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    for &(_, material, mesh, instance_index) in &alpha_draws {
+                        let Some(gmat) = self.materials.get(material) else {
+                            continue;
+                        };
+                        if gmat.desc.water_mask {
+                            continue;
+                        }
+                        let bounds = self
+                            .staging
+                            .get(instance_index as usize)
+                            .map(|(_, b)| *b)
+                            .unwrap_or(Aabb::EMPTY);
+                        let Some(gm) = self.mesh_for_batch(mesh, &bounds, camera.position) else {
+                            continue;
+                        };
+                        pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                        pass.set_bind_group(1, &self.shadow_bind_group, &[]);
+                        pass.set_bind_group(2, &gmat.bind_group, &[]);
+                        pass.set_bind_group(3, &self.skin_bind_group, &[]);
+                        pass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
+                        pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                        pass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(
+                            0..gm.index_count,
+                            0,
+                            instance_index..(instance_index + 1),
+                        );
+                        stats.draw_calls += 1;
+                        stats.triangles += gm.index_count as u64 / 3;
+                    }
+                }
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quench3d-oit-composite-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: color,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(composite);
+                pass.set_bind_group(0, composite_bg, &[]);
+                pass.draw(0..3, 0..1);
+                stats.post_passes += 1;
             }
         }
 
