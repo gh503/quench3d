@@ -49,6 +49,11 @@ pub struct SceneObject {
     /// 独立的物体：场景树、导出、选择都当归主物体的一部分。这个字段就是那条"归属线"——
     /// 少了它，编辑器把场景存回去会把附加部件写成一堆独立物体（静默的数据繁殖）。
     pub owner_part: Option<usize>,
+    /// 是否由编辑器运行时生成（例如摄像头点云重建）。
+    ///
+    /// 这类物体没有可序列化的源网格，场景 JSON 不导出它；否则打开时网格句柄悬空。
+    /// 仍会参与渲染/选择/物理之外的编辑，用户可以在会话里移动它。
+    pub generated: bool,
     /// 关联的物理刚体（`None` 表示纯静态显示）。
     ///
     /// **带刚体的物体必须是根**（[`Scene::set_parent`] 会拒绝，场景校验器也会报错）：
@@ -1289,6 +1294,7 @@ impl Scene {
             prev_world: None,
             parent: None,
             owner_part: None,
+            generated: false,
             body: None,
             visible: true,
             cast_shadows: true,

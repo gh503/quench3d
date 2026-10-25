@@ -50,6 +50,29 @@ fn headless_engine() -> Option<Engine> {
 }
 
 #[test]
+fn generated_objects_are_not_written_to_scene_json() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    let index = engine
+        .scene
+        .add_named(1u32, 1u32, Transform::IDENTITY, "摄像头重建（生成）");
+    engine.scene.objects[index].generated = true;
+    let saved = scene_io::scene_to_json(&engine, &doc).expect("导出必须成功");
+    assert!(
+        !saved.json.contains("摄像头重建（生成）"),
+        "生成的网格不能写进场景 JSON"
+    );
+    assert!(
+        saved.skipped.is_empty(),
+        "生成物体应被静默跳过，而不是报无法表达：{:?}",
+        saved.skipped
+    );
+}
+
+#[test]
 fn scene_json_roundtrip_keeps_objects_and_ground() {
     let Some(mut engine) = headless_engine() else {
         return;

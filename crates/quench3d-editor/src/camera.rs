@@ -34,8 +34,14 @@ use std::{
 
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use quench3d::Engine;
 use quench3d_math::Vec3;
+#[cfg(not(target_arch = "wasm32"))]
+use quench3d_math::Vec4;
 use quench3d_render::DebugLines;
+#[cfg(not(target_arch = "wasm32"))]
+use quench3d_render::{MaterialDesc, MeshData, MeshId};
 use serde::Deserialize;
 
 /// MediaPipe Pose 的 33 点连接表。
@@ -250,6 +256,15 @@ pub struct CameraFeed {
     background_frame: u64,
     /// 复用的 RGBA 缓冲（摄像头 640×480 一帧约 1.2 MB）。
     background_rgba: Vec<u8>,
+    /// UI 请求"从当前点云生成网格"，下一帧由 3D 循环消费。
+    recon_requested: bool,
+    /// 生成的网格/物体句柄（会话内复用，避免每次点击都新增物体）。
+    recon_mesh: Option<MeshId>,
+    recon_object: Option<usize>,
+    /// 体素边长（米）。
+    recon_voxel: f32,
+    /// 最近一次生成的结果/错误，显示在窗口里。
+    recon_status: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -281,6 +296,11 @@ impl CameraFeed {
             background_3d: false,
             background_frame: u64::MAX,
             background_rgba: Vec::new(),
+            recon_requested: false,
+            recon_mesh: None,
+            recon_object: None,
+            recon_voxel: 0.03,
+            recon_status: String::new(),
         }
     }
 
@@ -331,6 +351,81 @@ impl CameraFeed {
             return;
         }
         add_pose_lines(lines, &pose.world);
+    }
+
+    /// UI 是否请求生成重建网格。
+    pub fn recon_requested(&self) -> bool {
+        self.recon_requested
+    }
+
+    /// 从当前深度点云生成/更新一个体素表面物体。
+    ///
+    /// 物体标记 `generated`，场景 JSON 不会尝试保存它（没有源网格会丢）。
+    /// 同一会话重复点击只更新同一个网格，不会每点一次多一个物体。
+    pub fn build_reconstruction(&mut self, engine: &mut Engine) {
+        self.recon_requested = false;
+        let Some(frame) = self.latest() else {
+            self.recon_status = "没有摄像头帧".to_string();
+            return;
+        };
+        let Some(points) = frame.points.as_deref() else {
+            self.recon_status = "这一帧没有点云（需要深度模型 + --points）".to_string();
+            return;
+        };
+        let mesh = crate::reconstruct::voxel_surface(points, self.recon_voxel);
+        if mesh.indices.is_empty() {
+            self.recon_status = "点云为空或体素太大，没有生成面".to_string();
+            return;
+        }
+        let triangles = mesh.indices.len() / 3;
+        let object_ok = self
+            .recon_object
+            .and_then(|i| engine.scene.objects.get(i))
+            .zip(self.recon_mesh)
+            .is_some_and(|(o, id)| o.generated && o.mesh == id);
+        if !object_ok {
+            let placeholder = engine.assets.mesh(
+                &mut engine.renderer,
+                &engine.gpu,
+                "$camera_recon",
+                &MeshData::cube(0.001),
+            );
+            let material = engine.assets.material(
+                &mut engine.renderer,
+                &engine.gpu,
+                "$camera_recon",
+                MaterialDesc {
+                    base_color: Vec4::new(0.52, 0.68, 0.82, 1.0),
+                    metallic: 0.0,
+                    roughness: 0.7,
+                    ..MaterialDesc::default()
+                },
+            );
+            let index = engine.scene.add_named(
+                placeholder,
+                material,
+                quench3d_math::Transform::IDENTITY,
+                "摄像头重建",
+            );
+            engine.scene.objects[index].generated = true;
+            self.recon_mesh = Some(placeholder);
+            self.recon_object = Some(index);
+        }
+        let Some(id) = self.recon_mesh else {
+            self.recon_status = "网格句柄丢失".to_string();
+            return;
+        };
+        if engine.renderer.update_mesh_data(&engine.gpu, id, &mesh) {
+            self.recon_status = format!(
+                "已生成 {triangles} 个三角形（帧 {}，体素 {:.1} cm）",
+                frame.json.frame,
+                self.recon_voxel * 100.0
+            );
+        } else {
+            self.recon_status = "网格已不存在（场景可能被清空），请再点一次".to_string();
+            self.recon_mesh = None;
+            self.recon_object = None;
+        }
     }
 
     /// 把最新一帧上传为 3D 背景；关闭开关时清掉背景。
@@ -539,6 +634,26 @@ impl CameraFeed {
                 );
             }
         });
+        ui.horizontal(|ui| {
+            ui.label("重建体素");
+            ui.add(
+                egui::DragValue::new(&mut self.recon_voxel)
+                    .range(0.01..=0.10)
+                    .speed(0.005)
+                    .suffix(" m"),
+            );
+            let enabled = frame.json.points.present && frame.points.is_some();
+            if ui
+                .add_enabled(enabled, egui::Button::new("生成/更新网格"))
+                .on_hover_text("把当前深度点云固化成体素表面；会作为一个可选中物体加到场景里")
+                .clicked()
+            {
+                self.recon_requested = true;
+            }
+        });
+        if !self.recon_status.is_empty() {
+            ui.label(egui::RichText::new(&self.recon_status).small().weak());
+        }
         ui.label(
             egui::RichText::new(format!(
                 "源：{} · 镜像：{} · 目录：{}",

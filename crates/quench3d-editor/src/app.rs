@@ -638,8 +638,13 @@ impl Inner {
         let size = (frame.texture.width(), frame.texture.height());
         // 摄像头 AR 背景：必须在 render_to 之前上传；关掉开关会清掉旧背景。
         #[cfg(not(target_arch = "wasm32"))]
-        self.camera
-            .sync_background(&mut self.engine.renderer, &self.engine.gpu);
+        {
+            if self.camera.recon_requested() {
+                self.camera.build_reconstruction(&mut self.engine);
+            }
+            self.camera
+                .sync_background(&mut self.engine.renderer, &self.engine.gpu);
+        }
         // 3D 画在**整张窗口纹理**上（中央面板是透明的，左右面板盖住两侧）。
         // 相机与拾取都必须用窗口宽高比/窗口坐标；把鼠标坐标当成中央视口局部
         // 坐标会让点选整体偏左、偏上，越靠边缘越明显。

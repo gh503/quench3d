@@ -30,6 +30,7 @@ pub mod gizmo;
 pub mod history;
 pub mod layout;
 pub mod picker;
+pub mod reconstruct;
 pub mod scene_io;
 pub mod ui;
 
