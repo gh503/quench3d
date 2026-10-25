@@ -1,18 +1,22 @@
 //! 把摄像头深度点云固化成可编辑的三角网。
 //!
-//! 点云本身只能看，不能选中/移动/导出。这里用**体素表面**把它变成真正的网格：
-//! 每个点落进一个体素，只有朝向空气的六个面才生成四边形。相比 Marching Cubes
-//! 它是有棱角的"扫描块"，但实现小、确定性强，适合单目深度点云这种稀疏输入。
+//! 点云本身只能看，不能选中/移动/导出。这里提供两种固化方式：
+//! * **体素表面**：每个点落进一个体素，只为朝向空气的六个面生成四边形，棱角分明；
+//! * **平滑表面**：复用流体的 Surface Nets 等值面提取，得到连续、带法线的表面。
 //!
 //! 纯 CPU、无第三方库；同样的点 + 体素尺寸逐位可复现。
 
 use std::collections::HashSet;
 
 use quench3d::render::{MeshData, Vertex};
-use quench3d_math::Vec3;
+use quench3d_math::{Vec2, Vec3};
+use quench3d_physics::extract_surface;
 
 /// 体素上限：超过就只保留最先出现的体素，避免一次扫描吃掉几 GB。
 pub const MAX_VOXELS: usize = 300_000;
+
+/// 平滑表面的最大格数（最长轴）；再高对摄像头点云没有意义，还会卡住 UI。
+pub const MAX_SURFACE_CELLS: u32 = 160;
 
 /// 从点云生成体素表面网格。
 ///
@@ -130,6 +134,47 @@ pub fn voxel_surface(points: &[Vec3], voxel: f32) -> MeshData {
     mesh
 }
 
+/// 从点云生成平滑的 Surface Nets 网格。
+///
+/// `voxel` 控制最长轴的格距（夹到 1e-3..=0.5 m）；`iso` 是等值面阈值。
+/// 点太少/半径非正时返回空网格（调用方保留旧画面）。
+pub fn smooth_surface(points: &[Vec3], voxel: f32, iso: f32) -> MeshData {
+    if points.is_empty() || !voxel.is_finite() || !iso.is_finite() {
+        return MeshData::default();
+    }
+    let voxel = voxel.clamp(1e-3, 0.5);
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for p in points {
+        if !p.is_finite() {
+            continue;
+        }
+        min = min.min(*p);
+        max = max.max(*p);
+    }
+    if !min.is_finite() || !max.is_finite() {
+        return MeshData::default();
+    }
+    let span = (max - min).max_element();
+    if span <= 1e-6 {
+        return MeshData::default();
+    }
+    let resolution = ((span / voxel).ceil() as u32).clamp(8, MAX_SURFACE_CELLS);
+    let surface = extract_surface(points, voxel * 2.0, resolution, iso.clamp(0.05, 1.5));
+    if surface.is_empty() {
+        return MeshData::default();
+    }
+    let mut mesh = MeshData::default();
+    mesh.vertices.reserve(surface.positions.len());
+    for (p, n) in surface.positions.iter().zip(&surface.normals) {
+        let u = ((p.x - min.x) / span).clamp(0.0, 1.0);
+        let v = ((p.z - min.z) / span).clamp(0.0, 1.0);
+        mesh.vertices.push(Vertex::new(*p, *n, Vec2::new(u, v)));
+    }
+    mesh.indices = surface.indices;
+    mesh
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +217,32 @@ mod tests {
         assert_eq!(mesh.indices.len(), 60);
         let b = mesh.aabb();
         assert!((b.max.x - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smooth_surface_handles_empty_and_closed_blobs() {
+        assert!(smooth_surface(&[], 0.03, 0.45).indices.is_empty());
+        let mut pts = Vec::new();
+        for z in -2..=2 {
+            for y in -2..=2 {
+                for x in -2..=2 {
+                    if x * x + y * y + z * z <= 5 {
+                        pts.push(Vec3::new(x as f32 * 0.04, y as f32 * 0.04, z as f32 * 0.04));
+                    }
+                }
+            }
+        }
+        let mesh = smooth_surface(&pts, 0.04, 0.45);
+        assert!(!mesh.indices.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
+        assert!(mesh.vertices.iter().all(|v| {
+            let p = Vec3::from_array(v.position);
+            let n = Vec3::from_array(v.normal);
+            p.is_finite() && n.is_finite() && n.length() > 0.5
+        }));
+        // 点云在原点附近，平滑网格不能跑到 bounds 之外太远。
+        let b = mesh.aabb();
+        assert!(b.min.x > -0.3 && b.max.x < 0.3);
     }
 
     #[test]

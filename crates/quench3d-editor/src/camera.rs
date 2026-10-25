@@ -264,6 +264,10 @@ pub struct CameraFeed {
     recon_frame: u64,
     /// 上次重建用的体素尺寸（改尺寸后同一帧也要重建）。
     recon_voxel_used: f32,
+    /// 用平滑 Surface Nets（否则用体素块）。
+    recon_smooth: bool,
+    /// 上次重建是否用了平滑模式。
+    recon_smooth_used: bool,
     /// 生成的网格/物体句柄（会话内复用，避免每次点击都新增物体）。
     recon_mesh: Option<MeshId>,
     recon_object: Option<usize>,
@@ -306,6 +310,8 @@ impl CameraFeed {
             recon_auto: false,
             recon_frame: u64::MAX,
             recon_voxel_used: 0.0,
+            recon_smooth: true,
+            recon_smooth_used: false,
             recon_mesh: None,
             recon_object: None,
             recon_voxel: 0.03,
@@ -389,11 +395,16 @@ impl CameraFeed {
         if object_ok
             && self.recon_frame == frame.json.frame
             && self.recon_voxel_used == self.recon_voxel
+            && self.recon_smooth_used == self.recon_smooth
         {
             self.recon_status = format!("已是最新（帧 {}）", frame.json.frame);
             return;
         }
-        let mesh = crate::reconstruct::voxel_surface(points, self.recon_voxel);
+        let mesh = if self.recon_smooth {
+            crate::reconstruct::smooth_surface(points, self.recon_voxel, 0.45)
+        } else {
+            crate::reconstruct::voxel_surface(points, self.recon_voxel)
+        };
         if mesh.indices.is_empty() {
             self.recon_status = "点云为空或体素太大，没有生成面".to_string();
             return;
@@ -434,9 +445,15 @@ impl CameraFeed {
         if engine.renderer.update_mesh_data(&engine.gpu, id, &mesh) {
             self.recon_frame = frame.json.frame;
             self.recon_voxel_used = self.recon_voxel;
+            self.recon_smooth_used = self.recon_smooth;
             self.recon_status = format!(
-                "已生成 {triangles} 个三角形（帧 {}，体素 {:.1} cm）",
+                "已生成 {triangles} 个三角形（帧 {}，{} {:.1} cm）",
                 frame.json.frame,
+                if self.recon_smooth {
+                    "平滑"
+                } else {
+                    "体素"
+                },
                 self.recon_voxel * 100.0
             );
         } else {
@@ -661,6 +678,8 @@ impl CameraFeed {
                     .suffix(" m"),
             );
             let enabled = frame.json.points.present && frame.points.is_some();
+            ui.checkbox(&mut self.recon_smooth, "平滑表面")
+                .on_hover_text("Surface Nets 连续表面；关掉则是一个个扫描块");
             if ui
                 .add_enabled(enabled, egui::Button::new("生成/更新网格"))
                 .on_hover_text("把当前深度点云固化成体素表面；会作为一个可选中物体加到场景里")
