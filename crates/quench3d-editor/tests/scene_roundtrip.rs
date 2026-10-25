@@ -1111,6 +1111,64 @@ fn removing_objects_releases_cached_mesh_and_material() {
     }
 }
 
+/// 两个材质共用一张贴图：删第一个物体时贴图必须保留，删最后一个才回收。
+#[test]
+fn shared_texture_is_released_only_after_the_last_material() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let baseline = engine.renderer.resource_counts();
+    let texture = engine.renderer.add_texture(
+        &engine.gpu,
+        &quench3d::render::ImageData::checker(2, 2, [255; 4], [0; 4]),
+        true,
+    );
+    let mut desc = MaterialDesc::new(Vec4::new(1.0, 1.0, 1.0, 1.0)).pbr(0.0, 0.5);
+    desc.base_color_texture = Some(texture);
+    let first = engine.assets.material(
+        &mut engine.renderer,
+        &engine.gpu,
+        "shared-texture-first",
+        desc.clone(),
+    );
+    let second = engine.assets.material(
+        &mut engine.renderer,
+        &engine.gpu,
+        "shared-texture-second",
+        desc,
+    );
+    assert_eq!(
+        engine.renderer.resource_counts(),
+        (baseline.0, baseline.1 + 2, baseline.2 + 1)
+    );
+    let mesh = engine.assets.unit_cube;
+    let a = engine
+        .scene
+        .add_named(mesh, first, Transform::IDENTITY, "shared-a");
+    engine
+        .scene
+        .add_named(mesh, second, Transform::IDENTITY, "shared-b");
+    assert!(engine.remove_object(a).is_some());
+    assert_eq!(
+        engine.renderer.resource_counts(),
+        (baseline.0, baseline.1 + 1, baseline.2 + 1),
+        "还有一个材质引用贴图，贴图不能提前释放"
+    );
+    // 删掉 a 后 b 的下标前移，按名字重新定位，避免拿旧下标。
+    let b = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == "shared-b")
+        .expect("b 还在");
+    assert!(engine.remove_object(b).is_some());
+    assert_eq!(
+        engine.renderer.resource_counts(),
+        baseline,
+        "最后一个材质删除后贴图必须回收"
+    );
+}
+
 /// 单场景内逐资源释放：反复上传/删除网格、材质、贴图，资源计数必须回到基线，
 /// 旧句柄必须失效，复用后的新句柄不能与旧句柄相同。
 #[test]

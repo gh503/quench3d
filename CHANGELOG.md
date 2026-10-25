@@ -41,6 +41,10 @@
 
 ### 新增
 
+- **贴图引用计数（引擎 M1 第 4 片）**：`AssetCache` 按 `MaterialDesc` 记录材质引用的
+  去重贴图，材质释放时减引用，最后一个引用消失才 `remove_texture`；GPU e2e 覆盖两个材质
+  共用一张贴图，删第一个贴图保留、删最后一个回收。M1 逐资源释放据此勾完成（边界：模型
+  文件级卸载没有单独入口、`set_material_texture` 不更新引用表、LOD 槽位不复用）。
 - **逐资源释放接入场景删除（引擎 M1 第 3 片）**：`AssetCache::release_mesh/release_material`
   与 `Engine::remove_object` 联动，编辑器删物体时在没有其他物体/粒子引用的情况下释放
   命名网格/材质；两条 GPU e2e 覆盖 16 轮 add/remove 与 8 轮加物体再删，句柄与资源计数

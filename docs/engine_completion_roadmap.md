@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**887 通过 / 0 失败 / 3 ignored**
-- wasm：**13,546,570 字节**
+- 测试：**888 通过 / 0 失败 / 3 ignored**
+- wasm：**13,556,612 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -22,14 +22,16 @@
 
 ### M1 资产与场景基础（3–4 人月）
 
-- [ ] 逐资源释放：网格/材质/贴图按句柄释放，句柄空间可复用；反复 load/remove 不涨。
-  - 已完成（底层）：`ResourceTable` 低 20 位下标 + 高 12 位代次；`remove_mesh/remove_material/remove_texture`；
+- [x] 逐资源释放：网格/材质/贴图按句柄释放，句柄空间可复用；反复 load/remove 不涨。
+  - 底层：`ResourceTable` 低 20 位下标 + 高 12 位代次；`remove_mesh/remove_material/remove_texture`；
     `mesh_count/material_count/texture_count` 只数活句柄；两条单测覆盖复用、旧句柄失效、重复释放、清空后不复活。
-  - 已接入：`AssetCache::release_mesh/release_material` + `Engine::remove_object`；编辑器删除物体
-    在无其他引用时释放命名网格/材质；`scene_roundtrip` 两条 GPU e2e（16 轮直接 add/remove、
-    8 轮加物体再删）计数都回到基线。
-  - 未完成：贴图还没有场景级引用表/自动释放（只有 `remove_texture` API）；模型整体卸载/热重载未接；
-    材质绑定组持有贴图 view，贴图显存要等材质释放；LOD 释放后槽位留空，不复用。
+  - 场景接入：`AssetCache::release_mesh/release_material` + `Engine::remove_object`；编辑器删除物体
+    在无其他引用时释放命名网格/材质。材质按 `MaterialDesc` 记录去重贴图引用，最后一个材质释放时
+    才 `remove_texture`。
+  - 行为证据（GPU e2e）：16 轮直接 add/remove、8 轮加物体再删、两个材质共用贴图删到最后一个，
+    `resource_counts` 都回到基线，旧句柄失效。
+  - 边界：模型文件级卸载/热重载没有单独入口（删光它的场景物体即可触发）；`set_material_texture`
+    换贴图不更新引用表；LOD 槽位释放后留空，不复用。
 - [ ] 场景迁移器：旧 `version` 一键升级、备份、失败不破坏原文件。
 - [ ] 运行时快照/恢复：刚体、关节、速度、睡眠、随机状态逐位可恢复。
 - [ ] 输入抽象：键鼠/手柄/触屏/重绑定，宿主可注入。

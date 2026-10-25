@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use quench3d_math::{Mat4, Quat, Transform, Vec2, Vec3, Vec4};
 use quench3d_physics::{BodyHandle, PhysicsWorld};
-use quench3d_render::{InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshId, Renderer};
+use quench3d_render::{
+    InstanceDesc, Lighting, MaterialDesc, MaterialId, MeshId, Renderer, TextureId,
+};
 
 /// 场景中的一个实例。
 #[derive(Clone, Debug)]
@@ -2689,6 +2691,10 @@ pub fn unit_cone_mesh() -> quench3d_render::MeshData {
 pub struct AssetCache {
     meshes: HashMap<String, MeshId>,
     materials: HashMap<String, MaterialId>,
+    /// 每个材质引用了哪些贴图（去重）；用于材质释放时回收贴图。
+    material_textures: HashMap<MaterialId, Vec<TextureId>>,
+    /// 贴图被多少个材质引用。
+    texture_refs: HashMap<TextureId, usize>,
     /// 单位立方体（边长为 1，中心在原点）。
     pub unit_cube: MeshId,
     /// 单位球（半径 0.5）。
@@ -2728,6 +2734,8 @@ impl AssetCache {
         Self {
             meshes: HashMap::new(),
             materials: HashMap::new(),
+            material_textures: HashMap::new(),
+            texture_refs: HashMap::new(),
             unit_cube,
             unit_sphere,
             unit_cylinder,
@@ -2807,9 +2815,32 @@ impl AssetCache {
         if let Some(id) = self.materials.get(name) {
             return *id;
         }
-        let id = renderer.add_material_named(ctx, desc, name);
+        let id = renderer.add_material_named(ctx, desc.clone(), name);
         self.materials.insert(name.to_string(), id);
+        self.track_material_textures(id, &desc);
         id
+    }
+
+    /// 记录一个材质引用的去重贴图，并增加引用计数。
+    fn track_material_textures(&mut self, id: MaterialId, desc: &MaterialDesc) {
+        let mut unique = HashSet::new();
+        for texture in [
+            desc.base_color_texture,
+            desc.normal_texture,
+            desc.metallic_roughness_texture,
+            desc.emissive_texture,
+            desc.ao_texture,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            unique.insert(texture);
+        }
+        let textures: Vec<TextureId> = unique.into_iter().collect();
+        for texture in &textures {
+            *self.texture_refs.entry(*texture).or_insert(0) += 1;
+        }
+        self.material_textures.insert(id, textures);
     }
 
     /// 释放一个由本缓存命名上传的网格。返回是否命中了缓存条目。
@@ -2844,7 +2875,20 @@ impl AssetCache {
             return false;
         };
         self.materials.remove(&name);
-        renderer.remove_material(id)
+        let released = renderer.remove_material(id);
+        if let Some(textures) = self.material_textures.remove(&id) {
+            for texture in textures {
+                let Some(count) = self.texture_refs.get_mut(&texture) else {
+                    continue;
+                };
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.texture_refs.remove(&texture);
+                    renderer.remove_texture(texture);
+                }
+            }
+        }
+        released
     }
 
     /// 缓存统计。
