@@ -1,0 +1,13 @@
+[package]
+name = "quench3d-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Quench3D audio: pure-Rust WAV decode, 3D panning and offline mixing (no device dependency)"
+readme.workspace = true
+keywords = ["game-engine", "audio", "wav", "mixer", "3d"]
+categories = ["game-engines", "multimedia", "audio"]
+
+[dependencies]
+quench3d-math.workspace = true

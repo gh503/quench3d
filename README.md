@@ -35,6 +35,7 @@ quench3d/
 │   │                     热路径零分配：内联小向量 SmallVec、跨步复用的宽相网格与求解缓冲
 │   │                     基准：cargo run --release -p quench3d-physics --example bench
 │   ├── quench3d-render/   wgpu 前向 PBR 渲染器：阴影、天空、网格、实例化、调试线段、离屏截图
+│   ├── quench3d-audio/    纯 Rust 音频：WAV 解码、3D 距离衰减/声像、离线混音（不依赖设备）
 │   ├── quench3d/          门面层：Engine / Game / App、场景与资源（glTF/OBJ）、输入、相机、Web 入口
 │   ├── quench3d-editor/   编辑器：egui 界面（工具栏 / 场景树 / 属性面板 / 状态栏）+ 引擎接线；
 │   │                     桌面端与 Web 端**同一套界面代码**（Web 端就是仓库的 web/index.html）
@@ -648,7 +649,22 @@ let result = character.move_and_slide(&mut world, feet_position, desired_transla
 if result.grounded { /* 可以跳跃 */ }
 ```
 
-### 3.4 相机与输入
+### 3.4 音频（离线/宿主输出）
+
+`quench3d-audio` 是不依赖设备库的音频基础层：WAV 解码（PCM 8/16/24/32 与
+float32/64）、多源混音、线性重采样、3D 距离衰减与等功率声像。
+`Engine::audio` 已经是一个 `AudioMixer`，宿主每帧把 `mix` 写出的交错立体声
+缓冲交给自己的音频后端（桌面 cpal / WebAudio）即可；本仓库**不假装已经内置
+设备输出**，但解码/混音/声像/循环都有无设备单测。
+
+```rust
+let clip = quench3d::audio::AudioClip::from_wav(&std::fs::read("music.wav")?)?;
+engine.audio.play(clip, quench3d::math::vec3(1.0, 0.0, 0.0));
+let mut out = vec![0.0f32; 480 * 2];
+engine.audio.mix(&mut out, 48_000);
+```
+
+### 3.5 相机与输入
 
 ```rust
 engine.camera_mode = CameraMode::Orbit;   // Orbit（环绕）/ Fly（自由飞行）
@@ -669,7 +685,7 @@ if engine.input.mouse_button_pressed(MouseButton::Left) {
 内置快捷键：`Tab` 切相机、`R` 对准场景、`F3` 网格、`F4` 阴影、`F5` 接触点、
 `F6` 包围盒、`F7` 查询探针、`F8` 模型骨骼、`F11` 关节、`T` 循环色调映射、`K` 3D 光标到选中中心、`O` 自动 LOD、`P` 暂停、`Esc` 退出。
 
-### 3.5 截图 / 离屏渲染
+### 3.6 截图 / 离屏渲染
 
 ```rust
 engine.screenshot(1920, 1080, "shot.png")?;                    // 桌面：写文件；Web：触发下载

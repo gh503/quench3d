@@ -30,6 +30,7 @@ documentation = "https://docs.rs/quench3d"
 quench3d-math = { path = "crates/quench3d-math", version = "0.1.0" }
 quench3d-physics = { path = "crates/quench3d-physics", version = "0.1.0" }
 quench3d-render = { path = "crates/quench3d-render", version = "0.1.0" }
+quench3d-audio = { path = "crates/quench3d-audio", version = "0.1.0" }
 quench3d = { path = "crates/quench3d", version = "0.1.0" }
 # 场景文件（`quench3d.scene`）与无窗口渲染/仿真的实现都在 CLI 库里，
 # 编辑器/其它宿主程序复用它，避免同一个格式两份实现。

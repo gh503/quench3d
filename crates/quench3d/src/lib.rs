@@ -132,6 +132,8 @@ pub mod web_console;
 #[cfg(target_arch = "wasm32")]
 pub mod web_probe;
 
+/// 音频（WAV 解码 + 3D 混音；不依赖设备）。
+pub use quench3d_audio as audio;
 /// 数学库。
 pub use quench3d_math as math;
 /// 物理引擎。
@@ -167,6 +169,7 @@ pub mod prelude {
     pub use crate::scene::{
         AssetCache, FiredAnimationEvent, Scene, SceneAnimationEvent, SceneObject,
     };
+    pub use quench3d_audio::{AudioClip, AudioListener, AudioMixer, AudioSource};
     pub use quench3d_math::{
         approx_eq, deg, lerp, rad, vec2, vec3, vec4, Aabb, Deg, Mat3, Mat4, Plane, Quat, Rad, Ray,
         Transform, Vec2, Vec3, Vec4,

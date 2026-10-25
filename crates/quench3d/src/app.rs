@@ -234,6 +234,8 @@ pub struct Engine {
     /// `false`，然后每帧自己调 [`Engine::update_camera`]（或直接
     /// `engine.orbit.update(&input)`）——两种相机都会按 `camera_mode` 走。
     pub auto_camera: bool,
+    /// 音频混音器（WAV 解码 + 3D 距离衰减/声像；宿主负责把缓冲送到设备）。
+    pub audio: crate::audio::AudioMixer,
     /// 最近一帧渲染统计。
     pub stats: RenderStats,
     /// 固定步长累加器。
@@ -267,6 +269,7 @@ impl Engine {
             paused: false,
             should_exit: false,
             auto_camera: true,
+            audio: crate::audio::AudioMixer::new(48_000),
             stats: RenderStats::default(),
             accumulator: 0.0,
             window: None,

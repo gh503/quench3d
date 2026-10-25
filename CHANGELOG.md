@@ -81,6 +81,10 @@
   `objects[].rolling_friction`（缺省 0 = 关闭）/ 编辑器属性面板「滚动阻力」。
   求解器在接触法向冲量上附加限幅角冲量，180 步内让滚动球从 12 rad/s 停到近 0、
   位移从 -4.99 m 收窄到 -0.007 m；缺省 0 时分支不进入，旧场景逐位不变。
+- **音频基础层 `quench3d-audio`**：纯 Rust WAV 解码（PCM 8/16/24/32、float32/64、
+  extensible）、多源混音/线性重采样/循环、3D 距离衰减与等功率声像，`Engine::audio`
+  直接可用；无设备单测覆盖解码、往返、声像、衰减、循环、pitch 与 NaN/clamp。
+  **没有内置设备输出**：宿主把 `mix` 的缓冲交给 cpal/WebAudio。
 - **流体连续发射器**：`fluids[].emit_rate`（粒子/秒）+ `emit_position` /
   `emit_radius` / `emit_velocity` / `emit_spread`，按黄金角在圆盘内确定撒点，
   不用随机数；到达 `max_particles` 即停，水排空后还能继续补水。缺省 0 不改变旧场景；

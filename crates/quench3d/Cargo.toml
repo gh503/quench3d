@@ -13,6 +13,7 @@ categories = ["game-engines", "rendering::engine", "graphics", "wasm"]
 quench3d-math.workspace = true
 quench3d-physics.workspace = true
 quench3d-render.workspace = true
+quench3d-audio.workspace = true
 bytemuck = { version = "1.25", features = ["derive"] }
 log = "0.4"
 pollster = "1.0"
