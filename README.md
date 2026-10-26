@@ -837,11 +837,13 @@ window.quench3dCameraDepth(
   [0, 0, 0],
 );
 // 窗口里勾「显示注入深度的点云」，或点「从注入深度重建表面」画体素表面线框
+window.quench3dCameraDepthAccumulation(true); // 可选：最近约 90 帧按 2 cm 体素平均
 window.quench3dCameraDepthClear();
 ```
 
 浏览器**不把普通 RGB 猜成深度**；没有外部深度源时点云/表面保持空。深度点云只用于
-调试线框，不写回场景 JSON。桌面「打开」与「导出 glTF/GLB」都会先弹内置文件选择器（导出可改路径/文件名）。
+调试线框，不写回场景 JSON。窗口里的「深度时间累积」与桌面同一套
+`PointCloudAccumulator`（2 cm 体素、约 90 帧 TTL）；关掉立即回到单帧原始点云。桌面「打开」与「导出 glTF/GLB」都会先弹内置文件选择器（导出可改路径/文件名）。
 读端把 2D 33 点连接画成洋红骨架，有 `world` 时按同一套 35 根骨在 3D 视口里画
 teal/gold 骨架。**浏览器里不内置推理**（没有 MediaPipe 模型与文件协议），
 骨架/轮廓/深度仍走桌面 Python 管线。需要 https 或 `localhost`。

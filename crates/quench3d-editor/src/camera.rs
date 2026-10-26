@@ -32,7 +32,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::reconstruct::PointCloudAccumulator;
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions};
@@ -1365,6 +1364,9 @@ fn draw_web_pose(ui: &egui::Ui, rect: egui::Rect, pose: &WebPoseJson) {
 #[cfg(target_arch = "wasm32")]
 struct WebDepthFrame {
     frame: u64,
+    /// 最近一帧的原始点云（关闭时间累积时回到它）。
+    raw: Vec<Vec3>,
+    /// 当前用于显示/重建的点云（开启累积时是累积结果）。
     points: Vec<Vec3>,
     triangles: Vec<[Vec3; 3]>,
 }
@@ -1372,6 +1374,48 @@ struct WebDepthFrame {
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static WEB_DEPTH: RefCell<Option<WebDepthFrame>> = const { RefCell::new(None) };
+    static WEB_DEPTH_ACCUM: RefCell<Option<PointCloudAccumulator>> = const { RefCell::new(None) };
+    static WEB_DEPTH_ACCUM_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 开关 Web 深度时间累积（最近约 90 帧、2 cm 体素平均）。
+///
+/// 与桌面「时间累积」同一套 `PointCloudAccumulator`；缺省关，关时每帧只显示
+/// 当前深度，旧行为不变。开启/关闭都会清掉重建表面，避免拿旧点云画新表面。
+#[cfg(target_arch = "wasm32")]
+pub fn set_web_accumulation(enabled: bool) {
+    WEB_DEPTH_ACCUM_ON.with(|c| c.set(enabled));
+    if enabled {
+        let seed = WEB_DEPTH.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|d| (d.frame, d.raw.clone()))
+                .filter(|(_, p)| !p.is_empty())
+        });
+        WEB_DEPTH_ACCUM.with(|slot| {
+            let mut accum = PointCloudAccumulator::new(0.02, 200_000, 90);
+            if let Some((frame, points)) = seed {
+                accum.merge(&points, frame);
+            }
+            *slot.borrow_mut() = Some(accum);
+        });
+    } else {
+        WEB_DEPTH_ACCUM.with(|slot| *slot.borrow_mut() = None);
+        WEB_DEPTH.with(|slot| {
+            if let Some(d) = slot.borrow_mut().as_mut() {
+                if !d.raw.is_empty() {
+                    d.points = d.raw.clone();
+                }
+                d.triangles.clear();
+            }
+        });
+    }
+}
+
+/// 当前是否开启 Web 深度时间累积。
+#[cfg(target_arch = "wasm32")]
+pub fn web_accumulation_enabled() -> bool {
+    WEB_DEPTH_ACCUM_ON.with(|c| c.get())
 }
 
 /// 注入一帧 u8 深度图，按针孔内参反投影成引擎坐标点云。
@@ -1407,13 +1451,32 @@ pub fn set_web_depth(
         origin,
         step,
     )?;
-    WEB_DEPTH.with(|slot| {
-        let frame = slot
-            .borrow()
+    let frame = WEB_DEPTH.with(|slot| {
+        slot.borrow()
             .as_ref()
-            .map_or(1, |d| d.frame.wrapping_add(1));
+            .map_or(1, |d| d.frame.wrapping_add(1))
+    });
+    let raw = points.clone();
+    let points = if web_accumulation_enabled() {
+        WEB_DEPTH_ACCUM.with(|slot| {
+            if slot.borrow().is_none() {
+                *slot.borrow_mut() = Some(PointCloudAccumulator::new(0.02, 200_000, 90));
+            }
+            let mut guard = slot.borrow_mut();
+            if let Some(accum) = guard.as_mut() {
+                accum.merge(&points, frame);
+                accum.points()
+            } else {
+                points
+            }
+        })
+    } else {
+        points
+    };
+    WEB_DEPTH.with(|slot| {
         *slot.borrow_mut() = Some(WebDepthFrame {
             frame,
+            raw,
             points,
             triangles: Vec::new(),
         });
@@ -1425,6 +1488,7 @@ pub fn set_web_depth(
 #[cfg(target_arch = "wasm32")]
 pub fn clear_web_depth() {
     WEB_DEPTH.with(|slot| *slot.borrow_mut() = None);
+    WEB_DEPTH_ACCUM.with(|slot| *slot.borrow_mut() = None);
 }
 
 /// 当前注入点云/表面计数，给页面与探针显示。
@@ -1776,6 +1840,14 @@ impl CameraFeed {
                         }
                     }
                     ui.separator();
+                    let mut accum = web_accumulation_enabled();
+                    if ui
+                        .checkbox(&mut accum, "深度时间累积（最近约 90 帧）")
+                        .changed()
+                    {
+                        set_web_accumulation(accum);
+                        self.depth_status.clear();
+                    }
                     ui.checkbox(&mut self.show_points, "显示注入深度的点云");
                     ui.horizontal(|ui| {
                         if ui.button("从注入深度重建表面").clicked() {

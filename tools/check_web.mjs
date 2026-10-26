@@ -345,6 +345,48 @@ if (!defaultBinding && namedFromGlue.size === 0) {
       bad("胶水缺少 set_camera_depth()/camera_depth_probe()");
     }
 
+    // 深度时间累积探针：开启后两帧不同位置的点应并集，关闭后回到单帧。
+    if (
+      typeof exported.set_camera_depth_accumulation === "function" &&
+      typeof exported.camera_depth_probe === "function"
+    ) {
+      const w = 64;
+      const h = 64;
+      const depth = new Uint8Array(w * h).fill(128);
+      const inject = (ox) =>
+        exported.set_camera_depth(
+          w,
+          h,
+          depth,
+          60,
+          60,
+          32,
+          32,
+          0.3,
+          3.0,
+          1,
+          new Float32Array([ox, 0, 0]),
+        );
+      try {
+        exported.set_camera_depth_accumulation(true);
+        inject(0);
+        inject(0.02);
+        const accumulated = Number(exported.camera_depth_probe().split(",")[0]);
+        exported.set_camera_depth_accumulation(false);
+        inject(0);
+        const raw = Number(exported.camera_depth_probe().split(",")[0]);
+        if (accumulated > raw && raw === w * h) {
+          ok(`Web 深度时间累积可用：单帧 ${raw} 点 → 累积 ${accumulated} 点`);
+        } else {
+          bad(`Web 深度时间累积没有生效：raw=${raw}, accumulated=${accumulated}`);
+        }
+      } catch (e) {
+        bad(`Web 深度时间累积失败：${String(e).slice(0, 160)}`);
+      }
+    } else {
+      bad("胶水缺少 set_camera_depth_accumulation()");
+    }
+
     // 深度重建表面探针：点云 → 体素表面必须真的产出三角形。
     if (typeof exported.camera_depth_surface_probe === "function") {
       const w = 64;

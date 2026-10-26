@@ -70,6 +70,13 @@ pub fn set_camera_depth(
     .map_err(|e| wasm_bindgen::JsValue::from_str(&e))
 }
 
+/// 开关 Web 深度时间累积（最近约 90 帧、2 cm 体素平均）。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_camera_depth_accumulation(enabled: bool) {
+    quench3d_editor::camera::set_web_accumulation(enabled);
+}
+
 /// 清空外部深度与重建表面。
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
