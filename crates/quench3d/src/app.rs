@@ -226,6 +226,14 @@ pub struct Engine {
     /// 暂停时**不推进物理，也不增长 [`Engine::time`]**（画面与仿真一起冻结）；
     /// `frame_count` 与 `fps` 仍然更新，因为它们描述的是渲染本身。
     pub paused: bool,
+    /// 仿真时间缩放（0~4，缺省 1）。只影响物理/动画/粒子与 `Engine::time`，
+    /// **不影响** `game.update` 的真实帧间隔、相机手感与 FPS 统计。
+    ///
+    /// 0 等价于“冻结仿真但不进入暂停态”（`paused` 仍为 false）；非有限值按 1 处理。
+    ///
+    /// 只作用于实时窗口的 [`Engine::tick`]。离屏 [`render_sequence`] 的步长/帧率由
+    /// [`SequenceParams`] 明确给出，不读这个字段（想做慢动作就调 `steps_per_frame` 或 `fps`）。
+    pub time_scale: f32,
     /// 是否请求退出。
     pub should_exit: bool,
     /// 是否由引擎自动把输入映射到相机（默认 `true`）。
@@ -267,6 +275,7 @@ impl Engine {
             last_dt: 0.0,
             fps: 0.0,
             paused: false,
+            time_scale: 1.0,
             should_exit: false,
             auto_camera: true,
             audio: crate::audio::AudioMixer::new(48_000),
@@ -613,6 +622,8 @@ impl Engine {
     /// 存在的理由：以前这套顺序只有 `ForgeApp::frame` 一条私有路径，
     /// 想加个 UI 层就得把它抄一遍（抄漏一处就是"物理跑两遍""时间不推进"这类鬼 bug）。
     pub fn tick<G: Game + ?Sized>(&mut self, game: &mut G, dt: f32) {
+        let scale = sanitized_time_scale(self.time_scale);
+        let sim_dt = dt * scale;
         self.input.begin_frame();
         // TAA 运动向量：先记下上一帧的世界变换，再让物理/动画改这一帧的。
         self.scene.snapshot_previous();
@@ -627,7 +638,7 @@ impl Engine {
         // 固定步长逻辑（物理）：最多追赶 8 步，避免长时间卡顿后"炸开"。
         if !self.paused {
             let fixed = self.world.fixed_dt().clamp(1.0 / 1000.0, 1.0 / 10.0);
-            self.accumulator += dt;
+            self.accumulator += sim_dt;
             let mut steps = 0;
             while self.accumulator >= fixed && steps < 8 {
                 game.fixed_update(self, fixed);
@@ -646,10 +657,11 @@ impl Engine {
             self.scene
                 .refresh_fluid_surfaces(world, &mut self.renderer, &self.gpu);
         }
-        // 模型动画按**帧**时间推进（不是物理子步）：它是视觉量，暂停时也不该继续走。
+        // 模型动画按**仿真帧**时间推进（不是物理子步）：它是视觉量，暂停时不走；
+        // 时间缩放同样作用于它，所以慢动作里动画也会慢下来。
         if !self.paused {
             self.scene
-                .advance_animations_with_renderer(dt, &mut self.renderer, &self.gpu);
+                .advance_animations_with_renderer(sim_dt, &mut self.renderer, &self.gpu);
             for event in self.scene.take_animation_events() {
                 game.on_animation_event(self, &event);
             }
@@ -659,7 +671,7 @@ impl Engine {
         let camera_position = self.camera().position;
         self.scene.update_lods(camera_position);
         // 粒子是视觉量：暂停时不再老化/飞行，但仍要面向当前相机。
-        let particle_dt = if self.paused { 0.0 } else { dt };
+        let particle_dt = if self.paused { 0.0 } else { sim_dt };
         self.scene.update_particles(camera_position, particle_dt);
 
         self.renderer.begin_frame();
@@ -667,6 +679,7 @@ impl Engine {
         self.draw_debug();
         game.draw(self);
 
+        let time_before = self.time;
         advance_clock(
             &mut self.time,
             &mut self.frame_count,
@@ -675,6 +688,10 @@ impl Engine {
             dt,
             self.paused,
         );
+        // 仿真时长按缩放走；FPS/帧间隔仍用真实 dt。
+        if !self.paused {
+            self.time = time_before + sim_dt;
+        }
     }
 
     /// 把当前场景渲染到任意视图（**不呈现**）。`size` 是目标像素尺寸。
@@ -718,6 +735,16 @@ impl Engine {
 /// `time` 只在未暂停时增长——「暂停」对仿真时间是真的冻结。
 ///
 /// 拆成自由函数是为了能在没有 GPU 的情况下单测这条规则（`Engine` 必须持有 GPU 上下文）。
+/// 时间缩放的合法范围与非法值回退（非有限值按 1 倍）。
+fn sanitized_time_scale(scale: f32) -> f32 {
+    if scale.is_finite() {
+        scale.clamp(0.0, 4.0)
+    } else {
+        1.0
+    }
+}
+
+/// 推进引擎时钟：帧计数与 FPS 永远按真实 `dt`；`time` 在未暂停时累加。
 fn advance_clock(
     time: &mut f32,
     frame_count: &mut u64,
@@ -1411,6 +1438,9 @@ pub fn render_offscreen_stats(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SequenceParams {
     /// 输出帧数（不含预热帧）。
+    ///
+    /// 这里的时长完全由 `frames × steps_per_frame × dt` 决定，与墙钟和
+    /// [`Engine::time_scale`] 无关；慢动作请改 `fps` 或 `steps_per_frame`。
     pub frames: u32,
     /// 每帧推进的物理步数。
     pub steps_per_frame: u32,
@@ -1761,6 +1791,94 @@ mod tests {
     }
 
     /// 暂停的语义：仿真时间冻结，但帧计数与 fps 照常更新。
+    #[test]
+    fn time_scale_is_clamped_and_non_finite_values_fall_back_to_one() {
+        assert_eq!(sanitized_time_scale(1.0), 1.0);
+        assert_eq!(sanitized_time_scale(0.5), 0.5);
+        assert_eq!(sanitized_time_scale(-2.0), 0.0);
+        assert_eq!(sanitized_time_scale(9.0), 4.0);
+        assert_eq!(sanitized_time_scale(f32::NAN), 1.0);
+        assert_eq!(sanitized_time_scale(f32::INFINITY), 1.0);
+    }
+
+    /// 时间缩放只改变物理/动画/仿真时长，不改变真实帧间隔与 FPS。
+    #[test]
+    fn time_scale_scales_physics_and_engine_time_but_not_fps() {
+        if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+            return;
+        }
+        let gpu = match pollster::block_on(GpuContext::headless(32, 32, GpuOptions::default())) {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("跳过：没有可用的 wgpu 适配器（{e}）");
+                return;
+            }
+        };
+        let mut engine = Engine::new(gpu, &EngineConfig::default());
+        engine.world.set_gravity(Vec3::ZERO);
+        let body = engine
+            .world
+            .add_builder(quench3d_physics::BodyBuilder::dynamic(
+                quench3d_physics::Shape::Sphere { radius: 0.1 },
+            ));
+        let mut game = NoGame;
+
+        let reset_body = |engine: &mut Engine| {
+            let b = engine.world.body_mut(body).expect("刚体存在");
+            b.transform.position = Vec3::ZERO;
+            b.linear_velocity = Vec3::X * 6.0;
+            b.angular_velocity = Vec3::ZERO;
+            b.wake_up();
+        };
+
+        reset_body(&mut engine);
+        for _ in 0..30 {
+            engine.tick(&mut game, 1.0 / 60.0);
+        }
+        let normal_x = engine
+            .world
+            .body(body)
+            .expect("刚体存在")
+            .transform
+            .position
+            .x;
+        let normal_time = engine.time;
+        let normal_fps = engine.fps;
+
+        reset_body(&mut engine);
+        engine.time = 0.0;
+        engine.accumulator = 0.0;
+        engine.time_scale = 0.5;
+        for _ in 0..30 {
+            engine.tick(&mut game, 1.0 / 60.0);
+        }
+        let half_x = engine
+            .world
+            .body(body)
+            .expect("刚体存在")
+            .transform
+            .position
+            .x;
+        let half_time = engine.time;
+        assert!(
+            (half_x - normal_x * 0.5).abs() < 1e-3,
+            "半速位移应约为一半：normal={normal_x}, half={half_x}"
+        );
+        assert!(
+            (half_time - normal_time * 0.5).abs() < 1e-4,
+            "半速仿真时间应约为一半：normal={normal_time}, half={half_time}"
+        );
+        assert!(
+            (engine.fps - normal_fps).abs() < 1e-3,
+            "FPS 描述真实帧间隔，不应被时间缩放改变"
+        );
+        assert!(
+            engine.fps > 30.0,
+            "无头 tick 的 FPS 应接近 60：{}",
+            engine.fps
+        );
+    }
+
     #[test]
     fn paused_freezes_simulation_time_but_not_frame_stats() {
         let (mut time, mut frames, mut last_dt, mut fps) = (0.0f32, 0u64, 0.0f32, 0.0f32);

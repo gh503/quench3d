@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+- **仿真时间缩放**：`Engine::time_scale`（0–4，缺省 1，非有限值回退 1）。实时
+  `Engine::tick` 里按缩放推进物理固定步、模型动画、粒子与 `Engine::time`；真实
+  帧间隔、FPS 与相机手感不变。0 表示“冻结仿真但不进入暂停态”。编辑器工具栏
+  加 0.1×–2× 拖动条，播放菜单加 0.25×/0.5×/1×/2×。离屏 `SequenceParams` 的
+  步长/帧率语义不变，不读这个字段。回归
+  `time_scale_scales_physics_and_engine_time_but_not_fps`（GPU opt-in）与
+  `time_scale_is_clamped_and_non_finite_values_fall_back_to_one`。
+
 - **场景生命周期回调**：`SceneHooks` + `Scene::set_hooks/has_hooks`。物体加入、删除
   与 `clear` 会主动回调（带新/旧下标与只读物体），宿主不必每帧扫描 `objects` 做差分；
   缺省不装时零回调、零分配。这是宿主回调，不是脚本语言/热重载。回归

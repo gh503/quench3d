@@ -481,6 +481,14 @@ engine.orbit.focus_on(&engine.scene.bounds_of(&engine.renderer, &ids).unwrap());
 let (ids, terrain) = engine.load_model_as_static("level.obj", Transform::IDENTITY, 0.9)?;
 ```
 
+播放控制里还有**时间缩放**（0.1×–2×，编辑器工具栏/播放菜单）：它只改物理、动画、
+粒子与 `Engine::time`，不改相机手感、`game.update(dt)` 的真实帧间隔与 FPS 统计；
+0 是“冻结仿真但不暂停”。离屏录制用 `SequenceParams` 的步长/帧率，不受它影响。
+
+播放控制里还有**时间缩放**（0.1×–2×，编辑器工具栏/播放菜单）：它只改物理、动画、
+粒子与 `Engine::time`，不改相机手感、`game.update(dt)` 的真实帧间隔与 FPS 统计；
+0 是“冻结仿真但不暂停”。离屏录制用 `SequenceParams` 的步长/帧率，不受它影响。
+
 ### 3.3 物理
 
 ```rust

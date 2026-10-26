@@ -239,6 +239,20 @@ fn top_bar(
                     doc.record_edit(engine);
                 }
                 ui.separator();
+                ui.label("速度");
+                let speed = ui
+                    .add(
+                        egui::DragValue::new(&mut engine.time_scale)
+                            .range(0.1..=2.0)
+                            .speed(0.05)
+                            .suffix("×"),
+                    )
+                    .on_hover_text("仿真时间缩放：只影响物理/动画/粒子，不影响相机手感与 FPS")
+                    .changed();
+                if speed {
+                    doc.status = format!("仿真速度 {:.2}×", engine.time_scale);
+                }
+                ui.separator();
                 let can_undo = doc.history.can_undo();
                 let can_redo = doc.history.can_redo();
                 if ui
@@ -560,6 +574,21 @@ fn playback_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             doc.step_once(engine);
             ui.close();
         }
+        ui.menu_button("时间缩放", |ui| {
+            for (label, value) in [
+                ("0.25×", 0.25),
+                ("0.5×", 0.5),
+                ("1×（正常）", 1.0),
+                ("2×", 2.0),
+            ] {
+                let selected = (engine.time_scale - value).abs() < 1e-4;
+                if ui.selectable_label(selected, label).clicked() {
+                    engine.time_scale = value;
+                    doc.status = format!("仿真速度 {value:.2}×");
+                    ui.close();
+                }
+            }
+        });
         if ui
             .button("重置")
             .on_hover_text("所有物体回到基线状态（位置 / 朝向 / 速度）")
