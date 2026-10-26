@@ -4054,6 +4054,7 @@ mod anim_tests {
         let mut player = crate::assets::ModelAnimationPlayer {
             animation: "转".into(),
             duration: 1.0,
+            start_time: 0.0,
             time: 0.3,
             speed: 1.0,
             looping: true,

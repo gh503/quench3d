@@ -855,6 +855,30 @@ impl Doc {
         Some(path)
     }
 
+    /// 写主 clip（或当前状态）的循环区间起点。状态机暂不支持子区间，返回 `None`。
+    pub fn set_animation_loop_start(
+        &mut self,
+        objects: &[usize],
+        _state: Option<&str>,
+        start: f32,
+    ) -> Option<String> {
+        if !start.is_finite() {
+            return None;
+        }
+        let model = objects
+            .iter()
+            .find_map(|&object| self.model_of_object(object))?;
+        let base = self.base_doc.as_mut()?;
+        let doc = base.models.get_mut(model)?;
+        let path = doc.path.display().to_string();
+        if doc.animator.is_some() {
+            return None;
+        }
+        let animation = doc.animation.as_mut()?;
+        animation.loop_start = Some(start.max(0.0));
+        Some(path)
+    }
+
     /// 文档里记录的模型变换（位置 / 姿态 / 均匀缩放，缺省 = 原点 / 无旋转 / 1 倍）。
     pub fn model_transform(&self, model: usize) -> Option<Transform> {
         let m = self.base_doc.as_ref()?.models.get(model)?;
@@ -2035,6 +2059,25 @@ mod tests {
             .set_animation_params(&[2], Some("nope"), 3.0, false)
             .is_none());
         assert!(doc.set_animation_params(&[99], None, 3.0, false).is_none());
+
+        assert_eq!(
+            doc.set_animation_loop_start(&[1], None, 0.75).as_deref(),
+            Some("a.glb")
+        );
+        let base = doc.base_doc.as_ref().expect("底稿");
+        assert_eq!(
+            base.models[0]
+                .animation
+                .as_ref()
+                .expect("animation")
+                .loop_start,
+            Some(0.75)
+        );
+        // 状态机没有子区间字段：不能悄悄把参数写到错误的对象上。
+        assert!(doc
+            .set_animation_loop_start(&[2], Some("idle"), 0.5)
+            .is_none());
+        assert!(doc.set_animation_loop_start(&[1], None, f32::NAN).is_none());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

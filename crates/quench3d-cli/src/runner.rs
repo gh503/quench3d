@@ -4058,6 +4058,7 @@ pub fn setup_visuals(
             if let Some(mut player) = model.player(&a.name) {
                 player.speed = a.speed.unwrap_or(1.0);
                 player.looping = a.looping.unwrap_or(true);
+                player.set_start_time(a.loop_start.unwrap_or(0.0));
                 player.time = a.start.unwrap_or(0.0);
                 // 起始时间按播放器自己的规则归一化（循环取模 / 不循环夹到时长），
                 // 不在格式层再抄一份时间语义。
@@ -4087,6 +4088,7 @@ pub fn setup_visuals(
                     if let Some(mut secondary) = model.player(&b.name) {
                         secondary.speed = b.speed.unwrap_or(1.0);
                         secondary.looping = b.looping.unwrap_or(true);
+                        secondary.set_start_time(b.loop_start.unwrap_or(0.0));
                         secondary.time = b.start.unwrap_or(0.0);
                         secondary.advance(0.0);
                         let secondary_events = m

@@ -1837,6 +1837,10 @@ pub struct ModelAnimationDoc {
     /// 从第几秒开始播放，缺省 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<f32>,
+    /// 循环区间起点（秒，缺省 0）。`loop=true` 时只在这段子区间里取模；
+    /// 缺省 0 时与老行为逐位一致。资产时长未知，运行时再夹到 `[0, duration]`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_start: Option<f32>,
     /// 播放倍速，缺省 1（必须 > 0）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
@@ -1888,6 +1892,9 @@ pub struct ModelAnimationBlendDoc {
     /// 从第几秒开始播放，缺省 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<f32>,
+    /// 循环区间起点（秒，缺省 0）；与主 clip 的 `loop_start` 同义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_start: Option<f32>,
     /// 播放倍速，缺省 1（必须 > 0）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<f32>,
@@ -10406,7 +10413,10 @@ mod tests {
         let doc = SceneDoc::from_value(json!({
             "models": [{
                 "path": base,
-                "animation": { "name": "walk", "blend": { "name": "run", "weight": 0.4 } },
+                "animation": {
+                    "name": "walk", "loop_start": 0.5,
+                    "blend": { "name": "run", "weight": 0.4, "loop_start": 0.25 }
+                },
                 "events": [
                     { "name": "footstep", "time": 0.3, "payload": "step=1" },
                     { "name": "run-step", "time": 0.6, "clip": "run" }
@@ -10421,6 +10431,12 @@ mod tests {
             .collect();
         assert!(errors.is_empty(), "{errors:?}");
         let again = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
+        let animation = again.models[0].animation.as_ref().expect("动画要往返");
+        assert_eq!(animation.loop_start, Some(0.5));
+        assert_eq!(
+            animation.blend.as_ref().expect("blend 要往返").loop_start,
+            Some(0.25)
+        );
         let events = again.models[0].events.as_ref().expect("事件要往返");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].name, "footstep");

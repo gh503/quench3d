@@ -249,6 +249,11 @@ pub struct ModelAnimationPlayer {
     pub animation: String,
     /// 时长（秒）。
     pub duration: f32,
+    /// 循环/播放区间的起点（秒，0~duration）。缺省 0 = 从片段开头播。
+    ///
+    /// 只影响播放头范围；采样矩阵仍用绝对时间。0 时 `advance` 的取模/夹取
+    /// 与旧实现逐位一致。
+    pub start_time: f32,
     /// 当前时间（秒）。
     pub time: f32,
     /// 播放速度（倍速，必须 > 0）。
@@ -276,13 +281,49 @@ impl ModelAnimationPlayer {
         } else {
             1.0
         };
+        let start = if self.start_time.is_finite() {
+            self.start_time.clamp(0.0, self.duration)
+        } else {
+            0.0
+        };
+        if self.time < start {
+            self.time = start;
+        }
         self.time += dt * speed;
         if self.looping {
-            self.time = self.time.rem_euclid(self.duration);
-            self.finished = false;
+            let span = self.duration - start;
+            if span > 1e-6 {
+                // start=0 时 `start + x.rem_euclid(span)` 与原实现逐位一致。
+                self.time = start + (self.time - start).rem_euclid(span);
+                self.finished = false;
+            } else {
+                self.time = start;
+                self.finished = true;
+            }
         } else if self.time >= self.duration {
             self.time = self.duration;
             self.finished = true;
+        }
+        self
+    }
+
+    /// 设置播放区间起点；把播放头夹到 `[start, duration]`。
+    ///
+    /// 非有限值按 0 处理；新起点高于当前播放头时，播放头立即跟到新起点。
+    pub fn set_start_time(&mut self, seconds: f32) -> &mut Self {
+        let limit = self.duration.max(0.0);
+        let start = if seconds.is_finite() {
+            seconds.clamp(0.0, limit)
+        } else {
+            0.0
+        };
+        self.start_time = start;
+        if self.time < start {
+            self.time = start;
+            self.finished = false;
+        }
+        if self.time > limit {
+            self.time = limit;
         }
         self
     }
@@ -312,6 +353,7 @@ impl LoadedModel {
         Some(ModelAnimationPlayer {
             animation: clip.name.clone(),
             duration: clip.duration,
+            start_time: 0.0,
             time: 0.0,
             speed: 1.0,
             looping: true,
@@ -2640,6 +2682,35 @@ mod cache_tests {
         cache.clear();
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().bytes, 0);
+    }
+
+    #[test]
+    fn animation_player_start_offset_loops_within_the_remaining_clip() {
+        let mut player = ModelAnimationPlayer {
+            animation: "clip".into(),
+            duration: 2.0,
+            time: 0.0,
+            start_time: 0.0,
+            speed: 1.0,
+            looping: true,
+            finished: false,
+        };
+        assert_eq!(player.start_time, 0.0);
+        player.set_start_time(0.5);
+        assert_eq!(player.time, 0.5, "设置起始点应把播放头带到起始点");
+        player.advance(2.0);
+        assert!(
+            (player.time - 1.0).abs() < 1e-5,
+            "起点 0.5、时长 2、循环区间 1.5s；+2s 应落在 1.0，实际 {}",
+            player.time
+        );
+        player.looping = false;
+        player.time = 0.5;
+        player.advance(10.0);
+        assert_eq!(player.time, 2.0);
+        assert!(player.finished);
+        player.set_start_time(f32::NAN);
+        assert_eq!(player.start_time, 0.0, "非有限起点要归零");
     }
 
     #[test]

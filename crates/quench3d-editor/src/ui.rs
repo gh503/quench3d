@@ -2796,6 +2796,40 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         record_edit = true;
                     }
                 });
+                if duration > 0.0 && animation.animator.is_none() {
+                    let mut start = animation.player.start_time.clamp(0.0, duration);
+                    let response = ui.add(
+                        egui::DragValue::new(&mut start)
+                            .range(0.0..=duration)
+                            .speed(0.01)
+                            .prefix("循环起点 "),
+                    );
+                    if response.drag_started() {
+                        begin_edit = true;
+                    }
+                    if response.changed() {
+                        animation.player.set_start_time(start);
+                        if animation.player.time < animation.player.start_time {
+                            animation.player.time = animation.player.start_time;
+                        }
+                        if models[index].is_some() {
+                            if let Some(path) = doc.set_animation_loop_start(
+                                &objects,
+                                state_name.as_deref(),
+                                animation.player.start_time,
+                            ) {
+                                changed_model = Some(path);
+                            }
+                        }
+                        refresh = true;
+                        if !response.dragged() {
+                            record_edit = true;
+                        }
+                    }
+                    if response.drag_stopped() {
+                        end_edit = true;
+                    }
+                }
                 if duration > 0.0 {
                     let mut time = animation.player.time.clamp(0.0, duration);
                     if ui

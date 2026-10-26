@@ -77,6 +77,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
         player: ModelAnimationPlayer {
             animation: "idle".into(),
             duration: 1.0,
+            start_time: 0.0,
             time: 0.25,
             speed: 1.0,
             looping: true,
@@ -85,6 +86,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
         secondary: Some(ModelAnimationPlayer {
             animation: "walk".into(),
             duration: 1.0,
+            start_time: 0.0,
             time: 0.5,
             speed: 1.0,
             looping: true,
@@ -184,6 +186,7 @@ fn fake_plain_animation_instance() -> ModelAnimationInstance {
         player: ModelAnimationPlayer {
             animation: "walk".into(),
             duration: 1.0,
+            start_time: 0.0,
             time: 0.25,
             speed: 1.0,
             looping: true,
