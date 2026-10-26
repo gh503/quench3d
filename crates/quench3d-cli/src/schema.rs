@@ -843,6 +843,7 @@ pub fn json_schema() -> Value {
             "bubble_radius",
             "bubble_buoyancy",
             "bubble_drag",
+            "bubble_expansion",
         ]);
         d["description"] = json!(
             "一个 CPU PBF 粒子流体：长方体发射器 + 粒子参数；粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；可选泡沫/飞沫（视觉白水）、接触摩擦与 Surface Nets 连续自由表面"
@@ -875,6 +876,7 @@ pub fn json_schema() -> Value {
         d["properties"]["bubble_radius"] = json!({ "type": "number", "exclusiveMinimum": 0, "maximum": 0.5 });
         d["properties"]["bubble_buoyancy"] = json!({ "type": "number", "minimum": 0, "maximum": 10 });
         d["properties"]["bubble_drag"] = json!({ "type": "number", "minimum": 0, "maximum": 50 });
+        d["properties"]["bubble_expansion"] = json!({ "type": "number", "minimum": 0, "maximum": 10 });
         d["properties"]["surface_mesh"] = json!({ "type": "boolean" });
         d["properties"]["surface_resolution"] =
             json!({ "type": "integer", "minimum": 8, "maximum": 96 });

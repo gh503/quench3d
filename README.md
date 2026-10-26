@@ -1146,7 +1146,7 @@ NaN 刚体  : 0
   "max_particles": 4000, "foam": false, "contact_friction": 0,
   "particle_collision": false, "bubbles": false,
   "bubble_rate": 20, "max_bubbles": 128, "bubble_radius": 0.03,
-  "bubble_buoyancy": 1.8, "bubble_drag": 2.0,
+  "bubble_buoyancy": 1.8, "bubble_drag": 2.0, "bubble_expansion": 0,
   "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
@@ -1171,7 +1171,8 @@ NaN 刚体  : 0
   与刚体/地面碰撞，并把气泡体积内的液体粒子径向推开（气泡受反作用）；浮出液面会
   破裂并在液面留下一颗被动泡沫（需同时开 `foam`），寿命结束则直接消失。`bubble_rate`（颗/秒，缺省 20）、`max_bubbles`（缺省 128，上限
   4096）、`bubble_radius`（缺省 0.03）、`bubble_buoyancy`（缺省 1.8 倍重力）、
-  `bubble_drag`（缺省 2）。CLI 把气泡画成低模球，`simulate` 报告 `bubbles` 计数
+  `bubble_drag`（缺省 2）、`bubble_expansion`（缺省 0 = 半径不变；>0 时按指数
+  长大并封顶到初始半径 4 倍，模拟上升减压）。CLI 把气泡画成低模球，`simulate` 报告 `bubbles` 计数
   （0 时省略）。局部气体体积分数还会折算进刚体浮力：气泡占据的体积不再排开液体，
   浮力密度乘以 `1 - gas_fraction`（上限 0.9），所以曝气的水托不住同样的重物。
   **不是**严格两相流：气泡不参与 PBF 密度约束，没有相变。

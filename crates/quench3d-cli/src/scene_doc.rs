@@ -1207,6 +1207,9 @@ pub struct FluidDoc {
     /// 气泡阻尼（1/s），缺省 2.0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_drag: Option<f32>,
+    /// 气泡半径随上升膨胀的速率（1/s），缺省 0 = 不膨胀。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_expansion: Option<f32>,
     /// 是否把粒子提取成**连续自由表面**（Surface Nets），缺省 false = 抬高的平面。
     ///
     /// 打开后每帧按粒子重建网格；比平面慢，但能看到真正的液滴/水花轮廓。
@@ -4423,6 +4426,15 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.bubble_drag"),
                         "气泡阻尼必须在 0~50 之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.bubble_expansion {
+                if !(v.is_finite() && (0.0..=10.0).contains(&v)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.bubble_expansion"),
+                        "气泡膨胀速率必须在 0~10 之间",
                     ));
                 }
             }
@@ -9091,7 +9103,7 @@ mod tests {
                   "particle_collision": true, "bubbles": true,
                   "bubble_rate": 40.0, "max_bubbles": 12,
                   "bubble_radius": 0.04, "bubble_buoyancy": 2.0,
-                  "bubble_drag": 1.5 }
+                  "bubble_drag": 1.5, "bubble_expansion": 0.7 }
             ]
         }))
         .expect("fluids 要能解析");
@@ -9115,6 +9127,7 @@ mod tests {
         assert_eq!(again.fluids[1].bubble_radius, Some(0.04));
         assert_eq!(again.fluids[1].bubble_buoyancy, Some(2.0));
         assert_eq!(again.fluids[1].bubble_drag, Some(1.5));
+        assert_eq!(again.fluids[1].bubble_expansion, Some(0.7));
 
         for (fluid, path) in [
             (json!({"size": [0, 1, 1]}), "fluids[0].size"),

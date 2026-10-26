@@ -110,6 +110,11 @@ pub struct FluidDesc {
     pub bubble_buoyancy: f32,
     /// 气泡阻尼（1/s），缺省 2.0。
     pub bubble_drag: f32,
+    /// 气泡半径随上升膨胀的速率（1/s），缺省 0 = 不膨胀。
+    ///
+    /// 这是简化压力模型：没有真正解气泡内压/表面张力，只让气泡在上升时按指数
+    /// 长大（体积分数随之增大）；半径封顶到初始值的 4 倍。
+    pub bubble_expansion: f32,
 }
 
 impl Default for FluidDesc {
@@ -145,6 +150,7 @@ impl Default for FluidDesc {
             bubble_radius: 0.03,
             bubble_buoyancy: 1.8,
             bubble_drag: 2.0,
+            bubble_expansion: 0.0,
         }
     }
 }
@@ -996,6 +1002,8 @@ impl Fluid {
         }
         let buoyancy = self.desc.bubble_buoyancy.max(0.0);
         let drag = self.desc.bubble_drag.max(0.0);
+        let expansion = self.desc.bubble_expansion.max(0.0);
+        let max_bubble_radius = self.desc.bubble_radius.max(0.005) * 4.0;
         let particle_radius = self.desc.radius.max(0.0);
         let foam_enabled = self.desc.foam;
         let max_foam = self.desc.max_foam;
@@ -1020,6 +1028,12 @@ impl Fluid {
             b.age += dt;
             if b.age >= b.life {
                 continue;
+            }
+            if expansion > 0.0 {
+                // 简化压力膨胀：半径按指数长大，封顶到初始半径的 4 倍。
+                // 不改变已经比上限大的注入气泡。
+                let cap = max_bubble_radius.max(b.radius);
+                b.radius = (b.radius * (1.0 + expansion * dt)).min(cap);
             }
             let prev = b.position;
             b.velocity = (b.velocity + accel * dt) * (1.0 - drag * dt).clamp(0.0, 1.0);
@@ -1450,6 +1464,32 @@ mod tests {
         );
         assert!(max_speed < 20.0, "气泡速度失控：{max_speed}");
         assert_eq!(fluid.stats().bubbles, bubbles.len());
+    }
+
+    #[test]
+    fn bubbles_expand_as_they_rise() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.set_gravity(Vec3::ZERO);
+        let mut d = box_desc();
+        d.bubbles = true;
+        d.bubble_rate = 20.0;
+        d.max_bubbles = 8;
+        d.bubble_buoyancy = 0.0; // 不浮升，避免到达液面破裂
+        d.bubble_expansion = 1.0;
+        d.emit_position = Vec3::new(0.0, 0.8, 0.0);
+        d.emit_radius = 0.1;
+        world.add_fluid(d).expect("参数合法");
+        for _ in 0..60 {
+            world.step(1.0 / 60.0);
+        }
+        let bubbles = world.fluids()[0].bubbles();
+        assert!(!bubbles.is_empty());
+        let max_radius = bubbles.iter().map(|b| b.radius).fold(0.0f32, f32::max);
+        assert!(
+            max_radius > 0.03 * 1.2,
+            "气泡应随上升膨胀：最大半径 {max_radius}（初始 0.03）"
+        );
     }
 
     #[test]
