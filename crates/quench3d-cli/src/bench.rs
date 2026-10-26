@@ -195,6 +195,10 @@ fn make_world(n: usize, layout: Layout, sleep: bool) -> PhysicsWorld {
     let mut world = PhysicsWorld::new();
     world.set_gravity(Vec3::new(0.0, -9.81, 0.0));
     world.config.sleep_enabled = sleep;
+    // 诊断用：同一个二进制里 A/B 窄相并行，排除机器频率/负载差异。
+    if std::env::var_os("QUENCH3D_BENCH_SERIAL_NARROW").is_some() {
+        world.config.parallel_narrowphase = false;
+    }
     world.add_body(
         BodyBuilder::r#static(Shape::Plane {
             normal: Vec3::new(0.0, 1.0, 0.0),
@@ -364,6 +368,8 @@ pub fn run(options: &BenchOptions) -> BenchReport {
         "数字来自当前机器，用于横向对比与回归，不是绝对基准。".to_string(),
         "关掉睡眠（--no-sleep）才是「一直在算」的最坏情况；默认开启睡眠更接近真实游戏。".to_string(),
         "物理稳态每步堆分配为 0（回归测试 quench3d-cli/tests/steady_state_allocations.rs 盯着这一点）。"
+            .to_string(),
+        "窄相并行可用 QUENCH3D_BENCH_SERIAL_NARROW=1 关掉做 A/B；两条路径结果逐位相同。"
             .to_string(),
     ];
     if !options.render {

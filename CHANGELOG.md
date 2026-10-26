@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **窄相候选对并行**：`SolverConfig::parallel_narrowphase`（native，缺省开；候选对
+  ≥256 且有多核才启用，wasm 自动串行）。每对候选独立求交、按原顺序合并，结果与
+  串行**逐位相同**；A/B（2000 体深堆，240 预热 + 120 步，关睡眠）29.11 → 25.11 ms/步，
+  窄相 6.08 → 3.70 ms。回归 `parallel_narrowphase_is_bit_identical_to_serial`
+  断言并行真的启用后逐位比较全部位姿/速度/睡眠。bench 新增
+  `QUENCH3D_BENCH_SERIAL_NARROW=1` 做同二进制 A/B。
+
 - **球体 CCD 擦角**：球心对盒做保守推进扫掠（球心到盒面距离 1-Lipschitz），对半空间
   线性求交、对球解二次方程。中心射线从盒顶上方掠过、球面却碰到盒角时，旧路径会整步
   穿过；现在会在首次接触处截住（法向消能，切向保留）。回归

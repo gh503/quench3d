@@ -1929,6 +1929,12 @@ cargo run --release -p quench3d-physics --example bench -- --phases         # �
   「全部速度迭代 → 松弛 → 位置修正」，每步只分发**一次**线程；
 * 岛的分配用 LPT 贪心（接触多的岛先分给最闲的线程），分配本身也是确定性的。
 
+窄相候选对也走同一条「结果不变」的并行：每对候选独立求交（流形内联、无堆分配），
+按原候选顺序合并；候选少于 256 时自动退回串行。2000 体深堆同会话 A/B
+（240 预热 + 120 步、关睡眠）29.11 → 25.11 ms/步，窄相 6.08 → 3.70 ms；
+回归 `parallel_narrowphase_is_bit_identical_to_serial` 会先断言并行真的启用，再逐位
+比较全部位姿/速度/睡眠。
+
 **结果与串行逐位相同**，这不是嘴上说的，是两个自动化测试钉住的：
 `parallel_solver_matches_sequential_bit_for_bit`（无关节快速路径）与
 `parallel_solver_with_joints_is_also_bit_exact`（有关节的交错路径），

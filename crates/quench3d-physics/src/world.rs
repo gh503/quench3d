@@ -337,6 +337,12 @@ pub struct PhysicsWorld {
     version: u64,
     proxies: Vec<Proxy>,
     pairs: Vec<(u32, u32)>,
+    /// 窄相并行：每对候选的流形（按 `pairs` 下标对齐，跨步复用）。
+    narrowphase_hits: Vec<Option<ContactManifold>>,
+    /// 窄相并行：哪些候选对通过分组/关节过滤。
+    narrowphase_pair_ok: Vec<bool>,
+    /// 最近一子步窄相是否真的走了多线程（诊断/基准用）。
+    narrowphase_parallel_used: bool,
     wake_list: Vec<u32>,
     /// 每步复用的刚体视图缓冲（避免每步重新分配 O(n) 内存）。
     scratch_views: Vec<BodyView>,
@@ -399,6 +405,11 @@ impl PhysicsWorld {
     /// 最近一步划分出的 island 数。
     pub fn island_count(&self) -> usize {
         self.islands.len()
+    }
+
+    /// 最近一子步是否走了窄相并行路径（native 上候选对足够多才会为真）。
+    pub fn uses_parallel_narrowphase(&self) -> bool {
+        self.narrowphase_parallel_used
     }
 
     /// 最近一子步是否走了 island 并行路径（native 上满足条件才会为真）。
@@ -488,6 +499,9 @@ impl PhysicsWorld {
             version: 0,
             proxies: Vec::new(),
             pairs: Vec::new(),
+            narrowphase_hits: Vec::new(),
+            narrowphase_pair_ok: Vec::new(),
+            narrowphase_parallel_used: false,
             wake_list: Vec::new(),
             scratch_views: Vec::new(),
             scratch_materials: Vec::new(),
@@ -1826,6 +1840,82 @@ impl PhysicsWorld {
         }
     }
 
+    /// 串行填充窄相结果（也是并行路径关闭/候选太少时的回退）。
+    fn fill_narrowphase_hits_serial(&mut self) {
+        self.narrowphase_hits.resize(self.pairs.len(), None);
+        for k in 0..self.pairs.len() {
+            let (ia, ib) = self.pairs[k];
+            let (ia, ib) = (ia as usize, ib as usize);
+            let hit = if self.narrowphase_pair_ok[k] {
+                match (
+                    self.bodies.get(ia).and_then(|s| s.body.as_ref()),
+                    self.bodies.get(ib).and_then(|s| s.body.as_ref()),
+                ) {
+                    (Some(a), Some(b)) => collide_bodies(a, b, self.config.speculative_margin),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            self.narrowphase_hits[k] = hit;
+        }
+    }
+
+    /// native 并行填充窄相结果；成功返回 true。
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fill_narrowphase_hits_parallel(&mut self) -> bool {
+        const MIN_PAIRS: usize = 256;
+        let n = self.pairs.len();
+        if n < MIN_PAIRS || !self.config.parallel_narrowphase || !self.config.parallel {
+            return false;
+        }
+        let hw = std::thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(1);
+        let cap = if self.config.max_threads == 0 {
+            8
+        } else {
+            self.config.max_threads.min(8)
+        };
+        let threads = hw.min(cap);
+        if threads < 2 {
+            return false;
+        }
+        let chunk = n.div_ceil(threads);
+        let bodies = &self.bodies;
+        let pairs = &self.pairs;
+        let ok = &self.narrowphase_pair_ok;
+        let hits = &mut self.narrowphase_hits;
+        let margin = self.config.speculative_margin;
+        std::thread::scope(|scope| {
+            for ((pair_chunk, ok_chunk), hit_chunk) in pairs
+                .chunks(chunk)
+                .zip(ok.chunks(chunk))
+                .zip(hits.chunks_mut(chunk))
+            {
+                scope.spawn(move || {
+                    for ((pair, ok), slot) in
+                        pair_chunk.iter().zip(ok_chunk).zip(hit_chunk.iter_mut())
+                    {
+                        let (ia, ib) = (pair.0 as usize, pair.1 as usize);
+                        *slot = if *ok {
+                            match (
+                                bodies.get(ia).and_then(|s| s.body.as_ref()),
+                                bodies.get(ib).and_then(|s| s.body.as_ref()),
+                            ) {
+                                (Some(a), Some(b)) => collide_bodies(a, b, margin),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                    }
+                });
+            }
+        });
+        true
+    }
+
     /// 宽相 + 窄相，并处理唤醒。
     /// 收集接触。
     ///
@@ -1888,37 +1978,48 @@ impl PhysicsWorld {
             self.phase_timings.candidate_pairs += self.pairs.len() as u64;
         }
 
+        // 分组/关节过滤先串行过一遍（很便宜），后续求交可以按候选对并行。
+        // 分组过滤在宽相已经做过一遍；这里再查一次是因为调用方可以直接改
+        // `body.groups`（宽相用的是本子步开头的快照，中间改了要以当前值为准）。
+        // 关节两端缺省不互相碰撞（Bullet / PhysX 的 `collide_connected = false`）。
+        self.narrowphase_pair_ok.clear();
+        self.narrowphase_pair_ok.reserve(self.pairs.len());
+        for &(ia, ib) in self.pairs.iter() {
+            let (ia, ib) = (ia as usize, ib as usize);
+            let ok = match (
+                self.bodies.get(ia).and_then(|s| s.body.as_ref()),
+                self.bodies.get(ib).and_then(|s| s.body.as_ref()),
+            ) {
+                (Some(a), Some(b)) => {
+                    a.groups.interacts(b.groups)
+                        && (self.joints.is_empty() || !self.joint_blocks_contact(ia, ib))
+                }
+                _ => false,
+            };
+            self.narrowphase_pair_ok.push(ok);
+        }
+        self.narrowphase_hits.resize(self.pairs.len(), None);
+        self.narrowphase_parallel_used = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.narrowphase_parallel_used = self.fill_narrowphase_hits_parallel();
+        }
+        if !self.narrowphase_parallel_used {
+            self.fill_narrowphase_hits_serial();
+        }
+
         for k in 0..self.pairs.len() {
             let (ia, ib) = self.pairs[k];
             let (ia, ib) = (ia as usize, ib as usize);
-            let (manifold, sensor_pair) = {
-                let a = match self.bodies.get(ia).and_then(|s| s.body.as_ref()) {
-                    Some(a) => a,
-                    None => continue,
-                };
-                let b = match self.bodies.get(ib).and_then(|s| s.body.as_ref()) {
-                    Some(b) => b,
-                    None => continue,
-                };
-                // 分组过滤在宽相已经做过一遍；这里再查一次是因为调用方可以直接改
-                // `body.groups`（宽相用的是本子步开头的快照，中间改了要以当前值为准）。
-                if !a.groups.interacts(b.groups) {
-                    continue;
-                }
-                // 关节两端缺省不互相碰撞（Bullet / PhysX 的 `collide_connected = false`）。
-                // 放在这里而不是宽相：宽相用的是"谁和谁可能碰"的粗筛，
-                // 关节过滤依赖关节表，而关节表在子步里是稳定的。
-                if !self.joints.is_empty() && self.joint_blocks_contact(ia, ib) {
-                    continue;
-                }
-                (
-                    collide_bodies(a, b, self.config.speculative_margin),
-                    a.sensor || b.sensor,
-                )
+            let Some(m) = self.narrowphase_hits[k].take() else {
+                continue;
             };
-            let m = match manifold {
-                Some(m) => m,
-                None => continue,
+            let sensor_pair = match (
+                self.bodies.get(ia).and_then(|s| s.body.as_ref()),
+                self.bodies.get(ib).and_then(|s| s.body.as_ref()),
+            ) {
+                (Some(a), Some(b)) => a.sensor || b.sensor,
+                _ => continue,
             };
 
             contacts.push(ContactPair {
@@ -2799,6 +2900,69 @@ mod tests {
 
     fn sphere(r: f32) -> Shape {
         Shape::Sphere { radius: r }
+    }
+
+    fn dense_stack() -> PhysicsWorld {
+        let mut w = PhysicsWorld::new();
+        w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
+        for i in 0..400 {
+            let x = (i % 20) as f32 * 0.9 - 9.0;
+            let z = (i / 20) as f32 * 0.9 - 9.0;
+            w.add_body(
+                BodyBuilder::dynamic(Shape::Box {
+                    half_extents: Vec3::splat(0.4),
+                })
+                .position(Vec3::new(x, 0.45, z))
+                .build(),
+            );
+        }
+        w
+    }
+
+    fn body_bits(world: &PhysicsWorld) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (_, b) in world.bodies() {
+            for v in [
+                b.position().x,
+                b.position().y,
+                b.position().z,
+                b.rotation().x,
+                b.rotation().y,
+                b.rotation().z,
+                b.rotation().w,
+                b.linear_velocity.x,
+                b.linear_velocity.y,
+                b.linear_velocity.z,
+                b.angular_velocity.x,
+                b.angular_velocity.y,
+                b.angular_velocity.z,
+            ] {
+                out.push(v.to_bits());
+            }
+            out.push(b.is_sleeping() as u32);
+        }
+        out
+    }
+
+    #[test]
+    fn parallel_narrowphase_is_bit_identical_to_serial() {
+        let mut serial = dense_stack();
+        serial.config.parallel_narrowphase = false;
+        let mut parallel = dense_stack();
+        parallel.config.parallel_narrowphase = true;
+        for _ in 0..10 {
+            serial.step(1.0 / 60.0);
+            parallel.step(1.0 / 60.0);
+        }
+        assert!(
+            parallel.uses_parallel_narrowphase(),
+            "候选对足够多时应真的走并行窄相"
+        );
+        assert_eq!(
+            body_bits(&serial),
+            body_bits(&parallel),
+            "并行窄相必须与串行逐位相同"
+        );
     }
 
     #[test]

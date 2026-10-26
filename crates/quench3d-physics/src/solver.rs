@@ -36,6 +36,11 @@ pub struct SolverConfig {
     /// 这个开关的存在是为了让回归测试能把两条路径的结果直接对比。
     /// wasm 上没有多线程，这个字段恒被忽略。
     pub parallel: bool,
+    /// 是否允许窄相候选对并行求交（native；输出与串行逐位相同）。
+    ///
+    /// 只影响性能，不影响结果：每对候选独立求交，结果按原候选顺序合并。
+    /// 候选数太少（< 256）时自动退回串行，避免线程开销。
+    pub parallel_narrowphase: bool,
     /// 并行求解最多用几个线程；`0` = 自动（按硬件并行度）。
     ///
     /// 线程数**不影响结果**：岛与岛不共享清醒刚体，每个刚体经历的运算顺序
@@ -83,6 +88,7 @@ impl Default for SolverConfig {
             relaxation_iterations: 1,
             warm_starting: true,
             parallel: true,
+            parallel_narrowphase: true,
             max_threads: 0,
             baumgarte: 0.2,
             slop: 0.005,
