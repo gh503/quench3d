@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use quench3d::render::{MeshData, Vertex};
-use quench3d_math::{Vec2, Vec3};
+use quench3d_math::{Quat, Vec2, Vec3};
 use quench3d_physics::extract_surface;
 
 /// 摄像头针孔投影：把引擎坐标顶点映射回原图 UV，用于给重建网格上色。
@@ -328,6 +328,199 @@ pub fn smooth_surface(points: &[Vec3], voxel: f32, iso: f32) -> MeshData {
     }
     mesh.indices = surface.indices;
     mesh
+}
+
+/// 两帧点云的刚体配准结果：把**当前帧**点映射到**上一帧**坐标系。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointCloudRegistration {
+    /// 旋转。
+    pub rotation: Quat,
+    /// 平移（米）。
+    pub translation: Vec3,
+    /// 参与最小二乘的对应点数。
+    pub pairs: usize,
+    /// 对应点残差均方根（米）。
+    pub rms: f32,
+}
+
+/// 两帧点云刚体配准：点到点 ICP + 小角度线性化，返回把当前帧映射到上一帧的
+/// `R, t`。
+///
+/// 这是**实时增量**配准，不是全局 SLAM：初始猜测是恒等变换，适合 30/60 Hz
+/// 相邻帧的小运动；大位移或完全不同的场景会因为没有对应点而返回 `None`。
+/// 用空间哈希找最近邻、固定采样与固定遍历顺序，结果确定；不依赖 GPU，也不
+/// 需要外部点云库。精度上限由体素/采样间距和实际重叠区决定。
+pub fn register_point_clouds(
+    previous: &[Vec3],
+    current: &[Vec3],
+) -> Option<PointCloudRegistration> {
+    const MAX_PREVIOUS: usize = 4000;
+    const MAX_CURRENT: usize = 1500;
+    const MAX_DISTANCE: f32 = 0.12;
+    const CELL: f32 = 0.08;
+    const ITERATIONS: usize = 24;
+
+    fn sample(points: &[Vec3], max: usize) -> Vec<Vec3> {
+        let step = points.len().div_ceil(max).max(1);
+        points
+            .iter()
+            .step_by(step)
+            .filter(|p| p.is_finite())
+            .copied()
+            .collect()
+    }
+
+    let previous = sample(previous, MAX_PREVIOUS);
+    let current = sample(current, MAX_CURRENT);
+    if previous.len() < 6 || current.len() < 6 {
+        return None;
+    }
+    let key = |p: Vec3| {
+        (
+            (p.x / CELL).floor() as i32,
+            (p.y / CELL).floor() as i32,
+            (p.z / CELL).floor() as i32,
+        )
+    };
+    let mut index: std::collections::HashMap<(i32, i32, i32), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, p) in previous.iter().enumerate() {
+        index.entry(key(*p)).or_default().push(i);
+    }
+    let nearest_pairs = |rotation: Quat, translation: Vec3| -> Vec<(Vec3, Vec3)> {
+        let mut pairs = Vec::with_capacity(current.len());
+        for p in &current {
+            let q = rotation.mul_vec3(*p) + translation;
+            let (cx, cy, cz) = key(q);
+            let mut nearest: Option<(usize, f32)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let Some(cell) = index.get(&(cx + dx, cy + dy, cz + dz)) else {
+                            continue;
+                        };
+                        for &i in cell {
+                            let d = (previous[i] - q).length_squared();
+                            if d <= MAX_DISTANCE * MAX_DISTANCE
+                                && nearest.is_none_or(|(_, best)| d < best)
+                            {
+                                nearest = Some((i, d));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((i, _)) = nearest {
+                pairs.push((previous[i], q));
+            }
+        }
+        pairs
+    };
+
+    let mut rotation = Quat::IDENTITY;
+    let mut translation = Vec3::ZERO;
+    for _ in 0..ITERATIONS {
+        let pairs = nearest_pairs(rotation, translation);
+        if pairs.len() < 6 {
+            return None;
+        }
+        // 小角度线性化：q' ≈ q + ω×q + v。对每个对应点把 3 行雅可比累加进
+        // 6×6 正规方程，解出增量 [ω, v]。
+        let mut normal = [[0.0f64; 6]; 6];
+        let mut rhs = [0.0f64; 6];
+        for (target, q) in &pairs {
+            let (qx, qy, qz) = (q.x as f64, q.y as f64, q.z as f64);
+            let rows = [
+                [0.0, qz, -qy, 1.0, 0.0, 0.0],
+                [-qz, 0.0, qx, 0.0, 1.0, 0.0],
+                [qy, -qx, 0.0, 0.0, 0.0, 1.0],
+            ];
+            let residual = [
+                (target.x - q.x) as f64,
+                (target.y - q.y) as f64,
+                (target.z - q.z) as f64,
+            ];
+            for row in 0..3 {
+                for i in 0..6 {
+                    rhs[i] += rows[row][i] * residual[row];
+                    for j in 0..6 {
+                        normal[i][j] += rows[row][i] * rows[row][j];
+                    }
+                }
+            }
+        }
+        let step = solve_six(normal, rhs)?;
+        let omega = Vec3::new(step[0] as f32, step[1] as f32, step[2] as f32);
+        let delta = Vec3::new(step[3] as f32, step[4] as f32, step[5] as f32);
+        let angle = omega.length();
+        let dq = if angle > 1e-7 {
+            Quat::from_axis_angle(omega / angle, angle)
+        } else {
+            Quat::IDENTITY
+        };
+        translation = dq.mul_vec3(translation) + delta;
+        rotation = (dq * rotation).normalize_or_identity();
+        if omega.length() < 1e-6 && delta.length() < 1e-6 {
+            break;
+        }
+    }
+
+    let pairs = nearest_pairs(rotation, translation);
+    if pairs.len() < 6 {
+        return None;
+    }
+    let rms = (pairs
+        .iter()
+        .map(|(target, q)| (*target - *q).length_squared())
+        .sum::<f32>()
+        / pairs.len() as f32)
+        .sqrt();
+    if !rms.is_finite() {
+        return None;
+    }
+    Some(PointCloudRegistration {
+        rotation,
+        translation,
+        pairs: pairs.len(),
+        rms,
+    })
+}
+
+/// 6×6 线性方程的高斯消元（部分主元）；奇异时返回 `None`。
+#[allow(clippy::needless_range_loop)] // 行列消元必须同时用列号与行号。
+fn solve_six(mut a: [[f64; 6]; 6], mut b: [f64; 6]) -> Option<[f64; 6]> {
+    for column in 0..6 {
+        let mut pivot = column;
+        for row in column + 1..6 {
+            if a[row][column].abs() > a[pivot][column].abs() {
+                pivot = row;
+            }
+        }
+        if a[pivot][column].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(column, pivot);
+        b.swap(column, pivot);
+        let scale = a[column][column];
+        for j in column..6 {
+            a[column][j] /= scale;
+        }
+        b[column] /= scale;
+        for row in 0..6 {
+            if row == column {
+                continue;
+            }
+            let factor = a[row][column];
+            if factor == 0.0 {
+                continue;
+            }
+            for j in column..6 {
+                a[row][j] -= factor * a[column][j];
+            }
+            b[row] -= factor * b[column];
+        }
+    }
+    Some(b)
 }
 
 #[cfg(test)]
@@ -671,6 +864,66 @@ mod accumulator_tests {
         assert_eq!(a.merge(&[vec3(3.0, 0.0, 0.0)], 100), 1);
         assert_eq!(a.len(), 1, "过期体素应被保留策略清掉");
         assert!(a.points()[0].x > 2.9);
+    }
+
+    /// 一条不平移对称的起伏面：给 ICP 足够几何约束，又不用外部点云文件。
+    fn wavy_patch() -> Vec<Vec3> {
+        let mut out = Vec::new();
+        for i in 0..24 {
+            for j in 0..24 {
+                let x = (i as f32 - 11.5) * 0.04;
+                let y = (j as f32 - 11.5) * 0.04;
+                let z = 0.08 * (x * 5.0).sin() + 0.04 * (y * 7.0).cos();
+                out.push(vec3(x, y, z));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn point_cloud_registration_recovers_a_known_rigid_motion() {
+        let previous = wavy_patch();
+        let rotation = Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), 0.02);
+        let translation = vec3(0.004, -0.003, 0.002);
+        let current: Vec<Vec3> = previous
+            .iter()
+            .map(|p| rotation.mul_vec3(*p) + translation)
+            .collect();
+        let found = register_point_clouds(&previous, &current).expect("同形点云应当配准");
+        assert!(found.pairs > 400, "对应点太少：{}", found.pairs);
+        assert!(found.rms < 0.002, "rms 应小于 2 mm：{}", found.rms);
+        let mut worst = 0.0f32;
+        for (p, q) in previous.iter().zip(&current) {
+            let mapped = found.rotation.mul_vec3(*q) + found.translation;
+            worst = worst.max((mapped - *p).length());
+        }
+        assert!(worst < 0.004, "最坏点误差应小于 4 mm：{worst}");
+    }
+
+    #[test]
+    fn point_cloud_registration_reports_no_match_instead_of_faking_identity() {
+        assert!(register_point_clouds(&[], &[Vec3::ZERO]).is_none());
+        assert!(register_point_clouds(&[Vec3::ZERO], &[]).is_none());
+        // 两组相距 10 m 的点：没有邻域对应，不能返回一个“恒等变换”冒充成功。
+        assert!(register_point_clouds(
+            &[vec3(0.0, 0.0, 0.0), vec3(0.1, 0.0, 0.0)],
+            &[vec3(10.0, 0.0, 0.0), vec3(10.1, 0.0, 0.0)]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn point_cloud_registration_is_deterministic() {
+        let previous = wavy_patch();
+        let rotation = Quat::from_axis_angle(vec3(1.0, 0.0, 0.0), -0.015);
+        let translation = vec3(-0.003, 0.002, 0.001);
+        let current: Vec<Vec3> = previous
+            .iter()
+            .map(|p| rotation.mul_vec3(*p) + translation)
+            .collect();
+        let a = register_point_clouds(&previous, &current).unwrap();
+        let b = register_point_clouds(&previous, &current).unwrap();
+        assert_eq!(a, b, "顺序/哈希遍历不能让配准漂移");
     }
 
     #[test]

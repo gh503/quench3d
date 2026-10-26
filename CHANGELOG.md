@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+- **摄像头增量位姿跟踪（ICP）**：编辑器「跟踪位姿（ICP）」在时间累积时把相邻帧
+  点云做刚体配准，累积到同一参考系，移动相机不再把表面拖成双层。新
+  `register_point_clouds`（点到点 ICP + 小角度线性化，空间哈希最近邻，确定性）：
+  已知 4 mm/2° 运动恢复最坏点误差 <4 mm；10 m 错位返回 `None` 而不是假恒等；
+  两次运行结果逐位相同。组合顺序回归两段增量叠到参考系 <6 mm。缺省关，关闭时
+  旧单帧路径逐位不变；大位移/无重叠会清空累积器重开参考系。桌面专用，不是
+  全局 SLAM，Web 端未接。
+
 - **精确凸-凸 CCD**：新增 `objects[].ccd_precise`（隐含 `ccd=true`），用 GJK 距离
   做保守推进，按 `Δ距离/(|v_rel|+|ω_a|R_a+|ω_b|R_b)` 找真实首次接触，不再依赖
   角点/16 边环采样。回归 `precise_ccd_catches_a_convex_hull_spike_between_samples`

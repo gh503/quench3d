@@ -212,6 +212,15 @@
 - [x] 摄像头点云时间累积（编辑器「时间累积」开关，缺省关）：最近约 90 帧按
   1.5 cm 体素去重/平均，最多 25 万体素，过期 90 帧自动丢弃；缺省关时仍走单帧
   旧路径。回归：互补帧合并、同体素平均/排序、上限/NaN/过期、两次运行逐位一致。
+- [x] 摄像头增量位姿跟踪（编辑器「跟踪位姿（ICP）」，缺省关，需同时开时间累积）：
+  相邻帧点到点 ICP + 小角度线性化，空间哈希最近邻、固定采样/遍历顺序；把
+  “当前相机 → 参考帧”的位姿叠到累积点云。`register_point_clouds` 回归
+  `point_cloud_registration_recovers_a_known_rigid_motion`（4 mm/2° 内恢复，
+  最坏点误差 <4 mm）、`..._reports_no_match_instead_of_faking_identity`（10 m
+  错位返回 None）、`..._is_deterministic`；组合顺序回归
+  `tracking_composes_increments_into_the_reference_frame`（两段增量叠到参考系
+  误差 <6 mm）。边界：增量跟踪，不是全局 SLAM；大位移/无重叠会重置累积器；
+  桌面端专用，Web 端未接。
 - [x] 精确 CCD（任意凸体 TOI），不是中心射线近似。
   - [x] **凸-凸保守推进**（`objects[].ccd_precise`，隐含 `ccd=true`）：用 GJK
     距离在时间上 1-Lipschitz 的性质，按 `Δ距离 / (|v_rel| + |ω_a|R_a + |ω_b|R_b)`

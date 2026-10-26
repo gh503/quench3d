@@ -34,7 +34,7 @@ use std::{
 
 use crate::reconstruct::PointCloudAccumulator;
 #[cfg(not(target_arch = "wasm32"))]
-use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions};
+use egui::{Color32, ColorImage, Pos2, Rect, RichText, Stroke, TextureHandle, TextureOptions};
 #[cfg(not(target_arch = "wasm32"))]
 use quench3d::Engine;
 use quench3d_math::Vec3;
@@ -318,8 +318,42 @@ pub struct CameraFeed {
     recon_accum_frame: u64,
     /// 累积器建立时用的体素尺寸（改尺寸要重建累积器）。
     recon_accum_voxel: f32,
+    /// 是否用相邻帧 ICP 把移动相机拼到同一参考系（缺省关）。
+    recon_track: bool,
+    /// 上一帧原始点云（相机坐标系），ICP 的参考帧。
+    track_previous: Vec<Vec3>,
+    /// 累积的“当前相机 → 参考帧”旋转。
+    track_rotation: quench3d_math::Quat,
+    /// 累积的“当前相机 → 参考帧”平移。
+    track_translation: Vec3,
+    /// 成功配准的帧数（诊断/UI）。
+    track_frames: u64,
+    /// 最近一次配准 rms（米）。
+    track_rms: f32,
     /// 最近一次生成的结果/错误，显示在窗口里。
     recon_status: String,
+}
+
+/// 把一帧 `raw` 用 ICP 增量叠进已经累积的位姿，并返回搬到参考系的点。
+///
+/// `rotation`/`translation` 是“上一帧相机 → 参考帧”；配准成功后就地更新成
+/// “当前帧相机 → 参考帧”。单独抽出来是为了能不用窗口/线程直接测组合顺序。
+#[cfg(not(target_arch = "wasm32"))]
+fn compose_tracked_points(
+    previous: &[Vec3],
+    raw: &[Vec3],
+    rotation: &mut quench3d_math::Quat,
+    translation: &mut Vec3,
+) -> Option<(Vec<Vec3>, f32)> {
+    let reg = crate::reconstruct::register_point_clouds(previous, raw)?;
+    *translation = rotation.mul_vec3(reg.translation) + *translation;
+    *rotation = (*rotation * reg.rotation).normalize_or_identity();
+    Some((
+        raw.iter()
+            .map(|p| rotation.mul_vec3(*p) + *translation)
+            .collect(),
+        reg.rms,
+    ))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -366,6 +400,12 @@ impl CameraFeed {
             recon_accum: None,
             recon_accum_frame: u64::MAX,
             recon_accum_voxel: 0.0,
+            recon_track: false,
+            track_previous: Vec::new(),
+            track_rotation: quench3d_math::Quat::IDENTITY,
+            track_translation: Vec3::ZERO,
+            track_frames: 0,
+            track_rms: f32::INFINITY,
             recon_status: String::new(),
         }
     }
@@ -527,6 +567,45 @@ impl CameraFeed {
         }
     }
 
+    /// 清空 ICP 状态；开关切换或累积器重建时调用。
+    fn reset_tracking(&mut self) {
+        self.track_previous.clear();
+        self.track_rotation = quench3d_math::Quat::IDENTITY;
+        self.track_translation = Vec3::ZERO;
+        self.track_frames = 0;
+        self.track_rms = f32::INFINITY;
+    }
+
+    /// 用相邻帧点云 ICP 把当前帧映射到参考帧；配准失败就清空累积器、
+    /// 以当前帧重新开一个参考系，避免把两个坐标系混在同一个体素网格里。
+    fn track_points(&mut self, raw: &[Vec3]) -> Vec<Vec3> {
+        if self.track_previous.is_empty() {
+            self.track_previous = raw.to_vec();
+            return raw.to_vec();
+        }
+        let Some((points, rms)) = compose_tracked_points(
+            &self.track_previous,
+            raw,
+            &mut self.track_rotation,
+            &mut self.track_translation,
+        ) else {
+            if let Some(acc) = self.recon_accum.as_mut() {
+                acc.clear();
+            }
+            self.track_previous = raw.to_vec();
+            self.track_rotation = quench3d_math::Quat::IDENTITY;
+            self.track_translation = Vec3::ZERO;
+            self.track_frames = 0;
+            self.track_rms = f32::INFINITY;
+            self.recon_accum_frame = u64::MAX;
+            return raw.to_vec();
+        };
+        self.track_previous = raw.to_vec();
+        self.track_frames = self.track_frames.saturating_add(1);
+        self.track_rms = rms;
+        points
+    }
+
     /// 从当前深度点云生成/更新一个体素表面物体。
     ///
     /// 物体标记 `generated`，场景 JSON 不会尝试保存它（没有源网格会丢）。
@@ -553,15 +632,32 @@ impl CameraFeed {
                 ));
                 self.recon_accum_voxel = self.recon_voxel;
                 self.recon_accum_frame = u64::MAX;
+                self.reset_tracking();
             }
-            if let Some(acc) = self.recon_accum.as_mut() {
-                if self.recon_accum_frame != frame.json.frame {
-                    acc.merge(raw_points, frame.json.frame);
-                    self.recon_accum_frame = frame.json.frame;
+            if self.recon_accum_frame == frame.json.frame {
+                if let Some(acc) = self.recon_accum.as_ref() {
+                    accumulated = acc.points();
+                } else {
+                    accumulated = Vec::new();
                 }
-                accumulated = acc.points();
             } else {
-                accumulated = Vec::new();
+                // ICP 与累积都在这里消费“原始相机坐标点”；多帧累加前先搬到
+                // 同一参考系，否则移动相机时体素网格会被拖成双层。
+                let tracked;
+                let input: &[Vec3] = if self.recon_track {
+                    tracked = self.track_points(raw_points);
+                    &tracked
+                } else {
+                    self.reset_tracking();
+                    raw_points
+                };
+                if let Some(acc) = self.recon_accum.as_mut() {
+                    acc.merge(input, frame.json.frame);
+                    self.recon_accum_frame = frame.json.frame;
+                    accumulated = acc.points();
+                } else {
+                    accumulated = Vec::new();
+                }
             }
             if accumulated.is_empty() {
                 self.recon_status = "累积点云为空".to_string();
@@ -644,8 +740,17 @@ impl CameraFeed {
             self.recon_frame = frame.json.frame;
             self.recon_voxel_used = self.recon_voxel;
             self.recon_smooth_used = self.recon_smooth;
+            let tracking = if self.recon_track && self.track_frames > 0 {
+                format!(
+                    "，ICP {} 帧（rms {:.1} mm）",
+                    self.track_frames,
+                    self.track_rms * 1000.0
+                )
+            } else {
+                String::new()
+            };
             self.recon_status = format!(
-                "已生成 {triangles} 个三角形（帧 {}，{} {:.1} cm）{}",
+                "已生成 {triangles} 个三角形（帧 {}，{} {:.1} cm）{}{}",
                 frame.json.frame,
                 if self.recon_smooth {
                     "平滑"
@@ -653,7 +758,8 @@ impl CameraFeed {
                     "体素"
                 },
                 self.recon_voxel * 100.0,
-                if colored > 0 { "，彩色" } else { "" }
+                if colored > 0 { "，彩色" } else { "" },
+                tracking
             );
         } else {
             self.recon_status = "网格已不存在（场景可能被清空），请再点一次".to_string();
@@ -900,6 +1006,24 @@ impl CameraFeed {
             {
                 self.recon_accum = None;
                 self.recon_frame = u64::MAX;
+                self.reset_tracking();
+            }
+            if ui
+                .checkbox(&mut self.recon_track, "跟踪位姿（ICP）")
+                .on_hover_text(
+                    "相邻帧点云刚体配准，把移动相机拼到同一参考系；只适合相邻帧小运动，失败会重置累积器",
+                )
+                .changed()
+            {
+                self.reset_tracking();
+                self.recon_accum = None;
+                self.recon_frame = u64::MAX;
+                if self.recon_track {
+                    self.recon_accumulate = true;
+                }
+            }
+            if self.recon_track && !self.recon_accumulate {
+                ui.label(RichText::new("跟踪位姿需要同时开「时间累积」").small().weak());
             }
             if ui
                 .add_enabled(enabled, egui::Button::new("生成/更新网格"))
@@ -2314,6 +2438,45 @@ mod tests {
         assert_eq!(points.len(), 4);
         assert!((points[0].z + 0.3).abs() < 1e-5, "{:?}", points[0]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tracking_composes_increments_into_the_reference_frame() {
+        fn patch(shift: Vertex) -> Vec<Vec3> {
+            let mut out = Vec::new();
+            for i in 0..18 {
+                for j in 0..18 {
+                    let x = (i as f32 - 8.5) * 0.05;
+                    let y = (j as f32 - 8.5) * 0.05;
+                    let z = 0.06 * (x * 6.0).sin() + 0.03 * (y * 5.0).cos();
+                    out.push(Vec3::new(x + shift.0, y + shift.1, z + shift.2));
+                }
+            }
+            out
+        }
+        type Vertex = (f32, f32, f32);
+        let reference = patch((0.0, 0.0, 0.0));
+        let first = patch((0.004, 0.0, 0.0));
+        let second = patch((0.008, 0.0, 0.0));
+        let mut rotation = quench3d_math::Quat::IDENTITY;
+        let mut translation = Vec3::ZERO;
+        let (mapped_first, rms_first) =
+            compose_tracked_points(&reference, &first, &mut rotation, &mut translation)
+                .expect("第一段应配准");
+        assert!(rms_first < 0.002, "第一段 rms 太大：{rms_first}");
+        let (mapped_second, rms_second) =
+            compose_tracked_points(&first, &second, &mut rotation, &mut translation)
+                .expect("第二段应配准");
+        assert!(rms_second < 0.002, "第二段 rms 太大：{rms_second}");
+        let mut worst = 0.0f32;
+        for (p, q) in reference.iter().zip(&mapped_second) {
+            worst = worst.max((*p - *q).length());
+        }
+        assert!(worst < 0.006, "两段增量叠到参考系后误差应 < 6 mm：{worst}");
+        // 第一段映射也必须仍然落在参考系，而不是只把第二段硬贴回去。
+        for (p, q) in reference.iter().zip(&mapped_first) {
+            assert!((*p - *q).length() < 0.006);
+        }
     }
 
     #[test]
