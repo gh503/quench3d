@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **球体 CCD 扫掠覆盖所有形状**：胶囊/圆柱/圆锥/圆角盒/凸包/三角网改用
+  `distance_point_to_shape` 距离场保守推进（1-Lipschitz），法线取距离场中心差分；
+  曲面擦碰再扫 2 次，切向会切进曲面时把整段位移截到接触点。回归
+  `ccd_catches_a_sphere_grazing_a_cylinder_rim`：球心沿 y=1.05 飞过半高 1、半径 0.5
+  的圆柱，中心射线从顶盖上方掠过；修复前 gap=0.05（球嵌进顶盖），修复后 ≥0.1。
+  只对 `ccd=true` 的球生效，缺省 `ccd=false` 旧场景逐位不变。
+
 - **性能基准防“塌堆”诊断**：`bench --phases` 行尾新增最终动态体的 `y[min,max]`
   与最大速度；`ScaleResult` 增加 `final_min_y/final_max_y/final_max_speed`。
   新增 `QUENCH3D_BENCH_VEL_ITER` 做求解迭代 A/B（诊断用）。

@@ -1568,6 +1568,49 @@ fn ccd_catches_a_sphere_grazing_a_box_corner() {
 }
 
 #[test]
+fn ccd_catches_a_sphere_grazing_a_cylinder_rim() {
+    // 圆柱半高 1、半径 0.5；球心沿 y=1.05 飞过。中心射线在顶盖上方，
+    // 但半径 0.1 的球面会擦到顶盖边缘——旧路径只对盒/球/平面做扫掠。
+    fn run(ccd: bool) -> Vec3 {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_builder(
+            BodyBuilder::r#static(Shape::Cylinder {
+                half_height: 1.0,
+                radius: 0.5,
+            })
+            .position(Vec3::ZERO),
+        );
+        let ball = w.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::new(-4.0, 1.05, 0.0))
+                .linear_velocity(Vec3::new(240.0, 0.0, 0.0))
+                .ccd(ccd),
+        );
+        w.step(1.0 / 60.0);
+        w.body(ball).unwrap().position()
+    }
+    let shape = Shape::Cylinder {
+        half_height: 1.0,
+        radius: 0.5,
+    };
+    let at_origin = Transform::from_translation(Vec3::ZERO);
+    let gap = |p: Vec3| crate::gjk::distance_point_to_shape(&shape, &at_origin, p);
+    let no_ccd = run(false);
+    assert!(
+        gap(no_ccd) < 0.1,
+        "前提：不开 CCD 时球应嵌进圆柱顶盖：{no_ccd}，gap={}",
+        gap(no_ccd)
+    );
+    let with_ccd = run(true);
+    assert!(
+        gap(with_ccd) >= 0.1 - 1e-3,
+        "球擦圆柱顶盖时 CCD 不能让球心留在里面：{with_ccd}，gap={}",
+        gap(with_ccd)
+    );
+}
+
+#[test]
 fn ccd_catches_a_corner_only_hit() {
     fn run(rotation: Quat) -> f32 {
         let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);

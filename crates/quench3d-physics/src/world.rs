@@ -23,6 +23,7 @@ use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{Broadphase, Proxy};
 use crate::contact::{ContactManifold, ContactPair, ContactPoint};
 use crate::fluid::{self, Fluid, FluidDesc, FluidStats};
+use crate::gjk;
 use crate::island::{IslandStats, Islands};
 use crate::joints::{
     hinge_angle, Joint, JointEntry, JointHandle, JointImpulses, JointSolver, JointTelemetry,
@@ -2169,13 +2170,14 @@ impl PhysicsWorld {
         }
     }
 
-    /// 球体对**盒子/平面/球**的扫掠：球心沿 `motion` 走，返回最早接触参数 `t∈[0,1]`
+    /// 球体对**所有形状**的扫掠：球心沿 `motion` 走，返回最早接触参数 `t∈[0,1]`
     /// 与接触法线（由对方指向球心）。
     ///
-    /// 中心射线只能覆盖"球心航线打到表面"；球擦着盒角时球心航线从上方/侧面掠过，
-    /// 但球面已经碰到角，旧路径会整步穿过去。这里对盒子做保守推进（球心到盒面的
-    /// 距离是 1-Lipschitz，`t += (dist-r)/|motion|` 不会越过首次接触），对球做解析
-    /// 二次方程，对半空间做一次线性求交。只处理这三种常见形状；其它形状保持原路径。
+    /// 中心射线只能覆盖"球心航线打到表面"；球擦着盒角/柱顶时球心航线从上方/侧面
+    /// 掠过，但球面已经碰到，旧路径会整步穿过去。盒子用球心到盒面的保守推进，
+    /// 球用解析二次方程，半空间用线性求交；胶囊/圆柱/圆锥/圆角盒/凸包/三角网等
+    /// 用 `distance_point_to_shape` 的距离场做保守推进（距离场 1-Lipschitz，
+    /// `t += (dist-r)/|motion|` 不会越过首次接触），法线取距离场中心差分。
     fn sphere_sweep_bodies(
         &self,
         self_index: usize,
@@ -2286,7 +2288,72 @@ impl PhysicsWorld {
                         found
                     }
                 }
-                _ => None,
+                _ => {
+                    // 其它凸形状/三角网：球心到表面的距离做保守推进。距离场是
+                    // 1-Lipschitz 的，`t += (dist-r)/speed` 不会越过首次接触；
+                    // 法线用距离场中心差分，退化时退回“朝运动反方向”。
+                    if speed <= 1e-9 {
+                        None
+                    } else {
+                        let mut t = 0.0f32;
+                        let mut found = None;
+                        for _ in 0..48 {
+                            let p = p0 + motion * t;
+                            let dist =
+                                gjk::distance_point_to_shape(&body.shape, &body.transform, p);
+                            if !dist.is_finite() {
+                                break;
+                            }
+                            if dist <= radius + 1e-4 {
+                                let eps = (radius * 0.125).max(1e-4);
+                                let dx = gjk::distance_point_to_shape(
+                                    &body.shape,
+                                    &body.transform,
+                                    p + Vec3::X * eps,
+                                ) - gjk::distance_point_to_shape(
+                                    &body.shape,
+                                    &body.transform,
+                                    p - Vec3::X * eps,
+                                );
+                                let dy = gjk::distance_point_to_shape(
+                                    &body.shape,
+                                    &body.transform,
+                                    p + Vec3::Y * eps,
+                                ) - gjk::distance_point_to_shape(
+                                    &body.shape,
+                                    &body.transform,
+                                    p - Vec3::Y * eps,
+                                );
+                                let dz = gjk::distance_point_to_shape(
+                                    &body.shape,
+                                    &body.transform,
+                                    p + Vec3::Z * eps,
+                                ) - gjk::distance_point_to_shape(
+                                    &body.shape,
+                                    &body.transform,
+                                    p - Vec3::Z * eps,
+                                );
+                                let grad = Vec3::new(dx, dy, dz);
+                                let n = if grad.length_squared() > 1e-12 {
+                                    grad.normalize()
+                                } else {
+                                    -motion.normalize_or_zero()
+                                };
+                                found = Some((t.clamp(0.0, 1.0), n));
+                                break;
+                            }
+                            let step = (dist - radius) / speed;
+                            if !step.is_finite() || step <= 1e-7 {
+                                break;
+                            }
+                            t += step;
+                            if t > 1.0 {
+                                break;
+                            }
+                        }
+                        found
+                    }
+                }
             };
             if let Some((t, n)) = hit {
                 if best.is_none_or(|(best_t, _)| t < best_t) {
@@ -2410,7 +2477,39 @@ impl PhysicsWorld {
                     if mn < -1e-6 {
                         // 只允许靠近 `travel` 这么多：`mn` 与 `-travel` 取"更靠外"的那个
                         let mn_clamped = mn.max(-travel);
-                        let motion_new = motion - n * (mn - mn_clamped);
+                        let mut motion_new = motion - n * (mn - mn_clamped);
+                        // 球的接触面可能是弯的：只截法向分量后，剩余切向位移仍可能
+                        // 在曲面上“切进去”。再扫 2 次，按新的运动方向继续截，直到
+                        // 这一步不再更早接触（盒角/圆柱顶盖擦碰都能受益）。
+                        if let Shape::Sphere { radius } = &b.shape {
+                            for _ in 0..2 {
+                                let Some((t2, n2)) = self.sphere_sweep_bodies(
+                                    i,
+                                    b.transform.position,
+                                    motion_new,
+                                    radius.abs(),
+                                ) else {
+                                    break;
+                                };
+                                let mn2 = motion_new.dot(n2);
+                                if mn2 >= -1e-6 {
+                                    break;
+                                }
+                                let travel2 = t2 * motion_new.length();
+                                let clamped2 = mn2.max(-travel2);
+                                let next = motion_new - n2 * (mn2 - clamped2);
+                                if (next - motion_new).length_squared() <= 0.0 {
+                                    // 曲面：法向分量已不足以描述“还会走多远”，
+                                    // 直接把整段位移截到这次接触，宁可早停不穿透。
+                                    let len = motion_new.length();
+                                    if len > 1e-9 && travel2 < len {
+                                        motion_new *= travel2 / len;
+                                    }
+                                    break;
+                                }
+                                motion_new = next;
+                            }
+                        }
                         if (motion_new - motion).length_squared() > 0.0 {
                             linear_update = Some(motion_new / dt);
                         }
