@@ -240,6 +240,16 @@ pub struct Doc {
     pub show_probes: bool,
     /// 是否画出选中物体的橙色包围盒。
     pub show_selection: bool,
+    /// 编辑器内录制的刚体位姿回放（`None` = 还没录过）。
+    pub replay: Option<ReplayClip>,
+    /// 正在逐帧录制物理位姿。
+    pub replay_recording: bool,
+    /// 正在按回放时间轴播放（物理暂停）。
+    pub replay_playing: bool,
+    /// 回放播放头（秒）。
+    pub replay_time: f32,
+    /// 开始播放前的暂停状态；停止播放时恢复。
+    replay_was_paused: bool,
     /// 本帧指针悬停命中的物体（只影响高亮，不写场景）。
     pub hovered: Option<usize>,
     /// 左/右面板宽度（使用偏好，不写进场景文件）。
@@ -963,6 +973,11 @@ impl Doc {
             show_help: false,
             show_probes: false,
             show_selection: true,
+            replay: None,
+            replay_recording: false,
+            replay_playing: false,
+            replay_time: 0.0,
+            replay_was_paused: false,
             hovered: None,
             layout: crate::layout::Layout::default(),
             recovery: None,
@@ -1186,6 +1201,145 @@ impl Doc {
         self.status = format!("已重置到基线（{} 个物体）", self.baseline.len());
     }
 
+    /// 编辑器录制上限：约 28 分钟（60 Hz），防止忘记停止把内存录满。
+    const MAX_REPLAY_FRAMES: usize = 100_000;
+
+    /// 开始录制：先记下当前位姿，之后每步调用 [`Self::record_replay_frame`]。
+    pub fn start_replay_recording(&mut self, world: &PhysicsWorld) {
+        let mut clip = ReplayClip::new(world.fixed_dt());
+        clip.record(world);
+        self.replay = Some(clip);
+        self.replay_recording = true;
+        self.replay_playing = false;
+        self.replay_time = 0.0;
+        self.status = "开始录制刚体回放（再点一次停止）".to_string();
+    }
+
+    /// 停止录制，返回帧数。
+    pub fn stop_replay_recording(&mut self) -> usize {
+        self.replay_recording = false;
+        let frames = self.replay_frame_count();
+        self.status = format!("回放录制完成：{frames} 帧");
+        frames
+    }
+
+    /// 录一帧当前物理位姿；同一个物理步只记一次（`step_once` 与每帧回调会重复调用）。
+    pub fn record_replay_frame(&mut self, world: &PhysicsWorld) {
+        if !self.replay_recording {
+            return;
+        }
+        let Some(clip) = self.replay.as_mut() else {
+            return;
+        };
+        if clip.frames().last().map(|f| f.step) == Some(world.step_count) {
+            return;
+        }
+        if clip.frames().len() >= Self::MAX_REPLAY_FRAMES {
+            self.replay_recording = false;
+            self.status = format!("回放录制达到 {0} 帧上限，已停止", Self::MAX_REPLAY_FRAMES);
+            return;
+        }
+        clip.record(world);
+    }
+
+    /// 已录帧数；没录过是 0。
+    pub fn replay_frame_count(&self) -> usize {
+        self.replay.as_ref().map_or(0, |c| c.frames().len())
+    }
+
+    /// 回放时长（秒）。
+    pub fn replay_duration(&self) -> f32 {
+        self.replay.as_ref().map_or(0.0, |c| c.duration())
+    }
+
+    /// 把回放的某个时刻写回物理世界；返回写回的刚体数。
+    ///
+    /// 只写位姿，不推进物理。UI 在播放时负责暂停引擎并同步场景。
+    pub fn apply_replay_at(&mut self, world: &mut PhysicsWorld, time: f32) -> usize {
+        let Some(clip) = self.replay.as_ref() else {
+            return 0;
+        };
+        let time = time.clamp(0.0, clip.duration());
+        let applied = clip.apply(world, time);
+        self.replay_time = time;
+        applied
+    }
+
+    /// 开始播放回放：暂停物理，写回第 0 帧。
+    pub fn play_replay(&mut self, engine: &mut Engine) -> bool {
+        if self.replay_frame_count() == 0 {
+            self.status = "还没有回放：先点「开始录制」".to_string();
+            return false;
+        }
+        self.replay_recording = false;
+        self.replay_was_paused = engine.paused;
+        engine.paused = true;
+        self.replay_playing = true;
+        let applied = self.apply_replay_at(&mut engine.world, 0.0);
+        Self::sync_replay_scene(engine);
+        self.status = format!("回放播放：{applied} 个刚体");
+        true
+    }
+
+    /// 暂停回放（保持当前帧）。
+    pub fn pause_replay(&mut self, engine: &mut Engine) {
+        if self.replay_playing {
+            self.replay_playing = false;
+            engine.paused = self.replay_was_paused;
+            self.status = "回放已暂停".to_string();
+        }
+    }
+
+    /// 停止回放：回到第 0 帧；只有确实在播放时才恢复原来的暂停状态。
+    pub fn stop_replay(&mut self, engine: &mut Engine) {
+        let was_playing = self.replay_playing;
+        self.replay_playing = false;
+        self.apply_replay_at(&mut engine.world, 0.0);
+        Self::sync_replay_scene(engine);
+        if was_playing {
+            engine.paused = self.replay_was_paused;
+        }
+        self.status = "回放已停止（回到起始位姿）".to_string();
+    }
+
+    /// 拖动时间轴：写回指定时刻（不改变播放/暂停状态）。
+    pub fn seek_replay(&mut self, engine: &mut Engine, time: f32) -> usize {
+        let applied = self.apply_replay_at(&mut engine.world, time);
+        Self::sync_replay_scene(engine);
+        applied
+    }
+
+    /// 每帧推进播放头；到末尾自动暂停。物理已暂停，这里只写位姿。
+    pub fn advance_replay(&mut self, engine: &mut Engine, dt: f32) {
+        if !self.replay_playing {
+            return;
+        }
+        // 播放期间物理必须暂停；用户从菜单点「播放」时也只改暂停状态，
+        // 不能让它把录制位姿和物理步进混在一起。
+        engine.paused = true;
+        let duration = self.replay_duration();
+        let step = dt * engine.time_scale;
+        let next = (self.replay_time + step.max(0.0)).min(duration);
+        self.apply_replay_at(&mut engine.world, next);
+        Self::sync_replay_scene(engine);
+        if next >= duration {
+            self.replay_playing = false;
+            engine.paused = self.replay_was_paused;
+            self.status = "回放播放结束".to_string();
+        }
+    }
+
+    /// 回放写回位姿后，立即把场景变换/流体表面同步过来，避免晚一帧。
+    fn sync_replay_scene(engine: &mut Engine) {
+        if !engine.scene.auto_sync_physics {
+            return;
+        }
+        engine.scene.sync_from_physics(&engine.world);
+        engine
+            .scene
+            .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
+    }
+
     /// 单步：不管当前是否暂停，都推进一个固定步长。
     pub fn step_once(&mut self, engine: &mut Engine) {
         let dt = engine.world.fixed_dt();
@@ -1194,6 +1348,7 @@ impl Doc {
             let world = &engine.world;
             engine.scene.sync_from_physics(world);
         }
+        self.record_replay_frame(&engine.world);
         self.status = format!("单步 {:.1} ms", dt * 1000.0);
     }
 

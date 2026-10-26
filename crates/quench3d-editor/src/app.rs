@@ -542,7 +542,11 @@ impl Inner {
         game.keys_enabled = keys_enabled;
         game.viewport_height =
             (self.viewport.rect.height() * full_output.pixels_per_point).max(1.0);
+        // 回放播放头在 tick 之前推进并写回位姿：这样本帧的 submit 用的是新位姿，
+        // 不会晚一帧。录制则只能在 tick 之后采（物理刚步进完）。
+        self.doc.advance_replay(&mut self.engine, dt);
         self.engine.tick(&mut game, dt);
+        self.doc.record_replay_frame(&self.engine.world);
         self.game = game;
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
         // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
@@ -2026,6 +2030,73 @@ mod preview_camera_tests {
             }),
             _ => false,
         })
+    }
+
+    /// 编辑器回放时间轴：在真实引擎上录制、播放、拖动、停止。
+    #[test]
+    fn replay_timeline_records_plays_and_restores_pause() {
+        if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+            return;
+        }
+        let gpu = match pollster::block_on(GpuContext::headless(
+            64,
+            64,
+            quench3d::render::GpuOptions::default(),
+        )) {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("跳过：没有可用的 wgpu 适配器（{e}）");
+                return;
+            }
+        };
+        let mut engine = Engine::new(
+            gpu,
+            &EngineConfig {
+                width: 64,
+                height: 64,
+                msaa_samples: 1,
+                ..Default::default()
+            },
+        );
+        engine.paused = true;
+        let dt = 1.0 / 60.0;
+        engine.world.set_fixed_dt(dt);
+        let handle = engine.world.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+                .position(vec3(0.0, 5.0, 0.0))
+                .build(),
+        );
+        let start = engine.world.body(handle).unwrap().transform().position.y;
+
+        let mut doc = Doc::new();
+        doc.start_replay_recording(&engine.world);
+        for _ in 0..4 {
+            engine.world.step(dt);
+            doc.record_replay_frame(&engine.world);
+        }
+        assert_eq!(doc.replay_frame_count(), 5);
+        doc.stop_replay_recording();
+
+        assert!(doc.play_replay(&mut engine));
+        assert!(engine.paused, "播放回放必须暂停物理");
+        assert_eq!(
+            engine.world.body(handle).unwrap().transform().position.y,
+            start
+        );
+
+        doc.seek_replay(&mut engine, 4.0 * dt);
+        let end = engine.world.body(handle).unwrap().transform().position.y;
+        assert!(end < start, "时间轴末帧应落下：{start} → {end}");
+
+        doc.advance_replay(&mut engine, 10.0);
+        assert!(!doc.replay_playing, "到末尾应自动暂停");
+        assert!(
+            engine.paused,
+            "播放结束后恢复播放前的暂停状态（原本是暂停）"
+        );
+        doc.stop_replay(&mut engine);
+        assert!(!doc.replay_playing);
+        assert!(engine.paused, "停止未播放的回放不应改变暂停状态");
     }
 
     /// 画中画回读不能改写主视图的状态栏统计。

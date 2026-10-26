@@ -229,6 +229,66 @@ fn top_bar(
                 {
                     doc.step_once(engine);
                 }
+                ui.separator();
+                if doc.replay_recording {
+                    if ui
+                        .button("停止录制")
+                        .on_hover_text("结束刚体位姿录制")
+                        .clicked()
+                    {
+                        doc.stop_replay_recording();
+                    }
+                } else if ui
+                    .button("录制回放")
+                    .on_hover_text(
+                        "从当前帧开始记录刚体位姿；每个渲染帧最多记一帧，卡顿合并物理步时只记末帧",
+                    )
+                    .clicked()
+                {
+                    if doc.replay_playing {
+                        doc.pause_replay(engine);
+                    }
+                    doc.start_replay_recording(&engine.world);
+                }
+                if doc.replay_frame_count() > 0 {
+                    let playing = doc.replay_playing;
+                    if ui
+                        .button(if playing {
+                            "暂停回放"
+                        } else {
+                            "播放回放"
+                        })
+                        .on_hover_text("回放时暂停物理，只写回刚体位姿")
+                        .clicked()
+                    {
+                        if playing {
+                            doc.pause_replay(engine);
+                        } else {
+                            doc.play_replay(engine);
+                        }
+                    }
+                    if ui
+                        .button("停止回放")
+                        .on_hover_text("回到回放第 0 帧并恢复原来的暂停状态")
+                        .clicked()
+                    {
+                        doc.stop_replay(engine);
+                    }
+                    let duration = doc.replay_duration().max(1e-3);
+                    let mut time = doc.replay_time;
+                    let changed = ui
+                        .add(
+                            egui::Slider::new(&mut time, 0.0..=duration)
+                                .show_value(true)
+                                .text("回放"),
+                        )
+                        .on_hover_text("拖动时间轴；回放只含刚体位姿")
+                        .changed();
+                    if changed {
+                        doc.seek_replay(engine, time);
+                    }
+                    ui.label(format!("{} 帧", doc.replay_frame_count()));
+                }
                 if ui
                     .button("重置")
                     .on_hover_text("所有物体回到基线状态（位置 / 朝向 / 速度）")

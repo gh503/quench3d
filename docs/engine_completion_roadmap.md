@@ -280,6 +280,10 @@
     `interpolated_transform_is_between_the_last_two_fixed_steps` 与
     `scene_can_render_interpolated_body_poses`；alpha=1/缺省关仍走旧位姿路径。
     边界：只插值刚体位姿，不插值流体粒子/泡沫/气泡/动画。
+  - [x] 编辑器回放时间轴：工具栏录制/播放/停止 + 拖动条；录制按物理步采刚体
+    位姿，播放暂停物理、写回后立即同步场景。回归
+    `replay_recording_captures_steps_and_seeks`、`replay_timeline_records_plays_and_restores_pause`。
+    边界：每渲染帧最多一帧（卡顿合并步只记末帧），只录刚体位姿，不进场景文件。
 - [ ] 音频/输入/脚本在桌面与 Web 两端可达；移动端触屏。
 - [ ] UI/文字系统或明确稳定的宿主接口（HUD 不靠第三方示例）。
 
