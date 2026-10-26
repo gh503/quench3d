@@ -438,6 +438,24 @@ impl Game for Demo {
 
 > 完整可运行版本见 `crates/quench3d/examples/hello_cube.rs`。
 
+场景生命周期回调（可选；不装时零开销）：物体加入/删除/清空会主动调用，
+不再需要每帧扫描 `objects` 做差分。回调里只读，不要在回调里再改场景。
+
+```rust
+struct Logger;
+impl SceneHooks for Logger {
+    fn on_object_added(&mut self, index: usize, object: &SceneObject) {
+        println!("+{index} {}", object.name);
+    }
+    fn on_object_removed(&mut self, index: usize, object: &SceneObject) {
+        println!("-{index} {}", object.name);
+    }
+}
+engine.scene.set_hooks(Some(Box::new(Logger)));
+```
+
+这是**宿主回调**，不是脚本语言/热重载；逐属性修改、物理事件仍走各自 API。
+
 ### 3.2 场景与资源
 
 ```rust

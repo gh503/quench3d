@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+- **场景生命周期回调**：`SceneHooks` + `Scene::set_hooks/has_hooks`。物体加入、删除
+  与 `clear` 会主动回调（带新/旧下标与只读物体），宿主不必每帧扫描 `objects` 做差分；
+  缺省不装时零回调、零分配。这是宿主回调，不是脚本语言/热重载。回归
+  `scene_hooks_fire_for_add_remove_and_clear`（含卸载后不再回调）。
+
 - **摄像头深度-only 重建**：采集端只写深度（`--no-points`）时，编辑器用
   `latest.json` 的 `intrinsics` 与 `depth.point_step/z_near/z_far/origin` 反投影出
   同一套点云，仍可显示/累积/生成网格；缺内参时保持 `points = None`，声明了

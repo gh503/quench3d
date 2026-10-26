@@ -145,7 +145,9 @@ pub use winit;
 
 pub use app::{render_offscreen, run, App, CameraMode, DebugOptions, Engine, EngineConfig, Game};
 pub use input::{Input, MouseButton};
-pub use scene::{AssetCache, FiredAnimationEvent, Scene, SceneAnimationEvent, SceneObject};
+pub use scene::{
+    AssetCache, FiredAnimationEvent, Scene, SceneAnimationEvent, SceneHooks, SceneObject,
+};
 
 pub use app::{
     render_offscreen_stats, render_sequence, render_sequence_with_game, write_png, SequenceFrame,
@@ -167,7 +169,7 @@ pub mod prelude {
     pub use crate::clock::now_seconds;
     pub use crate::input::{Input, MouseButton};
     pub use crate::scene::{
-        AssetCache, FiredAnimationEvent, Scene, SceneAnimationEvent, SceneObject,
+        AssetCache, FiredAnimationEvent, Scene, SceneAnimationEvent, SceneHooks, SceneObject,
     };
     pub use quench3d_audio::{AudioClip, AudioListener, AudioMixer, AudioSource};
     pub use quench3d_math::{

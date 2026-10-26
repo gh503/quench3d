@@ -1256,6 +1256,22 @@ pub struct ModelLodGroup {
     pub active: usize,
 }
 
+/// 场景生命周期回调。
+///
+/// 宿主实现这个 trait 并 [`Scene::set_hooks`] 后，物体加入/删除与清空会**主动回调**，
+/// 不再需要每帧扫描 `objects` 做差分。回调拿到的是刚变更后的下标/物体（只读），
+/// 不能在回调里再改场景；需要改场景请记下事件，回到宿主循环里处理。
+///
+/// 缺省不装 hooks：所有方法行为与旧版本一致，不分配、不回调。
+pub trait SceneHooks {
+    /// 物体加入后调用；`index` 是它在 `Scene::objects` 里的新下标。
+    fn on_object_added(&mut self, _index: usize, _object: &SceneObject) {}
+    /// 物体删除后调用；`index` 是删除前的下标，后面的物体已经前移。
+    fn on_object_removed(&mut self, _index: usize, _object: &SceneObject) {}
+    /// `Scene::clear` 清空全部物体后调用一次。
+    fn on_scene_cleared(&mut self) {}
+}
+
 /// 场景。
 pub struct Scene {
     /// 全部物体。
@@ -1279,6 +1295,8 @@ pub struct Scene {
     pub particles: Vec<ParticleSystem>,
     /// 本帧触发、等待宿主导出的动画事件（`take_animation_events` 清空）。
     fired_animation_events: Vec<FiredAnimationEvent>,
+    /// 可选的宿主生命周期回调。
+    hooks: Option<Box<dyn SceneHooks>>,
 }
 
 impl Default for Scene {
@@ -1299,6 +1317,7 @@ impl Scene {
             lods: Vec::new(),
             particles: Vec::new(),
             fired_animation_events: Vec::new(),
+            hooks: None,
         }
     }
 
@@ -1309,6 +1328,20 @@ impl Scene {
 
     /// 添加并命名。
     pub fn add_named(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        transform: Transform,
+        name: &str,
+    ) -> usize {
+        let index = self.push_named(mesh, material, transform, name);
+        self.notify_added(index);
+        index
+    }
+
+    /// 只登记物体、不触发回调；由公开的 add 方法在配置完附加字段后调
+    /// [`Scene::notify_added`]，保证宿主看到的是最终状态。
+    fn push_named(
         &mut self,
         mesh: MeshId,
         material: MaterialId,
@@ -1338,6 +1371,22 @@ impl Scene {
             fluid_foam: None,
         });
         index
+    }
+
+    fn notify_added(&mut self, index: usize) {
+        if let Some(hooks) = self.hooks.as_mut() {
+            hooks.on_object_added(index, &self.objects[index]);
+        }
+    }
+
+    /// 装入生命周期回调（替换旧的）；传 `None` 可卸载。
+    pub fn set_hooks(&mut self, hooks: Option<Box<dyn SceneHooks>>) {
+        self.hooks = hooks;
+    }
+
+    /// 是否装了生命周期回调。
+    pub fn has_hooks(&self) -> bool {
+        self.hooks.is_some()
     }
 
     /// 添加一个 CPU 粒子发射器；每个粒子是一个独立的公告板场景物体。
@@ -1422,7 +1471,7 @@ impl Scene {
         for i in 0..count {
             let mut offset = particle_offset(&mut system_state.seed, desc.shape, radius, box_size);
             offset += desc.position;
-            let index = self.add_named(
+            let index = self.push_named(
                 mesh,
                 material,
                 Transform::new(offset, Quat::IDENTITY, Vec3::splat(size)),
@@ -1435,6 +1484,7 @@ impl Scene {
                 age: particle_rand(&mut system_state.seed) * lifetime,
                 velocity: desc.velocity + particle_point(&mut system_state.seed, spread),
             });
+            self.notify_added(index);
         }
         self.particles.push(system_state);
         system
@@ -1509,7 +1559,7 @@ impl Scene {
         for i in current..target {
             let mut offset = particle_offset(&mut seed, shape, radius, box_size);
             offset += position;
-            let index = self.add_named(
+            let index = self.push_named(
                 mesh,
                 material,
                 Transform::new(offset, Quat::IDENTITY, Vec3::splat(size)),
@@ -1523,6 +1573,7 @@ impl Scene {
                 age: particle_rand(&mut seed) * lifetime,
                 velocity,
             });
+            self.notify_added(index);
         }
         self.particles[system].seed = seed;
     }
@@ -1621,8 +1672,9 @@ impl Scene {
         name: &str,
     ) -> usize {
         let transform = world.body(body).map(|b| b.transform()).unwrap_or_default();
-        let index = self.add_named(mesh, material, transform, name);
+        let index = self.push_named(mesh, material, transform, name);
         self.objects[index].body = Some(body);
+        self.notify_added(index);
         index
     }
 
@@ -1636,12 +1688,13 @@ impl Scene {
     ) -> usize {
         let radius = spec.radius.max(1e-4);
         let transform = Transform::new(spec.position, Quat::IDENTITY, Vec3::splat(radius * 2.0));
-        let index = self.add_named(mesh, material, transform, name);
+        let index = self.push_named(mesh, material, transform, name);
         self.objects[index].fluid_particle = Some(FluidParticleVisual {
             fluid: spec.fluid,
             particle: spec.particle,
             radius,
         });
+        self.notify_added(index);
         index
     }
 
@@ -1657,7 +1710,7 @@ impl Scene {
     ) -> usize {
         let radius = spec.radius.max(1e-4);
         let transform = Transform::new(spec.position, Quat::IDENTITY, Vec3::splat(radius * 2.0));
-        let index = self.add_named(mesh, material, transform, name);
+        let index = self.push_named(mesh, material, transform, name);
         self.objects[index].fluid_foam = Some(FluidFoamVisual {
             fluid: spec.fluid,
             index: spec.index,
@@ -1665,6 +1718,7 @@ impl Scene {
         });
         self.objects[index].visible = false;
         self.objects[index].cast_shadows = false;
+        self.notify_added(index);
         index
     }
 
@@ -1681,12 +1735,13 @@ impl Scene {
             Quat::IDENTITY,
             Vec3::new(spec.half_size.x * 2.0, 1.0, spec.half_size.y * 2.0),
         );
-        let index = self.add_named(mesh, material, transform, name);
+        let index = self.push_named(mesh, material, transform, name);
         self.objects[index].fluid_surface = Some(FluidSurfaceVisual {
             fluid: spec.fluid,
             half_size: spec.half_size,
             ..FluidSurfaceVisual::default()
         });
+        self.notify_added(index);
         index
     }
 
@@ -1704,7 +1759,7 @@ impl Scene {
         iso: f32,
         name: &str,
     ) -> usize {
-        let index = self.add_named(placeholder, material, Transform::IDENTITY, name);
+        let index = self.push_named(placeholder, material, Transform::IDENTITY, name);
         self.objects[index].fluid_surface = Some(FluidSurfaceVisual {
             fluid,
             half_size: Vec2::splat(1.0),
@@ -1714,6 +1769,7 @@ impl Scene {
             revision: u64::MAX,
         });
         self.objects[index].cast_shadows = false;
+        self.notify_added(index);
         index
     }
 
@@ -1794,6 +1850,9 @@ impl Scene {
         self.animations.clear();
         self.particles.clear();
         self.fired_animation_events.clear();
+        if let Some(hooks) = self.hooks.as_mut() {
+            hooks.on_scene_cleared();
+        }
     }
 
     /// 物体数量。
@@ -2799,6 +2858,9 @@ impl Scene {
             }
         }
         self.particles.retain(|system| !system.objects.is_empty());
+        if let Some(hooks) = self.hooks.as_mut() {
+            hooks.on_object_removed(index, &removed);
+        }
         Some(removed)
     }
 
@@ -5045,6 +5107,101 @@ mod particle_tests {
         assert_eq!(scene.particles[0].lifetime, 1.0, "非法寿命回退");
         assert_eq!(scene.particles[0].size, 0.1, "非法尺寸回退");
     }
+    #[derive(Default)]
+    struct HookEvents {
+        added: Vec<(usize, String)>,
+        removed: Vec<(usize, String)>,
+        cleared: usize,
+    }
+
+    struct Recorder(std::rc::Rc<std::cell::RefCell<HookEvents>>);
+
+    impl SceneHooks for Recorder {
+        fn on_object_added(&mut self, index: usize, object: &SceneObject) {
+            self.0.borrow_mut().added.push((index, object.name.clone()));
+        }
+        fn on_object_removed(&mut self, index: usize, object: &SceneObject) {
+            self.0
+                .borrow_mut()
+                .removed
+                .push((index, object.name.clone()));
+        }
+        fn on_scene_cleared(&mut self) {
+            self.0.borrow_mut().cleared += 1;
+        }
+    }
+
+    #[test]
+    fn scene_hooks_fire_for_add_remove_and_clear() {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(HookEvents::default()));
+        let mut scene = Scene::new();
+        scene.set_hooks(Some(Box::new(Recorder(events.clone()))));
+        assert!(scene.has_hooks());
+
+        scene.add_named(0, 0, Transform::IDENTITY, "甲");
+        scene.add_named(0, 0, Transform::IDENTITY, "乙");
+        {
+            let e = events.borrow();
+            assert_eq!(
+                e.added,
+                vec![(0, "甲".to_string()), (1, "乙".to_string())],
+                "加入回调必须带新下标与名字"
+            );
+        }
+
+        let removed = scene.remove(0).expect("删掉甲");
+        assert_eq!(removed.name, "甲");
+        assert_eq!(
+            events.borrow().removed,
+            vec![(0, "甲".to_string())],
+            "删除回调拿到删除前下标"
+        );
+
+        scene.clear();
+        assert_eq!(events.borrow().cleared, 1);
+        assert!(scene.objects.is_empty());
+
+        // 卸载后不再回调，场景行为不变。
+        scene.set_hooks(None);
+        assert!(!scene.has_hooks());
+        scene.add_named(0, 0, Transform::IDENTITY, "丙");
+        assert_eq!(events.borrow().added.len(), 2);
+    }
+
+    struct BodyProbe {
+        saw_body: bool,
+    }
+
+    impl SceneHooks for BodyProbe {
+        fn on_object_added(&mut self, _index: usize, object: &SceneObject) {
+            self.saw_body = object.body.is_some();
+        }
+    }
+
+    #[test]
+    fn hook_sees_the_body_when_add_with_body_finishes() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_builder(quench3d_physics::BodyBuilder::dynamic(
+            quench3d_physics::Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+        ));
+        let mut scene = Scene::new();
+        let probe = std::rc::Rc::new(std::cell::RefCell::new(BodyProbe { saw_body: false }));
+        struct Shared(std::rc::Rc<std::cell::RefCell<BodyProbe>>);
+        impl SceneHooks for Shared {
+            fn on_object_added(&mut self, index: usize, object: &SceneObject) {
+                self.0.borrow_mut().on_object_added(index, object);
+            }
+        }
+        scene.set_hooks(Some(Box::new(Shared(probe.clone()))));
+        scene.add_with_body(0, 0, body, &world, "箱子");
+        assert!(
+            probe.borrow().saw_body,
+            "add_with_body 的回调必须在 body 设置之后才触发"
+        );
+    }
+
     #[test]
     fn removing_an_object_before_the_proxies_keeps_their_indices_valid() {
         let mut scene = Scene::new();

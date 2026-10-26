@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**990 通过 / 0 失败 / 5 ignored**
-- wasm：**13,762,947 字节**
+- 测试：**992 通过 / 0 失败 / 5 ignored**
+- wasm：**13,761,247 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -131,6 +131,8 @@
 - [x] 音频子系统：WAV 解码、混音、3D 衰减/声像、无设备离线测试
   （`quench3d-audio`，`Engine::audio`；真实设备输出仍由宿主适配）。
 - [ ] 脚本层：宿主可注册回调，场景生命周期钩子不再只能轮询。
+  - [x] 场景生命周期回调 `SceneHooks`（加入/删除/清空，缺省不装零开销；
+    回调只读）。不是脚本语言/热重载。回归 `scene_hooks_fire_for_add_remove_and_clear`。
 
 ### M4 物理精度与规模（8–12 人月）
 
