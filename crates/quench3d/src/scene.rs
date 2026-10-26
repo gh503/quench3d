@@ -87,6 +87,8 @@ pub struct SceneObject {
     ///
     /// 每帧读 `Fluid::foam()` 的第 `index` 颗；数量不够时隐藏，不参与物理。
     pub fluid_foam: Option<FluidFoamVisual>,
+    /// 粒子流体的**气泡**可视绑定（`None` = 普通物体）。
+    pub fluid_bubble: Option<FluidBubbleVisual>,
 }
 
 /// 添加粒子物体时的参数（避免 8 个位置参数）。
@@ -96,6 +98,19 @@ pub struct FluidParticleSpec {
     pub fluid: usize,
     /// 粒子下标。
     pub particle: usize,
+    /// 可视半径（米）。
+    pub radius: f32,
+    /// 初始位置。
+    pub position: Vec3,
+}
+
+/// 添加气泡物体时的参数。
+#[derive(Clone, Copy, Debug)]
+pub struct FluidBubbleSpec {
+    /// 流体下标。
+    pub fluid: usize,
+    /// 气泡下标（与 `Fluid::bubbles()` 同序）。
+    pub index: usize,
     /// 可视半径（米）。
     pub radius: f32,
     /// 初始位置。
@@ -341,6 +356,17 @@ pub struct FluidFoamVisual {
     /// 流体下标。
     pub fluid: usize,
     /// 泡沫下标（与 `Fluid::foam()` 同序）。
+    pub index: usize,
+    /// 可视半径（米）。
+    pub radius: f32,
+}
+
+/// 粒子流体的气泡可视绑定。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FluidBubbleVisual {
+    /// 流体下标。
+    pub fluid: usize,
+    /// 气泡下标（与 `Fluid::bubbles()` 同序）。
     pub index: usize,
     /// 可视半径（米）。
     pub radius: f32,
@@ -1369,6 +1395,7 @@ impl Scene {
             fluid_particle: None,
             fluid_surface: None,
             fluid_foam: None,
+            fluid_bubble: None,
         });
         index
     }
@@ -1712,6 +1739,28 @@ impl Scene {
         let transform = Transform::new(spec.position, Quat::IDENTITY, Vec3::splat(radius * 2.0));
         let index = self.push_named(mesh, material, transform, name);
         self.objects[index].fluid_foam = Some(FluidFoamVisual {
+            fluid: spec.fluid,
+            index: spec.index,
+            radius,
+        });
+        self.objects[index].visible = false;
+        self.objects[index].cast_shadows = false;
+        self.notify_added(index);
+        index
+    }
+
+    /// 添加一个跟随流体气泡的物体（不参与物理）。
+    pub fn add_fluid_bubble(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        spec: FluidBubbleSpec,
+        name: &str,
+    ) -> usize {
+        let radius = spec.radius.max(1e-4);
+        let transform = Transform::new(spec.position, Quat::IDENTITY, Vec3::splat(radius * 2.0));
+        let index = self.push_named(mesh, material, transform, name);
+        self.objects[index].fluid_bubble = Some(FluidBubbleVisual {
             fluid: spec.fluid,
             index: spec.index,
             radius,
@@ -2612,6 +2661,24 @@ impl Scene {
                 }
                 continue;
             }
+            if let Some(visual) = obj.fluid_bubble {
+                let bubble = world
+                    .fluids()
+                    .get(visual.fluid)
+                    .and_then(|f| f.bubbles().get(visual.index));
+                if let Some(b) = bubble {
+                    obj.visible = true;
+                    obj.transform.position = b.position;
+                    obj.transform.rotation = Quat::IDENTITY;
+                    // 寿命末段缩小；气泡比泡沫更透明/更小。
+                    let fade = ((b.life - b.age) / b.life.max(1e-3)).clamp(0.2, 1.0);
+                    obj.transform.scale = Vec3::splat(visual.radius * 2.0 * fade.sqrt());
+                    obj.color = Vec4::new(0.82, 0.93, 1.0, 1.0);
+                } else {
+                    obj.visible = false;
+                }
+                continue;
+            }
             if let Some(visual) = obj.fluid_particle {
                 if let Some(fluid) = world.fluids().get(visual.fluid) {
                     if let Some(p) = fluid.particles().get(visual.particle) {
@@ -3359,6 +3426,47 @@ mod tests {
         }
         scene.sync_from_physics(&world);
         assert!(!scene.objects[index].visible, "泡沫过期后应隐藏");
+    }
+
+    #[test]
+    fn bubble_visual_follows_fluid_bubbles() {
+        use quench3d_physics::FluidDesc;
+
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_fluid(FluidDesc {
+            center: Vec3::new(0.0, 1.0, 0.0),
+            half_extents: Vec3::splat(0.2),
+            spacing: 0.1,
+            radius: 0.05,
+            bubbles: true,
+            bubble_rate: 120.0,
+            max_bubbles: 4,
+            emit_position: Vec3::new(0.0, 0.5, 0.0),
+            emit_radius: 0.05,
+            ..FluidDesc::default()
+        });
+        for _ in 0..12 {
+            world.step(1.0 / 60.0);
+        }
+        let bubble = world.fluids()[0].bubbles()[0];
+        let mut scene = Scene::new();
+        let index = scene.add_fluid_bubble(
+            1u32,
+            1u32,
+            FluidBubbleSpec {
+                fluid: 0,
+                index: 0,
+                radius: 0.03,
+                position: Vec3::ZERO,
+            },
+            "气泡",
+        );
+        assert!(!scene.objects[index].visible, "初始应隐藏");
+        scene.sync_from_physics(&world);
+        assert!(scene.objects[index].visible, "有气泡时应显示");
+        assert_eq!(scene.objects[index].transform.position, bubble.position);
+        assert!(!scene.objects[index].cast_shadows);
     }
 
     #[test]

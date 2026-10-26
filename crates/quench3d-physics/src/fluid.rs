@@ -94,6 +94,22 @@ pub struct FluidDesc {
     /// 只作用于粒子碰到动态/静态刚体时的**切向**相对速度；法向冲量仍按原逻辑
     /// 反推。打开后水会拖着刚体走，也会被刚体表面拖慢。
     pub contact_friction: f32,
+    /// 是否模拟气泡/气相（缺省 false；旧场景逐位不变）。
+    ///
+    /// 气泡是**轻质气相粒子**：受反向重力浮升、与刚体/地面碰撞、把液体粒子
+    /// 从气泡体积里推开，到液面/寿命结束消失。它不参与 PBF 密度约束，也还没有
+    /// 气泡体积分数/相变，所以**不是**严格的两相流；但会排开液体并对液体做功。
+    pub bubbles: bool,
+    /// 气泡生成速率（颗/秒），缺省 20。
+    pub bubble_rate: f32,
+    /// 气泡上限，缺省 128。
+    pub max_bubbles: usize,
+    /// 气泡半径（米），缺省 0.03。
+    pub bubble_radius: f32,
+    /// 浮升加速度相对重力的倍数，缺省 1.8。
+    pub bubble_buoyancy: f32,
+    /// 气泡阻尼（1/s），缺省 2.0。
+    pub bubble_drag: f32,
 }
 
 impl Default for FluidDesc {
@@ -123,6 +139,12 @@ impl Default for FluidDesc {
             max_foam: 256,
             particle_collision: false,
             contact_friction: 0.0,
+            bubbles: false,
+            bubble_rate: 20.0,
+            max_bubbles: 128,
+            bubble_radius: 0.03,
+            bubble_buoyancy: 1.8,
+            bubble_drag: 2.0,
         }
     }
 }
@@ -205,6 +227,8 @@ pub struct FluidStats {
     pub contacts: usize,
     /// 当前泡沫/飞沫粒子数（0 时报告省略）。
     pub foam: usize,
+    /// 当前气泡数（0 时报告省略）。
+    pub bubbles: usize,
 }
 
 /// 粒子与刚体的一个接触（求解最后一步记录，用于两-way 反冲）。
@@ -227,6 +251,21 @@ pub enum FoamKind {
     Spray,
     /// 泡沫：贴着水面，轻微上浮。
     Foam,
+}
+
+/// 一颗气泡/气相粒子。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bubble {
+    /// 世界位置。
+    pub position: Vec3,
+    /// 速度。
+    pub velocity: Vec3,
+    /// 半径（米）。
+    pub radius: f32,
+    /// 已存活时间。
+    pub age: f32,
+    /// 寿命；到点后消失。
+    pub life: f32,
 }
 
 /// 一颗被动泡沫/飞沫粒子（只用于渲染，不参与 PBF 求解）。
@@ -281,6 +320,12 @@ pub struct Fluid {
     foam_accum: f32,
     /// 已经生成的泡沫序号（确定性轮转起点）。
     foam_emitted: u64,
+    /// 气泡/气相粒子。
+    bubbles: Vec<Bubble>,
+    /// 气泡生成不足一颗的累积量。
+    bubble_accum: f32,
+    /// 已经生成的气泡序号（确定性轮转起点）。
+    bubble_emitted: u64,
 }
 
 impl Fluid {
@@ -312,6 +357,9 @@ impl Fluid {
             foam: Vec::new(),
             foam_accum: 0.0,
             foam_emitted: 0,
+            bubbles: Vec::new(),
+            bubble_accum: 0.0,
+            bubble_emitted: 0,
         };
         fluid.spawn();
         Some(fluid)
@@ -335,6 +383,11 @@ impl Fluid {
     /// 当前泡沫/飞沫粒子（只读；最多 `desc.max_foam` 颗）。
     pub fn foam(&self) -> &[FoamParticle] {
         &self.foam
+    }
+
+    /// 当前气泡/气相粒子（只读；最多 `desc.max_bubbles` 颗）。
+    pub fn bubbles(&self) -> &[Bubble] {
+        &self.bubbles
     }
 
     /// 用当前粒子提取连续表面（Surface Nets）。
@@ -508,11 +561,13 @@ impl Fluid {
         }
         // 发射要在 n == 0 的早退之前：水被排空后还能继续补水。
         self.emit(dt);
+        self.emit_bubbles(dt);
         let n = self.positions.len();
         if n == 0 {
-            // 水排空后泡沫还要继续飞/淡出，不能在这里把统计和泡沫一起清掉。
+            // 水排空后泡沫/气泡还要继续飞/淡出，不能在这里把统计和它们一起清掉。
             let foam_radius = (self.desc.radius * 0.5).max(0.005);
             self.update_foam(gravity, dt, bodies, foam_radius);
+            self.update_bubbles(gravity, dt, bodies);
             self.recompute_stats();
             self.revision = self.revision.wrapping_add(1);
             return;
@@ -807,6 +862,7 @@ impl Fluid {
         self.spawn_foam(dt);
         let foam_radius = (self.desc.radius * 0.5).max(0.005);
         self.update_foam(gravity, dt, bodies, foam_radius);
+        self.update_bubbles(gravity, dt, bodies);
         self.recompute_stats();
         self.revision = self.revision.wrapping_add(1);
     }
@@ -863,6 +919,123 @@ impl Fluid {
             spawned += 1;
         }
         self.foam_accum -= spawned as f32;
+    }
+
+    /// 连续生成气泡：按 `bubble_rate` 累积，位置用黄金角/确定轮转撒在发射盘内。
+    fn emit_bubbles(&mut self, dt: f32) {
+        let d = &self.desc;
+        if !d.bubbles || d.bubble_rate <= 0.0 || d.max_bubbles == 0 || dt <= 0.0 {
+            return;
+        }
+        self.bubble_accum += d.bubble_rate * dt;
+        let radius = d.bubble_radius.max(0.005);
+        let mut spawned = 0usize;
+        while self.bubble_accum >= 1.0 && self.bubbles.len() < d.max_bubbles {
+            let k = self.bubble_emitted;
+            let angle = k as f32 * 2.399_963_2;
+            let ring = ((k % 8) as f32 + 0.5) / 8.0;
+            let r = d.emit_radius.max(0.0) * ring.sqrt();
+            let position = d.emit_position + Vec3::new(angle.cos() * r, 0.0, angle.sin() * r);
+            let velocity = d.emit_velocity + Vec3::Y * 0.5;
+            self.bubbles.push(Bubble {
+                position,
+                velocity,
+                radius,
+                age: 0.0,
+                life: 4.0,
+            });
+            self.bubble_emitted = self.bubble_emitted.wrapping_add(1);
+            self.bubble_accum -= 1.0;
+            spawned += 1;
+        }
+        if spawned == 0 && self.bubble_accum > 1.0 {
+            // 上限已满：丢掉这一颗的累积，避免上限放开时一次爆出一大串。
+            self.bubble_accum = self.bubble_accum.fract();
+        }
+    }
+
+    /// 气泡浮升/阻尼/刚体碰撞/排开液体。
+    ///
+    /// 气泡不是 PBF 粒子：不参与密度约束，也不会被液体压力推回去。但每步会把
+    /// 与气泡体积重叠的液体粒子推开，并给它们一点速度，所以气泡会**排开液体**、
+    /// 在液面破裂。`life` 到点或浮出液面就消失。
+    fn update_bubbles(&mut self, gravity: Vec3, dt: f32, bodies: &[BodySlot]) {
+        if self.bubbles.is_empty() || !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        let buoyancy = self.desc.bubble_buoyancy.max(0.0);
+        let drag = self.desc.bubble_drag.max(0.0);
+        let particle_radius = self.desc.radius.max(0.0);
+        let up = if gravity.length_squared() > 1e-6 {
+            -gravity.normalize()
+        } else {
+            Vec3::Y
+        };
+        let accel = up * (9.81 * buoyancy);
+        let surface = if !self.positions.is_empty() {
+            let mut max_y = f32::NEG_INFINITY;
+            for p in &self.positions {
+                max_y = max_y.max(p.y);
+            }
+            (max_y + self.desc.radius * 0.5).max(self.desc.center.y)
+        } else {
+            self.desc.center.y + self.desc.half_extents.y
+        };
+        let mut keep = 0usize;
+        for index in 0..self.bubbles.len() {
+            let mut b = self.bubbles[index];
+            b.age += dt;
+            if b.age >= b.life {
+                continue;
+            }
+            let prev = b.position;
+            b.velocity = (b.velocity + accel * dt) * (1.0 - drag * dt).clamp(0.0, 1.0);
+            b.velocity = b.velocity.clamp_length(10.0);
+            b.position += b.velocity * dt;
+            let (corrected, contact) =
+                collide_position(prev, b.position, bodies, b.radius.max(0.005));
+            b.position = corrected;
+            if let Some(contact) = contact {
+                let vn = b.velocity.dot(contact.normal);
+                if vn < 0.0 {
+                    b.velocity -= contact.normal * (vn * 1.05);
+                }
+                let vn_after = b.velocity.dot(contact.normal);
+                let tangential = b.velocity - contact.normal * vn_after;
+                b.velocity = contact.normal * vn_after + tangential * 0.94;
+            }
+            // 排开液体：气泡体积内的粒子沿径向推出，并给一点速度；气泡受反作用。
+            if !self.positions.is_empty() {
+                let reach = b.radius + particle_radius * 0.5;
+                for i in 0..self.positions.len() {
+                    let d = self.positions[i] - b.position;
+                    let dist = d.length();
+                    if dist >= reach || dist <= EPS {
+                        continue;
+                    }
+                    let n = d / dist;
+                    let push = (reach - dist) * 0.5;
+                    self.positions[i] += n * push;
+                    self.velocities[i] += n * (push / dt * 0.2);
+                    b.position -= n * (push * 0.05);
+                }
+            }
+            if b.position.y > surface + b.radius {
+                // 到达液面：破裂消失（后续可视化可以在这里生成泡沫）。
+                continue;
+            }
+            if let Some(y) = self.desc.drain_y {
+                if b.position.y < y {
+                    continue;
+                }
+            }
+            if !b.position.is_finite() || !b.velocity.is_finite() {
+                continue;
+            }
+            self.bubbles[keep] = b;
+            keep += 1;
+        }
+        self.bubbles.truncate(keep);
     }
 
     /// 被动泡沫的寿命/重力/阻尼 + **与刚体碰撞**。
@@ -966,6 +1139,7 @@ impl Fluid {
         if n == 0 {
             self.stats = FluidStats {
                 foam: self.foam.len(),
+                bubbles: self.bubbles.len(),
                 ..FluidStats::default()
             };
             return;
@@ -993,6 +1167,7 @@ impl Fluid {
             max_y,
             contacts: self.stats_contacts,
             foam: self.foam.len(),
+            bubbles: self.bubbles.len(),
         };
     }
 }
@@ -1186,6 +1361,95 @@ mod tests {
             "泡沫不能穿过地板；min_y = {min_y}（{} 颗）",
             foam.len()
         );
+    }
+
+    #[test]
+    fn bubbles_rise_and_do_not_fall_through_the_floor() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        let mut d = box_desc();
+        d.bubbles = true;
+        d.bubble_rate = 30.0;
+        d.max_bubbles = 16;
+        d.emit_position = Vec3::new(0.0, 0.5, 0.0);
+        d.emit_radius = 0.1;
+        d.drain_y = Some(-1.0);
+        world.add_fluid(d).expect("参数合法");
+        for _ in 0..120 {
+            world.step(1.0 / 60.0);
+        }
+        let fluid = &world.fluids()[0];
+        let bubbles = fluid.bubbles();
+        assert!(!bubbles.is_empty(), "开启气泡后应生成气泡");
+        assert!(bubbles.len() <= 16, "气泡不能超过上限：{}", bubbles.len());
+        let min_y = bubbles
+            .iter()
+            .map(|b| b.position.y)
+            .fold(f32::INFINITY, f32::min);
+        let max_speed = bubbles
+            .iter()
+            .map(|b| b.velocity.length())
+            .fold(0.0f32, f32::max);
+        assert!(
+            min_y > -0.1,
+            "气泡不能穿过地板：min_y = {min_y}（{} 颗）",
+            bubbles.len()
+        );
+        assert!(
+            bubbles
+                .iter()
+                .all(|b| b.position.is_finite() && b.velocity.is_finite()),
+            "气泡位置/速度必须有限"
+        );
+        assert!(max_speed < 20.0, "气泡速度失控：{max_speed}");
+        assert_eq!(fluid.stats().bubbles, bubbles.len());
+    }
+
+    #[test]
+    fn bubbles_are_off_by_default() {
+        let fluid = Fluid::new(box_desc()).unwrap();
+        assert!(fluid.bubbles().is_empty());
+        assert_eq!(fluid.stats().bubbles, 0);
+    }
+
+    #[test]
+    fn bubbles_rise_and_displace_liquid_particles() {
+        fn run(bubbles: bool) -> (Vec<Vec3>, f32) {
+            let mut world = PhysicsWorld::new();
+            world.set_fixed_dt(1.0 / 60.0);
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+            );
+            let mut d = box_desc();
+            d.bubbles = bubbles;
+            d.bubble_rate = 400.0;
+            d.max_bubbles = 32;
+            d.emit_position = Vec3::new(0.0, 0.8, 0.0);
+            d.emit_radius = 0.2;
+            world.add_fluid(d).expect("参数合法");
+            for _ in 0..60 {
+                world.step(1.0 / 60.0);
+            }
+            let fluid = &world.fluids()[0];
+            let max_bubble_y = fluid
+                .bubbles()
+                .iter()
+                .map(|b| b.position.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            (fluid.particles().to_vec(), max_bubble_y)
+        }
+        let (without, _) = run(false);
+        let (with, bubble_y) = run(true);
+        assert!(bubble_y > 0.8, "气泡必须向上浮：最高 y = {bubble_y}");
+        let moved = with
+            .iter()
+            .zip(&without)
+            .map(|(a, b)| (*a - *b).length())
+            .fold(0.0f32, f32::max);
+        assert!(moved > 1e-3, "气泡体积内的液体会被排开；最大位移 = {moved}");
     }
 
     #[test]

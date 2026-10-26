@@ -1144,7 +1144,9 @@ NaN 刚体  : 0
   "emit_rate": 0, "emit_position": [0,1,0], "emit_radius": 0.1,
   "emit_velocity": [0,1,0], "emit_spread": 0.0, "drag": 6, "iterations": 4,
   "max_particles": 4000, "foam": false, "contact_friction": 0,
-  "particle_collision": false,
+  "particle_collision": false, "bubbles": false,
+  "bubble_rate": 20, "max_bubbles": 128, "bubble_radius": 0.03,
+  "bubble_buoyancy": 1.8, "bubble_drag": 2.0,
   "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
@@ -1165,8 +1167,15 @@ NaN 刚体  : 0
   粒子直径的邻居沿连线推开，再重新投影到刚体边界；低迭代/自由表面下不会互相重叠，
   代价是每步一次邻居遍历。`contact_friction`（0~1，缺省 0 = 关闭）给粒子与刚体接触加切向库仑摩擦：
   水会拖着动态刚体走，也会被静态地面拖慢；静置接触用重力法向支持力近似载荷。
+  `bubbles = true`（缺省 false）生成**轻质气泡/气相粒子**：反向重力浮升、阻尼、
+  与刚体/地面碰撞，并把气泡体积内的液体粒子径向推开（气泡受反作用）；浮出液面或
+  寿命结束消失。`bubble_rate`（颗/秒，缺省 20）、`max_bubbles`（缺省 128，上限
+  4096）、`bubble_radius`（缺省 0.03）、`bubble_buoyancy`（缺省 1.8 倍重力）、
+  `bubble_drag`（缺省 2）。CLI 把气泡画成低模球，`simulate` 报告 `bubbles` 计数
+  （0 时省略）。**不是**严格两相流：气泡不参与 PBF 密度约束，没有体积分数/相变。
   **边界**：表面张力不是曲率/真实 mN/m 模型，涡量是视觉/稳定性约束；泡沫是单相
-  视觉白水（不是气泡/两相流，仍不做双向耦合）；粒子间碰撞只保证最小分离，不模拟压力/粘性；
+  视觉白水（不是气泡/两相流，仍不做双向耦合）；气泡只排开液体、不改变液体密度；
+  粒子间碰撞只保证最小分离，不模拟压力/粘性；
   敞开的平地上水仍会摊成薄层（这是"液体在无限平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：
   `quench3d render examples/particles_showcase.json --out particles.png`。

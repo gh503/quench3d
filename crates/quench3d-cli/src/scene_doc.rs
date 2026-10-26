@@ -1189,6 +1189,24 @@ pub struct FluidDoc {
     /// 流体-刚体接触摩擦系数 0~1，缺省 0 = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_friction: Option<f32>,
+    /// 是否生成气泡/气相粒子，缺省 false = 旧场景逐位不变。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bubbles: bool,
+    /// 气泡生成速率（颗/秒），缺省 20。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_rate: Option<f32>,
+    /// 气泡上限 0~4096，缺省 128。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bubbles: Option<usize>,
+    /// 气泡半径（米），缺省 0.03。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_radius: Option<f32>,
+    /// 浮升加速度相对重力的倍数，缺省 1.8。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_buoyancy: Option<f32>,
+    /// 气泡阻尼（1/s），缺省 2.0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_drag: Option<f32>,
     /// 是否把粒子提取成**连续自由表面**（Surface Nets），缺省 false = 抬高的平面。
     ///
     /// 打开后每帧按粒子重建网格；比平面慢，但能看到真正的液滴/水花轮廓。
@@ -4360,6 +4378,51 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.contact_friction"),
                         "接触摩擦必须在 0~1 之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.bubble_rate {
+                if !(v.is_finite() && (0.0..=5000.0).contains(&v)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.bubble_rate"),
+                        "气泡生成速率必须在 0~5000 颗/秒之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.max_bubbles {
+                if v > 4096 {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.max_bubbles"),
+                        "气泡上限不能超过 4096",
+                    ));
+                }
+            }
+            if let Some(v) = f.bubble_radius {
+                if !(v.is_finite() && v > 0.0 && v <= 0.5) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.bubble_radius"),
+                        "气泡半径必须在 (0, 0.5] 米之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.bubble_buoyancy {
+                if !(v.is_finite() && (0.0..=10.0).contains(&v)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.bubble_buoyancy"),
+                        "气泡浮升倍数必须在 0~10 之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.bubble_drag {
+                if !(v.is_finite() && (0.0..=50.0).contains(&v)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.bubble_drag"),
+                        "气泡阻尼必须在 0~50 之间",
                     ));
                 }
             }
@@ -9025,7 +9088,10 @@ mod tests {
                 { "size": [2, 1, 1], "spacing": 0.2, "radius": 0.08,
                   "rest_density": 900, "viscosity": 0.1, "iterations": 6,
                   "max_particles": 500, "contact_friction": 0.6,
-                  "particle_collision": true }
+                  "particle_collision": true, "bubbles": true,
+                  "bubble_rate": 40.0, "max_bubbles": 12,
+                  "bubble_radius": 0.04, "bubble_buoyancy": 2.0,
+                  "bubble_drag": 1.5 }
             ]
         }))
         .expect("fluids 要能解析");
@@ -9043,6 +9109,12 @@ mod tests {
         assert_eq!(again.fluids[1].max_particles, 500);
         assert_eq!(again.fluids[1].contact_friction, Some(0.6));
         assert!(again.fluids[1].particle_collision);
+        assert!(again.fluids[1].bubbles);
+        assert_eq!(again.fluids[1].bubble_rate, Some(40.0));
+        assert_eq!(again.fluids[1].max_bubbles, Some(12));
+        assert_eq!(again.fluids[1].bubble_radius, Some(0.04));
+        assert_eq!(again.fluids[1].bubble_buoyancy, Some(2.0));
+        assert_eq!(again.fluids[1].bubble_drag, Some(1.5));
 
         for (fluid, path) in [
             (json!({"size": [0, 1, 1]}), "fluids[0].size"),

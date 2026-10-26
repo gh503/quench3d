@@ -131,6 +131,9 @@ pub struct FluidReport {
     /// 当前泡沫/飞沫数（0 时不出现，保持旧报告字节不变）。
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub foam: usize,
+    /// 当前气泡数（0 时不出现，保持旧报告字节不变）。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub bubbles: usize,
 }
 
 /// 一个关节的运行时遥测（`simulate --json` 的 `joints[]`）。
@@ -2753,6 +2756,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
                     max_y: s.max_y,
                     contacts: s.contacts,
                     foam: s.foam,
+                    bubbles: s.bubbles,
                 }
             })
             .collect(),
@@ -4146,6 +4150,17 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
             ..MaterialDesc::default()
         },
     );
+    let bubble_material = engine.assets.material(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$fluid_bubble",
+        MaterialDesc {
+            base_color: Vec4::new(0.82, 0.93, 1.0, 1.0),
+            metallic: 0.0,
+            roughness: 0.35,
+            ..MaterialDesc::default()
+        },
+    );
     for (fi, fluid) in engine.world.fluids().iter().enumerate() {
         let spec = doc.fluids.get(fi);
         // 连续表面模式不再画每颗粒子的球：它们全被表面包住，画了只是多几万次绘制/阴影。
@@ -4181,6 +4196,22 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
                             position: Vec3::ZERO,
                         },
                         &format!("流体泡沫{fi}.{k}"),
+                    );
+                }
+            }
+            if spec.bubbles {
+                let radius = fluid.desc().bubble_radius.max(0.005);
+                for k in 0..fluid.desc().max_bubbles {
+                    engine.scene.add_fluid_bubble(
+                        foam_mesh,
+                        bubble_material,
+                        quench3d::scene::FluidBubbleSpec {
+                            fluid: fi,
+                            index: k,
+                            radius,
+                            position: Vec3::ZERO,
+                        },
+                        &format!("流体气泡{fi}.{k}"),
                     );
                 }
             }
