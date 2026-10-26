@@ -1568,6 +1568,56 @@ fn ccd_catches_a_sphere_grazing_a_box_corner() {
 }
 
 #[test]
+fn precise_ccd_stops_a_rotating_hull_spike_on_a_trimesh_wall() {
+    // 和半空间回归同一构造，但目标是两片三角形组成的薄墙：长刺仍放在采样
+    // 间隙（index 1），旧采样路径看不到它，精确路径要逐三角形看到。
+    let mut points = vec![Vec3::new(0.03, 0.02, 0.0)];
+    points.push(Vec3::new(1.0, 0.0, 0.0));
+    for i in 0..300 {
+        let a = i as f32 * 0.37;
+        points.push(Vec3::new(
+            0.04 + 0.03 * a.cos(),
+            0.06 * a.sin(),
+            0.06 * a.cos(),
+        ));
+    }
+    let hull_points = points.clone();
+    let dt = 0.05;
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vec3::ZERO);
+    world.set_fixed_dt(dt);
+    world.add_builder(BodyBuilder::r#static(Shape::TriMesh {
+        vertices: vec![
+            vec3(0.0, -1.0, -1.0),
+            vec3(0.0, 1.0, -1.0),
+            vec3(0.0, 1.0, 1.0),
+            vec3(0.0, -1.0, 1.0),
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    }));
+    let body = world.add_builder(
+        BodyBuilder::dynamic(Shape::ConvexHull { points })
+            .position(vec3(0.6, 0.0, 0.0))
+            .angular_velocity(Vec3::Y * (core::f32::consts::TAU / dt))
+            .ccd(true)
+            .ccd_precise(true),
+    );
+    world.step(dt);
+    let body = world.body(body).unwrap();
+    let angle = 2.0 * body.rotation().w.abs().clamp(-1.0, 1.0).acos();
+    let lowest_x = hull_points
+        .iter()
+        .map(|p| (body.position() + body.rotation().mul_vec3(*p)).x)
+        .fold(f32::INFINITY, f32::min);
+    println!("ccd wall: angle={angle:.3} min_x={lowest_x:.3}");
+    assert!(
+        angle < 2.3,
+        "精确 CCD 应在刺穿过薄墙前截断旋转，实际转了 {angle:.3} rad"
+    );
+    assert!(lowest_x > -0.05, "刺不能穿过薄墙，最低 x = {lowest_x:.3}");
+}
+
+#[test]
 fn precise_ccd_stops_a_rotating_hull_spike_on_a_plane() {
     // 凸包有 300+ 个点，旧旋转扫掠按 stride 抽样；把长刺放在 index 1（会被跳过），
     // 其余点都贴着中心。无重力、零线速度，只靠绕 X 轴 180° 的旋转把刺扫到地面。

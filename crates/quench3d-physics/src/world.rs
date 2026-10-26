@@ -2322,11 +2322,15 @@ impl PhysicsWorld {
             }
             let Some(b) = &slot.body else { continue };
             let plane = matches!(b.shape, Shape::Plane { .. });
-            if b.sensor || (b.shape.is_static_only() && !plane) || !b.groups.interacts(groups) {
+            let trimesh = matches!(b.shape, Shape::TriMesh { .. });
+            if b.sensor
+                || (b.shape.is_static_only() && !plane && !trimesh)
+                || !b.groups.interacts(groups)
+            {
                 continue;
             }
-            // 半空间没有有限包围球；它的支持点就是平面本身，按 0 处理。
-            let rb = if plane {
+            // 半空间/三角网没有有限包围球；三角网按逐三角形距离推进，自身按静态处理。
+            let rb = if plane || trimesh {
                 0.0
             } else {
                 b.shape.bounding_radius()
@@ -2381,6 +2385,53 @@ impl PhysicsWorld {
                         break;
                     }
                     let advance = distance / step;
+                    if !(advance.is_finite() && advance > 1e-6) {
+                        break;
+                    }
+                    t += advance;
+                    if t >= 1.0 {
+                        break;
+                    }
+                    continue;
+                }
+                // 三角网：逐三角形取凸体到三角形的最短距离，再用同一个
+                // 1-Lipschitz 上界推进。薄墙/单个三角面片都能被看到。
+                if let Shape::TriMesh { vertices, indices } = &b.shape {
+                    let sa = gjk::Support::new(&a.shape, &ta);
+                    let mut min_distance = f32::INFINITY;
+                    let mut touched = false;
+                    for tri in indices.chunks(3) {
+                        if tri.len() < 3 {
+                            continue;
+                        }
+                        let (Some(v0), Some(v1), Some(v2)) = (
+                            vertices.get(tri[0] as usize),
+                            vertices.get(tri[1] as usize),
+                            vertices.get(tri[2] as usize),
+                        ) else {
+                            continue;
+                        };
+                        let p0 = tb.position + tb.rotation.mul_vec3(*v0);
+                        let p1 = tb.position + tb.rotation.mul_vec3(*v1);
+                        let p2 = tb.position + tb.rotation.mul_vec3(*v2);
+                        let st = gjk::Support::triangle([p0, p1, p2]);
+                        let hit = gjk::gjk(&sa, &st);
+                        if hit.intersect || hit.distance <= 1e-4 {
+                            touched = true;
+                            break;
+                        }
+                        min_distance = min_distance.min(hit.distance);
+                    }
+                    if touched {
+                        if t > 1e-5 && best.is_none_or(|cur| t < cur) {
+                            best = Some(t);
+                        }
+                        break;
+                    }
+                    if !min_distance.is_finite() {
+                        break;
+                    }
+                    let advance = min_distance / step;
                     if !(advance.is_finite() && advance > 1e-6) {
                         break;
                     }

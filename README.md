@@ -569,7 +569,7 @@ world.add_builder(
     BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
         .linear_velocity(Vec3::X * 300.0)
         .ccd(true)                // 高速小物体：中心射线 + 形状极端点旋转扫掠，不穿薄墙
-        // .ccd_precise(true)     // 凸-凸/半空间精确 TOI：支持函数保守推进，采样间隙也不漏；更贵
+        // .ccd_precise(true)     // 凸-凸/半空间/三角网精确 TOI：支持函数保守推进，采样间隙也不漏；更贵
 );
 for e in world.sensor_events() {  // 只在进入/离开的那一子步有内容
     println!("{} {:?} {:?}", if e.started { "进入" } else { "离开" }, e.sensor, e.other);

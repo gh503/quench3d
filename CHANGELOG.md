@@ -49,8 +49,12 @@
   `precise_ccd_is_wired_from_the_scene_file`。现在**半空间**也用支持函数沿法线
   做 1-Lipschitz 推进：回归 `precise_ccd_stops_a_rotating_hull_spike_on_a_plane`
   （300+ 点凸包、长刺在采样间隙、只靠旋转扫向地面：旧采样路径转 2.5 rad 穿地，
-  精确路径在 1.7 rad 截住）。每开一个精确体每子步 O(其它凸体)；三角网仍走默认
-  路径，默认 `false` 时旧场景逐位不变。
+  精确路径在 1.7 rad 截住）。**三角网**也支持了：逐三角形用 GJK 求凸体到三角形
+  的最短距离，再按同一上界推进；回归
+  `precise_ccd_stops_a_rotating_hull_spike_on_a_trimesh_wall`（同一根采样间隙长刺
+  扫过两片三角形薄墙，旧路径转 2.525 rad 穿墙，精确路径 1.672 rad 截住）。
+  每开一个精确体每子步 O(其它凸体 × 三角形数)，是显式高成本路径；默认 `false`
+  时旧场景逐位不变。
 
 - **摄像头重建无光照直出**：有摄像头 RGB 时重建材质 `unlit = true`，原图不再被
   场景灯光/阴影二次调制；没有 RGB 的蓝灰占位表面仍走光照。GPU 回归

@@ -21,12 +21,18 @@ const EPA_MAX_VERTS: usize = 128;
 /// 判定「原点已在单纯形内」的距离阈值（长度量纲）。
 const TOUCH_EPS: f32 = 1e-5;
 
+/// 支持函数的来源：普通形状，或一个世界空间三角形（三角网精确 CCD 用）。
+#[derive(Clone, Copy)]
+enum SupportSource<'a> {
+    Shape(&'a Shape),
+    Triangle([Vec3; 3]),
+}
+
 /// 支持函数代理：记录形状与它所在的世界位姿。
 #[derive(Clone, Copy)]
 pub(crate) struct Support<'a> {
-    /// 形状引用。
-    pub shape: &'a Shape,
-    /// 世界位置。
+    source: SupportSource<'a>,
+    /// 世界位置（三角形的质心）。
     pub pos: Vec3,
     /// 世界旋转。
     pub rot: Quat,
@@ -38,18 +44,45 @@ impl<'a> Support<'a> {
     /// 由形状与变换构造。
     pub fn new(shape: &'a Shape, t: &Transform) -> Self {
         Self {
-            shape,
+            source: SupportSource::Shape(shape),
             pos: t.position,
             rot: t.rotation,
             inv_rot: t.rotation.inverse(),
         }
     }
 
+    /// 世界空间三角形；顶点已乘过目标刚体的位姿。
+    pub fn triangle(points: [Vec3; 3]) -> Self {
+        let pos = (points[0] + points[1] + points[2]) / 3.0;
+        Self {
+            source: SupportSource::Triangle(points),
+            pos,
+            rot: Quat::IDENTITY,
+            inv_rot: Quat::IDENTITY,
+        }
+    }
+
     /// 形状在世界空间中沿 `dir` 的最远点。
     #[inline]
     pub fn support(&self, dir: Vec3) -> Vec3 {
-        let local = self.inv_rot.mul_vec3(dir);
-        self.pos + self.rot.mul_vec3(self.shape.support(local))
+        match self.source {
+            SupportSource::Shape(shape) => {
+                let local = self.inv_rot.mul_vec3(dir);
+                self.pos + self.rot.mul_vec3(shape.support(local))
+            }
+            SupportSource::Triangle(points) => {
+                let mut best = points[0];
+                let mut best_dot = best.dot(dir);
+                for p in &points[1..] {
+                    let d = p.dot(dir);
+                    if d > best_dot {
+                        best = *p;
+                        best_dot = d;
+                    }
+                }
+                best
+            }
+        }
     }
 }
 
