@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **球体 CCD 考虑目标运动**：`sphere_sweep_bodies` 用相对运动扫掠，目标这一步按
+  线速度外推（静态体为零）；运动学/动态目标穿过球心航线不再漏。回归
+  `sphere_sweep_accounts_for_a_moving_target`：运动学盒子 +Y 4 m 穿过球 +X 航线，
+  修复前返回 None，修复后能给出首次接触。目标自转仍不参与；缺省 `ccd=false`
+  旧场景逐位不变。
+
 - **球体 CCD 扫掠覆盖所有形状**：胶囊/圆柱/圆锥/圆角盒/凸包/三角网改用
   `distance_point_to_shape` 距离场保守推进（1-Lipschitz），法线取距离场中心差分；
   曲面擦碰再扫 2 次，切向会切进曲面时把整段位移截到接触点。回归

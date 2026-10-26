@@ -2178,19 +2178,25 @@ impl PhysicsWorld {
     /// 球用解析二次方程，半空间用线性求交；胶囊/圆柱/圆锥/圆角盒/凸包/三角网等
     /// 用 `distance_point_to_shape` 的距离场做保守推进（距离场 1-Lipschitz，
     /// `t += (dist-r)/|motion|` 不会越过首次接触），法线取距离场中心差分。
+    /// 扫掠用**相对运动**：目标这一步按速度线形外推（静态体为零），所以“目标撞上来”
+    /// 也能被看到；目标自转仍不参与。
     fn sphere_sweep_bodies(
         &self,
         self_index: usize,
         p0: Vec3,
         motion: Vec3,
         radius: f32,
+        dt: f32,
     ) -> Option<(f32, Vec3)> {
-        if !p0.is_finite() || !motion.is_finite() || !(radius.is_finite() && radius > 0.0) {
+        if !p0.is_finite()
+            || !motion.is_finite()
+            || !(radius.is_finite() && radius > 0.0)
+            || !(dt.is_finite() && dt > 0.0)
+        {
             return None;
         }
         let groups = self.bodies.get(self_index)?.body.as_ref()?.groups;
-        let speed = motion.length();
-        let sweep = speed * 1.0 + radius;
+        let sweep = motion.length() * 1.0 + radius;
         let mut best: Option<(f32, Vec3)> = None;
         for (i, slot) in self.bodies.iter().enumerate() {
             if i == self_index {
@@ -2200,6 +2206,15 @@ impl PhysicsWorld {
             if body.sensor || !body.groups.interacts(groups) {
                 continue;
             }
+            // 目标这一步自己的位移。静态体不动；运动学/动态体按当前速度线性外推。
+            // 用相对运动扫掠，才能抓住“球没动、目标撞上来”或反向对撞。
+            let target_motion = if body.body_type == BodyType::Static {
+                Vec3::ZERO
+            } else {
+                body.linear_velocity * dt
+            };
+            let rel_motion = motion - target_motion;
+            let rel_speed = rel_motion.length();
             let aabb = body.world_aabb();
             if aabb.is_valid()
                 && !aabb.grown(sweep).contains_point(p0)
@@ -2213,7 +2228,7 @@ impl PhysicsWorld {
                     if n.length_squared() < 0.5 {
                         None
                     } else {
-                        let denom = motion.dot(n);
+                        let denom = rel_motion.dot(n);
                         let signed = (p0 - body.transform.position).dot(n);
                         if signed <= radius {
                             Some((0.0, n))
@@ -2232,28 +2247,28 @@ impl PhysicsWorld {
                     if c <= 0.0 {
                         Some((0.0, rel.normalize_or_zero()))
                     } else {
-                        let a = motion.length_squared();
-                        let b = 2.0 * rel.dot(motion);
+                        let a = rel_motion.length_squared();
+                        let b = 2.0 * rel.dot(rel_motion);
                         let disc = b * b - 4.0 * a * c;
                         if a <= 1e-12 || disc < 0.0 {
                             None
                         } else {
                             let t = (-b - disc.sqrt()) / (2.0 * a);
                             (0.0..=1.0).contains(&t).then(|| {
-                                let n =
-                                    (p0 + motion * t - body.transform.position).normalize_or_zero();
+                                let n = (p0 + rel_motion * t - body.transform.position)
+                                    .normalize_or_zero();
                                 (t, n)
                             })
                         }
                     }
                 }
                 Shape::Box { half_extents } => {
-                    if speed <= 1e-9 {
+                    if rel_speed <= 1e-9 {
                         None
                     } else {
                         let inv = body.transform.rotation.inverse();
                         let center0 = inv.mul_vec3(p0 - body.transform.position);
-                        let local_motion = inv.mul_vec3(motion);
+                        let local_motion = inv.mul_vec3(rel_motion);
                         let he = half_extents.abs();
                         let mut t = 0.0f32;
                         let mut found = None;
@@ -2276,7 +2291,7 @@ impl PhysicsWorld {
                                 found = Some((t.clamp(0.0, 1.0), n));
                                 break;
                             }
-                            let step = (dist - radius) / speed;
+                            let step = (dist - radius) / rel_speed;
                             if !step.is_finite() || step <= 1e-7 {
                                 break;
                             }
@@ -2292,13 +2307,13 @@ impl PhysicsWorld {
                     // 其它凸形状/三角网：球心到表面的距离做保守推进。距离场是
                     // 1-Lipschitz 的，`t += (dist-r)/speed` 不会越过首次接触；
                     // 法线用距离场中心差分，退化时退回“朝运动反方向”。
-                    if speed <= 1e-9 {
+                    if rel_speed <= 1e-9 {
                         None
                     } else {
                         let mut t = 0.0f32;
                         let mut found = None;
                         for _ in 0..48 {
-                            let p = p0 + motion * t;
+                            let p = p0 + rel_motion * t;
                             let dist =
                                 gjk::distance_point_to_shape(&body.shape, &body.transform, p);
                             if !dist.is_finite() {
@@ -2337,12 +2352,12 @@ impl PhysicsWorld {
                                 let n = if grad.length_squared() > 1e-12 {
                                     grad.normalize()
                                 } else {
-                                    -motion.normalize_or_zero()
+                                    -rel_motion.normalize_or_zero()
                                 };
                                 found = Some((t.clamp(0.0, 1.0), n));
                                 break;
                             }
-                            let step = (dist - radius) / speed;
+                            let step = (dist - radius) / rel_speed;
                             if !step.is_finite() || step <= 1e-7 {
                                 break;
                             }
@@ -2437,7 +2452,7 @@ impl PhysicsWorld {
                 // 球的中心射线漏掉盒角：用球心扫掠补一条更精确的最早接触。
                 if let Shape::Sphere { radius } = &b.shape {
                     if let Some((t, n)) =
-                        self.sphere_sweep_bodies(i, b.transform.position, motion, radius.abs())
+                        self.sphere_sweep_bodies(i, b.transform.position, motion, radius.abs(), dt)
                     {
                         let travel = (t * total).clamp(0.0, total);
                         if best.is_none_or(|(cur, _)| travel < cur) {
@@ -2488,6 +2503,7 @@ impl PhysicsWorld {
                                     b.transform.position,
                                     motion_new,
                                     radius.abs(),
+                                    dt,
                                 ) else {
                                     break;
                                 };
@@ -3041,6 +3057,34 @@ mod tests {
             out.push(b.is_sleeping() as u32);
         }
         out
+    }
+
+    #[test]
+    fn sphere_sweep_accounts_for_a_moving_target() {
+        // 球沿 +X 飞，目标盒子是运动学体、沿 +Y 穿过球心航线。只看目标的
+        // 起始位置，球会从盒子下方 4 m 处飞过；但这一步盒子会向上走 4 m，
+        // 球面实际会撞上。CCD 必须用相对速度扫掠。
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        let sphere = w.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::new(-4.0, 0.0, 0.0))
+                .linear_velocity(Vec3::new(4.0, 0.0, 0.0)),
+        );
+        let s = sphere.index as usize;
+        w.add_builder(
+            BodyBuilder::kinematic(Shape::Box {
+                half_extents: Vec3::splat(0.5),
+            })
+            .position(Vec3::new(0.0, -4.0, 0.0))
+            .linear_velocity(Vec3::new(0.0, 240.0, 0.0)),
+        );
+        let hit =
+            w.sphere_sweep_bodies(s, Vec3::new(-4.0, 0.0, 0.0), Vec3::X * 4.0, 0.1, 1.0 / 60.0);
+        assert!(
+            hit.is_some(),
+            "运动学目标穿过球心航线时，扫掠必须看到相对运动"
+        );
     }
 
     #[test]
