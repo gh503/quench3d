@@ -234,6 +234,10 @@ fn make_world(n: usize, layout: Layout, sleep: bool) -> PhysicsWorld {
 /// 跑一个规模的测量。
 fn measure(bodies: usize, options: &BenchOptions) -> ScaleResult {
     let mut world = make_world(bodies, options.layout, options.sleep);
+    let phases = std::env::var_os("QUENCH3D_BENCH_PHASES").is_some();
+    if phases {
+        world.set_phase_timing(true);
+    }
     for _ in 0..options.warmup {
         world.step(1.0 / 60.0);
     }
@@ -243,6 +247,25 @@ fn measure(bodies: usize, options: &BenchOptions) -> ScaleResult {
     }
     let elapsed = started.elapsed().as_secs_f64();
     let steps = options.steps.max(1);
+    if phases {
+        let t = world.phase_timings();
+        let n = t.steps.max(1) as f64;
+        eprintln!(
+            "阶段/步 (n={bodies}, {:.2} ms): 积分 {:.2} 宽相 {:.2} 窄相 {:.2} 准备 {:.2} 速度 {:.2} 位置 {:.2} 写回 {:.2} 记账 {:.2} 总计 {:.2} · 候选 {} 流形 {}",
+            elapsed * 1000.0 / steps as f64,
+            t.integrate_velocity_us / n / 1000.0,
+            t.broadphase_us / n / 1000.0,
+            t.narrowphase_us / n / 1000.0,
+            t.prepare_us / n / 1000.0,
+            t.velocity_us / n / 1000.0,
+            t.position_us / n / 1000.0,
+            t.writeback_us / n / 1000.0,
+            t.bookkeeping_us / n / 1000.0,
+            t.total_us / n / 1000.0,
+            t.candidate_pairs / t.steps.max(1),
+            t.manifolds / t.steps.max(1),
+        );
+    }
     let mut sleeping = 0usize;
     for (_, body) in world.bodies() {
         if body.is_sleeping() {

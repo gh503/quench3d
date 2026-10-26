@@ -705,9 +705,7 @@ fn anisotropic_friction(
 pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mut [BodyView]) {
     {
         for c in contacts.iter_mut() {
-            let va = views[c.a];
-            let vb = views[c.b];
-            let mut vrel = vb.velocity_at(c.rb) - va.velocity_at(c.ra);
+            let mut vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
             // 摩擦（用上一轮的法向冲量作为上界）
             let max_friction = c.friction * c.normal_impulse;
             // 各向异性时两个切向的上界不同；ratio=0 时两值逐位等于 friction，
@@ -739,9 +737,7 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
                         c.tangent_impulse[i] = *n;
                         apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);
                     }
-                    let va2 = views[c.a];
-                    let vb2 = views[c.b];
-                    vrel = vb2.velocity_at(c.rb) - va2.velocity_at(c.ra);
+                    vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
                 }
             } else {
                 for i in 0..2 {
@@ -760,9 +756,7 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
                     d = new - c.tangent_impulse[i];
                     c.tangent_impulse[i] = new;
                     apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);
-                    let va2 = views[c.a];
-                    let vb2 = views[c.b];
-                    vrel = vb2.velocity_at(c.rb) - va2.velocity_at(c.ra);
+                    vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
                 }
             }
             // 法向
@@ -819,9 +813,7 @@ pub(crate) fn relax_contacts(
     {
         for _ in 0..iterations {
             for c in contacts.iter_mut() {
-                let va = views[c.a];
-                let vb = views[c.b];
-                let vrel = vb.velocity_at(c.rb) - va.velocity_at(c.ra);
+                let vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
                 let vn = vrel.dot(c.normal);
                 if vn >= 0.0 || c.normal_impulse <= 0.0 {
                     continue;
@@ -857,11 +849,9 @@ pub(crate) fn solve_position_contacts(
                 if pen <= cfg.slop {
                     continue;
                 }
-                let va = views[c.a];
-                let vb = views[c.b];
                 let target =
                     ((cfg.baumgarte / dt) * (pen - cfg.slop)).min(cfg.max_correction_velocity);
-                let vrel = vb.pseudo_velocity_at(c.rb) - va.pseudo_velocity_at(c.ra);
+                let vrel = relative_pseudo_velocity(views, c.a, c.b, c.ra, c.rb);
                 let vn = vrel.dot(c.normal);
                 let mut d = (target - vn) / c.k_normal;
                 let new = (c.pseudo_impulse + d).max(0.0);
@@ -874,6 +864,22 @@ pub(crate) fn solve_position_contacts(
             }
         }
     }
+}
+
+/// 相对速度 `v_b(rb) - v_a(ra)`，只读字段，不复制整个 [`BodyView`]。
+#[inline]
+fn relative_velocity(views: &[BodyView], a: usize, b: usize, ra: Vec3, rb: Vec3) -> Vec3 {
+    let va = &views[a];
+    let vb = &views[b];
+    (vb.lin + vb.ang.cross(rb)) - (va.lin + va.ang.cross(ra))
+}
+
+/// 相对伪速度；同上。
+#[inline]
+fn relative_pseudo_velocity(views: &[BodyView], a: usize, b: usize, ra: Vec3, rb: Vec3) -> Vec3 {
+    let va = &views[a];
+    let vb = &views[b];
+    (vb.pseudo_lin + vb.pseudo_ang.cross(rb)) - (va.pseudo_lin + va.pseudo_ang.cross(ra))
 }
 
 /// 对一对刚体施加世界冲量（作用于指定力臂）。
@@ -1147,6 +1153,34 @@ mod tests {
         );
         assert!(views[0].lin.x < 0.0, "A 应被推向 -X");
         assert!(views[1].lin.x > 0.0, "B 应被推向 +X");
+    }
+
+    /// 优化后的相对速度辅助函数必须与旧的“复制 BodyView 再调 velocity_at”逐位一致。
+    #[test]
+    fn relative_velocity_helper_matches_body_view_formula() {
+        let mut a = box_body(0.0);
+        let mut b = box_body(1.0);
+        a.linear_velocity = vec3(0.25, -0.5, 1.5);
+        a.angular_velocity = vec3(0.1, 0.2, -0.3);
+        b.linear_velocity = vec3(-1.0, 0.75, 0.0);
+        b.angular_velocity = vec3(-0.4, 0.05, 0.6);
+        b.transform.rotation =
+            quench3d_math::Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7);
+        let mut views = vec![BodyView::from_body(&a), BodyView::from_body(&b)];
+        views[0].pseudo_lin = vec3(0.2, 0.0, -0.1);
+        views[0].pseudo_ang = vec3(0.0, 0.3, 0.0);
+        views[1].pseudo_lin = vec3(-0.2, 0.1, 0.0);
+        views[1].pseudo_ang = vec3(0.1, 0.0, -0.2);
+        for (ra, rb) in [
+            (Vec3::ZERO, Vec3::ZERO),
+            (vec3(0.5, 0.0, 0.0), vec3(-0.5, 0.0, 0.0)),
+            (vec3(0.1, 0.2, 0.3), vec3(-0.3, 0.0, 0.2)),
+        ] {
+            let old = views[1].velocity_at(rb) - views[0].velocity_at(ra);
+            assert_eq!(relative_velocity(&views, 0, 1, ra, rb), old);
+            let old_pseudo = views[1].pseudo_velocity_at(rb) - views[0].pseudo_velocity_at(ra);
+            assert_eq!(relative_pseudo_velocity(&views, 0, 1, ra, rb), old_pseudo);
+        }
     }
 
     #[test]

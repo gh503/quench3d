@@ -1663,6 +1663,8 @@ quench3d render scene.json --out out.png --golden 参考.png   # 单帧像素回
 quench3d bench --json                                  # 缺省 100/500/1000 体，scatter 布局
 quench3d bench --bodies 500,2000,5000 --no-sleep        # 「一直在算」的最坏情况
 quench3d bench --layout stack --no-render               # 深堆场景，跳过渲染
+QUENCH3D_BENCH_PHASES=1 quench3d bench --layout stack --no-render
+                                                        # 打印阶段分解（积分/宽相/窄相/准备/速度/位置/写回）
 ```
 
 输出包含：启动开销、常驻/峰值内存、每个规模的每步耗时与「体·步/秒」吞吐、
