@@ -17,6 +17,9 @@ frames/
 *.swp
 *.swo
 
+# 本地发行包（tools/package_release.sh 的默认输出）：可随时重建，不进版本库。
+dist/
+
 # 各编辑器的备份文件（foo~ 之类）。
 *~
 

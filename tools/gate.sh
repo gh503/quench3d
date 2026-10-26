@@ -101,6 +101,15 @@ else
   grep -E '^(test result: FAILED|error)' -A 10 "$LOG_DIR/gate-test.log" | head -n 30
 fi
 
+step "发行打包（debug 二进制；结构/清单/校验和）"
+if bash tools/check_package.sh >"$LOG_DIR/gate-package.log" 2>&1; then
+  ok package
+  tail -n 2 "$LOG_DIR/gate-package.log"
+else
+  bad package
+  tail -n 20 "$LOG_DIR/gate-package.log"
+fi
+
 if [ "$FAST" = "1" ]; then
   printf '\n（--fast：跳过 wasm 构建与 check_web）\n'
 else

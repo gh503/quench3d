@@ -352,6 +352,9 @@
 
 - [ ] 三平台 + wasm CI 每次提交真跑；真 GPU WebGPU 路径验收。
 - [ ] `wasm-opt`/Brotli/文件名哈希；预编译发行。
+  - [x] 本地可复现发行包（`tools/package_release.sh` + 门禁里的
+    `tools/check_package.sh`）：二进制、web/pkg、manifest、SHA256SUMS。
+  - [ ] wasm-opt/Brotli、文件名哈希、签名/安装器与真实三平台发行。
 - [ ] `cargo publish --dry-run`、SBOM、依赖漏洞扫描、semver 策略。
 
 ## 2. 执行顺序与规则

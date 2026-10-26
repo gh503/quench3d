@@ -48,7 +48,9 @@ quench3d/
 │   ├── ab_bench.sh       配对 A/B 基准（同会话多次取最小，避开机器噪声）
 │   ├── mock_llm_server.py 假 OpenAI 服务：没有本地模型也能试 ask / chat
 │   ├── check_web.mjs     检查 Web 产物：页面 import 的符号、wasm 能否实例化
-│   └── check_browser.mjs 可选：headless Chrome 的 wasm 1000 步 + Canvas 预览基准
+│   ├── check_browser.mjs 可选：headless Chrome 的 wasm 1000 步 + Canvas 预览基准
+│   ├── package_release.sh 本地发行包：二进制 + web/pkg + 清单 + SHA256SUMS
+│   └── check_package.sh  门禁里的打包结构/清单/校验和/可执行性检查
 ├── docs/
 │   └── island_parallel_plan.md  island 并行求解设计稿（三步均已落地，见 §8.6 / §8.7）
 ├── .github/workflows/ci.yml  三平台 + wasm 的 CI 矩阵

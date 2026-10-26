@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **本地发行打包**：新增 `tools/package_release.sh`，把 CLI/编辑器 release 二进制、
+  `web/pkg`、README/CHANGELOG/LICENSE、`manifest.json`（版本/提交/大小/哈希）与
+  `SHA256SUMS` 打进一个目录；`--skip-build` 复用已有二进制，`--dry-run` 只打印计划。
+  `tools/check_package.sh` 在门禁里实际构建 debug 二进制、检查目录结构、清单大小、
+  `sha256sum -c`，并运行包内 `quench3d --help/--version`。仍没有 wasm-opt/Brotli/
+  文件名哈希，也不是安装器；这些仍属未完成的发布流水线。
+
 - **模型动画循环子区间**：`models[].animation.loop_start` /
   `models[].animation.blend.loop_start`（秒，缺省 0）把循环限制在
   `[loop_start, duration]`，编辑器的「循环起点」`DragValue` 可改并写回场景
