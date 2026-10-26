@@ -2194,7 +2194,8 @@ impl PhysicsWorld {
     /// 用 `distance_point_to_shape` 的距离场做保守推进（距离场 1-Lipschitz，
     /// `t += (dist-r)/|motion|` 不会越过首次接触），法线取距离场中心差分。
     /// 扫掠用**相对运动**：目标这一步按速度线形外推（静态体为零），所以“目标撞上来”
-    /// 也能被看到；目标自转仍不参与。
+    /// 也能被看到。目标自转目前只支持盒子：按角点移动不超过半径/4 采样若干时刻；
+    /// 其它形状仍按静态姿态扫。
     fn sphere_sweep_bodies(
         &self,
         self_index: usize,
@@ -2228,12 +2229,21 @@ impl PhysicsWorld {
             } else {
                 body.linear_velocity * dt
             };
+            let target_omega = if body.body_type == BodyType::Static {
+                Vec3::ZERO
+            } else {
+                body.angular_velocity
+            };
             let rel_motion = motion - target_motion;
             let rel_speed = rel_motion.length();
             let aabb = body.world_aabb();
+            // 旋转目标扫过的范围可能远大于其初始 AABB（长条盒转 90°），预筛按
+            // 角速度 × 包围半径 × dt 膨胀。
+            let rotation_reach = target_omega.length() * body.shape.bounding_radius() * dt;
+            let grow = sweep + target_motion.length() + rotation_reach;
             if aabb.is_valid()
-                && !aabb.grown(sweep).contains_point(p0)
-                && !aabb.grown(sweep).contains_point(p0 + motion)
+                && !aabb.grown(grow).contains_point(p0)
+                && !aabb.grown(grow).contains_point(p0 + motion)
             {
                 continue;
             }
@@ -2278,7 +2288,71 @@ impl PhysicsWorld {
                     }
                 }
                 Shape::Box { half_extents } => {
-                    if rel_speed <= 1e-9 {
+                    let omega_speed = target_omega.length();
+                    if omega_speed > 1e-6 {
+                        // 旋转盒：把这一步按“角点移动不超过半径/4”采样成若干时刻，
+                        // 每个时刻把盒子转到 `ω·t`，在相对位移 `p0 + rel_motion·t`
+                        // 处求到盒面的距离。旋转目标没有简单的 1-Lipschitz 距离场，
+                        // 所以这里是**时间采样**而不是保守推进；采样上限 512。
+                        // 这是旋转目标 CCD 的第一个形状；其它形状仍按静态姿态扫。
+                        let shape = Shape::Box {
+                            half_extents: *half_extents,
+                        };
+                        let samples = ((rotation_reach / (radius * 0.25).max(1e-3)).ceil()
+                            as usize)
+                            .clamp(16, 512);
+                        let mut found = None;
+                        for k in 0..=samples {
+                            let t = k as f32 / samples as f32;
+                            let p = p0 + rel_motion * t;
+                            let tf = Transform {
+                                position: body.transform.position,
+                                rotation: body.transform.rotation
+                                    * Quat::from_axis_angle(
+                                        target_omega.normalize_or_zero(),
+                                        omega_speed * t,
+                                    ),
+                                scale: body.transform.scale,
+                            };
+                            let dist = gjk::distance_point_to_shape(&shape, &tf, p);
+                            if !dist.is_finite() {
+                                break;
+                            }
+                            if dist <= radius + 1e-4 {
+                                let eps = (radius * 0.125).max(1e-4);
+                                let dx =
+                                    gjk::distance_point_to_shape(&shape, &tf, p + Vec3::X * eps)
+                                        - gjk::distance_point_to_shape(
+                                            &shape,
+                                            &tf,
+                                            p - Vec3::X * eps,
+                                        );
+                                let dy =
+                                    gjk::distance_point_to_shape(&shape, &tf, p + Vec3::Y * eps)
+                                        - gjk::distance_point_to_shape(
+                                            &shape,
+                                            &tf,
+                                            p - Vec3::Y * eps,
+                                        );
+                                let dz =
+                                    gjk::distance_point_to_shape(&shape, &tf, p + Vec3::Z * eps)
+                                        - gjk::distance_point_to_shape(
+                                            &shape,
+                                            &tf,
+                                            p - Vec3::Z * eps,
+                                        );
+                                let grad = Vec3::new(dx, dy, dz);
+                                let n = if grad.length_squared() > 1e-12 {
+                                    grad.normalize()
+                                } else {
+                                    -rel_motion.normalize_or_zero()
+                                };
+                                found = Some((t, n));
+                                break;
+                            }
+                        }
+                        found
+                    } else if rel_speed <= 1e-9 {
                         None
                     } else {
                         let inv = body.transform.rotation.inverse();
@@ -3146,6 +3220,30 @@ mod tests {
             with < without * 0.95,
             "气泡占据体积应降低局部浮力：无气泡 {without}，有气泡 {with}"
         );
+    }
+
+    #[test]
+    fn sphere_sweep_sees_a_rotating_target_corner() {
+        // 球沿 +X 飞；薄盒水平放在 y=2，静止姿态从球上方掠过。盒在一步内绕 Z
+        // 转 90°，下角扫到 y=0，正好扫进球的航线。只按起始姿态扫会漏。
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        let sphere = w.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::new(-4.0, 0.0, 0.0))
+                .linear_velocity(Vec3::new(4.0, 0.0, 0.0)),
+        );
+        let s = sphere.index as usize;
+        w.add_builder(
+            BodyBuilder::kinematic(Shape::Box {
+                half_extents: Vec3::new(2.0, 0.1, 0.1),
+            })
+            .position(Vec3::new(0.0, 2.0, 0.0))
+            .angular_velocity(Vec3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2 * 60.0)),
+        );
+        let hit =
+            w.sphere_sweep_bodies(s, Vec3::new(-4.0, 0.0, 0.0), Vec3::X * 4.0, 0.1, 1.0 / 60.0);
+        assert!(hit.is_some(), "旋转盒的下角扫过球心航线时必须被截住");
     }
 
     #[test]
