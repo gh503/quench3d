@@ -832,6 +832,7 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         collides_with: o.collides_with.clone().or_else(|| t.collides_with.clone()),
         sensor: o.sensor.or(t.sensor),
         ccd: o.ccd.or(t.ccd),
+        ccd_precise: o.ccd_precise.or(t.ccd_precise),
     }
 }
 
@@ -1785,6 +1786,13 @@ pub struct ObjectDoc {
     /// 需要 `body` 是 `"dynamic"`；它是保守推进式的近似，不是精确 TOI。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ccd: Option<bool>,
+    /// 精确凸-凸 CCD（GJK 保守推进），缺省 false。
+    ///
+    /// 比 `ccd` 贵：每个开启的物体每子步检查所有凸形状邻居；隐含 `ccd=true`。
+    /// 半空间/三角网目标仍走默认射线/角点路径；用于尖刺、非盒凸体等
+    /// 采样点之间会漏的高速接触。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccd_precise: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -6132,6 +6140,22 @@ impl SceneDoc {
                     ));
                 }
             }
+            if o.ccd_precise == Some(true) {
+                if o.body != BodyKind::Dynamic {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        format!("{p}.ccd_precise"),
+                        format!("body 是 {:?}，精确 CCD 只对 dynamic 生效", o.body),
+                    ));
+                }
+                if has_plane {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        format!("{p}.ccd_precise"),
+                        "无限半空间/三角网没有有限支持点，精确路径会回退到默认 CCD",
+                    ));
+                }
+            }
             // scale 是渲染专用的：碰撞形状取 shape 里的原始尺寸，这里放大会静默对不上
             if o.scale.is_some() && o.body != BodyKind::None {
                 out.push(
@@ -8877,9 +8901,15 @@ mod tests {
         .unwrap();
         let o = &doc.objects[0];
         assert!(o.collision_layer.is_none() && o.collides_with.is_none());
-        assert!(o.sensor.is_none() && o.ccd.is_none());
+        assert!(o.sensor.is_none() && o.ccd.is_none() && o.ccd_precise.is_none());
         let json = serde_json::to_string(&doc).unwrap();
-        for key in ["collision_layer", "collides_with", "sensor", "ccd"] {
+        for key in [
+            "collision_layer",
+            "collides_with",
+            "sensor",
+            "ccd",
+            "ccd_precise",
+        ] {
             assert!(!json.contains(key), "缺省时不该序列化出 {key}");
         }
 
@@ -8933,14 +8963,18 @@ mod tests {
 
         // CCD：只对 dynamic 有意义
         let doc = SceneDoc::from_json(
-            r#"{"objects":[{"name":"a","body":"static","ccd":true},{"name":"b","body":"dynamic","ccd":true}]}"#,
+            r#"{"objects":[{"name":"a","body":"static","ccd":true,"ccd_precise":true},{"name":"b","body":"dynamic","ccd":true,"ccd_precise":true}]}"#,
         )
         .unwrap();
         let diags = doc.validate();
         assert!(diags
             .iter()
             .any(|d| d.path == "objects[0].ccd" && d.severity == Severity::Warning));
+        assert!(diags
+            .iter()
+            .any(|d| d.path == "objects[0].ccd_precise" && d.severity == Severity::Warning));
         assert!(!diags.iter().any(|d| d.path == "objects[1].ccd"));
+        assert!(!diags.iter().any(|d| d.path == "objects[1].ccd_precise"));
 
         // 拼错字段名要报未知字段
         assert!(

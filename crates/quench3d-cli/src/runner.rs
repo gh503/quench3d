@@ -2358,6 +2358,9 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if o.ccd == Some(true) {
             builder = builder.ccd(true);
         }
+        if o.ccd_precise == Some(true) {
+            builder = builder.ccd_precise(true);
+        }
         let handle = world.add_builder(builder);
         let name = object_name(doc, i);
         handles.insert(name.clone(), handle);

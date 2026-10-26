@@ -583,7 +583,8 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
                 }
             }),
             sensor: body.map(|b| b.sensor).filter(|s| *s),
-            ccd: body.map(|b| b.ccd).filter(|c| *c),
+            ccd: body.map(|b| b.ccd && !b.ccd_precise).filter(|c| *c),
+            ccd_precise: body.map(|b| b.ccd_precise).filter(|c| *c),
         });
         exported.push((index, out.objects.len() - 1));
     }

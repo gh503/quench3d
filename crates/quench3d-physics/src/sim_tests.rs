@@ -1888,6 +1888,52 @@ fn ccd_rotation_sweep_stops_a_spinning_cone_before_a_thin_ceiling() {
     );
 }
 
+/// 精确凸-凸 CCD：老路径对非盒凸体只扫中心射线；一个带尖锐凸起的凸包
+/// 侧向撞薄墙时中心射线从旁边掠过，旧路径会整步穿过去。GJK 保守推进必须
+/// 用凸包真实支持点把墙截住。
+#[test]
+fn precise_ccd_catches_a_convex_hull_spike_between_samples() {
+    fn run(precise: bool) -> f32 {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: vec3(0.25, 0.02, 0.6),
+            })
+            .position(vec3(1.0, 0.0, 0.0))
+            .build(),
+        );
+        // 小基座 + 一根沿 +X 的长尖刺；尖刺端点就是凸包的支持点，但旧路径
+        // 不看它（只从质心发一条中心射线）。
+        let mut points = vec![
+            vec3(-0.1, -0.1, -0.1),
+            vec3(-0.1, -0.1, 0.1),
+            vec3(-0.1, 0.1, -0.1),
+            vec3(-0.1, 0.1, 0.1),
+            vec3(0.1, 0.0, 0.0),
+            vec3(2.0, 0.0, 0.0),
+        ];
+        // 让尖刺端点落在墙正下方；质心在 x=-1，中心射线打不到 x=1 的墙。
+        let hull = w.add_body(
+            BodyBuilder::dynamic(Shape::ConvexHull {
+                points: points.split_off(0),
+            })
+            .position(vec3(-1.0, -0.5, 0.0))
+            .linear_velocity(vec3(0.0, 4.0, 0.0))
+            .ccd_precise(precise)
+            .build(),
+        );
+        for _ in 0..30 {
+            w.step(1.0 / 60.0);
+        }
+        w.body(hull).unwrap().position().y
+    }
+    let without = run(false);
+    let with = run(true);
+    assert!(without > 1.0, "旧路径应整步穿过薄墙：y={without}");
+    assert!(with < 0.5, "精确 CCD 应在尖刺碰到墙时截住：y={with}");
+}
+
 #[test]
 fn ccd_respects_collision_groups() {
     let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);

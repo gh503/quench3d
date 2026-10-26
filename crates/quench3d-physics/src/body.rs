@@ -403,6 +403,11 @@ pub struct RigidBody {
     /// 代价是每个开了 CCD 的物体每子步一次射线查询，与速度无关。
     pub ccd: bool,
 
+    /// 精确 CCD：对**凸形状与凸形状**用 GJK 距离做保守推进，直到真正接触；
+    /// 比默认的中心射线 + 角点采样更贵（每个开了此标志的物体每子步 O(其它体)），
+    /// 但能抓住采样点之间的尖锐凸起。半空间/三角网仍走默认路径。
+    pub ccd_precise: bool,
+
     /// 质量。
     pub(crate) mass: f32,
     /// 质量倒数（0 表示无限大）。
@@ -773,6 +778,7 @@ pub struct BodyBuilder {
     groups: InteractionGroups,
     sensor: bool,
     ccd: bool,
+    ccd_precise: bool,
 }
 
 impl BodyBuilder {
@@ -802,6 +808,7 @@ impl BodyBuilder {
             groups: InteractionGroups::default(),
             sensor: false,
             ccd: false,
+            ccd_precise: false,
         }
     }
 
@@ -1011,6 +1018,15 @@ impl BodyBuilder {
         self
     }
 
+    /// 开启精确凸-凸 CCD（GJK 保守推进；隐含 `ccd=true`）。
+    pub fn ccd_precise(mut self, precise: bool) -> Self {
+        self.ccd_precise = precise;
+        if precise {
+            self.ccd = true;
+        }
+        self
+    }
+
     /// 追加一个复合形状部件（可以调多次）。
     ///
     /// 部件相对**刚体原点**摆位；质量、质心、惯性张量按所有部件重新合成。
@@ -1083,6 +1099,7 @@ impl BodyBuilder {
             groups: self.groups,
             sensor: self.sensor,
             ccd: self.ccd,
+            ccd_precise: self.ccd_precise,
             mass,
             inv_mass,
             inertia_local: inertia,

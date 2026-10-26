@@ -3975,6 +3975,44 @@ fn meaningless_output_flags_are_rejected() {
     assert!(!out.exists(), "simulate --render --dry-run 也不许写盘");
 }
 
+/// 精确凸-凸 CCD 也要能从场景文件走到模拟：带尖刺的凸包侧向撞薄墙，
+/// 旧中心射线路径会穿过去；`ccd_precise` 必须把墙截住。
+#[test]
+fn precise_ccd_is_wired_from_the_scene_file() {
+    let dir = temp_dir("precise_ccd");
+    let scene = dir.join("spike.json");
+    let text = r#"{
+      "objects": [
+        { "name": "薄墙", "shape": { "type": "box", "size": [0.5, 0.04, 1.2] },
+          "position": [1, 0, 0], "body": "static" },
+        { "name": "尖刺", "shape": { "type": "convex",
+            "points": [[-0.1,-0.1,-0.1],[-0.1,-0.1,0.1],[-0.1,0.1,-0.1],
+                       [-0.1,0.1,0.1],[0.1,0,0],[2.0,0,0]] },
+          "position": [-1, -0.5, 0], "body": "dynamic",
+          "velocity": [0, 4, 0], "gravity_scale": 0,
+          "ccd_precise": FLAG }
+      ],
+      "simulate": { "steps": 30, "dt": 0.0166667 }
+    }"#;
+    let y = |flag: &str| {
+        std::fs::write(&scene, text.replace("FLAG", flag)).unwrap();
+        let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+        assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+        r.json()["data"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == "尖刺")
+            .unwrap()["position"][1]
+            .as_f64()
+            .unwrap()
+    };
+    let coarse = y("false");
+    let precise = y("true");
+    assert!(coarse > 1.0, "旧路径应穿过薄墙：y={coarse}");
+    assert!(precise < 0.5, "精确 CCD 应在尖刺碰到墙时截住：y={precise}");
+}
+
 /// 碰撞过滤 / 传感器 / CCD 端到端：三个功能都要能从**场景文件**走到报告里。
 #[test]
 fn simulate_reports_sensors_and_respects_layers_and_ccd() {

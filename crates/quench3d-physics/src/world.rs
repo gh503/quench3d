@@ -2301,6 +2301,86 @@ impl PhysicsWorld {
         None
     }
 
+    /// 凸-凸精确 CCD：用 GJK 距离做保守推进，直到两形状真正接触。
+    ///
+    /// 距离函数在时间上是 1-Lipschitz 的，速度上界
+    /// `|v_rel| + |ω_a|·R_a + |ω_b|·R_b` 保证 `Δ距离 / 上界` 不会越过首次接触。
+    /// 只处理两侧都是凸形状（半空间/三角网走默认射线/角点路径）；返回归一化
+    /// 时间 `t∈[0,1]`。每个开了 `ccd_precise` 的物体每子步 O(其它体)，是
+    /// 明确的高成本精确路径，不是默认开关。
+    fn sweep_convex_bodies(&self, self_index: usize, dt: f32) -> Option<f32> {
+        let a = self.bodies.get(self_index)?.body.as_ref()?;
+        if a.shape.is_static_only() || a.sensor || !(dt.is_finite() && dt > 0.0) {
+            return None;
+        }
+        let groups = a.groups;
+        let ra = a.shape.bounding_radius();
+        let mut best: Option<f32> = None;
+        for (i, slot) in self.bodies.iter().enumerate() {
+            if i == self_index {
+                continue;
+            }
+            let Some(b) = &slot.body else { continue };
+            if b.sensor || b.shape.is_static_only() || !b.groups.interacts(groups) {
+                continue;
+            }
+            let rb = b.shape.bounding_radius();
+            if !(ra.is_finite() && rb.is_finite()) {
+                continue;
+            }
+            let rel_v = a.linear_velocity - b.linear_velocity;
+            let bound = rel_v.length()
+                + a.angular_velocity.length() * ra
+                + b.angular_velocity.length() * rb;
+            if !(bound.is_finite() && bound > 1e-6) {
+                continue;
+            }
+            let step = bound * dt;
+            let mut t = 0.0f32;
+            for _ in 0..64 {
+                let tf = |body: &RigidBody| {
+                    let speed = body.angular_velocity.length();
+                    let rotation = if speed > 1e-9 {
+                        body.transform.rotation
+                            * Quat::from_axis_angle(
+                                body.angular_velocity.normalize_or_zero(),
+                                speed * dt * t,
+                            )
+                    } else {
+                        body.transform.rotation
+                    };
+                    Transform {
+                        position: body.transform.position + body.linear_velocity * (dt * t),
+                        rotation,
+                        scale: body.transform.scale,
+                    }
+                };
+                let ta = tf(a);
+                let tb = tf(b);
+                let ga = gjk::Support::new(&a.shape, &ta);
+                let gb = gjk::Support::new(&b.shape, &tb);
+                let hit = gjk::gjk(&ga, &gb);
+                if hit.intersect || hit.distance <= 1e-4 {
+                    // 起始姿态已经接触时交给窄相/求解器，不要把速度乘 0 冻住
+                    // 一个本来只是贴在地板上的精确 CCD 物体。
+                    if t > 1e-5 && best.is_none_or(|cur| t < cur) {
+                        best = Some(t);
+                    }
+                    break;
+                }
+                let advance = hit.distance / step;
+                if !(advance.is_finite() && advance > 1e-6) {
+                    break;
+                }
+                t += advance;
+                if t >= 1.0 {
+                    break;
+                }
+            }
+        }
+        best
+    }
+
     fn sphere_sweep_bodies(
         &self,
         self_index: usize,
@@ -2631,6 +2711,13 @@ impl PhysicsWorld {
             if (!total.is_finite() || total <= 0.0) && !sweep_spin {
                 continue;
             }
+            // 精确凸-凸路径：和旧路径取更早的 TOI；半空间/三角网目标不在
+            // 这里处理（GJK 无有限支持点），仍由旧射线/角点扫掠兜底。
+            let precise_t = if b.ccd_precise {
+                self.sweep_convex_bodies(i, dt)
+            } else {
+                None
+            };
             let self_handle = BodyHandle::new(i as u32, slot.generation);
             let groups = b.groups;
             let filter = |handle: BodyHandle| -> bool {
@@ -2863,14 +2950,26 @@ impl PhysicsWorld {
                     _ => {}
                 }
             }
+            let mut final_update: Option<(Vec3, Option<Vec3>)> = None;
+            let mut final_t = 1.0f32;
             if spin_t < 1.0 {
-                updates.push((
-                    i,
+                final_t = spin_t;
+                final_update = Some((
                     b.linear_velocity * spin_t,
                     Some(b.angular_velocity * spin_t),
                 ));
             } else if let Some(v) = linear_update {
-                updates.push((i, v, None));
+                final_update = Some((v, None));
+            }
+            if let Some(t) = precise_t {
+                if t < final_t {
+                    final_t = t;
+                    final_update = Some((b.linear_velocity * t, Some(b.angular_velocity * t)));
+                }
+            }
+            let _ = final_t;
+            if let Some((v, w)) = final_update {
+                updates.push((i, v, w));
             }
         }
         for (i, v, w) in updates {
