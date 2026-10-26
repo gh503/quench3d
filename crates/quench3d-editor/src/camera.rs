@@ -145,6 +145,32 @@ struct DepthJson {
     raw_min: Option<f32>,
     #[serde(default)]
     raw_max: Option<f32>,
+    /// 反投影采样步长（像素）；0 视为 6（采集端缺省）。
+    #[serde(default)]
+    point_step: u32,
+    /// u8=255 对应的相机空间深度（任意尺度，缺省 0.3）。
+    #[serde(default)]
+    z_near: Option<f32>,
+    /// u8=0 对应的相机空间深度（缺省 3.0）。
+    #[serde(default)]
+    z_far: Option<f32>,
+    /// 反投影后加上的引擎坐标原点（缺省 [2.2, 1.0, 0.0]）。
+    #[serde(default)]
+    origin: Option<[f32; 3]>,
+}
+
+/// 采集端估计的针孔内参；缺省 0 表示没有内参、不做深度反投影。
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, Default, Deserialize)]
+struct IntrinsicsJson {
+    #[serde(default)]
+    fx: f32,
+    #[serde(default)]
+    fy: f32,
+    #[serde(default)]
+    cx: f32,
+    #[serde(default)]
+    cy: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -205,6 +231,8 @@ pub struct FeedJson {
     depth: DepthJson,
     #[serde(default)]
     points: PointsJson,
+    #[serde(default)]
+    intrinsics: IntrinsicsJson,
 }
 
 /// 一帧已经读入内存的动捕数据。
@@ -400,7 +428,8 @@ impl CameraFeed {
             return;
         };
         let Some(raw_points) = frame.points.as_deref() else {
-            self.recon_status = "这一帧没有点云（需要深度模型 + --points）".to_string();
+            self.recon_status =
+                "这一帧没有点云（需要深度 + 内参，或采集端写 --points）".to_string();
             return;
         };
         // 时间累积：同一体素取多帧平均，弥补单帧遮挡/噪声；缺省关时完全走旧路径。
@@ -706,9 +735,19 @@ impl CameraFeed {
                     .weak(),
                 )
                 .on_hover_text(hover);
+            } else if let Some(points) = &frame.points {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "深度内参反投影 {} 点 · 采集端未写 latest.points",
+                        points.len()
+                    ))
+                    .small()
+                    .weak(),
+                )
+                .on_hover_text("用 latest.depth + intrinsics 现算，尺度仍是相对逆深度");
             } else {
                 ui.label(
-                    egui::RichText::new("没有点云（--no-points 或未启用深度）")
+                    egui::RichText::new("没有点云（需要深度 + 内参，或 --points）")
                         .small()
                         .weak(),
                 );
@@ -722,7 +761,7 @@ impl CameraFeed {
                     .speed(0.005)
                     .suffix(" m"),
             );
-            let enabled = frame.json.points.present && frame.points.is_some();
+            let enabled = frame.points.is_some();
             ui.checkbox(&mut self.recon_smooth, "平滑表面")
                 .on_hover_text("Surface Nets 连续表面；关掉则是一个个扫描块");
             if ui
@@ -1019,6 +1058,16 @@ fn read_frame(dir: &Path) -> Result<Option<FeedFrame>, String> {
     } else {
         None
     };
+    // 采集端可以只写深度（`--no-points`）：读端用内参 + z 映射补出同一点云。
+    // 没有内参（fx/fy <= 0）时不猜，保持旧行为 `points = None`。
+    let points = if json.points.present {
+        points
+    } else {
+        points.or_else(|| {
+            let depth = depth.as_deref()?;
+            depth_to_points(&json, depth).ok()
+        })
+    };
     Ok(Some(FeedFrame {
         json,
         rgb,
@@ -1026,6 +1075,61 @@ fn read_frame(dir: &Path) -> Result<Option<FeedFrame>, String> {
         points,
         loaded_at: Instant::now(),
     }))
+}
+
+/// 用 `latest.json` 的内参与深度映射把 u8 相对深度反投影成引擎坐标点云。
+#[cfg(not(target_arch = "wasm32"))]
+///
+/// 与采集端 `camera_mocap.py::depth_to_points` 同一套约定：u8=255 → `z_near`，
+/// u8=0 → `z_far`；像素 `(x, y)` 按 `(x-cx)/fx`、`-(y-cy)/fy` 反投影，再转成
+/// 引擎 x 右 / y 上 / z 向屏幕外。没有有效内参时返回错误（调用方保持无点云）。
+fn depth_to_points(json: &FeedJson, depth: &[u8]) -> Result<Vec<Vec3>, String> {
+    let intrinsics = &json.intrinsics;
+    if !(intrinsics.fx.is_finite()
+        && intrinsics.fy.is_finite()
+        && intrinsics.fx > 0.0
+        && intrinsics.fy > 0.0)
+    {
+        return Err("缺少有效内参（fx/fy）".to_string());
+    }
+    let w = json.width as usize;
+    let h = json.height as usize;
+    if depth.len() != w * h {
+        return Err("深度图长度与画面尺寸不符".to_string());
+    }
+    let step = usize::try_from(json.depth.point_step)
+        .ok()
+        .filter(|s| *s > 0)
+        .unwrap_or(6);
+    let z_near = json.depth.z_near.unwrap_or(0.3);
+    let z_far = json.depth.z_far.unwrap_or(3.0);
+    if !(z_near.is_finite() && z_far.is_finite() && z_far > z_near) {
+        return Err("深度 z_near/z_far 非法".to_string());
+    }
+    let origin = json.depth.origin.unwrap_or([2.2, 1.0, 0.0]);
+    if !origin.iter().all(|v| v.is_finite()) {
+        return Err("深度原点含非有限值".to_string());
+    }
+    let xs: Vec<usize> = (0..w).step_by(step).collect();
+    let ys: Vec<usize> = (0..h).step_by(step).collect();
+    let count = xs
+        .len()
+        .checked_mul(ys.len())
+        .ok_or_else(|| "深度重建点数溢出".to_string())?;
+    if count > 1_000_000 {
+        return Err(format!("深度重建点数过多：{count}"));
+    }
+    let mut out = Vec::with_capacity(count);
+    for &y in &ys {
+        for &x in &xs {
+            let d = f32::from(depth[y * w + x]) / 255.0;
+            let z = z_near + (1.0 - d) * (z_far - z_near);
+            let gx = (x as f32 - intrinsics.cx) / intrinsics.fx * z;
+            let gy = -(y as f32 - intrinsics.cy) / intrinsics.fy * z;
+            out.push(Vec3::new(gx + origin[0], gy + origin[1], -z + origin[2]));
+        }
+    }
+    Ok(out)
 }
 
 /// 把点云画成小十字。深度反投影没有拓扑，点本身就是最小可读单元。
@@ -1647,6 +1751,7 @@ mod tests {
         assert_eq!(frame.json.frame, 1);
         assert_eq!(frame.rgb.len(), 12);
         assert_eq!(frame.depth.as_deref(), Some([3u8; 4].as_slice()));
+        assert!(frame.points.is_none(), "没有内参时不能猜点云");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1667,6 +1772,76 @@ mod tests {
         assert_eq!(json.points.count, 2);
         assert_eq!(json.points.layout, "xyz_f32_le");
         assert_eq!(json.points.bounds, Some([-1.0, -1.0, -3.0, 1.0, 1.0, 0.0]));
+    }
+
+    fn depth_only_json(step: u32) -> FeedJson {
+        let text = format!(
+            r#"{{"schema":"quench3d.mocap/1","version":1,"frame":1,
+            "timestamp_ms":0,"source":"test","width":2,"height":2,"fps":30,
+            "pose":{{"present":false}},"silhouette":{{"present":false}},
+            "intrinsics":{{"fx":2.0,"fy":2.0,"cx":0.5,"cy":0.5}},
+            "depth":{{"present":true,"kind":"relative_inverse_depth",
+              "point_step":{step},"z_near":0.3,"z_far":3.0,"origin":[0.0,0.0,0.0]}}}}"#
+        );
+        serde_json::from_str(&text).expect("解析")
+    }
+
+    #[test]
+    fn depth_to_points_matches_the_producer_convention() {
+        let json = depth_only_json(1);
+        let points = depth_to_points(&json, &[255, 0, 255, 0]).expect("反投影");
+        assert_eq!(points.len(), 4);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // 像素 (0,0)：d=255 → z=0.3，gx=-0.075，gy=+0.075，输出 z=-0.3
+        assert!(close(points[0].x, -0.075), "{:?}", points[0]);
+        assert!(close(points[0].y, 0.075), "{:?}", points[0]);
+        assert!(close(points[0].z, -0.3), "{:?}", points[0]);
+        // 像素 (1,0)：d=0 → z=3.0，gx=gy=0.75
+        assert!(close(points[1].x, 0.75), "{:?}", points[1]);
+        assert!(close(points[1].y, 0.75), "{:?}", points[1]);
+        assert!(close(points[1].z, -3.0), "{:?}", points[1]);
+        // 像素 (1,1)：gy 取负
+        assert!(close(points[3].y, -0.75), "{:?}", points[3]);
+    }
+
+    #[test]
+    fn depth_to_points_honors_step_and_rejects_missing_intrinsics() {
+        let json = depth_only_json(2);
+        let points = depth_to_points(&json, &[255, 0, 255, 0]).expect("反投影");
+        assert_eq!(points.len(), 1, "2×2 图步长 2 只采 (0,0)");
+        let mut missing = depth_only_json(1);
+        missing.intrinsics.fx = 0.0;
+        let err = depth_to_points(&missing, &[255, 0, 255, 0]).expect_err("缺内参必须拒绝");
+        assert!(err.contains("内参"), "{err}");
+    }
+
+    #[test]
+    fn read_frame_reconstructs_points_from_depth_without_a_points_file() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "quench3d-camera-depth-only-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let json = r#"{"schema":"quench3d.mocap/1","version":1,"frame":3,
+            "timestamp_ms":0,"source":"test","width":2,"height":2,"fps":30,
+            "pose":{"present":false},"silhouette":{"present":false},
+            "intrinsics":{"fx":2.0,"fy":2.0,"cx":0.5,"cy":0.5},
+            "depth":{"present":true,"kind":"relative_inverse_depth",
+              "point_step":1,"z_near":0.3,"z_far":3.0,"origin":[0.0,0.0,0.0]},
+            "points":{"present":false}}"#;
+        std::fs::write(dir.join("latest.json"), json).expect("写 json");
+        std::fs::write(dir.join("latest.rgb"), [0u8; 12]).expect("写 rgb");
+        std::fs::write(dir.join("latest.depth"), [255u8, 0, 255, 0]).expect("写 depth");
+        let frame = read_frame(&dir).expect("读").expect("有帧");
+        assert!(!frame.json.points.present);
+        let points = frame.points.expect("深度应有内参反投影点云");
+        assert_eq!(points.len(), 4);
+        assert!((points[0].z + 0.3).abs() < 1e-5, "{:?}", points[0]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1705,6 +1880,35 @@ mod tests {
         assert_eq!(points.len(), 2);
         assert!((points[0].x - 2.0).abs() < 1e-6);
         assert!((points[1].z + 1.0).abs() < 1e-6);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_promised_points_file_is_not_silently_rebuilt_from_depth() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "quench3d-camera-missing-points-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let json = r#"{"schema":"quench3d.mocap/1","version":1,"frame":4,
+            "timestamp_ms":0,"source":"test","width":2,"height":2,"fps":30,
+            "pose":{"present":false},"silhouette":{"present":false},
+            "intrinsics":{"fx":2.0,"fy":2.0,"cx":0.5,"cy":0.5},
+            "depth":{"present":true,"point_step":1,"z_near":0.3,"z_far":3.0,
+              "origin":[0.0,0.0,0.0]},
+            "points":{"present":true,"path":"latest.points","count":4}}"#;
+        std::fs::write(dir.join("latest.json"), json).expect("写 json");
+        std::fs::write(dir.join("latest.rgb"), [0u8; 12]).expect("写 rgb");
+        std::fs::write(dir.join("latest.depth"), [255u8; 4]).expect("写 depth");
+        let frame = read_frame(&dir).expect("读").expect("有帧");
+        assert!(
+            frame.points.is_none(),
+            "采集端声明了 latest.points 但文件缺失时，不能悄悄改用深度"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

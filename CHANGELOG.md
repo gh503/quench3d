@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **摄像头深度-only 重建**：采集端只写深度（`--no-points`）时，编辑器用
+  `latest.json` 的 `intrinsics` 与 `depth.point_step/z_near/z_far/origin` 反投影出
+  同一套点云，仍可显示/累积/生成网格；缺内参时保持 `points = None`，声明了
+  `latest.points` 但文件缺失时**不会**悄悄改用深度。回归 4 条：映射约定、步长/缺内参、
+  深度-only 读帧、缺文件不兜底。
+
 - **流体粒子间最小分离**：`fluids[].particle_collision`（缺省 false）。打开后每步
   PBF 位置迭代结束，把距离小于 `2*radius` 的邻居沿连线各推开一半，再重新投影到
   刚体边界；低迭代/自由表面下粒子不再互相重叠。缺省关时旧路径逐位不变；回归

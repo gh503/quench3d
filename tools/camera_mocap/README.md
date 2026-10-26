@@ -7,7 +7,8 @@
 * **3D 姿态**：33 个以髋部为原点的世界点（近似米，MediaPipe 输出）；
 * **深度**：可选的 MiDaS small 单目**相对逆深度**（0..255，不是米）；
 * **点云**：把深度按相机内参反投影成 `latest.points`（缺省每 6 像素取一点）；
-  z 被映射到 0.3~3.0 的任意尺度，只用于观察结构；
+  z 被映射到 0.3~3.0 的任意尺度，只用于观察结构；`--no-points` 时编辑器用
+  JSON 的 `intrinsics` 与 `depth.point_step/z_near/z_far/origin` 现算同一点云；
 * **编辑器叠加**：`quench3d-editor` 显示摄像头画面 + 轮廓/骨架，并把 3D 世界点画成
   青绿色骨骼、黄色关节点；勾选「显示点云」后画出深度反投影点。
 
@@ -119,6 +120,7 @@ target/camera/
   "depth": {
     "present": true, "kind": "relative_inverse_depth", "path": "latest.depth",
     "width": 640, "height": 480, "raw_min": 0.0, "raw_max": 737.6,
+    "point_step": 6, "z_near": 0.3, "z_far": 3.0, "origin": [2.2, 1.0, 0.0],
     "note": "MiDaS 相对逆深度，归一化到 0..255；不是米制距离。"
   },
   "points": {

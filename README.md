@@ -757,7 +757,9 @@ quench3d::write_png(&image, "out.png")?;
 * 轮廓：Pose 自带人体分割 mask → 最大外轮廓多边形；
 * 深度：可选 MiDaS small ONNX，**单目相对逆深度**（0..255，不是米）；
 * 点云：把深度按相机内参反投影成 `latest.points`（xyz_f32_le，缺省 6 像素下采样），
-  z 是 0.3~3.0 的**任意尺度**；
+  z 是 0.3~3.0 的**任意尺度**；采集端用 `--no-points` 只写深度时，编辑器会用
+  JSON 里的 `intrinsics` + `depth.point_step/z_near/z_far/origin` 现算同一套点云
+  （缺内参不猜，保持无点云）；
 * 编辑器：`quench3d-editor` 的「摄像头动捕（实验）」浮动窗口显示画面/轮廓/骨架，
   3D 世界点作为调试线段叠加到视口（青绿骨骼、黄色关节点）；勾选「显示点云」后
   把深度反投影点画成青色小十字。勾选「作为 3D 视口背景（AR）」后，最新画面按
@@ -770,6 +772,8 @@ quench3d::write_png(&image, "out.png")?;
   它不会被写进场景 JSON（没有源网格，重开时会悬空），需要长期保存请另存为 glTF。
   勾选「时间累积」后，最近约 90 帧点云按体素平均后再重建：慢速移动时能补上
   单帧遮挡/噪声，快速移动会有拖影；缺省关，关掉时仍是单帧旧路径。
+  深度-only 帧（没有 `latest.points`）同样能重建；点云来自读端的内参反投影，
+  不是新增的推理。
 
 ```bash
 python3 -m venv target/tmp/camvenv

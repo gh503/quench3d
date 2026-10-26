@@ -3,7 +3,9 @@
 运行：python -m unittest discover -s tools/camera_mocap -p 'test_*.py'
 """
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -85,6 +87,39 @@ class ContourTests(unittest.TestCase):
         mask = np.zeros((100, 100), dtype=np.uint8)
         mask[0:2, 0:2] = 255
         self.assertIsNone(cm.largest_contour_polygon(mask))
+
+
+class FeedPayloadTests(unittest.TestCase):
+    def test_depth_metadata_is_written_for_depth_only_frames(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+            pose = cm.PoseResult([], [], False, 0.0, None)
+            depth = np.full((2, 2), 255, dtype=np.uint8)
+            cm.write_feed(
+                out,
+                5,
+                2,
+                2,
+                30.0,
+                "test",
+                False,
+                rgb,
+                pose,
+                None,
+                depth,
+                0.0,
+                1.0,
+                None,
+                3,
+            )
+            payload = json.loads((out / "latest.json").read_text())
+            self.assertFalse(payload["points"]["present"])
+            self.assertEqual(payload["depth"]["point_step"], 3)
+            self.assertAlmostEqual(payload["depth"]["z_near"], cm.POINT_Z_NEAR)
+            self.assertAlmostEqual(payload["depth"]["z_far"], cm.POINT_Z_FAR)
+            self.assertEqual(payload["depth"]["origin"], list(cm.POINT_ORIGIN))
+            self.assertGreater(payload["intrinsics"]["fx"], 0.0)
 
 
 class PoseTableTests(unittest.TestCase):

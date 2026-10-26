@@ -567,6 +567,10 @@ def write_feed(
             "height": height,
             "raw_min": round(depth_lo, 6) if depth_lo is not None else None,
             "raw_max": round(depth_hi, 6) if depth_hi is not None else None,
+            "point_step": int(point_step),
+            "z_near": POINT_Z_NEAR,
+            "z_far": POINT_Z_FAR,
+            "origin": list(POINT_ORIGIN),
             "note": "MiDaS 相对逆深度，归一化到 0..255；不是米制距离。",
         },
     }
