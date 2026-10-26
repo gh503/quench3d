@@ -1475,6 +1475,7 @@ fn scene_animator_transitions_and_promotes() {
             speed: 1.0,
             looping: true,
             start: 0.0,
+            loop_start: 0.25,
         },
         ModelAnimatorState {
             name: "run".into(),
@@ -1482,6 +1483,7 @@ fn scene_animator_transitions_and_promotes() {
             speed: 1.0,
             looping: true,
             start: 0.0,
+            loop_start: 0.4,
         },
     ];
     let transitions = vec![ModelAnimatorTransition {
@@ -1505,6 +1507,10 @@ fn scene_animator_transitions_and_promotes() {
         )
         .expect("两个 clip 都存在");
     assert_eq!(scene.animations[idx].player.animation, "移动");
+    assert!(
+        (scene.animations[idx].player.start_time - 0.25).abs() < 1e-6,
+        "状态机的 loop_start 必须进播放器"
+    );
     assert!(scene.animations[idx].secondary.is_none());
 
     scene.advance_animations(0.25);
@@ -1532,6 +1538,10 @@ fn scene_animator_transitions_and_promotes() {
         a.blend_weight > 0.4 && a.blend_weight < 0.6,
         "过渡开始后的这一帧应走到半程：{}",
         a.blend_weight
+    );
+    assert!(
+        (a.secondary.as_ref().expect("副 clip").start_time - 0.4).abs() < 1e-6,
+        "新状态的 loop_start 必须进副播放器"
     );
 
     scene.advance_animations(0.25);
@@ -1562,6 +1572,7 @@ fn scene_animator_transitions_when_clip_finishes() {
             speed: 1.0,
             looping: false,
             start: 0.0,
+            loop_start: 0.0,
         },
         ModelAnimatorState {
             name: "after".into(),
@@ -1569,6 +1580,7 @@ fn scene_animator_transitions_when_clip_finishes() {
             speed: 1.0,
             looping: true,
             start: 0.0,
+            loop_start: 0.0,
         },
     ];
     let transitions = vec![ModelAnimatorTransition {

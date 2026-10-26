@@ -1128,7 +1128,12 @@ pub fn json_schema() -> Value {
         d
     });
     defs.insert("modelAnimatorState".into(), {
-        let mut d = def(&["name", "animation", "speed", "loop", "start"]);
+        let mut d = def(&["name", "animation", "speed", "loop", "start", "loop_start"]);
+        d["properties"]["loop_start"] = json!({
+            "type": "number",
+            "minimum": 0.0,
+            "description": "循环子区间起点（秒，缺省 0）；运行时夹到 [0, duration]"
+        });
         d["required"] = json!(["name", "animation"]);
         d
     });

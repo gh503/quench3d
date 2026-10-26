@@ -1928,6 +1928,9 @@ pub struct ModelAnimatorStateDoc {
     /// 进入状态时的起始时间，缺省 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<f32>,
+    /// 循环子区间起点（秒，缺省 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_start: Option<f32>,
 }
 
 /// serde 的 `skip_serializing_if`：`false` 不写进 JSON（老场景不增加噪声）。
@@ -10400,6 +10403,31 @@ mod tests {
             .map(|d| d.path)
             .collect();
         assert_eq!(errors, vec!["lighting.taa.feedback".to_string()]);
+    }
+
+    #[test]
+    fn animator_state_loop_start_roundtrips() {
+        let doc = SceneDoc::from_value(json!({
+            "models": [{
+                "path": "m.glb",
+                "animator": {
+                    "initial": "idle",
+                    "states": [
+                        { "name": "idle", "animation": "idle", "loop_start": 0.3 }
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            doc.models[0].animator.as_ref().unwrap().states[0].loop_start,
+            Some(0.3)
+        );
+        let again = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
+        assert_eq!(
+            again.models[0].animator.as_ref().unwrap().states[0].loop_start,
+            Some(0.3)
+        );
     }
 
     #[test]

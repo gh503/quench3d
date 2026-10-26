@@ -119,6 +119,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
                     speed: 1.0,
                     looping: true,
                     start: 0.0,
+                    loop_start: 0.0,
                 },
                 ModelAnimatorState {
                     name: "走".into(),
@@ -126,6 +127,7 @@ fn fake_animation_instance() -> ModelAnimationInstance {
                     speed: 1.0,
                     looping: true,
                     start: 0.0,
+                    loop_start: 0.0,
                 },
             ],
             transitions: vec![quench3d::scene::ModelAnimatorTransition {

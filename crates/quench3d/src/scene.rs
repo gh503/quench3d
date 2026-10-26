@@ -442,6 +442,8 @@ pub struct ModelAnimatorState {
     pub looping: bool,
     /// 进入状态时的起始时间（秒）。
     pub start: f32,
+    /// 循环子区间起点（秒，0 = 从片段开头循环）。
+    pub loop_start: f32,
 }
 
 /// 状态机用来判断过渡的运行时参数（浮点；布尔/触发器用 0/1 表达）。
@@ -1214,6 +1216,7 @@ fn advance_animator(a: &mut ModelAnimationInstance, dt: f32) {
     };
     player.speed = state.speed;
     player.looping = state.looping;
+    player.set_start_time(state.loop_start);
     player.time = state.start;
     player.advance(0.0);
     if fade <= 0.0 {
@@ -2055,6 +2058,7 @@ impl Scene {
         let mut player = model.player(&first.animation)?;
         player.speed = first.speed;
         player.looping = first.looping;
+        player.set_start_time(first.loop_start);
         player.time = first.start;
         player.advance(0.0);
         let index = self.animations.len();
@@ -4387,6 +4391,7 @@ mod anim_tests {
             speed: 1.0,
             looping: true,
             start: 0.0,
+            loop_start: 0.0,
         }
     }
 

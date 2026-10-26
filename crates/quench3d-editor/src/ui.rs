@@ -2796,7 +2796,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         record_edit = true;
                     }
                 });
-                if duration > 0.0 && animation.animator.is_none() {
+                if duration > 0.0 {
                     let mut start = animation.player.start_time.clamp(0.0, duration);
                     let response = ui.add(
                         egui::DragValue::new(&mut start)
@@ -2811,6 +2811,11 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         animation.player.set_start_time(start);
                         if animation.player.time < animation.player.start_time {
                             animation.player.time = animation.player.start_time;
+                        }
+                        if let Some(animator) = &mut animation.animator {
+                            if let Some(state) = animator.states.get_mut(animator.current) {
+                                state.loop_start = animation.player.start_time;
+                            }
                         }
                         if models[index].is_some() {
                             if let Some(path) = doc.set_animation_loop_start(
@@ -3097,6 +3102,7 @@ fn animations_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                                 speed: 1.0,
                                 looping: true,
                                 start: 0.0,
+                                loop_start: 0.0,
                             });
                             if models[index].is_some() {
                                 if let Some(path) =

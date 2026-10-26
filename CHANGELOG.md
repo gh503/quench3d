@@ -11,12 +11,13 @@
 - **模型动画循环子区间**：`models[].animation.loop_start` /
   `models[].animation.blend.loop_start`（秒，缺省 0）把循环限制在
   `[loop_start, duration]`，编辑器的「循环起点」`DragValue` 可改并写回场景
-  （普通片段；状态机暂不支持）。回归
+  （普通片段与状态机当前状态）。回归
   `animation_player_start_offset_loops_within_the_remaining_clip`
   （起点 0.5、时长 2、+2s 落在 1.0；非循环夹到时长；NaN 归零）、
   `model_events_validate_and_roundtrip`（主/副 clip 往返）与
   `set_animation_params_writes_animation_and_current_animator_state`
-  （写回主 clip、状态机拒绝）。缺省 0 时旧动画逐位不变。
+  （写回主 clip 与状态机状态）、`scene_animator_transitions_and_promotes`
+  （状态机 loop_start 进入主/副播放器）。缺省 0 时旧动画逐位不变。
 
 - **4000 级流体性能**：邻域从每步 `HashMap` 27 格查询改为稠密网格 + 复用链表
   （邻居集合/顺序与旧哈希路径逐位一致，回归 `fluid_grid_matches_the_hash_neighbour_order`）；

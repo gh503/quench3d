@@ -537,6 +537,7 @@ impl Doc {
                 speed: None,
                 looping: None,
                 start: None,
+                loop_start: None,
             });
         Some(path)
     }
@@ -855,11 +856,11 @@ impl Doc {
         Some(path)
     }
 
-    /// 写主 clip（或当前状态）的循环区间起点。状态机暂不支持子区间，返回 `None`。
+    /// 写主 clip 或状态机当前状态的循环区间起点。
     pub fn set_animation_loop_start(
         &mut self,
         objects: &[usize],
-        _state: Option<&str>,
+        state: Option<&str>,
         start: f32,
     ) -> Option<String> {
         if !start.is_finite() {
@@ -871,8 +872,13 @@ impl Doc {
         let base = self.base_doc.as_mut()?;
         let doc = base.models.get_mut(model)?;
         let path = doc.path.display().to_string();
-        if doc.animator.is_some() {
-            return None;
+        if let Some(animator) = &mut doc.animator {
+            let state = animator
+                .states
+                .iter_mut()
+                .find(|s| Some(s.name.as_str()) == state)?;
+            state.loop_start = Some(start.max(0.0));
+            return Some(path);
         }
         let animation = doc.animation.as_mut()?;
         animation.loop_start = Some(start.max(0.0));
@@ -2073,9 +2079,18 @@ mod tests {
                 .loop_start,
             Some(0.75)
         );
-        // 状态机没有子区间字段：不能悄悄把参数写到错误的对象上。
+        assert_eq!(
+            doc.set_animation_loop_start(&[2], Some("run"), 0.5)
+                .as_deref(),
+            Some("b.glb")
+        );
+        let base = doc.base_doc.as_ref().expect("底稿");
+        let animator = base.models[1].animator.as_ref().expect("animator");
+        let run = animator.states.iter().find(|s| s.name == "run").unwrap();
+        assert_eq!(run.loop_start, Some(0.5));
+        // 未知状态不能误写。
         assert!(doc
-            .set_animation_loop_start(&[2], Some("idle"), 0.5)
+            .set_animation_loop_start(&[2], Some("nope"), 0.5)
             .is_none());
         assert!(doc.set_animation_loop_start(&[1], None, f32::NAN).is_none());
     }

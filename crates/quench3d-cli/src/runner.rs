@@ -4149,6 +4149,7 @@ pub fn setup_visuals(
                     speed: s.speed.unwrap_or(1.0),
                     looping: s.looping.unwrap_or(true),
                     start: s.start.unwrap_or(0.0),
+                    loop_start: s.loop_start.unwrap_or(0.0),
                 })
                 .collect();
             let transitions: Vec<quench3d::scene::ModelAnimatorTransition> = anim
