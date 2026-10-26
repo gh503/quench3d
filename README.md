@@ -923,6 +923,8 @@ quench3d schema --json                   # 能力清单：命令、参数、场�
 | `validate <场景>` | 校验场景，返回全部诊断（带 JSON 路径） | 否 |
 | `export <场景> [模型.obj\|模型.gltf\|模型.glb]` | 图元物体 → OBJ + MTL；扩展名 `.gltf` 导出文本 glTF 2.0（base64 内嵌几何/贴图/动画），`.glb` 导出二进制 GLB（BIN chunk），本引擎均可重新导入 | 否 |
 | `simulate <场景>` | 只跑物理，报告每个刚体的位置 / 速度 / 位移 / 休眠 / 接触，可按 `--trace` 采集轨迹 | 否 |
+| `record <场景> <文件>` | 跑物理并把刚体位姿录成版本化 Q3RP 回放（位置/旋转/缩放，带校验和） | 否 |
+| `replay <文件>` | 校验 Q3RP 回放并输出帧数/时长/刚体数摘要 | 否 |
 | `query <场景>` | 几何查询：`--ray` 射线（`--all` 给沿路全部命中）/ `--overlap` 任意形状重叠，可配层掩码与传感器开关 | 否 |
 | `render <场景>` | 无窗口渲染成 PNG（可先步进物理） | 是 |
 | `movie <场景>` | 录制仿真视频：PNG 序列 + `trace.jsonl`（附编码命令），或 `--encoder gif\|apng` 直接出单文件 | 是 |
@@ -940,6 +942,8 @@ quench3d export scene.json model.glb                    # 同一份场景 → �
 quench3d export scene.json model.stl                    # 图元 → 二进制 STL（3D 打印）
 quench3d simulate scene.json --steps 600 --json
 quench3d simulate scene.json --trace-all --json            # 附带每条轨迹的结论
+quench3d record scene.json replay.q3r                        # 刚体位姿回放（Q3RP）
+quench3d replay replay.q3r --json                            # 校验并汇总回放
 quench3d render scene.json --out scene.png --width 960 --height 600
 quench3d movie scene.json --frames 300 --frames-dir frames   # 录 5 秒（60fps，1 步/帧）
 quench3d query scene.json --ray 0,5,0,0,-1,0 --json          # 这条射线上有什么（最近一个）

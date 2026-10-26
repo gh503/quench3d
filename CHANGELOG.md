@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+- **CLI 录制/回放**：新增 `quench3d record <场景> <文件>` 与 `quench3d replay <文件>`。
+  `record` 复用场景的定时动作/子步，逐固定步记录刚体位姿并写 Q3RP；`replay` 只读
+  校验并输出帧数/时长/刚体数。端到端测试 `record_and_replay_round_trip` 覆盖
+  初始帧+5 步、摘要字段与损坏文件报错；schema/帮助同步。
+
 - **刚体位姿回放**：新增 `ReplayClip`（`crates/quench3d-physics/src/replay.rs`）。
   `record` 每固定步记录刚体位姿，二进制格式带 `Q3RP` magic、版本 1、FNV-1a 校验；
   `sample` 按时间做位置 lerp / 旋转 slerp，`apply` 只写位姿不推进物理。截断/

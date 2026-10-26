@@ -3324,6 +3324,46 @@ pub fn run_query(
     Ok(base)
 }
 
+/// 回放录制结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordReport {
+    /// 写出的文件。
+    pub path: String,
+    /// 帧数（含初始帧）。
+    pub frames: usize,
+    /// 初始帧的刚体数。
+    pub bodies: usize,
+    /// 回放时长（秒）。
+    pub duration: f32,
+    /// 固定步长。
+    pub fixed_dt: f32,
+    /// 文件字节数。
+    pub bytes: usize,
+    /// 物理步数。
+    pub steps: u32,
+}
+
+/// 回放文件摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayReport {
+    /// 文件路径。
+    pub path: String,
+    /// 格式版本。
+    pub version: u16,
+    /// 帧数。
+    pub frames: usize,
+    /// 首帧刚体数。
+    pub bodies: usize,
+    /// 任意帧的最大刚体数。
+    pub max_bodies: usize,
+    /// 时长（秒）。
+    pub duration: f32,
+    /// 固定步长。
+    pub fixed_dt: f32,
+    /// 文件字节数。
+    pub bytes: usize,
+}
+
 /// 只跑物理（不需要 GPU）。
 pub fn run_simulate(doc: &SceneDoc) -> Result<SimReport, RunError> {
     run_simulate_traced(doc, &[], 1).map(|(report, _)| report)
@@ -3480,6 +3520,78 @@ pub fn run_simulate_traced(
         .map(|t| summarize_trace(t.name, t.shape.to_string(), t.samples, truncated))
         .collect();
     Ok((report, trajectories))
+}
+
+/// 录制刚体位姿回放。
+pub fn run_record(doc: &SceneDoc, out: &Path) -> Result<RecordReport, RunError> {
+    let resolved = resolve_includes(doc)?;
+    let expanded = resolved.expanded();
+    let doc = &expanded;
+    let mut build = build_world(doc)?;
+    let steps = doc.simulate.steps;
+    if steps > 100_000 {
+        return Err(RunError::scene(format!(
+            "回放最多录制 100000 步，当前 {steps}；请拆段或减小 simulate.steps"
+        )));
+    }
+    let dt = doc.simulate.dt;
+    if !(dt.is_finite() && dt > 0.0) {
+        return Err(RunError::scene(format!(
+            "回放步长必须是正有限数，当前 {dt}"
+        )));
+    }
+    let mut clip = ReplayClip::new(dt);
+    let mut script = Script::new(doc, &build.world, &build.handles)?;
+    script.begin(&build.world);
+    clip.record(&build.world);
+    for _ in 1..=steps {
+        script.step(&mut build.world, dt);
+        clip.record(&build.world);
+    }
+    let bytes = clip.encode();
+    if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| RunError::io(format!("无法创建回放目录 {}：{e}", parent.display())))?;
+        }
+    }
+    std::fs::write(out, &bytes)
+        .map_err(|e| RunError::io(format!("无法写回放 {}：{e}", out.display())))?;
+    let bodies = clip.frames().first().map_or(0, |f| f.poses.len());
+    Ok(RecordReport {
+        path: out.display().to_string(),
+        frames: clip.frames().len(),
+        bodies,
+        duration: clip.duration(),
+        fixed_dt: dt,
+        bytes: bytes.len(),
+        steps,
+    })
+}
+
+/// 读取并校验回放文件，输出摘要（不需要 GPU）。
+pub fn run_replay(path: &Path) -> Result<ReplayReport, RunError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| RunError::io(format!("无法读回放 {}：{e}", path.display())))?;
+    let clip =
+        ReplayClip::decode(&bytes).map_err(|e| RunError::io(format!("回放文件无效：{e}")))?;
+    let bodies = clip.frames().first().map_or(0, |f| f.poses.len());
+    let max_bodies = clip
+        .frames()
+        .iter()
+        .map(|f| f.poses.len())
+        .max()
+        .unwrap_or(0);
+    Ok(ReplayReport {
+        path: path.display().to_string(),
+        version: quench3d::physics::REPLAY_VERSION,
+        frames: clip.frames().len(),
+        bodies,
+        max_bodies,
+        duration: clip.duration(),
+        fixed_dt: clip.fixed_dt,
+        bytes: bytes.len(),
+    })
 }
 
 /// 采集一个采样点。

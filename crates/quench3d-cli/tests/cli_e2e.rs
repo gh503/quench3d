@@ -60,10 +60,61 @@ fn version_and_help_are_friendly() {
     let h = run(&["--help"]);
     assert_eq!(h.code, 0);
     for cmd in [
-        "schema", "doctor", "info", "validate", "export", "render", "simulate", "ask", "mcp",
+        "schema", "doctor", "info", "validate", "export", "render", "simulate", "record", "replay",
+        "ask", "mcp",
     ] {
         assert!(h.stdout.contains(cmd), "帮助里缺少命令 {cmd}");
     }
+}
+
+#[test]
+fn record_and_replay_round_trip() {
+    let dir = temp_dir("record_replay");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+  "format": "quench3d.scene", "version": 2, "name": "回放测试",
+  "ground": { "size": 20, "material": "floor" },
+  "materials": { "floor": { "color": [0.5,0.5,0.5] }, "box": { "color": [0.8,0.4,0.2] } },
+  "objects": [
+    { "name": "箱子", "shape": { "type": "box", "size": [0.5,0.5,0.5] },
+      "position": [0,3,0], "material": "box", "body": "dynamic" }
+  ],
+  "simulate": { "steps": 5, "dt": 0.1 }
+}"#,
+    )
+    .unwrap();
+    let clip = dir.join("clip.q3r");
+    let r = run(&[
+        "record",
+        scene.to_str().unwrap(),
+        clip.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let env = r.json();
+    assert_eq!(env["command"], "record");
+    assert_eq!(env["data"]["frames"], 6, "初始帧 + 5 步：{}", env);
+    assert_eq!(env["data"]["steps"], 5);
+    assert!(env["data"]["bodies"].as_u64().unwrap() >= 2);
+    assert!(env["data"]["bytes"].as_u64().unwrap() > 0);
+    assert!(clip.exists());
+
+    let r = run(&["replay", clip.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let env = r.json();
+    assert_eq!(env["command"], "replay");
+    assert_eq!(env["data"]["version"], 1);
+    assert_eq!(env["data"]["frames"], 6);
+    assert!((env["data"]["duration"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+
+    // 损坏文件必须报错而不是 panic。
+    let bad = dir.join("bad.q3r");
+    std::fs::write(&bad, b"not a replay").unwrap();
+    let r = run(&["replay", bad.to_str().unwrap(), "--json"]);
+    assert_ne!(r.code, 0);
+    assert_eq!(r.json()["error"]["code"], "io_error");
 }
 
 #[test]

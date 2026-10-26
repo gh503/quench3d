@@ -232,6 +232,36 @@ pub fn schema() -> Value {
                 ]
             },
             {
+                "name": "record",
+                "summary": "跑物理并把刚体位姿录成版本化回放文件（不需要 GPU）",
+                "args": [
+                    { "name": "scene", "type": "path", "required": true, "description": "场景 JSON 路径" },
+                    { "name": "out", "type": "path", "required": true, "description": "回放输出路径（Q3RP 二进制）" },
+                    { "name": "--steps", "type": "u32", "required": false, "description": "覆盖 simulate.steps；最多 100000" },
+                    { "name": "--dt", "type": "f32", "required": false, "description": "覆盖 simulate.dt" },
+                    { "name": "--no-clobber", "type": "flag", "required": false, "description": "输出已存在就报错，不覆盖" }
+                ],
+                "output": "{ path, frames, bodies, duration, fixed_dt, bytes, steps }",
+                "notes": "只录刚体位姿（位置/旋转/缩放），不录速度、关节、流体粒子；格式带 magic Q3RP、版本 1 与 FNV-1a 校验和",
+                "examples": [
+                    "quench3d record scene.json replay.q3r --json",
+                    "quench3d record scene.json replay.q3r --steps 120 --no-clobber"
+                ]
+            },
+            {
+                "name": "replay",
+                "summary": "读取并校验 Q3RP 回放文件，输出帧数/时长/刚体数摘要（不需要 GPU）",
+                "args": [
+                    { "name": "file", "type": "path", "required": true, "description": "Q3RP 回放文件路径" }
+                ],
+                "output": "{ path, version, frames, bodies, max_bodies, duration, fixed_dt, bytes }",
+                "notes": "损坏/截断/版本不符/校验和不匹配会报错；只读不推进物理",
+                "examples": [
+                    "quench3d replay replay.q3r --json",
+                    "quench3d replay replay.q3r"
+                ]
+            },
+            {
                 "name": "query",
                 "summary": "在场景上做一次几何查询（射线 / 任意形状重叠），不需要 GPU、不改动场景",
                 "args": [
@@ -1582,8 +1612,8 @@ mod tests {
         let cmds = s["commands"].as_array().unwrap();
         let names: Vec<&str> = cmds.iter().map(|c| c["name"].as_str().unwrap()).collect();
         for expected in [
-            "schema", "doctor", "info", "validate", "render", "simulate", "query", "example",
-            "ask", "chat", "bench", "mcp",
+            "schema", "doctor", "info", "validate", "render", "simulate", "record", "replay",
+            "query", "example", "ask", "chat", "bench", "mcp",
         ] {
             assert!(names.contains(&expected), "能力清单缺少命令 {expected}");
         }

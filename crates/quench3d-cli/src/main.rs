@@ -939,6 +939,95 @@ fn dispatch(args: &Args) -> i32 {
                 Err(e) => fail(args, "movie", ErrorInfo::from_run(&e), started),
             }
         }
+        "record" => {
+            let started = Instant::now();
+            let Some(path) = args.positional.first() else {
+                return missing(
+                    args,
+                    "record",
+                    "需要场景文件路径",
+                    "quench3d record scene.json replay.q3r",
+                );
+            };
+            let Some(out) = args.positional.get(1) else {
+                return missing(
+                    args,
+                    "record",
+                    "需要回放输出路径",
+                    "quench3d record scene.json replay.q3r",
+                );
+            };
+            let mut doc = match load_scene(args, path, started) {
+                Ok(d) => d,
+                Err(code) => return code,
+            };
+            if let Err(code) = apply_overrides(args, &mut doc, started) {
+                return code;
+            }
+            let out_path = std::path::PathBuf::from(out);
+            if args.has("--no-clobber") && out_path.exists() {
+                return fail(
+                    args,
+                    "record",
+                    ErrorInfo::from_run(&runner::RunError::output_exists(&out_path)),
+                    started,
+                );
+            }
+            if args.has("--dry-run") {
+                return fail(
+                    args,
+                    "record",
+                    ErrorInfo::new("invalid", "record 会写回放文件，不支持 --dry-run")
+                        .hint("只想校验场景请用 quench3d validate"),
+                    started,
+                );
+            }
+            match runner::run_record(&doc, &out_path) {
+                Ok(report) => {
+                    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+                    let human = format!(
+                        "回放文件  : {}\n帧数      : {}\n刚体      : {}\n时长      : {:.3} s（dt = {:.5}s）\n大小      : {} KB\n下一步    : quench3d replay {} --json",
+                        report.path,
+                        report.frames,
+                        report.bodies,
+                        report.duration,
+                        report.fixed_dt,
+                        report.bytes / 1024,
+                        report.path,
+                    );
+                    finish(args, "record", Ok(value), started, |_| println!("{human}"))
+                }
+                Err(e) => fail(args, "record", ErrorInfo::from_run(&e), started),
+            }
+        }
+        "replay" => {
+            let started = Instant::now();
+            let Some(path) = args.positional.first() else {
+                return missing(
+                    args,
+                    "replay",
+                    "需要回放文件路径",
+                    "quench3d replay replay.q3r --json",
+                );
+            };
+            match runner::run_replay(std::path::Path::new(path)) {
+                Ok(report) => {
+                    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+                    let human = format!(
+                        "回放文件  : {}\n版本      : {}\n帧数      : {}（最多 {} 刚体/帧）\n时长      : {:.3} s（dt = {:.5}s）\n大小      : {} KB",
+                        report.path,
+                        report.version,
+                        report.frames,
+                        report.max_bodies,
+                        report.duration,
+                        report.fixed_dt,
+                        report.bytes / 1024,
+                    );
+                    finish(args, "replay", Ok(value), started, |_| println!("{human}"))
+                }
+                Err(e) => fail(args, "replay", ErrorInfo::from_run(&e), started),
+            }
+        }
         "simulate" => {
             let started = Instant::now();
             let Some(path) = args.positional.first() else {
@@ -2222,6 +2311,8 @@ fn help_text() -> String {
   render <场景>          无窗口渲染成 PNG（可先步进物理）
   movie <场景>           录制仿真视频：PNG 序列 + trace.jsonl（交 ffmpeg），或直接出 GIF/APNG
   simulate <场景>        只跑物理，输出每个刚体的位置/速度/位移/休眠
+  record <场景> <文件>   跑物理并把刚体位姿录成 Q3RP 回放文件（不需要 GPU）
+  replay <文件>          校验回放文件并输出帧数/时长/刚体数摘要
   bench                  性能与资源基准：物理吞吐、每步分配、轨迹开销、单帧渲染、常驻内存
   example [--out 文件]   输出一个可直接运行的示例场景 JSON
   ask "<需求>"           让大模型生成场景 JSON，可接着渲染或仿真
