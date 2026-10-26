@@ -2082,7 +2082,7 @@ impl PhysicsWorld {
     /// 这样位置积分之后，刚体正好停在接触点前（不会穿过去），而沿着墙面的滑动不受影响；
     /// 下一子步窄相会正常生成接触，冲量由求解器给（恢复系数、摩擦都照旧生效）。
     /// 代价是**每个开了 CCD 的刚体每子步一次射线查询**，与它的速度无关。
-    /// 边界：只扫中心线（擦着角过去可能漏）、没有旋转扫掠，"极快 + 极薄"仍可能漏——见文档。
+    /// 边界：中心射线 + 形状极端点旋转扫掠；极端点之间仍可能漏，"极快 + 极薄"仍可能漏——见文档。
     fn apply_ccd(&mut self, dt: f32) {
         if dt <= 0.0 {
             return;
@@ -2096,11 +2096,19 @@ impl PhysicsWorld {
             }
             let motion = b.linear_velocity * dt;
             let total = motion.length();
-            // 旋转扫掠：只对盒子做角点扫掠（长条/薄板最容易"没有线速度、
-            // 只靠转动穿过薄墙"）。角速度很小时走原来的纯平移路径。
+            // 旋转扫掠：对盒/胶囊/柱/锥/圆角盒/凸包的极端点做线段扫掠（长条/薄板最容易
+            // "没有线速度、只靠转动穿过薄墙"）。角速度很小时走原来的纯平移路径。
             let spin = b.angular_velocity.length() * dt;
-            let sweep_spin =
-                matches!(b.shape, Shape::Box { .. }) && spin.is_finite() && spin > 1e-4;
+            let sweep_spin = matches!(
+                b.shape,
+                Shape::Box { .. }
+                    | Shape::Capsule { .. }
+                    | Shape::Cylinder { .. }
+                    | Shape::Cone { .. }
+                    | Shape::RoundedBox { .. }
+                    | Shape::ConvexHull { .. }
+            ) && spin.is_finite()
+                && spin > 1e-4;
             if (!total.is_finite() || total <= 0.0) && !sweep_spin {
                 continue;
             }
@@ -2131,7 +2139,7 @@ impl PhysicsWorld {
                     best = Some((travel, hit.normal));
                 }
                 // 盒子只有角会撞上矮墙时，中心射线会从上方掠过：补 8 条角射线。
-                // 只对盒子做（球/胶囊的中心射线已足够），且仍是一次查询/角，代价可控。
+                // 盒子补 8 条角射线（球没有旋转扫掠；其他形状见下面的分支）。
                 if let Shape::Box { half_extents } = &b.shape {
                     for sx in [-1.0f32, 1.0] {
                         for sy in [-1.0f32, 1.0] {
@@ -2170,9 +2178,10 @@ impl PhysicsWorld {
                 }
             }
 
-            // --- 旋转扫掠：把 8 个角点在这一步走出的**线段**当扫掠体 ---
+            // --- 旋转扫掠：把形状的极端点在这一步走出的**线段**当扫掠体 ---
             // 只缩小时间（线速度与角速度同乘 t），不做反弹；下一子步窄相照常
             // 生成接触并给冲量。线段是真实圆弧的弦，偏保守（宁可早停不穿透）。
+            // 盒子是 8 角；胶囊是两端点；柱/锥用 16 边环；凸包用全部顶点（最多 256）。
             let mut spin_t = 1.0f32;
             if sweep_spin {
                 let angle = spin;
@@ -2181,31 +2190,114 @@ impl PhysicsWorld {
                 let q1 = Quat::from_axis_angle(axis, angle) * q0;
                 let p0 = b.transform.position;
                 let p1 = p0 + motion;
-                if let Shape::Box { half_extents } = &b.shape {
-                    for sx in [-1.0f32, 1.0] {
-                        for sy in [-1.0f32, 1.0] {
-                            for sz in [-1.0f32, 1.0] {
-                                let local = Vec3::new(
-                                    half_extents.x * sx,
-                                    half_extents.y * sy,
-                                    half_extents.z * sz,
-                                );
-                                let from = p0 + q0.mul_vec3(local);
-                                let to = p1 + q1.mul_vec3(local);
-                                let seg = to - from;
-                                let len = seg.length();
-                                if !len.is_finite() || len <= 1e-6 {
-                                    continue;
+                let qm = Quat::from_axis_angle(axis, angle * 0.5) * q0;
+                let pm = p0 + motion * 0.5;
+                let mut sweep_segment = |from: Vec3, to: Vec3, base: f32, span: f32| {
+                    let seg = to - from;
+                    let len = seg.length();
+                    if !len.is_finite() || len <= 1e-6 {
+                        return;
+                    }
+                    let Some(hit) = self.raycast_filtered(from, seg / len, len, filter) else {
+                        return;
+                    };
+                    let local_t = (hit.distance / len).clamp(0.0, 1.0);
+                    let t = (base + local_t * span).clamp(0.0, 1.0);
+                    spin_t = spin_t.min(t);
+                };
+                // 半步 + 整步两段：只测端点弦会漏掉"圆弧顶点在两帧之间"的薄墙
+                // （胶囊端盖的极点最典型：弦两端都在 y<1，顶点正好越过 y=1）。
+                let mut sweep = |local: Vec3| {
+                    let a = p0 + q0.mul_vec3(local);
+                    let b = pm + qm.mul_vec3(local);
+                    let c = p1 + q1.mul_vec3(local);
+                    sweep_segment(a, b, 0.0, 0.5);
+                    sweep_segment(b, c, 0.5, 0.5);
+                };
+                match &b.shape {
+                    Shape::Box { half_extents } => {
+                        for sx in [-1.0f32, 1.0] {
+                            for sy in [-1.0f32, 1.0] {
+                                for sz in [-1.0f32, 1.0] {
+                                    sweep(Vec3::new(
+                                        half_extents.x * sx,
+                                        half_extents.y * sy,
+                                        half_extents.z * sz,
+                                    ));
                                 }
-                                let Some(hit) = self.raycast_filtered(from, seg / len, len, filter)
-                                else {
-                                    continue;
-                                };
-                                let t = (hit.distance / len).clamp(0.0, 1.0);
-                                spin_t = spin_t.min(t);
                             }
                         }
                     }
+                    Shape::Capsule {
+                        half_height,
+                        radius,
+                    } => {
+                        // 端点 + 两端"侧壁"的支撑点；旋转时侧壁也可能扫到薄墙。
+                        for sy in [-1.0f32, 1.0] {
+                            for sx in [-1.0f32, 0.0, 1.0] {
+                                for sz in [-1.0f32, 0.0, 1.0] {
+                                    if sx == 0.0 && sz == 0.0 {
+                                        continue;
+                                    }
+                                    sweep(Vec3::new(radius * sx, half_height * sy, radius * sz));
+                                }
+                            }
+                            sweep(Vec3::new(0.0, half_height * sy, 0.0));
+                            // 端盖极点：胶囊最外沿；只扫中心线/侧壁会漏掉这一圈。
+                            sweep(Vec3::new(0.0, (half_height + radius) * sy, 0.0));
+                        }
+                    }
+                    Shape::Cylinder {
+                        half_height,
+                        radius,
+                    } => {
+                        for sy in [-1.0f32, 1.0] {
+                            for k in 0..16 {
+                                let a = k as f32 / 16.0 * std::f32::consts::TAU;
+                                sweep(Vec3::new(
+                                    radius * a.cos(),
+                                    half_height * sy,
+                                    radius * a.sin(),
+                                ));
+                            }
+                        }
+                    }
+                    Shape::Cone {
+                        half_height,
+                        radius,
+                    } => {
+                        for k in 0..16 {
+                            let a = k as f32 / 16.0 * std::f32::consts::TAU;
+                            sweep(Vec3::new(radius * a.cos(), -half_height, radius * a.sin()));
+                        }
+                        sweep(Vec3::new(0.0, *half_height, 0.0));
+                    }
+                    Shape::RoundedBox {
+                        half_extents,
+                        radius,
+                    } => {
+                        for sx in [-1.0f32, 1.0] {
+                            for sy in [-1.0f32, 1.0] {
+                                for sz in [-1.0f32, 1.0] {
+                                    sweep(Vec3::new(
+                                        half_extents.x * sx,
+                                        half_extents.y * sy,
+                                        half_extents.z * sz,
+                                    ));
+                                    let _ = radius;
+                                }
+                            }
+                        }
+                    }
+                    Shape::ConvexHull { points } => {
+                        let stride = points.len().div_ceil(256).max(1);
+                        for (i, p) in points.iter().enumerate() {
+                            if i % stride == 0 {
+                                sweep(*p);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             if spin_t < 1.0 {

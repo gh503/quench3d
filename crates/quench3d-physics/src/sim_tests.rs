@@ -1624,6 +1624,182 @@ fn ccd_rotation_sweep_stops_a_spinning_box_before_a_thin_ceiling() {
     );
 }
 
+/// 胶囊没有线速度、只绕 Z 自转：端盖扫向 y=0.98 的薄天花板。
+/// 现有旋转扫掠只覆盖盒子；这条测试先在旧实现上失败，再把端点扫掠补上。
+#[test]
+fn ccd_rotation_sweep_stops_a_spinning_capsule_before_a_thin_ceiling() {
+    fn run(ccd: bool) -> (f32, f32) {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_body(
+            BodyBuilder::r#static(Shape::Plane {
+                normal: Vec3::NEG_Y,
+            })
+            .position(vec3(0.0, 0.98, 0.0))
+            .build(),
+        );
+        let capsule = w.add_body(
+            BodyBuilder::dynamic(Shape::Capsule {
+                half_height: 0.95,
+                radius: 0.05,
+            })
+            .position(Vec3::ZERO)
+            .rotation(quench3d_math::Quat::from_rotation_z(
+                -std::f32::consts::FRAC_PI_2,
+            ))
+            .angular_velocity(vec3(0.0, 0.0, 10.0))
+            .ccd(ccd)
+            .build(),
+        );
+        let mut max_endpoint_y = 0.0f32;
+        for _ in 0..120 {
+            w.step(DT);
+            let p = w.body(capsule).unwrap();
+            for sy in [-0.95f32, 0.95] {
+                let y = (p.position() + p.rotation().mul_vec3(vec3(0.0, sy, 0.0))).y;
+                max_endpoint_y = max_endpoint_y.max(y + 0.05);
+            }
+        }
+        let angle = w.body(capsule).unwrap().rotation().to_axis_angle().1.abs();
+        assert_all_finite(&w, "胶囊旋转 CCD");
+        (max_endpoint_y, angle)
+    }
+    let (without_y, without_angle) = run(false);
+    let (with_y, with_angle) = run(true);
+    assert!(without_y <= 1.02, "对照也不该穿透：{without_y}");
+    assert!(with_y <= 1.02, "端点旋转扫掠应把胶囊截在天花板下：{with_y}");
+    assert!(
+        with_angle < without_angle - 1.0,
+        "旋转扫掠应比纯离散更早截住：without={without_angle}, with={with_angle}"
+    );
+}
+
+/// 任意凸包：长轴两端顶点只靠自转扫向薄天花板。旧实现只扫盒子，凸包完全漏掉。
+#[test]
+fn ccd_rotation_sweep_stops_a_spinning_convex_hull_before_a_thin_ceiling() {
+    fn run(ccd: bool) -> f32 {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_body(
+            BodyBuilder::r#static(Shape::Plane {
+                normal: Vec3::NEG_Y,
+            })
+            .position(vec3(0.0, 0.98, 0.0))
+            .build(),
+        );
+        let hull = w.add_body(
+            BodyBuilder::dynamic(Shape::ConvexHull {
+                points: vec![
+                    vec3(-1.0, -0.05, -0.05),
+                    vec3(1.0, -0.05, -0.05),
+                    vec3(-1.0, 0.05, 0.05),
+                    vec3(1.0, 0.05, 0.05),
+                    vec3(-1.0, 0.05, -0.05),
+                    vec3(1.0, -0.05, 0.05),
+                ],
+            })
+            .position(Vec3::ZERO)
+            .angular_velocity(vec3(0.0, 0.0, 10.0))
+            .ccd(ccd)
+            .build(),
+        );
+        for _ in 0..120 {
+            w.step(DT);
+        }
+        let angle = w.body(hull).unwrap().rotation().to_axis_angle().1.abs();
+        assert_all_finite(&w, "凸包旋转 CCD");
+        angle
+    }
+    let without = run(false);
+    let with = run(true);
+    assert!(
+        with < without - 0.5,
+        "凸包顶点扫掠应比纯离散更早截住：without={without}, with={with}"
+    );
+}
+
+/// 圆柱边环扫掠：横放圆柱只靠自转把侧缘扫向薄天花板。
+#[test]
+fn ccd_rotation_sweep_stops_a_spinning_cylinder_before_a_thin_ceiling() {
+    fn run(ccd: bool) -> f32 {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_body(
+            BodyBuilder::r#static(Shape::Plane {
+                normal: Vec3::NEG_Y,
+            })
+            .position(vec3(0.0, 0.98, 0.0))
+            .build(),
+        );
+        let cylinder = w.add_body(
+            BodyBuilder::dynamic(Shape::Cylinder {
+                half_height: 1.0,
+                radius: 0.05,
+            })
+            .position(Vec3::ZERO)
+            .rotation(quench3d_math::Quat::from_rotation_z(
+                -std::f32::consts::FRAC_PI_2,
+            ))
+            .angular_velocity(vec3(0.0, 0.0, 10.0))
+            .ccd(ccd)
+            .build(),
+        );
+        for _ in 0..120 {
+            w.step(DT);
+        }
+        let angle = w.body(cylinder).unwrap().rotation().to_axis_angle().1.abs();
+        assert_all_finite(&w, "圆柱旋转 CCD");
+        angle
+    }
+    let without = run(false);
+    let with = run(true);
+    assert!(
+        with < without - 0.3,
+        "圆柱边环扫掠应比纯离散更早截住：without={without}, with={with}"
+    );
+}
+
+/// 圆锥底环/顶点扫掠：横放圆锥只靠自转把底部边缘扫向薄天花板。
+#[test]
+fn ccd_rotation_sweep_stops_a_spinning_cone_before_a_thin_ceiling() {
+    fn run(ccd: bool) -> f32 {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_body(
+            BodyBuilder::r#static(Shape::Plane {
+                normal: Vec3::NEG_Y,
+            })
+            .position(vec3(0.0, 0.98, 0.0))
+            .build(),
+        );
+        let cone = w.add_body(
+            BodyBuilder::dynamic(Shape::Cone {
+                half_height: 1.0,
+                radius: 0.05,
+            })
+            .position(Vec3::ZERO)
+            .rotation(quench3d_math::Quat::from_rotation_z(
+                -std::f32::consts::FRAC_PI_2,
+            ))
+            .angular_velocity(vec3(0.0, 0.0, 10.0))
+            .ccd(ccd)
+            .build(),
+        );
+        for _ in 0..120 {
+            w.step(DT);
+        }
+        let angle = w.body(cone).unwrap().rotation().to_axis_angle().1.abs();
+        assert_all_finite(&w, "圆锥旋转 CCD");
+        angle
+    }
+    let without = run(false);
+    let with = run(true);
+    assert!(
+        with < without - 0.2,
+        "圆锥底环扫掠应比纯离散更早截住：without={without}, with={with}"
+    );
+}
+
 #[test]
 fn ccd_respects_collision_groups() {
     let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
