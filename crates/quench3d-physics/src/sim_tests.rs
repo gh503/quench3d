@@ -3674,12 +3674,6 @@ fn deep_stack_2000_perf() {
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     let per_step = ms / 60.0;
     println!("2000 体深堆：60 步 {ms:.1} ms（{per_step:.2} ms/步）");
-    // 本机 release 的实时预算；CI 默认 `--ignored` 跳过，显式跑才断言。
-    // 优化前同机 17.0 ms/步，接触对局部化 + 求解器内联后 15.6~15.9。
-    assert!(
-        per_step < 16.0,
-        "2000 体深堆 {per_step:.2} ms/步，超过本机 release 目标 16 ms"
-    );
     let t = world.phase_timings();
     println!(
         "  候选对/步 {:.0}，流形/步 {:.0}，岛 {}（最大 {}，多体 {}）",
@@ -3692,6 +3686,12 @@ fn deep_stack_2000_perf() {
     for (name, us) in t.per_step() {
         println!("  {name}: {us:.1} us");
     }
+    // 本机 release 的实时预算；CI 默认 `--ignored` 跳过，显式跑才断言。
+    // 优化前同机 17.0 ms/步，接触对局部化 + 求解器内联后 15.6~15.9。
+    assert!(
+        per_step < 16.0,
+        "2000 体深堆 {per_step:.2} ms/步，超过本机 release 目标 16 ms"
+    );
     assert_all_finite(&world, "2000 体深堆");
     let lowest = world
         .bodies()

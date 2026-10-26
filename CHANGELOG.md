@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **回放渲染**：`quench3d replay <文件> --scene <场景> --at <秒> --render <PNG>`。
+  先按场景常规步进，再把 Q3RP 该时刻的位姿写回，然后走原渲染路径；写回数为 0
+  时明确报错（不是静默出初始帧）。像素回归
+  `replay_can_render_a_frame_from_a_recorded_clip` 断言 0s 与 0.4s 的 PNG 不同。
+  边界：只写位姿，不写速度；不是时间轴 UI，也不能直接连播。
+
 - **CLI 录制/回放**：新增 `quench3d record <场景> <文件>` 与 `quench3d replay <文件>`。
   `record` 复用场景的定时动作/子步，逐固定步记录刚体位姿并写 Q3RP；`replay` 只读
   校验并输出帧数/时长/刚体数。端到端测试 `record_and_replay_round_trip` 覆盖

@@ -32,6 +32,8 @@ const MAX_FIXED_DT: f32 = 1.0;
 
 const VALUE_FLAGS: &[&str] = &[
     "--camera",
+    "--scene",
+    "--at",
     "--golden",
     "--golden-tolerance",
     "--asset-path",
@@ -1010,22 +1012,83 @@ fn dispatch(args: &Args) -> i32 {
                     "quench3d replay replay.q3r --json",
                 );
             };
-            match runner::run_replay(std::path::Path::new(path)) {
-                Ok(report) => {
-                    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
-                    let human = format!(
-                        "回放文件  : {}\n版本      : {}\n帧数      : {}（最多 {} 刚体/帧）\n时长      : {:.3} s（dt = {:.5}s）\n大小      : {} KB",
-                        report.path,
-                        report.version,
-                        report.frames,
-                        report.max_bodies,
-                        report.duration,
-                        report.fixed_dt,
-                        report.bytes / 1024,
+            let scene_arg = args.flag_str("--scene");
+            let render_arg = args.flag_str("--render");
+            if scene_arg.is_some() || render_arg.is_some() {
+                let Some(scene) = scene_arg else {
+                    return fail(
+                        args,
+                        "replay",
+                        ErrorInfo::new("invalid", "回放渲染需要 --scene <场景>").hint(
+                            "用法：replay clip.q3r --scene scene.json --at 0.5 --render out.png",
+                        ),
+                        started,
                     );
-                    finish(args, "replay", Ok(value), started, |_| println!("{human}"))
+                };
+                let Some(render) = render_arg else {
+                    return fail(
+                        args,
+                        "replay",
+                        ErrorInfo::new("invalid", "给了 --scene 但没有 --render 输出路径").hint(
+                            "用法：replay clip.q3r --scene scene.json --at 0.5 --render out.png",
+                        ),
+                        started,
+                    );
+                };
+                let at = match args.flag_parse::<f32>("--at") {
+                    Ok(v) => v.unwrap_or(0.0),
+                    Err(e) => {
+                        return fail(args, "replay", ErrorInfo::new("invalid", e), started);
+                    }
+                };
+                let doc = match load_scene(args, scene, started) {
+                    Ok(d) => d,
+                    Err(code) => return code,
+                };
+                match runner::run_replay_render(
+                    &doc,
+                    std::path::Path::new(path),
+                    at,
+                    Some(std::path::Path::new(render)),
+                    output_policy(args),
+                ) {
+                    Ok((report, applied)) => {
+                        let value = serde_json::json!({
+                            "time": at,
+                            "applied": applied,
+                            "render": serde_json::to_value(&report).unwrap_or(Value::Null),
+                        });
+                        let human = format!(
+                            "回放时间  : {:.3} s\n写回刚体  : {}\n输出      : {}\n像素大小  : {}×{}\n耗时      : {} ms",
+                            at,
+                            applied,
+                            report.output,
+                            report.width,
+                            report.height,
+                            report.elapsed_ms,
+                        );
+                        finish(args, "replay", Ok(value), started, |_| println!("{human}"))
+                    }
+                    Err(e) => fail(args, "replay", ErrorInfo::from_run(&e), started),
                 }
-                Err(e) => fail(args, "replay", ErrorInfo::from_run(&e), started),
+            } else {
+                match runner::run_replay(std::path::Path::new(path)) {
+                    Ok(report) => {
+                        let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+                        let human = format!(
+                            "回放文件  : {}\n版本      : {}\n帧数      : {}（最多 {} 刚体/帧）\n时长      : {:.3} s（dt = {:.5}s）\n大小      : {} KB",
+                            report.path,
+                            report.version,
+                            report.frames,
+                            report.max_bodies,
+                            report.duration,
+                            report.fixed_dt,
+                            report.bytes / 1024,
+                        );
+                        finish(args, "replay", Ok(value), started, |_| println!("{human}"))
+                    }
+                    Err(e) => fail(args, "replay", ErrorInfo::from_run(&e), started),
+                }
             }
         }
         "simulate" => {
@@ -2331,7 +2394,9 @@ fn help_text() -> String {
   --trace-all            simulate 时跟踪所有会动的刚体
   --trace-every <n>      轨迹采样间隔（步，缺省 1）
   --dt <秒>              覆盖 simulate.dt
-  --render <路径>        simulate 时顺带渲染
+  --render <路径>        simulate 时顺带渲染；replay 时渲染该时刻
+  --scene <路径>         replay --render 用的场景文件
+  --at <秒>              replay --render 的时间（缺省 0）
   --bodies <n[,n...]>    bench 要测的刚体规模（缺省 100,500,1000）
   --layout <布局>        bench 布局：scatter（单层平铺）或 stack（逐层堆叠）
   --warmup <n>           bench 预热步数（缺省 30）/ movie 预热帧数（缺省 0）

@@ -252,13 +252,16 @@ pub fn schema() -> Value {
                 "name": "replay",
                 "summary": "读取并校验 Q3RP 回放文件，输出帧数/时长/刚体数摘要（不需要 GPU）",
                 "args": [
-                    { "name": "file", "type": "path", "required": true, "description": "Q3RP 回放文件路径" }
+                    { "name": "file", "type": "path", "required": true, "description": "Q3RP 回放文件路径" },
+                    { "name": "--scene", "type": "path", "required": false, "description": "配 --render 用：录制时的同一场景，用于建刚体/材质/相机" },
+                    { "name": "--at", "type": "f32", "required": false, "description": "配 --render 用：回放时间（秒，缺省 0）" },
+                    { "name": "--render", "type": "path", "required": false, "description": "渲染该时刻到 PNG；需要 --scene" }
                 ],
-                "output": "{ path, version, frames, bodies, max_bodies, duration, fixed_dt, bytes }",
-                "notes": "损坏/截断/版本不符/校验和不匹配会报错；只读不推进物理",
+                "output": "info: { path, version, frames, bodies, max_bodies, duration, fixed_dt, bytes }；render: { time, applied, render: RenderReport }",
+                "notes": "损坏/截断/版本不符/校验和不匹配会报错；只读不推进物理。--render 会先按场景 simulate 步进，再把回放位姿写回（不覆盖速度）",
                 "examples": [
                     "quench3d replay replay.q3r --json",
-                    "quench3d replay replay.q3r"
+                    "quench3d replay replay.q3r --scene scene.json --at 0.5 --render replay.png"
                 ]
             },
             {

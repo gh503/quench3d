@@ -118,6 +118,72 @@ fn record_and_replay_round_trip() {
 }
 
 #[test]
+fn replay_can_render_a_frame_from_a_recorded_clip() {
+    let dir = temp_dir("replay_render");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+  "format": "quench3d.scene", "version": 2, "name": "回放渲染",
+  "ground": { "size": 20, "material": "floor" },
+  "materials": {
+    "floor": { "color": [0.5,0.5,0.5], "roughness": 0.9 },
+    "box": { "color": [0.9,0.3,0.15], "roughness": 0.4 }
+  },
+  "objects": [
+    { "name": "箱子", "shape": { "type": "box", "size": [0.8,0.8,0.8] },
+      "position": [0,4,0], "material": "box", "body": "dynamic" }
+  ],
+  "camera": { "position": [5,3,6], "look_at": [0,2,0], "fov_deg": 50 },
+  "lighting": { "preset": "studio", "shadows": false },
+  "simulate": { "steps": 5, "dt": 0.1 },
+  "render": { "width": 64, "height": 64, "msaa": 1, "output": "unused.png" }
+}"#,
+    )
+    .unwrap();
+    let clip = dir.join("clip.q3r");
+    let r = run(&["record", scene.to_str().unwrap(), clip.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+
+    let first = dir.join("at-0.png");
+    let r = run(&[
+        "replay",
+        clip.to_str().unwrap(),
+        "--scene",
+        scene.to_str().unwrap(),
+        "--at",
+        "0",
+        "--render",
+        first.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stdout={}\nstderr={}", r.stdout, r.stderr);
+    let env = r.json();
+    assert!(env["data"]["applied"].as_u64().unwrap() >= 2);
+    assert_eq!(env["data"]["render"]["width"], 64);
+
+    let later = dir.join("at-04.png");
+    let r = run(&[
+        "replay",
+        clip.to_str().unwrap(),
+        "--scene",
+        scene.to_str().unwrap(),
+        "--at",
+        "0.4",
+        "--render",
+        later.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(first.exists() && later.exists());
+    assert_ne!(
+        std::fs::read(&first).unwrap(),
+        std::fs::read(&later).unwrap(),
+        "回放 0.4s 的箱子应比 0s 低，两张 PNG 不应逐字节相同"
+    );
+}
+
+#[test]
 fn runtime_errors_carry_stable_machine_codes() {
     let dir = temp_dir("runtime_codes");
     let missing = dir.join("does-not-exist.json");

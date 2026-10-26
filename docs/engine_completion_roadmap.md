@@ -8,7 +8,7 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**1023 通过 / 0 失败 / 5 ignored**
+- 测试：**1024 通过 / 0 失败 / 5 ignored**
 - wasm：**13,879,807 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
@@ -268,7 +268,9 @@
     `corrupt_truncated_and_future_versions_are_rejected`、`empty_clip_encodes_and_decodes`。
     边界：只录刚体位姿，不录速度/流体/关节；不是完整存档格式。CLI 已接
     `record <场景> <文件>` 与 `replay <文件>`，端到端回归
-    `record_and_replay_round_trip`（含损坏文件报错）。
+    `record_and_replay_round_trip`（含损坏文件报错）。`replay --scene --at --render`
+    可把回放某一时刻写回场景并出图，像素回归
+    `replay_can_render_a_frame_from_a_recorded_clip`（0s 与 0.4s 的 PNG 必须不同）。
   - [x] 固定步长渲染插值：`PhysicsWorld::body_interpolated_transform` 保存上一
     子步位姿，`Engine::render_interpolation`（缺省关）按累加器 alpha 插值，
     `Scene::sync_from_physics_interpolated`；编辑器默认开。回归

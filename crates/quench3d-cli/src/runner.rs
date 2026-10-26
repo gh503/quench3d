@@ -5289,6 +5289,40 @@ fn run_render_single(
     policy: OutputPolicy,
     golden: Option<&GoldenSpec>,
 ) -> Result<RenderReport, RunError> {
+    run_render_single_with_replay(doc, output_override, policy, golden, None)
+        .map(|(report, _)| report)
+}
+
+/// 渲染回放中的某一时刻：先按场景常规步进，再把回放位姿写回，然后出图。
+pub fn run_replay_render(
+    doc: &SceneDoc,
+    replay_path: &Path,
+    time: f32,
+    output_override: Option<&Path>,
+    policy: OutputPolicy,
+) -> Result<(RenderReport, usize), RunError> {
+    let bytes = std::fs::read(replay_path)
+        .map_err(|e| RunError::io(format!("无法读回放 {}：{e}", replay_path.display())))?;
+    let clip =
+        ReplayClip::decode(&bytes).map_err(|e| RunError::io(format!("回放文件无效：{e}")))?;
+    if !(time.is_finite() && time >= 0.0) {
+        return Err(RunError::scene(format!(
+            "回放时间必须是 >= 0 的有限数，当前 {time}"
+        )));
+    }
+    if clip.frames().is_empty() {
+        return Err(RunError::scene("回放没有任何帧，无法渲染".to_string()));
+    }
+    run_render_single_with_replay(doc, output_override, policy, None, Some((&clip, time)))
+}
+
+fn run_render_single_with_replay(
+    doc: &SceneDoc,
+    output_override: Option<&std::path::Path>,
+    policy: OutputPolicy,
+    golden: Option<&GoldenSpec>,
+    replay: Option<(&ReplayClip, f32)>,
+) -> Result<(RenderReport, usize), RunError> {
     let started = Instant::now();
     // 场景说"不要渲染"，就别渲染：宁可报错，也不要无视这个字段（以前它是死字段）
     if !doc.render.enabled {
@@ -5339,33 +5373,46 @@ fn run_render_single(
         }
         // 只跑物理：不建 GPU 上下文、不写盘。渲染相关的统计保持 0，
         // 由 `dry_run: true` 与 `would_write` 说明"这些数不是真的没有，而是没测"。
-        return Ok(RenderReport {
-            output: output.display().to_string(),
-            width,
-            height,
-            bytes: 0,
-            draw_calls: 0,
-            instances: 0,
-            triangles: 0,
-            culled: 0,
-            distance_culled: 0,
-            shadow_instances: 0,
-            lines: 0,
-            objects: 0,
-            camera_position: [0.0; 3],
-            probes,
-            sensors,
-            simulate: sim,
-            water_post: false,
-            dry_run: true,
-            would_write: vec![output.display().to_string()],
-            outputs: Vec::new(),
-            camera_name: doc.selected_camera.clone(),
-            golden: None,
-            models,
-            warnings,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        });
+        return Ok((
+            RenderReport {
+                output: output.display().to_string(),
+                width,
+                height,
+                bytes: 0,
+                draw_calls: 0,
+                instances: 0,
+                triangles: 0,
+                culled: 0,
+                distance_culled: 0,
+                shadow_instances: 0,
+                lines: 0,
+                objects: 0,
+                camera_position: [0.0; 3],
+                probes,
+                sensors,
+                simulate: sim,
+                water_post: false,
+                dry_run: true,
+                would_write: vec![output.display().to_string()],
+                outputs: Vec::new(),
+                camera_name: doc.selected_camera.clone(),
+                golden: None,
+                models,
+                warnings,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            },
+            0,
+        ));
+    }
+
+    let mut replay_applied = 0usize;
+    if let Some((clip, time)) = replay {
+        replay_applied = clip.apply(&mut build.world, time);
+        if replay_applied == 0 {
+            return Err(RunError::scene(
+                "回放里的刚体句柄在当前场景中一个都不存在：请用录制时的同一场景渲染".to_string(),
+            ));
+        }
     }
 
     let WorldBuild {
@@ -5452,33 +5499,36 @@ fn run_render_single(
         ..
     } = stats;
 
-    Ok(RenderReport {
-        output: output.display().to_string(),
-        width,
-        height,
-        bytes,
-        draw_calls,
-        instances,
-        triangles,
-        culled,
-        distance_culled,
-        shadow_instances,
-        lines,
-        objects: scene_objects,
-        camera_position,
-        probes,
-        sensors,
-        simulate: sim,
-        water_post,
-        dry_run: false,
-        would_write: Vec::new(),
-        outputs: Vec::new(),
-        camera_name: doc.selected_camera.clone(),
-        golden: golden_report,
-        models,
-        warnings,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-    })
+    Ok((
+        RenderReport {
+            output: output.display().to_string(),
+            width,
+            height,
+            bytes,
+            draw_calls,
+            instances,
+            triangles,
+            culled,
+            distance_culled,
+            shadow_instances,
+            lines,
+            objects: scene_objects,
+            camera_position,
+            probes,
+            sensors,
+            simulate: sim,
+            water_post,
+            dry_run: false,
+            would_write: Vec::new(),
+            outputs: Vec::new(),
+            camera_name: doc.selected_camera.clone(),
+            golden: golden_report,
+            models,
+            warnings,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        },
+        replay_applied,
+    ))
 }
 
 /// 读取一张 RGBA8 / RGB8 PNG 并比对。
