@@ -1523,6 +1523,51 @@ fn ccd_works_while_skimming_a_ground_plane() {
 
 /// CCD 的角射线：旋转盒子只有下角会撞矮墙，中心射线从墙顶掠过。
 #[test]
+fn ccd_catches_a_sphere_grazing_a_box_corner() {
+    // 中心射线从盒顶上方掠过；球心 y=1.05、半径 0.1，球其实会擦到盒顶角。
+    // 旧 CCD 只对球打中心射线（+运动方向 reach），这个角擦会整步穿过。
+    fn run(ccd: bool) -> Vec3 {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_builder(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(1.0),
+            })
+            .position(Vec3::ZERO),
+        );
+        let ball = w.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::new(-4.0, 1.05, 0.0))
+                .linear_velocity(Vec3::new(240.0, 0.0, 0.0))
+                .ccd(ccd),
+        );
+        w.step(1.0 / 60.0);
+        w.body(ball).unwrap().position()
+    }
+    // 点到盒面的距离；小于半径就是球体与盒子重叠。
+    fn gap(p: Vec3) -> f32 {
+        let c = Vec3::new(
+            p.x.clamp(-1.0, 1.0),
+            p.y.clamp(-1.0, 1.0),
+            p.z.clamp(-1.0, 1.0),
+        );
+        (p - c).length()
+    }
+    let no_ccd = run(false);
+    assert!(
+        no_ccd.x > -1.0 && gap(no_ccd) < 0.1,
+        "前提：不开 CCD 时这一步应已经嵌进盒角：{no_ccd}，gap={}",
+        gap(no_ccd)
+    );
+    let with_ccd = run(true);
+    assert!(
+        gap(with_ccd) >= 0.1 - 1e-3,
+        "球擦到盒顶角时 CCD 不能让球心留在盒内：{with_ccd}，gap={}",
+        gap(with_ccd)
+    );
+}
+
+#[test]
 fn ccd_catches_a_corner_only_hit() {
     fn run(rotation: Quat) -> f32 {
         let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);

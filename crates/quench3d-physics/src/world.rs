@@ -2068,7 +2068,135 @@ impl PhysicsWorld {
         }
     }
 
-    /// 连续碰撞检测（CCD）：对开了 `ccd` 的动态刚体，把这一步的位移截在"撞上之前"。
+    /// 球体对**盒子/平面/球**的扫掠：球心沿 `motion` 走，返回最早接触参数 `t∈[0,1]`
+    /// 与接触法线（由对方指向球心）。
+    ///
+    /// 中心射线只能覆盖"球心航线打到表面"；球擦着盒角时球心航线从上方/侧面掠过，
+    /// 但球面已经碰到角，旧路径会整步穿过去。这里对盒子做保守推进（球心到盒面的
+    /// 距离是 1-Lipschitz，`t += (dist-r)/|motion|` 不会越过首次接触），对球做解析
+    /// 二次方程，对半空间做一次线性求交。只处理这三种常见形状；其它形状保持原路径。
+    fn sphere_sweep_bodies(
+        &self,
+        self_index: usize,
+        p0: Vec3,
+        motion: Vec3,
+        radius: f32,
+    ) -> Option<(f32, Vec3)> {
+        if !p0.is_finite() || !motion.is_finite() || !(radius.is_finite() && radius > 0.0) {
+            return None;
+        }
+        let groups = self.bodies.get(self_index)?.body.as_ref()?.groups;
+        let speed = motion.length();
+        let sweep = speed * 1.0 + radius;
+        let mut best: Option<(f32, Vec3)> = None;
+        for (i, slot) in self.bodies.iter().enumerate() {
+            if i == self_index {
+                continue;
+            }
+            let Some(body) = &slot.body else { continue };
+            if body.sensor || !body.groups.interacts(groups) {
+                continue;
+            }
+            let aabb = body.world_aabb();
+            if aabb.is_valid()
+                && !aabb.grown(sweep).contains_point(p0)
+                && !aabb.grown(sweep).contains_point(p0 + motion)
+            {
+                continue;
+            }
+            let hit = match &body.shape {
+                Shape::Plane { normal } => {
+                    let n = body.transform.rotation.mul_vec3(normal.normalize_or_zero());
+                    if n.length_squared() < 0.5 {
+                        None
+                    } else {
+                        let denom = motion.dot(n);
+                        let signed = (p0 - body.transform.position).dot(n);
+                        if signed <= radius {
+                            Some((0.0, n))
+                        } else if denom < -1e-9 {
+                            let t = (radius - signed) / denom;
+                            (0.0..=1.0).contains(&t).then_some((t, n))
+                        } else {
+                            None
+                        }
+                    }
+                }
+                Shape::Sphere { radius: other_r } => {
+                    let rel = p0 - body.transform.position;
+                    let rr = radius + other_r.abs();
+                    let c = rel.length_squared() - rr * rr;
+                    if c <= 0.0 {
+                        Some((0.0, rel.normalize_or_zero()))
+                    } else {
+                        let a = motion.length_squared();
+                        let b = 2.0 * rel.dot(motion);
+                        let disc = b * b - 4.0 * a * c;
+                        if a <= 1e-12 || disc < 0.0 {
+                            None
+                        } else {
+                            let t = (-b - disc.sqrt()) / (2.0 * a);
+                            (0.0..=1.0).contains(&t).then(|| {
+                                let n =
+                                    (p0 + motion * t - body.transform.position).normalize_or_zero();
+                                (t, n)
+                            })
+                        }
+                    }
+                }
+                Shape::Box { half_extents } => {
+                    if speed <= 1e-9 {
+                        None
+                    } else {
+                        let inv = body.transform.rotation.inverse();
+                        let center0 = inv.mul_vec3(p0 - body.transform.position);
+                        let local_motion = inv.mul_vec3(motion);
+                        let he = half_extents.abs();
+                        let mut t = 0.0f32;
+                        let mut found = None;
+                        for _ in 0..32 {
+                            let center = center0 + local_motion * t;
+                            let closest = Vec3::new(
+                                center.x.clamp(-he.x, he.x),
+                                center.y.clamp(-he.y, he.y),
+                                center.z.clamp(-he.z, he.z),
+                            );
+                            let delta = center - closest;
+                            let dist = delta.length();
+                            if dist <= radius + 1e-4 {
+                                let n_local = if dist > 1e-6 {
+                                    delta / dist
+                                } else {
+                                    -local_motion.normalize_or_zero()
+                                };
+                                let n = body.transform.rotation.mul_vec3(n_local);
+                                found = Some((t.clamp(0.0, 1.0), n));
+                                break;
+                            }
+                            let step = (dist - radius) / speed;
+                            if !step.is_finite() || step <= 1e-7 {
+                                break;
+                            }
+                            t += step;
+                            if t > 1.0 {
+                                break;
+                            }
+                        }
+                        found
+                    }
+                }
+                _ => None,
+            };
+            if let Some((t, n)) = hit {
+                if best.is_none_or(|(best_t, _)| t < best_t) {
+                    best = Some((t, n));
+                }
+            }
+        }
+        best
+    }
+
+    /// 连续碰撞检测（CCD）：对开了 `ccd` 的动态刚体，把这一步的位移截在"撞上之前"。    /// 连续碰撞检测（CCD）：对开了 `ccd` 的动态刚体，把这一步的位移截在"撞上之前"。
     ///
     /// 做法（**不是**全局子步细分）：
     /// 1. 取这一步的位移 `motion = v * dt`，方向 `dir = motion / |motion|`；
@@ -2137,6 +2265,17 @@ impl PhysicsWorld {
                 {
                     let travel = (hit.distance - reach).clamp(0.0, total);
                     best = Some((travel, hit.normal));
+                }
+                // 球的中心射线漏掉盒角：用球心扫掠补一条更精确的最早接触。
+                if let Shape::Sphere { radius } = &b.shape {
+                    if let Some((t, n)) =
+                        self.sphere_sweep_bodies(i, b.transform.position, motion, radius.abs())
+                    {
+                        let travel = (t * total).clamp(0.0, total);
+                        if best.is_none_or(|(cur, _)| travel < cur) {
+                            best = Some((travel, n));
+                        }
+                    }
                 }
                 // 盒子只有角会撞上矮墙时，中心射线会从上方掠过：补 8 条角射线。
                 // 盒子补 8 条角射线（球没有旋转扫掠；其他形状见下面的分支）。
