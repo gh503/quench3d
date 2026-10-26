@@ -138,7 +138,7 @@
 
 - [x] 4000 级流体性能：稠密网格邻域（与旧哈希顺序逐位一致，回归
   `fluid_grid_matches_the_hash_neighbour_order`）+ native 密度/lambda 区间并行；
-  4913 颗粒子 release **18.7 → 15.5 ms/步**（显式 ignored 基准）。wasm 仍单线程。
+  4913 颗粒子 release **18.7 → 14.4 ms/步**（显式 ignored 基准）。wasm 仍单线程。
 - [x] 流体连续自由表面：Surface Nets 从 PBF 粒子提取三角形网格（`fluids[].surface_mesh`，
   分辨率 8~96），`Renderer::update_mesh_data` 支持拓扑整体替换；GPU e2e
   （`fluid_surface_replaces_the_placeholder_mesh`）与提取单测 4 条。

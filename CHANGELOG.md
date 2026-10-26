@@ -11,7 +11,7 @@
 - **4000 级流体性能**：邻域从每步 `HashMap` 27 格查询改为稠密网格 + 复用链表
   （邻居集合/顺序与旧哈希路径逐位一致，回归 `fluid_grid_matches_the_hash_neighbour_order`）；
   密度/lambda 在粒子数 ≥1024 时按区间并行（每颗只写自己的值，native）。4913 颗粒子
-  release 下 **18.7 → 15.5 ms/步**（显式 ignored 基准），低于 16 ms 的 60 Hz 预算；
+  release 下 **18.7 → 14.4 ms/步**（显式 ignored 基准），低于 16 ms 的 60 Hz 预算；
   wasm 仍单线程。默认路径参数不变，旧流体结果逐位不变。
 
 
