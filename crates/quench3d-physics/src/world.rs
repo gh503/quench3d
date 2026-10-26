@@ -633,6 +633,11 @@ impl PhysicsWorld {
         &self.fluids
     }
 
+    /// 可变流体访问（测试/工具注入气泡等；正常场景用 `add_fluid`）。
+    pub fn fluids_mut(&mut self) -> &mut [Fluid] {
+        &mut self.fluids
+    }
+
     /// 流体数量。
     pub fn fluid_count(&self) -> usize {
         self.fluids.len()
@@ -1455,7 +1460,17 @@ impl PhysicsWorld {
                 }
                 let ratio = (s.volume / total).clamp(0.0, 1.0);
                 b.submerged = b.submerged.max(ratio);
-                b.add_force_at_point(-gravity * (desc.rest_density * s.volume), s.centroid);
+                // 局部气体体积分数：气泡占据的体积不再排开液体，所以把浮力
+                // 用的密度按 (1 - 气体分数) 缩小。只是体积分数模型，不是气泡
+                // 压力/相变；没有气泡时 gas = 0，旧路径逐位不变。
+                let gas = fluid.gas_volume_near(aabb);
+                let gas_fraction = if gas > 0.0 {
+                    (gas / (s.volume + gas).max(1e-9)).clamp(0.0, 0.9)
+                } else {
+                    0.0
+                };
+                let density = desc.rest_density * (1.0 - gas_fraction);
+                b.add_force_at_point(-gravity * (density * s.volume), s.centroid);
                 if desc.drag > 0.0 {
                     let f = 1.0 / (1.0 + desc.drag * ratio * dt);
                     b.linear_velocity *= f;
@@ -3084,6 +3099,52 @@ mod tests {
         assert!(
             hit.is_some(),
             "运动学目标穿过球心航线时，扫掠必须看到相对运动"
+        );
+    }
+
+    #[test]
+    fn aerated_fluid_reduces_buoyancy_on_a_body() {
+        use crate::fluid::{Bubble, FluidDesc};
+
+        fn buoyant_force(with_bubble: bool) -> f32 {
+            let mut w = PhysicsWorld::new();
+            w.set_gravity(Vec3::new(0.0, -9.81, 0.0));
+            let body = w.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+                    .position(Vec3::new(0.0, 2.0, 0.0)),
+            );
+            w.add_fluid(FluidDesc {
+                center: Vec3::new(0.0, 2.0, 0.0),
+                half_extents: Vec3::splat(0.4),
+                spacing: 0.1,
+                radius: 0.05,
+                max_particles: 1000,
+                ..FluidDesc::default()
+            })
+            .expect("流体参数合法");
+            if with_bubble {
+                w.fluids_mut()[0].add_bubble(Bubble {
+                    position: Vec3::new(0.33, 2.0, 0.0),
+                    velocity: Vec3::ZERO,
+                    radius: 0.15,
+                    age: 0.0,
+                    life: 10.0,
+                });
+            }
+            w.step_fluids(1.0 / 60.0);
+            let b = w.bodies[body.index as usize]
+                .body
+                .as_ref()
+                .expect("刚体存在");
+            b.force.y
+        }
+
+        let without = buoyant_force(false);
+        let with = buoyant_force(true);
+        assert!(without > 0.0, "未曝气时浮力应向上：force.y = {without}");
+        assert!(
+            with < without * 0.95,
+            "气泡占据体积应降低局部浮力：无气泡 {without}，有气泡 {with}"
         );
     }
 

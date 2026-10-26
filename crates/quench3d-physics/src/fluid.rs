@@ -390,6 +390,37 @@ impl Fluid {
         &self.bubbles
     }
 
+    /// 注入一颗气泡（测试/工具用；正常路径是 `bubbles = true` 连续生成）。
+    ///
+    /// 不检查 `max_bubbles`，方便用一颗气泡做受控实验；正式生成仍受上限约束。
+    pub fn add_bubble(&mut self, bubble: Bubble) {
+        self.bubbles.push(bubble);
+    }
+
+    /// 与包围盒重叠的气泡总体积（m³）。用于把局部气体体积分数折算进浮力。
+    pub fn gas_volume_near(&self, aabb: Aabb) -> f32 {
+        if !aabb.is_valid() {
+            return 0.0;
+        }
+        let mut volume = 0.0f32;
+        for b in &self.bubbles {
+            let r = b.radius.max(0.0);
+            if r <= 0.0 || !b.position.is_finite() {
+                continue;
+            }
+            // 气泡被液体推到刚体表面时中心正好在 `aabb + r` 上（浮点会差一点），
+            // 留 1 cm 余量把“贴着表面”的气泡算进局部含气量。
+            if aabb.grown(r + 0.01).contains_point(b.position) {
+                volume += 4.0 / 3.0 * std::f32::consts::PI * r * r * r;
+            }
+        }
+        if volume.is_finite() {
+            volume.max(0.0)
+        } else {
+            0.0
+        }
+    }
+
     /// 用当前粒子提取连续表面（Surface Nets）。
     ///
     /// `resolution` 是最长轴的目标格数，`iso` 是等值面阈值；默认 `32 / 0.45`
