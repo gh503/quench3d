@@ -7,7 +7,7 @@ use core::f32::consts::PI;
 
 use quench3d_math::*;
 
-use crate::gjk::point_in_convex;
+use crate::gjk::{epa, gjk, point_in_convex, Support};
 
 /// 凸包质量属性采样的每轴网格分辨率下限/上限。
 const HULL_SAMPLES_MIN: usize = 8;
@@ -128,6 +128,44 @@ fn box_inertia(mass: f32, he: Vec3) -> Vec3 {
     )
 }
 
+/// 凸包的**精确**最近表面点：GJK 求外部最近点，EPA 求内部推到最近面的方向。
+///
+/// 旧实现直接拿 AABB 当凸包（点 (0.8,0.8,0.8) 在四面格外、却在 AABB 内，
+/// 会得到错误的 +X 面）。这里仍不建面表：GJK/EPA 只依赖支持函数，O(迭代) 而不是
+/// O(n²) 面枚举；点集退化或 EPA 失败时才退回 AABB。
+fn convex_surface(points: &[Vec3], p: Vec3) -> Option<(Vec3, Vec3)> {
+    if points.len() < 4 {
+        return None;
+    }
+    let hull = Shape::ConvexHull {
+        points: points.to_vec(),
+    };
+    let t = Transform::from_translation(Vec3::ZERO);
+    let pt = Shape::Sphere { radius: 0.0 };
+    let tp = Transform::from_translation(p);
+    let sa = Support::new(&hull, &t);
+    let sb = Support::new(&pt, &tp);
+    let r = gjk(&sa, &sb);
+    if !r.intersect {
+        if r.point_a.is_finite() && r.normal.is_finite() {
+            return Some((r.point_a, r.normal.normalize_or_zero()));
+        }
+        return None;
+    }
+    // 点在内部：EPA 的 normal 是 Minkowski 面法线；用点集质心给"朝外"定向。
+    let e = epa(&sa, &sb, &r)?;
+    let q = e.point_a;
+    let centroid = points.iter().fold(Vec3::ZERO, |acc, v| acc + *v) / points.len() as f32;
+    let mut n = e.normal;
+    if n.dot(q - centroid) < 0.0 {
+        n = -n;
+    }
+    if !q.is_finite() || n.length_squared() < 1e-12 {
+        return None;
+    }
+    Some((q, n.normalize_or_zero()))
+}
+
 impl Shape {
     /// 形状沿法线方向"长胖" `margin` 米（配合 `SolverConfig::speculative_margin`）。
     ///
@@ -186,8 +224,8 @@ impl Shape {
     ///
     /// 流体粒子碰撞用：`p` 可以在形状外（返回最近表面点，法线朝外），
     /// 也可以在形状内（返回把点推出去的方向）。`Plane` 返回投影点与平面法线。
-    /// `TriMesh` 返回 `None`（薄壳没有可靠的"最近表面"语义，粒子直接穿过；
-    /// 这是 M2 的已知边界）。凸包/圆锥没有解析最近点，按 AABB 近似。
+    /// `TriMesh` 走逐三角形最近点（薄壳也能挡粒子）；凸包用 GJK/EPA 求**精确**
+    /// 最近表面（不再按 AABB 近似）；圆锥仍按 AABB 近似（已知边界）。
     pub fn closest_surface(&self, p: Vec3) -> Option<(Vec3, Vec3)> {
         if !p.is_finite() {
             return None;
@@ -268,7 +306,18 @@ impl Shape {
                     }
                 }
             }
-            Shape::Cone { .. } | Shape::ConvexHull { .. } => {
+            Shape::ConvexHull { points } => {
+                if let Some(hit) = convex_surface(points, p) {
+                    return Some(hit);
+                }
+                let local = self.local_aabb();
+                if !local.is_valid() {
+                    return None;
+                }
+                box_surface(p - local.center(), local.half_extents())
+                    .map(|(q, n)| (q + local.center(), n))
+            }
+            Shape::Cone { .. } => {
                 let local = self.local_aabb();
                 if !local.is_valid() {
                     return None;
@@ -1318,6 +1367,41 @@ mod tests {
         // 三个轴相等（立方体对称）
         assert!((mmp.inertia.x - mmp.inertia.y).abs() / mmp.inertia.x < 0.02);
         assert!((mmp.inertia.x - mmp.inertia.z).abs() / mmp.inertia.x < 0.02);
+    }
+
+    #[test]
+    fn convex_hull_closest_surface_is_not_its_aabb() {
+        // 四面体 (0,0,0)/(1,0,0)/(0,1,0)/(0,0,1)。(0.8,0.8,0.8) 在 AABB 内，
+        // 但在四面格外；AABB 近似会错误地把它推到 (1,0.8,0.8)（+X 面），
+        // 真正最近点应在斜面 x+y+z=1 上。
+        let s = Shape::ConvexHull {
+            points: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z],
+        };
+        let p = vec3(0.8, 0.8, 0.8);
+        let (q, n) = s.closest_surface(p).expect("凸包必须有最近表面");
+        assert!(
+            (q.x + q.y + q.z - 1.0).abs() < 0.02,
+            "最近点应落在斜面 x+y+z=1 上，实际 {q:?}"
+        );
+        assert!(
+            (q - vec3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)).length() < 0.03,
+            "最近点应接近斜面中心，实际 {q:?}"
+        );
+        assert!(
+            (n - vec3(1.0, 1.0, 1.0).normalize()).length() < 0.03,
+            "外法线应朝斜面外，实际 {n:?}"
+        );
+        // 外部远点也不能退化成 AABB 的 (1,1,1) 顶点。
+        let far = vec3(2.0, 2.0, 2.0);
+        let (q2, n2) = s.closest_surface(far).expect("凸包必须有最近表面");
+        assert!(
+            (q2.x + q2.y + q2.z - 1.0).abs() < 0.02,
+            "远点最近点也应在斜面，实际 {q2:?}"
+        );
+        assert!(
+            n2.dot(vec3(1.0, 1.0, 1.0)) > 0.99,
+            "远点法线应朝外，实际 {n2:?}"
+        );
     }
 
     #[test]

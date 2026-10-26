@@ -6,7 +6,8 @@
 //! * **双向耦合（M3）**：刚体是流体的边界，流体会被刚体推开；粒子撞到**动态**刚体时
 //!   把法向冲量按动量守恒反推给刚体（静态刚体只挡粒子，不会动）。
 //! * **边界**：对所有非传感器刚体做最近表面投影（球/盒/胶囊/圆柱/圆锥/圆角盒/半空间），
-//!   `TriMesh` 与凸包按 AABB 近似（见 [`crate::Shape::closest_surface`]）。
+//!   `TriMesh` 逐三角形最近点；凸包用 GJK/EPA 精确最近表面；圆锥仍按 AABB 近似
+//!   （见 [`crate::Shape::closest_surface`]）。
 //! * 没有表面张力、涡量约束、粘性应力张量；粘性用 XSPH 近似。
 
 use core::f32::consts::PI;
@@ -1093,6 +1094,38 @@ mod tests {
         }
         assert_eq!(f.particles().len(), g.particles().len());
         assert_eq!(f.particles(), g.particles());
+    }
+
+    #[test]
+    fn particles_fall_past_a_convex_hull_aabb_corner() {
+        // 四面体的 AABB 是 1×1×1，但在 (0.8, *, 0.8) 这条竖直线上四面体只到 y≈0。
+        // 旧实现把凸包当 AABB，粒子会停在天花板 y≈1；精确最近表面应让它们落到地面。
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        world.add_builder(BodyBuilder::r#static(Shape::ConvexHull {
+            points: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z],
+        }));
+        world.add_fluid(FluidDesc {
+            center: vec3(0.8, 2.0, 0.8),
+            half_extents: vec3(0.1, 0.1, 0.1),
+            spacing: 0.1,
+            radius: 0.05,
+            max_particles: 64,
+            ..FluidDesc::default()
+        });
+        for _ in 0..180 {
+            world.step(1.0 / 60.0);
+        }
+        let s = world.fluids()[0].stats();
+        assert!(
+            s.min_y < 0.3,
+            "粒子应绕过凸包落到地面，实际 min_y={}（AABB 近似会停在 1.0 附近）",
+            s.min_y
+        );
+        assert!(s.max_speed < 4.0, "max_speed={}", s.max_speed);
     }
 
     #[test]
