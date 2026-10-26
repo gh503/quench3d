@@ -2088,7 +2088,7 @@ impl PhysicsWorld {
             return;
         }
         // 先收集（这一阶段只读 `self`），避免边遍历边改
-        let mut updates: Vec<(usize, Vec3)> = Vec::new();
+        let mut updates: Vec<(usize, Vec3, Option<Vec3>)> = Vec::new();
         for (i, slot) in self.bodies.iter().enumerate() {
             let Some(b) = &slot.body else { continue };
             if !b.ccd || b.body_type != BodyType::Dynamic || b.is_sleeping() {
@@ -2096,76 +2096,134 @@ impl PhysicsWorld {
             }
             let motion = b.linear_velocity * dt;
             let total = motion.length();
-            if !total.is_finite() || total <= 0.0 {
+            // 旋转扫掠：只对盒子做角点扫掠（长条/薄板最容易"没有线速度、
+            // 只靠转动穿过薄墙"）。角速度很小时走原来的纯平移路径。
+            let spin = b.angular_velocity.length() * dt;
+            let sweep_spin =
+                matches!(b.shape, Shape::Box { .. }) && spin.is_finite() && spin > 1e-4;
+            if (!total.is_finite() || total <= 0.0) && !sweep_spin {
                 continue;
             }
             let self_handle = BodyHandle::new(i as u32, slot.generation);
             let groups = b.groups;
-            let dir = motion / total;
-            // 中心到表面在**运动方向**上的距离（凸形状上精确：球是半径、盒是各轴投影和）。
-            // 用它把"射线打到表面"换算成"中心还能走多远"。
-            let reach = b.shape.support(dir).dot(dir).max(0.0);
             let filter = |handle: BodyHandle| -> bool {
                 handle != self_handle
                     && self
                         .body(handle)
                         .is_some_and(|other| !other.sensor && other.groups.interacts(groups))
             };
-            // 中心射线。不用保守推进扫掠（`shape_cast`）：它按"到任意方向最近物体的
-            // 距离"推进，贴着地面滑行的子弹会被地面拖住，而且最近点不在运动路径上时
-            // 会直接越过真正的碰撞点（实测一个旋转盒的角撞矮墙会漏）。
-            let mut best: Option<(f32, Vec3)> = None;
-            if let Some(hit) =
-                self.raycast_filtered(b.transform.position, dir, total + reach, filter)
-            {
-                let travel = (hit.distance - reach).clamp(0.0, total);
-                best = Some((travel, hit.normal));
+
+            // --- 纯平移/平移+小转动：原中心射线 + 8 角射线（历史路径）---
+            let mut linear_update: Option<Vec3> = None;
+            if total.is_finite() && total > 0.0 {
+                let dir = motion / total;
+                // 中心到表面在**运动方向**上的距离（凸形状上精确：球是半径、盒是各轴投影和）。
+                // 用它把"射线打到表面"换算成"中心还能走多远"。
+                let reach = b.shape.support(dir).dot(dir).max(0.0);
+                // 中心射线。不用保守推进扫掠（`shape_cast`）：它按"到任意方向最近物体的
+                // 距离"推进，贴着地面滑行的子弹会被地面拖住，而且最近点不在运动路径上时
+                // 会直接越过真正的碰撞点（实测一个旋转盒的角撞矮墙会漏）。
+                let mut best: Option<(f32, Vec3)> = None;
+                if let Some(hit) =
+                    self.raycast_filtered(b.transform.position, dir, total + reach, filter)
+                {
+                    let travel = (hit.distance - reach).clamp(0.0, total);
+                    best = Some((travel, hit.normal));
+                }
+                // 盒子只有角会撞上矮墙时，中心射线会从上方掠过：补 8 条角射线。
+                // 只对盒子做（球/胶囊的中心射线已足够），且仍是一次查询/角，代价可控。
+                if let Shape::Box { half_extents } = &b.shape {
+                    for sx in [-1.0f32, 1.0] {
+                        for sy in [-1.0f32, 1.0] {
+                            for sz in [-1.0f32, 1.0] {
+                                let local = Vec3::new(
+                                    half_extents.x * sx,
+                                    half_extents.y * sy,
+                                    half_extents.z * sz,
+                                );
+                                let offset = b.transform.rotation.mul_vec3(local);
+                                let origin = b.transform.position + offset;
+                                let Some(hit) =
+                                    self.raycast_filtered(origin, dir, total + reach, filter)
+                                else {
+                                    continue;
+                                };
+                                let travel = (hit.distance - offset.dot(dir)).clamp(0.0, total);
+                                if best.is_none_or(|(t, _)| travel < t) {
+                                    best = Some((travel, hit.normal));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((travel, n)) = best {
+                    // 朝表面运动的法向分量（负 = 正在靠近）
+                    let mn = motion.dot(n);
+                    if mn < -1e-6 {
+                        // 只允许靠近 `travel` 这么多：`mn` 与 `-travel` 取"更靠外"的那个
+                        let mn_clamped = mn.max(-travel);
+                        let motion_new = motion - n * (mn - mn_clamped);
+                        if (motion_new - motion).length_squared() > 0.0 {
+                            linear_update = Some(motion_new / dt);
+                        }
+                    }
+                }
             }
-            // 盒子只有角会撞上矮墙时，中心射线会从上方掠过：补 8 条角射线。
-            // 只对盒子做（球/胶囊的中心射线已足够），且仍是一次查询/角，代价可控。
-            if let Shape::Box { half_extents } = &b.shape {
-                for sx in [-1.0f32, 1.0] {
-                    for sy in [-1.0f32, 1.0] {
-                        for sz in [-1.0f32, 1.0] {
-                            let local = Vec3::new(
-                                half_extents.x * sx,
-                                half_extents.y * sy,
-                                half_extents.z * sz,
-                            );
-                            let offset = b.transform.rotation.mul_vec3(local);
-                            let origin = b.transform.position + offset;
-                            let Some(hit) =
-                                self.raycast_filtered(origin, dir, total + reach, filter)
-                            else {
-                                continue;
-                            };
-                            let travel = (hit.distance - offset.dot(dir)).clamp(0.0, total);
-                            if best.is_none_or(|(t, _)| travel < t) {
-                                best = Some((travel, hit.normal));
+
+            // --- 旋转扫掠：把 8 个角点在这一步走出的**线段**当扫掠体 ---
+            // 只缩小时间（线速度与角速度同乘 t），不做反弹；下一子步窄相照常
+            // 生成接触并给冲量。线段是真实圆弧的弦，偏保守（宁可早停不穿透）。
+            let mut spin_t = 1.0f32;
+            if sweep_spin {
+                let angle = spin;
+                let axis = b.angular_velocity.normalize_or_zero();
+                let q0 = b.transform.rotation;
+                let q1 = Quat::from_axis_angle(axis, angle) * q0;
+                let p0 = b.transform.position;
+                let p1 = p0 + motion;
+                if let Shape::Box { half_extents } = &b.shape {
+                    for sx in [-1.0f32, 1.0] {
+                        for sy in [-1.0f32, 1.0] {
+                            for sz in [-1.0f32, 1.0] {
+                                let local = Vec3::new(
+                                    half_extents.x * sx,
+                                    half_extents.y * sy,
+                                    half_extents.z * sz,
+                                );
+                                let from = p0 + q0.mul_vec3(local);
+                                let to = p1 + q1.mul_vec3(local);
+                                let seg = to - from;
+                                let len = seg.length();
+                                if !len.is_finite() || len <= 1e-6 {
+                                    continue;
+                                }
+                                let Some(hit) = self.raycast_filtered(from, seg / len, len, filter)
+                                else {
+                                    continue;
+                                };
+                                let t = (hit.distance / len).clamp(0.0, 1.0);
+                                spin_t = spin_t.min(t);
                             }
                         }
                     }
                 }
             }
-            let Some((travel, n)) = best else {
-                continue;
-            };
-            // 朝表面运动的法向分量（负 = 正在靠近）
-            let mn = motion.dot(n);
-            if mn >= -1e-6 {
-                // 掠过的情形：没有再往表面里走，不用管
-                continue;
-            }
-            // 只允许靠近 `travel` 这么多：`mn` 与 `-travel` 取"更靠外"的那个
-            let mn_clamped = mn.max(-travel);
-            let motion_new = motion - n * (mn - mn_clamped);
-            if (motion_new - motion).length_squared() > 0.0 {
-                updates.push((i, motion_new / dt));
+            if spin_t < 1.0 {
+                updates.push((
+                    i,
+                    b.linear_velocity * spin_t,
+                    Some(b.angular_velocity * spin_t),
+                ));
+            } else if let Some(v) = linear_update {
+                updates.push((i, v, None));
             }
         }
-        for (i, v) in updates {
+        for (i, v, w) in updates {
             if let Some(b) = self.bodies[i].body.as_mut() {
                 b.linear_velocity = v;
+                if let Some(w) = w {
+                    b.angular_velocity = w;
+                }
             }
         }
     }

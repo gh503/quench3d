@@ -116,7 +116,7 @@
 | 接触信息 | Unity / Godot | 接触对可读、带法向冲量（`contact.rs:103`、`world.rs:972`）；**无接触事件/回调/接触 ID** | 🟠 |
 | 触发器（sensor） | 全部 | `objects[].sensor` + `PhysicsWorld::sensor_events()`（进入/离开，每步轮询；不唤醒睡眠体、无回调总线） | 🟡 |
 | 碰撞过滤（层/掩码） | 全部 | `objects[].collision_layer` / `collides_with`（对称匹配，宽相即过滤；射线/查询不看过滤） | 🟡 |
-| CCD | PhysX / Jolt | `objects[].ccd`：每子步一次中心射线 + 只截法向位移（**非**精确 TOI、只扫中心线、无旋转扫掠） | 🟡 |
+| CCD | PhysX / Jolt | `objects[].ccd`：中心射线 + 盒子 8 角射线 + 盒子旋转扫掠（8 角点线段最早 TOI，线/角速度同乘 t）；球/胶囊/凸包仍只扫中心线，**非**任意凸体精确 TOI | 🟡 |
 | 求解器可配 | 全部 | `SolverConfig`（速度/位置迭代、松弛、warm start、Baumgarte、slop）可配（`solver.rs:24-72`） | ✅ |
 | 睡眠 | 全部 | 有 | ✅ |
 | 确定性 | 高要求仿真 | 同机确定、跨线程数确定（有测试）；**跨平台/跨编译器边界未声明、无测试**（→ H5） | 🟠 |

@@ -89,6 +89,9 @@
   extensible）、多源混音/线性重采样/循环、3D 距离衰减与等功率声像，`Engine::audio`
   直接可用；无设备单测覆盖解码、往返、声像、衰减、循环、pitch 与 NaN/clamp。
   **没有内置设备输出**：宿主把 `mix` 的缓冲交给 cpal/WebAudio。
+- **盒子旋转 CCD**：在中心/8 角射线之外，对带角速度的盒子把 8 个角点这一步的
+  线段当扫掠体，取最早 TOI 并同乘线/角速度；补"无 CCD 会转过接触角、开 CCD
+  停在 87° 接触角"对照测试。仍不是任意凸体精确 TOI。
 - **关节径向间隙**：`PhysicsWorld::set_joint_radial_clearance` / 场景
   `joints[].radial_clearance`（米，缺省 0 = 理想点约束）。fixed/ball/hinge 的锚点在
   间隙内完全自由，到边界只挡径向分离；预测式速度上限避免一步穿透。0.2 mm 用

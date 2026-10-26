@@ -1566,6 +1566,65 @@ fn ccd_catches_a_corner_only_hit() {
 
 /// CCD 也要遵守碰撞分组：分组不匹配的墙，扫掠时就得当作不存在。
 #[test]
+fn ccd_rotation_sweep_stops_a_spinning_box_before_a_thin_ceiling() {
+    // 长条盒子没有线速度，只靠绕 Z 轴自转把端角扫向 y=1.0 的天花板。
+    // 旧的"中心射线 + 8 条平移角射线"在这条路径上完全不会触发；旋转扫掠必须
+    // 在角点跨过平面前把角速度截住。
+    fn run(ccd: bool) -> (f32, f32) {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.add_body(
+            BodyBuilder::r#static(Shape::Plane {
+                normal: Vec3::NEG_Y,
+            })
+            .position(vec3(0.0, 1.0, 0.0))
+            .build(),
+        );
+        let blade = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: vec3(1.0, 0.05, 0.05),
+            })
+            .position(Vec3::ZERO)
+            .angular_velocity(vec3(0.0, 0.0, 10.0))
+            .ccd(ccd)
+            .build(),
+        );
+        let mut max_corner_y = 0.0f32;
+        for _ in 0..120 {
+            w.step(DT);
+            let p = w.body(blade).unwrap();
+            for sx in [-1.0f32, 1.0] {
+                let local = vec3(sx, 0.05, 0.0);
+                let y = (p.position() + p.rotation().mul_vec3(local)).y;
+                max_corner_y = max_corner_y.max(y);
+            }
+        }
+        let angle = w.body(blade).unwrap().rotation().to_axis_angle().1.abs();
+        assert_all_finite(&w, "旋转 CCD");
+        (max_corner_y, angle)
+    }
+
+    let (max_y_without, angle_without) = run(false);
+    let (max_y_with, angle_with) = run(true);
+    assert!(
+        max_y_without <= 1.01,
+        "离散窄相本身也不该让角点穿出天花板，实际 {max_y_without}"
+    );
+    assert!(
+        angle_without > 3.0,
+        "对照：没有旋转 CCD 时盒子会继续转过接触角，实际 {angle_without} rad"
+    );
+    assert!(
+        max_y_with <= 1.01,
+        "旋转 CCD 应把角点截在天花板下：max_y={max_y_with}"
+    );
+    assert!(
+        angle_with < 1.7,
+        "盒子应在约 87° 的接触角停下，实际 {angle_with} rad"
+    );
+}
+
+#[test]
 fn ccd_respects_collision_groups() {
     let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
     // 墙只在第 5 层、且只碰第 5 层；子弹在第 0 层 → 互相不碰

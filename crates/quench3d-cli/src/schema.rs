@@ -496,7 +496,7 @@ pub fn scene_grammar() -> Value {
             "collision_layer": "碰撞层 0~31，缺省 0",
             "collides_with": "愿意碰的层号列表，缺省所有层；判断是**对称**的（双方都愿意才碰），[] 表示谁也不碰",
             "sensor": "true = 触发区：照常报进入/离开，但不产生冲量（别的物体穿过去）；需要 body 不为 none",
-            "ccd": "true = 连续碰撞检测（每子步从中心往前打一条射线，把这一步的位移截在命中点）；只对 dynamic 生效",
+            "ccd": "true = 连续碰撞检测（中心射线 + 盒子 8 角射线；有角速度的盒子再做 8 角点旋转扫掠，按最早命中时间同时缩放线/角速度）；只对 dynamic 生效，仍不是任意凸体精确 TOI",
             "note": "linear/angular_damping、gravity_scale、mass、allow_sleep、angular_velocity 只对 body=dynamic 生效"
         },
         "model": {
