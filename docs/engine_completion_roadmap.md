@@ -185,6 +185,9 @@
   库仑上限 μ·|Jn|；静置接触用重力法向支持力近似载荷，动态刚体受反作用。
   滑动水柱减速、动态刚体被拖走回归；0 时旧路径逐位不变。
 - [x] 摄像头点云两种固化：体素块 + Surface Nets 平滑表面（编辑器实时跟随）。
+  重建网格会按针孔内参把顶点投回 `latest.rgb`，把摄像头画面作为基础色贴图；
+  没内参/RGB 时退回蓝灰纯色。回归 2 条投影/UV 单测 + GPU 贴图测试
+  `reconstruction_uses_camera_rgb_as_a_base_color_texture`。
 - [x] 点云重建前按每轴 0.5% 分位裁剪深度飞点（<64 点不裁；>20 万点先等距抽样）。
 - [x] 深度-only 摄像头点云：采集端 `--no-points` 时，编辑器用 JSON 内参与
   `depth.point_step/z_near/z_far/origin` 现算点云；缺内参不猜，声明了

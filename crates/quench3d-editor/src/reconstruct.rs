@@ -13,6 +13,91 @@ use quench3d::render::{MeshData, Vertex};
 use quench3d_math::{Vec2, Vec3};
 use quench3d_physics::extract_surface;
 
+/// 摄像头针孔投影：把引擎坐标顶点映射回原图 UV，用于给重建网格上色。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraProjection {
+    /// 图像宽度（像素）。
+    pub width: u32,
+    /// 图像高度（像素）。
+    pub height: u32,
+    /// 水平焦距（像素）。
+    pub fx: f32,
+    /// 垂直焦距（像素）。
+    pub fy: f32,
+    /// 主点 x（像素）。
+    pub cx: f32,
+    /// 主点 y（像素）。
+    pub cy: f32,
+    /// 点云原点（引擎坐标 = 相机坐标 + origin）。
+    pub origin: Vec3,
+    /// 图像是否水平镜像。
+    pub mirrored: bool,
+}
+
+impl CameraProjection {
+    /// 内参/尺寸是否足以投影。
+    pub fn is_valid(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.fx.is_finite()
+            && self.fy.is_finite()
+            && self.fx > 0.0
+            && self.fy > 0.0
+            && self.cx.is_finite()
+            && self.cy.is_finite()
+            && self.origin.is_finite()
+    }
+
+    /// 把引擎坐标点投到图像 UV（0..1，左上原点）；不在画面前方/画面外返回 `None`。
+    pub fn uv(&self, p: Vec3) -> Option<Vec2> {
+        if !self.is_valid() || !p.is_finite() {
+            return None;
+        }
+        let z = self.origin.z - p.z;
+        if !(z.is_finite() && z > 1e-6) {
+            return None;
+        }
+        let mut x = (p.x - self.origin.x) / z * self.fx + self.cx;
+        let y = -(p.y - self.origin.y) / z * self.fy + self.cy;
+        if self.mirrored {
+            x = (self.width.saturating_sub(1)) as f32 - x;
+        }
+        if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+            return None;
+        }
+        if x >= self.width as f32 || y >= self.height as f32 {
+            return None;
+        }
+        Some(Vec2::new(
+            (x + 0.5) / self.width as f32,
+            (y + 0.5) / self.height as f32,
+        ))
+    }
+}
+
+/// 给网格顶点写摄像头原图 UV；返回成功投影的顶点数。
+///
+/// `rgb` 必须是 `width*height*3` 的 RGB24；长度不符时不改网格并返回 0。
+/// 投影不到的顶点用画面中心 UV（0.5, 0.5），避免采样到贴图角落的黑色。
+pub fn colorize_mesh_uvs(mesh: &mut MeshData, rgb: &[u8], projection: &CameraProjection) -> usize {
+    if !projection.is_valid()
+        || rgb.len() != projection.width as usize * projection.height as usize * 3
+    {
+        return 0;
+    }
+    let mut colored = 0usize;
+    for vertex in &mut mesh.vertices {
+        let p = Vec3::from_array(vertex.position);
+        if let Some(uv) = projection.uv(p) {
+            vertex.uv = uv.to_array();
+            colored += 1;
+        } else {
+            vertex.uv = [0.5, 0.5];
+        }
+    }
+    colored
+}
+
 /// 体素上限：超过就只保留最先出现的体素，避免一次扫描吃掉几 GB。
 pub const MAX_VOXELS: usize = 300_000;
 
@@ -248,6 +333,63 @@ pub fn smooth_surface(points: &[Vec3], voxel: f32, iso: f32) -> MeshData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_maps_engine_points_back_to_camera_pixels() {
+        let p = CameraProjection {
+            width: 100,
+            height: 50,
+            fx: 100.0,
+            fy: 100.0,
+            cx: 50.0,
+            cy: 25.0,
+            origin: Vec3::ZERO,
+            mirrored: false,
+        };
+        assert!(p.is_valid());
+        let center = p.uv(Vec3::new(0.0, 0.0, -1.0)).unwrap();
+        assert!((center.x - 0.505).abs() < 1e-6, "{center:?}");
+        assert!((center.y - 0.51).abs() < 1e-6, "{center:?}");
+        // 相机右侧（+X）→ 像素右；相机上方（+Y）→ 像素上（y 变小）。
+        let right = p.uv(Vec3::new(0.1, 0.0, -1.0)).unwrap();
+        assert!(right.x > center.x);
+        let up = p.uv(Vec3::new(0.0, 0.1, -1.0)).unwrap();
+        assert!(up.y < center.y);
+        // 背后/画面外/非有限值不猜。
+        assert_eq!(p.uv(Vec3::new(0.0, 0.0, 1.0)), None);
+        assert_eq!(p.uv(Vec3::new(10.0, 0.0, -1.0)), None);
+        assert_eq!(p.uv(Vec3::splat(f32::NAN)), None);
+
+        let mut mirrored = p;
+        mirrored.mirrored = true;
+        let m = mirrored.uv(Vec3::new(0.1, 0.0, -1.0)).unwrap();
+        assert!((m.x - (1.0 - right.x)).abs() < 1e-6, "{m:?} {right:?}");
+    }
+
+    #[test]
+    fn colorize_sets_uvs_and_rejects_wrong_rgb_length() {
+        let mut mesh = voxel_surface(&[Vec3::new(0.0, 0.0, -1.0)], 0.5);
+        let projection = CameraProjection {
+            width: 16,
+            height: 16,
+            fx: 4.0,
+            fy: 4.0,
+            cx: 8.0,
+            cy: 8.0,
+            origin: Vec3::ZERO,
+            mirrored: false,
+        };
+        assert_eq!(colorize_mesh_uvs(&mut mesh, &[0u8; 767], &projection), 0);
+        assert_eq!(
+            colorize_mesh_uvs(&mut mesh, &[128u8; 16 * 16 * 3], &projection),
+            24
+        );
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|v| { v.uv[0] >= 0.0 && v.uv[0] <= 1.0 && v.uv[1] >= 0.0 && v.uv[1] <= 1.0 }));
+        assert!(mesh.vertices.iter().any(|v| v.uv != [0.5, 0.5]));
+    }
 
     #[test]
     fn empty_and_degenerate_points_produce_no_mesh() {

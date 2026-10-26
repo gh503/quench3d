@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+- **摄像头重建上色**：有 `latest.rgb` 和内参时，重建网格顶点按针孔模型投回原图，
+  摄像头画面作为基础色贴图（基础色改成白色，避免被旧蓝灰染一遍）；每换一帧只换
+  一张贴图并回收旧的。没有内参/没有 RGB 时仍走原来的蓝灰纯色路径。回归
+  `projection_maps_engine_points_back_to_camera_pixels`（右/上/镜像/背后/画面外）、
+  `colorize_sets_uvs_and_rejects_wrong_rgb_length`，以及 GPU 测试
+  `reconstruction_uses_camera_rgb_as_a_base_color_texture`（合成深度点云 + 红绿
+  两半画面，断言材质真的挂上基础色贴图、基础色为白、状态含「彩色」）。
+
 - **编辑器回放时间轴**：工具栏新增「录制回放 / 停止录制 / 播放回放 / 停止回放」
   与时间轴滑杆。录制从当前位姿开始，按物理步采刚体位姿；播放时暂停物理、只写回
   位姿，并立即同步场景（水面网格也刷新）。回归 `replay_recording_captures_steps_and_seeks`

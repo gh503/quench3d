@@ -44,7 +44,9 @@ use quench3d_render::DebugLines;
 #[cfg(target_arch = "wasm32")]
 use quench3d_render::{GpuContext, Renderer};
 #[cfg(not(target_arch = "wasm32"))]
-use quench3d_render::{MaterialDesc, MeshData, MeshId};
+use quench3d_render::{
+    ImageData, MaterialDesc, MaterialId, MaterialTextureSlot, MeshData, MeshId, TextureId,
+};
 use serde::Deserialize;
 
 /// MediaPipe Pose 的 33 点连接表。
@@ -302,6 +304,10 @@ pub struct CameraFeed {
     /// 生成的网格/物体句柄（会话内复用，避免每次点击都新增物体）。
     recon_mesh: Option<MeshId>,
     recon_object: Option<usize>,
+    /// 重建材质（用于把摄像头原图作为基础色贴图）。
+    recon_material: Option<MaterialId>,
+    /// 当前挂在重建材质上的摄像头贴图；换帧时回收旧的。
+    recon_texture: Option<TextureId>,
     /// 体素边长（米）。
     recon_voxel: f32,
     /// 是否把最近若干帧点云按体素累积后再重建（缺省关，旧路径不变）。
@@ -353,6 +359,8 @@ impl CameraFeed {
             recon_smooth_used: false,
             recon_mesh: None,
             recon_object: None,
+            recon_material: None,
+            recon_texture: None,
             recon_voxel: 0.03,
             recon_accumulate: false,
             recon_accum: None,
@@ -369,6 +377,14 @@ impl CameraFeed {
             .lock()
             .ok()
             .and_then(|guard| guard.as_ref().cloned())
+    }
+
+    /// 测试用：直接注入一帧，避免依赖真实摄像头目录。
+    #[cfg(test)]
+    fn set_latest_for_test(&self, frame: Arc<FeedFrame>) {
+        if let Ok(mut slot) = self.shared.latest.lock() {
+            *slot = Some(frame);
+        }
     }
 
     /// 最新帧号（不克隆帧数据）。
@@ -414,6 +430,98 @@ impl CameraFeed {
     /// UI 是否请求生成重建网格（手动或实时跟随）。
     pub fn recon_requested(&self) -> bool {
         self.recon_requested || self.recon_auto
+    }
+
+    /// 当前帧的针孔投影；缺内参/尺寸时返回 `None`，此时保持旧的纯色材质。
+    fn frame_projection(frame: &FeedFrame) -> Option<crate::reconstruct::CameraProjection> {
+        let intr = &frame.json.intrinsics;
+        let origin =
+            frame
+                .json
+                .depth
+                .origin
+                .unwrap_or([MOCAP_ORIGIN.x, MOCAP_ORIGIN.y, MOCAP_ORIGIN.z]);
+        let projection = crate::reconstruct::CameraProjection {
+            width: frame.json.width,
+            height: frame.json.height,
+            fx: intr.fx,
+            fy: intr.fy,
+            cx: intr.cx,
+            cy: intr.cy,
+            origin: Vec3::from_array(origin),
+            mirrored: frame.json.mirrored,
+        };
+        projection.is_valid().then_some(projection)
+    }
+
+    /// 把摄像头原图挂到重建材质上；没有颜色时清掉并回到纯色。
+    fn sync_recon_texture(&mut self, engine: &mut Engine, frame: &FeedFrame, colored: usize) {
+        if self.recon_material.is_none() {
+            self.recon_material = self
+                .recon_object
+                .and_then(|i| engine.scene.objects.get(i))
+                .map(|o| o.material);
+        }
+        let Some(material) = self.recon_material else {
+            return;
+        };
+        let expected = frame.json.width as usize * frame.json.height as usize * 3;
+        if colored == 0 || frame.rgb.len() != expected || expected == 0 {
+            if let Some(old) = self.recon_texture.take() {
+                engine.renderer.set_material_texture(
+                    &engine.gpu,
+                    material,
+                    MaterialTextureSlot::BaseColor,
+                    None,
+                );
+                engine.renderer.update_material(
+                    &engine.gpu,
+                    material,
+                    MaterialDesc {
+                        base_color: Vec4::new(0.52, 0.68, 0.82, 1.0),
+                        metallic: 0.0,
+                        roughness: 0.7,
+                        ..MaterialDesc::default()
+                    },
+                );
+                engine.renderer.remove_texture(old);
+            }
+            return;
+        }
+        let mut rgba = Vec::with_capacity(expected / 3 * 4);
+        for px in frame.rgb.as_chunks::<3>().0 {
+            rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+        }
+        let image = ImageData {
+            width: frame.json.width,
+            height: frame.json.height,
+            rgba,
+        };
+        let texture = engine.renderer.add_texture(&engine.gpu, &image, true);
+        // 贴图会乘基础色；有原图时基础色必须是白色，否则会被旧的蓝色染一遍。
+        engine.renderer.update_material(
+            &engine.gpu,
+            material,
+            MaterialDesc {
+                base_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+                metallic: 0.0,
+                roughness: 0.7,
+                base_color_texture: Some(texture),
+                ..MaterialDesc::default()
+            },
+        );
+        if !engine.renderer.set_material_texture(
+            &engine.gpu,
+            material,
+            MaterialTextureSlot::BaseColor,
+            Some(texture),
+        ) {
+            engine.renderer.remove_texture(texture);
+            return;
+        }
+        if let Some(old) = self.recon_texture.replace(texture) {
+            engine.renderer.remove_texture(old);
+        }
     }
 
     /// 从当前深度点云生成/更新一个体素表面物体。
@@ -473,11 +581,16 @@ impl CameraFeed {
             self.recon_status = format!("已是最新（帧 {}）", frame.json.frame);
             return;
         }
-        let mesh = if self.recon_smooth {
+        let mut mesh = if self.recon_smooth {
             crate::reconstruct::smooth_surface(points, self.recon_voxel, 0.45)
         } else {
             crate::reconstruct::voxel_surface_robust(points, self.recon_voxel)
         };
+        let projection = Self::frame_projection(&frame);
+        let colored = projection
+            .as_ref()
+            .map(|p| crate::reconstruct::colorize_mesh_uvs(&mut mesh, &frame.rgb, p))
+            .unwrap_or(0);
         if mesh.indices.is_empty() {
             self.recon_status = "点云为空或体素太大，没有生成面".to_string();
             return;
@@ -495,7 +608,11 @@ impl CameraFeed {
                 &engine.gpu,
                 "$camera_recon",
                 MaterialDesc {
-                    base_color: Vec4::new(0.52, 0.68, 0.82, 1.0),
+                    base_color: if colored > 0 {
+                        Vec4::new(1.0, 1.0, 1.0, 1.0)
+                    } else {
+                        Vec4::new(0.52, 0.68, 0.82, 1.0)
+                    },
                     metallic: 0.0,
                     roughness: 0.7,
                     ..MaterialDesc::default()
@@ -510,29 +627,36 @@ impl CameraFeed {
             engine.scene.objects[index].generated = true;
             self.recon_mesh = Some(placeholder);
             self.recon_object = Some(index);
+            self.recon_material = Some(material);
         }
         let Some(id) = self.recon_mesh else {
             self.recon_status = "网格句柄丢失".to_string();
             return;
         };
         if engine.renderer.update_mesh_data(&engine.gpu, id, &mesh) {
+            self.sync_recon_texture(engine, &frame, colored);
             self.recon_frame = frame.json.frame;
             self.recon_voxel_used = self.recon_voxel;
             self.recon_smooth_used = self.recon_smooth;
             self.recon_status = format!(
-                "已生成 {triangles} 个三角形（帧 {}，{} {:.1} cm）",
+                "已生成 {triangles} 个三角形（帧 {}，{} {:.1} cm）{}",
                 frame.json.frame,
                 if self.recon_smooth {
                     "平滑"
                 } else {
                     "体素"
                 },
-                self.recon_voxel * 100.0
+                self.recon_voxel * 100.0,
+                if colored > 0 { "，彩色" } else { "" }
             );
         } else {
             self.recon_status = "网格已不存在（场景可能被清空），请再点一次".to_string();
             self.recon_mesh = None;
             self.recon_object = None;
+            self.recon_material = None;
+            if let Some(old) = self.recon_texture.take() {
+                engine.renderer.remove_texture(old);
+            }
         }
     }
 
@@ -2232,5 +2356,86 @@ mod tests {
         let err = read_frame(&dir).expect_err("必须拒绝");
         assert!(err.contains("长度"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+    #[test]
+    fn reconstruction_uses_camera_rgb_as_a_base_color_texture() {
+        if std::env::var_os("QUENCH3D_GPU_TESTS").is_none() {
+            return;
+        }
+        let gpu = match pollster::block_on(quench3d::render::GpuContext::headless(
+            64,
+            64,
+            quench3d::render::GpuOptions::default(),
+        )) {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("跳过：没有可用的 wgpu 适配器（{e}）");
+                return;
+            }
+        };
+        let config = quench3d::EngineConfig {
+            width: 64,
+            height: 64,
+            msaa_samples: 1,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(gpu, &config);
+        let mut feed = CameraFeed::new();
+        let json = FeedJson {
+            frame: 1,
+            width: 64,
+            height: 64,
+            depth: DepthJson {
+                // 点云是相机坐标 + origin；这里用原点，投影更容易手算。
+                origin: Some([0.0, 0.0, 0.0]),
+                ..DepthJson::default()
+            },
+            intrinsics: IntrinsicsJson {
+                fx: 50.0,
+                fy: 50.0,
+                cx: 32.0,
+                cy: 32.0,
+            },
+            ..FeedJson::default()
+        };
+        let mut points = Vec::new();
+        for z in -10..=0 {
+            for y in -4..=4 {
+                for x in -4..=4 {
+                    points.push(Vec3::new(x as f32 * 0.04, y as f32 * 0.04, z as f32 * 0.04));
+                }
+            }
+        }
+        let mut rgb = vec![0u8; 64 * 64 * 3];
+        for (i, px) in rgb.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            // 上半屏红、下半屏绿：只要有一半被采样到，就说明不是纯色路径。
+            let y = i / 64;
+            *px = if y < 32 { [230, 20, 20] } else { [20, 230, 20] };
+        }
+        let frame = FeedFrame {
+            json,
+            rgb,
+            depth: None,
+            points: Some(points),
+            loaded_at: std::time::Instant::now(),
+        };
+        feed.set_latest_for_test(Arc::new(frame));
+        feed.recon_smooth = false;
+        feed.recon_voxel = 0.04;
+        feed.build_reconstruction(&mut engine);
+        assert_eq!(engine.scene.objects.len(), 1, "应生成一个重建物体");
+        let object = &engine.scene.objects[0];
+        assert!(object.generated);
+        let material = engine
+            .renderer
+            .material(object.material)
+            .expect("重建材质应存在");
+        assert!(
+            material.base_color_texture.is_some(),
+            "有 RGB + 内参时应把摄像头原图挂成基础色贴图"
+        );
+        assert_eq!(material.base_color, Vec4::new(1.0, 1.0, 1.0, 1.0));
+        assert!(feed.recon_texture.is_some());
+        assert!(feed.recon_status.contains("彩色"), "{}", feed.recon_status);
     }
 }
