@@ -89,6 +89,10 @@
   extensible）、多源混音/线性重采样/循环、3D 距离衰减与等功率声像，`Engine::audio`
   直接可用；无设备单测覆盖解码、往返、声像、衰减、循环、pitch 与 NaN/clamp。
   **没有内置设备输出**：宿主把 `mix` 的缓冲交给 cpal/WebAudio。
+- **关节径向间隙**：`PhysicsWorld::set_joint_radial_clearance` / 场景
+  `joints[].radial_clearance`（米，缺省 0 = 理想点约束）。fixed/ball/hinge 的锚点在
+  间隙内完全自由，到边界只挡径向分离；预测式速度上限避免一步穿透。0.2 mm 用
+  `0.0002`，新增 0.2 m / 0.2 mm 两级间隙、CLI 接线与校验测试；旧场景逐位不变。
 - **各向异性摩擦**：`BodyBuilder::anisotropic_friction(axis, ratio)` /
   场景 `friction_anisotropy` + `friction_axis`。沿本地主轴 `μ(1+ratio)`、垂直
   `μ(1-ratio)`，静/动摩擦同步缩放；缺省 0 走原标量路径逐位不变。新增沿轴/横轴

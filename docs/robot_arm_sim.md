@@ -77,6 +77,10 @@ PD 力矩每个子步只施加一次（不是每个速度迭代一次）。`torq
 * 铰链伺服：`motor_target_deg` + `motor_kp`（N·m/rad）/`motor_kd`（N·m·s/rad）/`motor_max_torque`（N·m）。
 * 滑块伺服（夹爪开合）：`motor_target_m`（米）+ `motor_kp`（N/m）/`motor_kd`（N·s/m）/`motor_max_torque`（N，最大推力）。只写目标不写 `motor_kp` 会报错，不会静默不动。
 * 改目标只改 `target_angle`，不改增益/限幅；两端刚体自动唤醒。
+* 关节径向间隙：在 fixed/ball/hinge 上写 `"radial_clearance": 0.0002`（米）就是 0.2 mm
+  的轴承/舵机回差。不写 = 理想点约束；间隙内两锚点自由，到边界只挡径向分离，
+  限位/马达/编码器角度不受影响。实测证据见 `ball_joint_radial_clearance_allows_a_bounded_gap`
+  （0.2 m 与 0.2 mm 两级，间隙误差 < 0.05 mm）和 `joint_radial_clearance_is_wired_from_scene_doc`。
 
 滑块伺服示例（夹爪）：
 
@@ -311,4 +315,7 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * 真实夹持已验证 20 g 与 100 g、40 mm 方块、friction 2.0；200 g 同套参数只抬起 0.098 m，更重物体仍需重新标定预紧/增益。
 * 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
 * MCP `simulate_steps` 已由 `quench3d_simulate.steps` 覆盖；`joint_target` 与 `query_contact` 已加。
-* 关节径向间隙 0.2 mm 未建模：当前铰链是理想点约束，没有径向自由间隙。按 120 mm 连杆估算，0.2 mm 间隙对应末端约 `atan(0.2/120)=0.095°` 的角度不确定度，小于 ±1° 验收；但它会带来真实的回差/抖动，本页不把“理想铰链”说成“已含间隙”。
+* 关节径向间隙已**可选**建模（`radial_clearance`，缺省 0 = 理想）；现有 M1 fixture
+  没有打开它，所以默认演示仍是理想铰链。按 120 mm 连杆估算，0.2 mm 间隙对应末端约
+  `atan(0.2/120)=0.095°` 的角度不确定度，小于 ±1° 验收；需要真实回差时给关节写
+  `0.0002`，不要期待默认场景自动含间隙。

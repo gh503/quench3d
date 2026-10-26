@@ -936,6 +936,94 @@ fn ball_joint_keeps_anchor_points_together() {
 }
 
 #[test]
+fn ball_joint_radial_clearance_allows_a_bounded_gap() {
+    // 锚点重合的球窝关节挂一个摆球。没有间隙时锚点必须贴合；给了径向间隙后，
+    // 摆球应能自由落到间隙边界并停在那里——这正是 0.2 mm 舵机回差要的模型。
+    for (clearance, tolerance) in [(0.2f32, 0.01f32), (0.0002, 0.00005)] {
+        let mut w = PhysicsWorld::new();
+        let anchor = add_anchor(&mut w);
+        let length = 1.5f32;
+        let bob = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+                .position(vec3(0.0, -length, 0.0))
+                .build(),
+        );
+        let joint = w.add_joint(Joint::Ball {
+            a: anchor,
+            b: bob,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: vec3(0.0, length, 0.0),
+            cone_limit: None,
+        });
+        assert_eq!(w.joint_radial_clearance(joint), Some(0.0));
+        assert!(w.set_joint_radial_clearance(joint, clearance));
+        // 负数/NaN 都按 0 处理。
+        assert!(w.set_joint_radial_clearance(joint, -1.0));
+        assert_eq!(w.joint_radial_clearance(joint), Some(0.0));
+        assert!(w.set_joint_radial_clearance(joint, clearance));
+
+        let mut max_gap = 0.0f32;
+        for _ in 0..180 {
+            w.step(DT);
+            let p = w.body(bob).unwrap();
+            let gap = (p.position() + p.rotation().mul_vec3(vec3(0.0, length, 0.0))).length();
+            max_gap = max_gap.max(gap);
+        }
+        let p = w.body(bob).unwrap();
+        let gap = (p.position() + p.rotation().mul_vec3(vec3(0.0, length, 0.0))).length();
+        assert!(
+            (gap - clearance).abs() <= tolerance,
+            "clearance={clearance}: 最终间隙 {gap} 应接近 {clearance}"
+        );
+        assert!(
+            max_gap <= clearance + tolerance * 2.0,
+            "clearance={clearance}: 最大间隙 {max_gap} 超出边界"
+        );
+        assert_all_finite(&w, "径向间隙球窝");
+    }
+}
+
+#[test]
+fn hinge_joint_radial_clearance_bounds_gap_without_losing_the_axis() {
+    // 机器人关节的真实形态是铰链，不是球窝。间隙只能吃掉径向平移，
+    // 转轴方向必须仍然锁住——摆球落到间隙边界后，朝向不能跟着歪。
+    let mut w = PhysicsWorld::new();
+    let anchor = add_anchor(&mut w);
+    let length = 1.5f32;
+    let bob = w.add_body(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+            .position(vec3(0.0, -length, 0.0))
+            .build(),
+    );
+    let handle = w.add_joint(Joint::Hinge {
+        a: anchor,
+        b: bob,
+        local_anchor_a: Vec3::ZERO,
+        local_anchor_b: vec3(0.0, length, 0.0),
+        local_axis_a: Vec3::Y,
+        local_axis_b: Vec3::Y,
+        limits: None,
+        motor: None,
+    });
+    assert!(w.set_joint_radial_clearance(handle, 0.0002));
+    for _ in 0..180 {
+        w.step(DT);
+    }
+    let p = w.body(bob).unwrap();
+    let gap = (p.position() + p.rotation().mul_vec3(vec3(0.0, length, 0.0))).length();
+    assert!(
+        (gap - 0.0002).abs() < 0.00005,
+        "0.2 mm 铰链间隙应停在边界：{gap}"
+    );
+    assert!(
+        p.rotation().angle_between(Quat::IDENTITY) < 0.01,
+        "径向间隙不应把铰链轴带歪：{:?}",
+        p.rotation()
+    );
+    assert_all_finite(&w, "径向间隙铰链");
+}
+
+#[test]
 fn fixed_joint_welds_bodies() {
     let mut w = PhysicsWorld::new();
     let base = add_anchor(&mut w);

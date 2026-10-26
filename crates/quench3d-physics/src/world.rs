@@ -94,6 +94,11 @@ pub(crate) struct JointSlot {
     pub(crate) break_torque: Option<f32>,
     /// 关节两端是否**互相碰撞**（缺省 `false`，与 Bullet/PhysX 一致）。
     pub(crate) collide_connected: bool,
+    /// 点约束的径向自由间隙（米，0 = 理想点约束）。
+    ///
+    /// 只作用于 fixed/ball/hinge 的点约束：两锚点距离 ≤ clearance 时完全自由，
+    /// 超过后才只约束**径向分离**速度；旋转/角度约束不受影响。缺省 0 走原路径。
+    pub(crate) radial_clearance: f32,
 }
 
 /// 宿主装入的单调时钟（秒）。
@@ -763,6 +768,7 @@ impl PhysicsWorld {
             slot.break_force = None;
             slot.break_torque = None;
             slot.collide_connected = false;
+            slot.radial_clearance = 0.0;
             JointHandle {
                 index,
                 generation: slot.generation,
@@ -776,6 +782,7 @@ impl PhysicsWorld {
                 break_force: None,
                 break_torque: None,
                 collide_connected: false,
+                radial_clearance: 0.0,
             });
             JointHandle {
                 index,
@@ -1032,6 +1039,35 @@ impl PhysicsWorld {
             return None;
         }
         Some(slot.collide_connected)
+    }
+
+    /// 设置点约束的径向自由间隙（米，>=0；非有限/负值按 0 处理）。
+    ///
+    /// 只对 fixed/ball/hinge 生效；distance/slider 没有点约束，设置了也不参与求解。
+    /// 0 = 理想点约束（旧行为）。返回句柄是否有效。
+    pub fn set_joint_radial_clearance(&mut self, handle: JointHandle, meters: f32) -> bool {
+        let Some(slot) = self
+            .joints
+            .get_mut(handle.index as usize)
+            .filter(|s| s.generation == handle.generation && s.joint.is_some())
+        else {
+            return false;
+        };
+        slot.radial_clearance = if meters.is_finite() {
+            meters.max(0.0)
+        } else {
+            0.0
+        };
+        true
+    }
+
+    /// 读取关节径向间隙（米）；句柄无效返回 `None`。
+    pub fn joint_radial_clearance(&self, handle: JointHandle) -> Option<f32> {
+        let slot = self
+            .joints
+            .get(handle.index as usize)
+            .filter(|s| s.generation == handle.generation && s.joint.is_some())?;
+        Some(slot.radial_clearance)
     }
 
     /// 这一对刚体之间是否有"不互相碰撞"的关节（见

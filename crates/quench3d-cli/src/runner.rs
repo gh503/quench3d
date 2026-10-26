@@ -2420,6 +2420,9 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             },
         };
         let handle = world.add_joint(joint);
+        if let Some(clearance) = j.radial_clearance {
+            world.set_joint_radial_clearance(handle, clearance);
+        }
         joint_entries.push(JointRuntime {
             name,
             handle,
@@ -6136,6 +6139,23 @@ mod tests {
         let b = build.world.bodies().next().unwrap().1;
         assert!((b.friction_anisotropy - 0.6).abs() < 1e-6);
         assert!((b.friction_axis.z - 1.0).abs() < 1e-6, "轴应归一化");
+    }
+
+    #[test]
+    fn joint_radial_clearance_is_wired_from_scene_doc() {
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [
+                 { "name": "座", "body": "static", "shape": { "type": "sphere", "radius": 0.1 } },
+                 { "name": "摆", "body": "dynamic", "position": [0, -1, 0],
+                   "shape": { "type": "sphere", "radius": 0.1 } } ],
+               "joints": [ { "type": "ball", "a": "座", "b": "摆",
+                 "anchor_b": [0, 1, 0], "radial_clearance": 0.0002 } ] }"#,
+        )
+        .unwrap();
+        assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+        let build = build_world(&doc).unwrap();
+        let handle = build.world.joint_handles()[0];
+        assert_eq!(build.world.joint_radial_clearance(handle), Some(0.0002));
     }
 
     #[test]

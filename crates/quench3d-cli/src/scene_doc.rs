@@ -2166,6 +2166,12 @@ pub struct JointDoc {
     /// 距离关节的阻尼。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damping: Option<f32>,
+    /// 点约束的径向自由间隙（米，缺省 0 = 理想关节）。
+    ///
+    /// 只对 fixed / ball / hinge 生效。两锚点距离 ≤ 间隙时自由，超过后才只约束
+    /// 径向分离；适合 0.2 mm 舵机回差、轴承游隙。distance / slider 没有点约束。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radial_clearance: Option<f32>,
     /// 铰链马达目标角速度（弧度/秒）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motor_velocity: Option<f32>,
@@ -3333,6 +3339,7 @@ fn check_joint(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     check_field::<[f32; 3]>(map, "frame_b", path, out);
     check_field::<[f32; 2]>(map, "limits", path, out);
     check_field::<f32>(map, "rest_length", path, out);
+    check_field::<f32>(map, "radial_clearance", path, out);
     check_field::<f32>(map, "stiffness", path, out);
     check_field::<f32>(map, "damping", path, out);
     check_field::<f32>(map, "motor_velocity", path, out);
@@ -6780,6 +6787,21 @@ impl SceneDoc {
                     "静止长度不能为负",
                 ));
             }
+            if let Some(c) = j.radial_clearance {
+                if !c.is_finite() || c < 0.0 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.radial_clearance"),
+                        "径向间隙必须是有限非负数（米）",
+                    ));
+                } else if c > 0.0 && matches!(j.kind, JointKind::Distance | JointKind::Slider) {
+                    out.push(Diagnostic::warn_code(
+                        ErrorCode::Ineffective,
+                        format!("{p}.radial_clearance"),
+                        "distance / slider 没有点约束，径向间隙不会生效",
+                    ));
+                }
+            }
             if let Some(l) = &j.limits {
                 if !l[0].is_finite() || !l[1].is_finite() {
                     out.push(Diagnostic::error_code(
@@ -9344,6 +9366,50 @@ mod tests {
         assert!(
             paths.contains(&"objects[0].friction_axis".to_string()),
             "{paths:?}"
+        );
+    }
+
+    #[test]
+    fn joint_radial_clearance_is_validated() {
+        let base = |kind: &str, extra: Value| {
+            let mut joint = json!({
+                "type": kind, "a": "座", "b": "摆",
+                "anchor_b": [0.0, 1.0, 0.0]
+            });
+            if let (Some(obj), Some(extra)) = (joint.as_object_mut(), extra.as_object()) {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            SceneDoc::from_value(json!({
+                "objects": [
+                    { "name": "座", "body": "static", "shape": { "type": "sphere", "radius": 0.1 } },
+                    { "name": "摆", "body": "dynamic", "position": [0.0, -1.0, 0.0],
+                      "shape": { "type": "sphere", "radius": 0.1 } }
+                ],
+                "joints": [joint]
+            }))
+            .unwrap()
+        };
+
+        let ok = base("ball", json!({ "radial_clearance": 0.0002 }));
+        assert!(!SceneDoc::has_errors(&ok.validate()), "{:?}", ok.validate());
+
+        let bad = base("ball", json!({ "radial_clearance": -0.1 }));
+        assert!(
+            bad.validate()
+                .iter()
+                .any(|d| d.path == "joints[0].radial_clearance"),
+            "负数间隙必须报错"
+        );
+
+        let slider = base("slider", json!({ "radial_clearance": 0.1 }));
+        assert!(
+            slider
+                .validate()
+                .iter()
+                .any(|d| d.path == "joints[0].radial_clearance" && d.message.contains("不会生效")),
+            "slider 上的间隙必须提醒"
         );
     }
 

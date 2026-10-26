@@ -501,6 +501,8 @@ pub(crate) struct JointState {
     pub point_impulse: Vec3,
     /// 点约束伪冲量。
     pub point_pseudo: Vec3,
+    /// 点约束的径向自由间隙（米，0 = 理想点约束）。
+    pub radial_clearance: f32,
     /// 3 自由度角度有效质量。
     pub ang3: Option<Mat3>,
     /// 3 自由度角度累积冲量。
@@ -621,6 +623,9 @@ impl JointSolver {
             };
             let va = views[e.a];
             let vb = views[e.b];
+            let clearance = joints
+                .get(e.joint_index)
+                .map_or(0.0, |s| s.radial_clearance);
             let local_a = joint.local_anchor_a();
             let local_b = joint.local_anchor_b();
             let ra = va.rot.mul_vec3(local_a);
@@ -634,8 +639,14 @@ impl JointSolver {
                 rb,
                 kind: JointKind::Ball,
                 point: None,
-                point_impulse: e.impulses.point,
+                // 有间隙时点约束是单边的，跨步热启动的旧冲量方向可能已失效：清零。
+                point_impulse: if clearance > 0.0 {
+                    Vec3::ZERO
+                } else {
+                    e.impulses.point
+                },
                 point_pseudo: Vec3::ZERO,
+                radial_clearance: clearance,
                 ang3: None,
                 ang3_impulse: e.impulses.ang3,
                 ang3_error: Vec3::ZERO,
@@ -956,7 +967,41 @@ impl JointSolver {
             }
 
             // --- 点约束 ---
-            if let Some(k) = st.point {
+            if st.radial_clearance > 0.0 {
+                // 径向间隙：锚点距离在 clearance 以内完全自由；到边界后只挡住
+                // **向外分离**的径向速度（切向仍自由，旋转约束不受影响）。
+                let va = views[st.a];
+                let vb = views[st.b];
+                let wa = va.pos + va.rot.mul_vec3(st.local_a);
+                let wb = vb.pos + vb.rot.mul_vec3(st.local_b);
+                let c = wb - wa;
+                let dist = c.length();
+                let vrel = vb.velocity_at(st.rb) - va.velocity_at(st.ra);
+                // 初始完全重合时 c 没有方向：用相对速度方向当分离方向，否则第一步
+                // 会整步自由下落、穿过间隙，下一步才被拉回。
+                let n = if dist > 1e-9 {
+                    c / dist
+                } else {
+                    vrel.normalize_or_zero()
+                };
+                if n.length_squared() > 0.5 {
+                    let vn = vrel.dot(n);
+                    // 预测式间隙：本步最多还能分开 (clearance-dist)，换算成速度
+                    // 上限。这样不会出现"高速穿过 0.2 mm 间隙、下一步才被拉回"的
+                    // 一步穿透；到边界后上限为 0（只挡分离）。
+                    let allowance = ((st.radial_clearance - dist).max(0.0) / dt).max(0.0);
+                    if vn > allowance {
+                        let k_rad = va.k_axis(st.ra, n) + vb.k_axis(st.rb, n);
+                        if k_rad > 1e-12 {
+                            let dl = -(vn - allowance) / k_rad;
+                            if dl.is_finite() {
+                                st.point_impulse += n * dl;
+                                apply_impulse(views, st.a, st.b, st.ra, st.rb, n * dl);
+                            }
+                        }
+                    }
+                }
+            } else if let Some(k) = st.point {
                 if let Some(inv) = k.try_inverse() {
                     let va = views[st.a];
                     let vb = views[st.b];
@@ -1175,7 +1220,31 @@ impl JointSolver {
         }
         for _ in 0..iterations {
             for st in self.states.iter_mut() {
-                if let Some(k) = st.point {
+                if st.radial_clearance > 0.0 {
+                    // 径向间隙的位置修正：只在超出间隙时把**超出的那一段**沿径向
+                    // 拉回，间隙内部的位姿完全不动。
+                    let va = views[st.a];
+                    let vb = views[st.b];
+                    let wa = va.pos + va.rot.mul_vec3(st.local_a);
+                    let wb = vb.pos + vb.rot.mul_vec3(st.local_b);
+                    let c = wb - wa;
+                    let dist = c.length();
+                    if dist > st.radial_clearance && dist > 1e-9 {
+                        let n = c / dist;
+                        let err = dist - st.radial_clearance;
+                        let bias = (err * beta / dt).min(max_speed);
+                        let target = -bias;
+                        let vrel = vb.pseudo_velocity_at(st.rb) - va.pseudo_velocity_at(st.ra);
+                        let k_rad = va.k_axis(st.ra, n) + vb.k_axis(st.rb, n);
+                        if k_rad > 1e-12 {
+                            let dl = (target - vrel.dot(n)) / k_rad;
+                            if dl.is_finite() {
+                                st.point_pseudo += n * dl;
+                                apply_pseudo_impulse(views, st.a, st.b, st.ra, st.rb, n * dl);
+                            }
+                        }
+                    }
+                } else if let Some(k) = st.point {
                     if let Some(inv) = k.try_inverse() {
                         let va = views[st.a];
                         let vb = views[st.b];
