@@ -209,6 +209,11 @@
 - [x] Web 深度时间累积：`window.quench3dCameraDepthAccumulation(true)` 或窗口
   「深度时间累积」用 `PointCloudAccumulator`（2 cm 体素、90 帧 TTL）合并多帧；
   Node 探针实测单帧 4096 点 → 两帧 5632 点，关闭后回到 4096。
+- [x] Web 深度 ICP 位姿跟踪：`window.quench3dCameraDepthTracking(true)` 或 Web
+  摄像头窗口「跟踪位姿（ICP，移动相机）」把注入的相邻深度帧用同一套
+  `register_point_clouds` 搬到参考系；打开时自动开时间累积，关闭累积同时关跟踪。
+  Node 探针实测三帧移动平面配准 3 帧、rms 有限，且跟踪后的点数少于不跟踪的叠加。
+  仍是增量跟踪，不是全局 SLAM；普通 RGB 摄像头仍需外部注入深度。
 - [x] 摄像头点云时间累积（编辑器「时间累积」开关，缺省关）：最近约 90 帧按
   1.5 cm 体素去重/平均，最多 25 万体素，过期 90 帧自动丢弃；缺省关时仍走单帧
   旧路径。回归：互补帧合并、同体素平均/排序、上限/NaN/过期、两次运行逐位一致。
@@ -220,7 +225,7 @@
   错位返回 None）、`..._is_deterministic`；组合顺序回归
   `tracking_composes_increments_into_the_reference_frame`（两段增量叠到参考系
   误差 <6 mm）。边界：增量跟踪，不是全局 SLAM；大位移/无重叠会重置累积器；
-  桌面端专用，Web 端未接。
+  桌面与 Web 都可用；Web 走外部深度注入。
 - [x] 精确 CCD（任意凸体 TOI），不是中心射线近似。
   - [x] **凸-凸保守推进**（`objects[].ccd_precise`，隐含 `ccd=true`）：用 GJK
     距离在时间上 1-Lipschitz 的性质，按 `Δ距离 / (|v_rel| + |ω_a|R_a + |ω_b|R_b)`

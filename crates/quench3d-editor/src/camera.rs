@@ -338,7 +338,6 @@ pub struct CameraFeed {
 ///
 /// `rotation`/`translation` 是“上一帧相机 → 参考帧”；配准成功后就地更新成
 /// “当前帧相机 → 参考帧”。单独抽出来是为了能不用窗口/线程直接测组合顺序。
-#[cfg(not(target_arch = "wasm32"))]
 fn compose_tracked_points(
     previous: &[Vec3],
     raw: &[Vec3],
@@ -1672,6 +1671,66 @@ thread_local! {
     static WEB_DEPTH: RefCell<Option<WebDepthFrame>> = const { RefCell::new(None) };
     static WEB_DEPTH_ACCUM: RefCell<Option<PointCloudAccumulator>> = const { RefCell::new(None) };
     static WEB_DEPTH_ACCUM_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static WEB_DEPTH_TRACK: RefCell<Option<WebTracking>> = const { RefCell::new(None) };
+    static WEB_DEPTH_TRACK_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Web 端相邻帧 ICP 的参考帧与累计位姿。
+#[cfg(target_arch = "wasm32")]
+struct WebTracking {
+    /// 上一帧原始点云（相机坐标，未搬到参考系）。
+    previous: Vec<Vec3>,
+    /// 当前相机 → 参考帧的累计旋转。
+    rotation: quench3d_math::Quat,
+    /// 当前相机 → 参考帧的累计平移。
+    translation: Vec3,
+    /// 成功配准的帧数（第一帧算 1）。
+    frames: u64,
+    /// 最近一次 rms（米）；只有一帧时是 +∞。
+    rms: f32,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebTracking {
+    fn new(points: &[Vec3]) -> Self {
+        Self {
+            previous: points.to_vec(),
+            rotation: quench3d_math::Quat::IDENTITY,
+            translation: Vec3::ZERO,
+            frames: 1,
+            rms: f32::INFINITY,
+        }
+    }
+}
+
+/// 开关 Web 深度时间累积之上的 ICP 位姿跟踪。
+///
+/// 打开时会同时打开时间累积（没有累积器时跟踪结果无处可放），并清空旧参考帧；
+/// 关闭只关跟踪，不动累积。缺省关，关时行为与旧版完全一致。
+#[cfg(target_arch = "wasm32")]
+pub fn set_web_tracking(enabled: bool) {
+    WEB_DEPTH_TRACK_ON.with(|c| c.set(enabled));
+    WEB_DEPTH_TRACK.with(|slot| *slot.borrow_mut() = None);
+    if enabled && !web_accumulation_enabled() {
+        set_web_accumulation(true);
+    }
+}
+
+/// 当前 Web ICP 是否开启。
+#[cfg(target_arch = "wasm32")]
+pub fn web_tracking_enabled() -> bool {
+    WEB_DEPTH_TRACK_ON.with(|c| c.get())
+}
+
+/// Web ICP 诊断：`(是否开启, 已配准帧数, 最近 rms 米)`。
+#[cfg(target_arch = "wasm32")]
+pub fn web_tracking_status() -> (bool, u64, f32) {
+    let enabled = web_tracking_enabled();
+    WEB_DEPTH_TRACK.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or((enabled, 0, f32::INFINITY), |t| (enabled, t.frames, t.rms))
+    })
 }
 
 /// 开关 Web 深度时间累积（最近约 90 帧、2 cm 体素平均）。
@@ -1697,6 +1756,10 @@ pub fn set_web_accumulation(enabled: bool) {
         });
     } else {
         WEB_DEPTH_ACCUM.with(|slot| *slot.borrow_mut() = None);
+        // 累积关了，跟踪结果没有容器；同时关掉跟踪，避免 UI 显示“已跟踪”
+        // 但实际每帧都回到单帧。
+        WEB_DEPTH_TRACK_ON.with(|c| c.set(false));
+        WEB_DEPTH_TRACK.with(|slot| *slot.borrow_mut() = None);
         WEB_DEPTH.with(|slot| {
             if let Some(d) = slot.borrow_mut().as_mut() {
                 if !d.raw.is_empty() {
@@ -1754,16 +1817,56 @@ pub fn set_web_depth(
     });
     let raw = points.clone();
     let points = if web_accumulation_enabled() {
+        // ICP 与桌面同一个组合函数：把当前帧搬到参考系后再进体素累积器。
+        // 跟踪失败会返回 `reset = true`，这里必须连累积器一起重建，不能把两个
+        // 坐标系混在同一个网格里。
+        let (tracked, reset) = if web_tracking_enabled() {
+            let mut reset = false;
+            let tracked = WEB_DEPTH_TRACK.with(|slot| {
+                let mut guard = slot.borrow_mut();
+                let Some(tracking) = guard.as_mut() else {
+                    *guard = Some(WebTracking::new(&raw));
+                    return raw.clone();
+                };
+                match compose_tracked_points(
+                    &tracking.previous,
+                    &raw,
+                    &mut tracking.rotation,
+                    &mut tracking.translation,
+                ) {
+                    Some((points, rms)) => {
+                        tracking.previous = raw.clone();
+                        tracking.frames = tracking.frames.saturating_add(1);
+                        tracking.rms = rms;
+                        points
+                    }
+                    None => {
+                        // 无重叠/运动太大：以当前帧重开参考系，而不是丢掉这帧。
+                        reset = true;
+                        *guard = Some(WebTracking::new(&raw));
+                        raw.clone()
+                    }
+                }
+            });
+            (tracked, reset)
+        } else {
+            (raw.clone(), false)
+        };
+        if reset {
+            WEB_DEPTH_ACCUM.with(|slot| {
+                *slot.borrow_mut() = Some(PointCloudAccumulator::new(0.02, 200_000, 90));
+            });
+        }
         WEB_DEPTH_ACCUM.with(|slot| {
             if slot.borrow().is_none() {
                 *slot.borrow_mut() = Some(PointCloudAccumulator::new(0.02, 200_000, 90));
             }
             let mut guard = slot.borrow_mut();
             if let Some(accum) = guard.as_mut() {
-                accum.merge(&points, frame);
+                accum.merge(&tracked, frame);
                 accum.points()
             } else {
-                points
+                tracked
             }
         })
     } else {
@@ -1785,6 +1888,7 @@ pub fn set_web_depth(
 pub fn clear_web_depth() {
     WEB_DEPTH.with(|slot| *slot.borrow_mut() = None);
     WEB_DEPTH_ACCUM.with(|slot| *slot.borrow_mut() = None);
+    WEB_DEPTH_TRACK.with(|slot| *slot.borrow_mut() = None);
 }
 
 /// 当前注入点云/表面计数，给页面与探针显示。
@@ -2143,6 +2247,25 @@ impl CameraFeed {
                     {
                         set_web_accumulation(accum);
                         self.depth_status.clear();
+                    }
+                    let mut track = web_tracking_enabled();
+                    if ui
+                        .checkbox(&mut track, "跟踪位姿（ICP，移动相机）")
+                        .changed()
+                    {
+                        set_web_tracking(track);
+                        self.depth_status.clear();
+                    }
+                    let (_, track_frames, track_rms) = web_tracking_status();
+                    if track_frames > 0 && track_rms.is_finite() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "ICP {track_frames} 帧 · rms {:.1} mm",
+                                track_rms * 1000.0
+                            ))
+                            .small()
+                            .weak(),
+                        );
                     }
                     ui.checkbox(&mut self.show_points, "显示注入深度的点云");
                     ui.horizontal(|ui| {

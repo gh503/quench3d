@@ -387,6 +387,75 @@ if (!defaultBinding && namedFromGlue.size === 0) {
       bad("胶水缺少 set_camera_depth_accumulation()");
     }
 
+    // Web 深度 ICP 跟踪探针：移动相机时相邻帧应拼到同一参考系，而不是
+    // 把同一块平面叠成两层。这里只断言“真的配准了至少两帧且 rms 有限”。
+    if (
+      typeof exported.set_camera_depth_tracking === "function" &&
+      typeof exported.camera_depth_tracking_probe === "function"
+    ) {
+      const w = 64;
+      const h = 64;
+      const depth = new Uint8Array(w * h).fill(128);
+      const inject = (ox) =>
+        exported.set_camera_depth(
+          w,
+          h,
+          depth,
+          60,
+          60,
+          32,
+          32,
+          0.3,
+          3.0,
+          1,
+          new Float32Array([ox, 0, 0]),
+        );
+      try {
+        exported.set_camera_depth_accumulation(true);
+        exported.set_camera_depth_tracking(true);
+        inject(0);
+        inject(0.02);
+        inject(0.04);
+        const [enabled, frames, rms] = exported
+          .camera_depth_tracking_probe()
+          .split(",")
+          .map(Number);
+        exported.set_camera_depth_tracking(false);
+        const trackedPoints = Number(
+          exported.camera_depth_probe().split(",")[0],
+        );
+        // 同样的三帧，不跟踪时会把平面叠成三层；跟踪对齐后点数应明显更少。
+        exported.clear_camera_depth();
+        exported.set_camera_depth_accumulation(true);
+        inject(0);
+        inject(0.02);
+        inject(0.04);
+        const untrackedPoints = Number(
+          exported.camera_depth_probe().split(",")[0],
+        );
+        if (
+          enabled === 1 &&
+          frames >= 2 &&
+          Number.isFinite(rms) &&
+          trackedPoints < untrackedPoints
+        ) {
+          ok(
+            `Web 深度 ICP 跟踪可用：配准 ${frames} 帧，rms ${rms.toFixed(4)} m，` +
+              `三帧 ${trackedPoints} 点（不跟踪 ${untrackedPoints} 点）`,
+          );
+        } else {
+          bad(
+            `Web 深度 ICP 跟踪没有生效：enabled=${enabled}, frames=${frames}, ` +
+              `rms=${rms}, tracked=${trackedPoints}, untracked=${untrackedPoints}`,
+          );
+        }
+      } catch (e) {
+        bad(`Web 深度 ICP 跟踪失败：${String(e).slice(0, 160)}`);
+      }
+    } else {
+      bad("胶水缺少 set_camera_depth_tracking()");
+    }
+
     // 深度重建表面探针：点云 → 体素表面必须真的产出三角形。
     if (typeof exported.camera_depth_surface_probe === "function") {
       const w = 64;

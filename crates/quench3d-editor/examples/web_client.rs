@@ -77,6 +77,24 @@ pub fn set_camera_depth_accumulation(enabled: bool) {
     quench3d_editor::camera::set_web_accumulation(enabled);
 }
 
+/// 开关 Web 深度时间累积之上的 ICP 位姿跟踪。
+///
+/// 打开会自动打开时间累积；浏览器普通 RGB 摄像头没有深度，仍需先
+/// `set_camera_depth` 注入深度帧。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_camera_depth_tracking(enabled: bool) {
+    quench3d_editor::camera::set_web_tracking(enabled);
+}
+
+/// Web ICP 诊断：`开启,配准帧数,rms 米`。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn camera_depth_tracking_probe() -> String {
+    let (enabled, frames, rms) = quench3d_editor::camera::web_tracking_status();
+    format!("{},{frames},{rms}", u8::from(enabled))
+}
+
 /// 清空外部深度与重建表面。
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
