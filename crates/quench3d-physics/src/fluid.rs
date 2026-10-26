@@ -254,6 +254,197 @@ impl FluidDesc {
     }
 }
 
+/// 流体邻域查询用的稠密网格（每步按预测位置重建一次）。
+///
+/// 旧实现每颗粒子查 27 个 `HashMap` 格子；对 4000+ 粒子，SipHash 和
+/// `Vec` 分配会占掉整步的明显比例。这里把格子映射到扁平 `heads`，链表
+/// 节点复用，构建一次、查询零分配；格子坐标与旧的 `p/h` 取整完全一致，
+/// 格子内按原始下标升序串起来，因此邻居顺序与旧路径相同。
+struct FluidGrid {
+    cell: f32,
+    origin: [i32; 3],
+    dims: [i32; 3],
+    heads: Vec<i32>,
+    next: Vec<i32>,
+}
+
+impl FluidGrid {
+    /// 格子总数上限；超过时退回旧哈希路径（极端大跨度点云）。
+    const MAX_CELLS: usize = 2_000_000;
+
+    fn new(points: &[Vec3], kernel: f32) -> Option<Self> {
+        if !(kernel.is_finite() && kernel > 0.0) || points.is_empty() {
+            return None;
+        }
+        let cell = kernel;
+        let mut min = [i32::MAX; 3];
+        let mut max = [i32::MIN; 3];
+        for p in points {
+            let c = fluid_abs_cell(*p, cell);
+            for axis in 0..3 {
+                min[axis] = min[axis].min(c[axis]);
+                max[axis] = max[axis].max(c[axis]);
+            }
+        }
+        let dims = [
+            (max[0] - min[0] + 1).max(1),
+            (max[1] - min[1] + 1).max(1),
+            (max[2] - min[2] + 1).max(1),
+        ];
+        let cells = dims[0] as usize * dims[1] as usize * dims[2] as usize;
+        if cells == 0 || cells > Self::MAX_CELLS {
+            return None;
+        }
+        let mut heads = vec![-1i32; cells];
+        let mut next = vec![-1i32; points.len()];
+        // 反向插入，让每个格子的链表按原始下标升序；与旧 `Vec` 的追加顺序一致。
+        for i in (0..points.len()).rev() {
+            let c = fluid_abs_cell(points[i], cell);
+            let local = [c[0] - min[0], c[1] - min[1], c[2] - min[2]];
+            let slot = (local[0] + dims[0] * (local[1] + dims[1] * local[2])) as usize;
+            next[i] = heads[slot];
+            heads[slot] = i as i32;
+        }
+        Some(Self {
+            cell,
+            origin: min,
+            dims,
+            heads,
+            next,
+        })
+    }
+
+    /// 向 `out` 追加与 `i` 距离小于核半径的邻居下标（不包含自己）。
+    fn neighbors(&self, points: &[Vec3], i: usize, kernel2: f32, out: &mut Vec<u32>) {
+        let c = fluid_abs_cell(points[i], self.cell);
+        for dz in -1..=1 {
+            let z = c[2] + dz - self.origin[2];
+            if z < 0 || z >= self.dims[2] {
+                continue;
+            }
+            for dy in -1..=1 {
+                let y = c[1] + dy - self.origin[1];
+                if y < 0 || y >= self.dims[1] {
+                    continue;
+                }
+                for dx in -1..=1 {
+                    let x = c[0] + dx - self.origin[0];
+                    if x < 0 || x >= self.dims[0] {
+                        continue;
+                    }
+                    let slot = (x + self.dims[0] * (y + self.dims[1] * z)) as usize;
+                    let mut j = self.heads[slot];
+                    while j >= 0 {
+                        let index = j as usize;
+                        if index != i && (points[index] - points[i]).length_squared() < kernel2 {
+                            out.push(index as u32);
+                        }
+                        j = self.next[index];
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn fluid_abs_cell(p: Vec3, cell: f32) -> [i32; 3] {
+    [
+        (p.x / cell).floor() as i32,
+        (p.y / cell).floor() as i32,
+        (p.z / cell).floor() as i32,
+    ]
+}
+
+/// 单个粒子区间的密度与 lambda 计算（并行/串行共用）。
+///
+/// 每颗粒子只读邻域/预测位置/气体分数，只写自己的 `density` 与 `lambda`；
+/// 区间之间没有共享写，所以按区间分给多个线程与串行**逐位相同**。
+#[allow(clippy::too_many_arguments)]
+fn density_lambda_range(
+    predicted: &[Vec3],
+    neighbors: &[Vec<u32>],
+    gas_fractions: &[f32],
+    mass: f32,
+    rho0: f32,
+    h: f32,
+    h2: f32,
+    poly6: f32,
+    spiky: f32,
+    w0: f32,
+    start: usize,
+    densities: &mut [f32],
+    lambdas: &mut [f32],
+) {
+    for (offset, (density, lambda)) in densities.iter_mut().zip(lambdas.iter_mut()).enumerate() {
+        let i = start + offset;
+        let mut rho = w0;
+        for &j in &neighbors[i] {
+            let r2 = (predicted[i] - predicted[j as usize]).length_squared();
+            if r2 < h2 {
+                let x = h2 - r2;
+                rho += poly6 * x * x * x;
+            }
+        }
+        let rho = rho * mass;
+        *density = rho;
+        let rho0_i = if gas_fractions.is_empty() {
+            rho0
+        } else {
+            rho0 * (1.0 - gas_fractions.get(i).copied().unwrap_or(0.0).clamp(0.0, 0.9))
+        };
+        let c = (rho / rho0_i - 1.0).clamp(0.0, 10.0);
+        if c < 0.01 {
+            *lambda = 0.0;
+            continue;
+        }
+        let mut sum_grad2 = 0.0f32;
+        for &j in &neighbors[i] {
+            let r = predicted[i] - predicted[j as usize];
+            let len = r.length();
+            if len > EPS && len < h {
+                let x = h - len;
+                let g = spiky * x * x / len;
+                let g = r * g * (mass / rho0_i);
+                sum_grad2 += g.length_squared();
+            }
+        }
+        *lambda = -c / (sum_grad2 + 1e-4);
+    }
+}
+
+/// 极端大跨度时的旧哈希回退；邻居顺序与旧实现一致。
+fn build_neighbors_hash(predicted: &[Vec3], h: f32, h2: f32, neighbors: &mut [Vec<u32>]) {
+    let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+    let cell = |p: Vec3| -> (i32, i32, i32) {
+        (
+            (p.x / h).floor() as i32,
+            (p.y / h).floor() as i32,
+            (p.z / h).floor() as i32,
+        )
+    };
+    for (i, p) in predicted.iter().enumerate() {
+        grid.entry(cell(*p)).or_default().push(i as u32);
+    }
+    for (i, out) in neighbors.iter_mut().enumerate() {
+        let pi = predicted[i];
+        let (cx, cy, cz) = cell(pi);
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if let Some(list) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                        for &j in list {
+                            let j = j as usize;
+                            if j != i && (pi - predicted[j]).length_squared() < h2 {
+                                out.push(j as u32);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 单个流体的只读统计（报告用）。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FluidStats {
@@ -669,42 +860,17 @@ impl Fluid {
             self.predicted[i] = self.positions[i] + v * dt;
         }
 
-        // 2. 空间哈希（固定 27 格顺序；map 只用于查找，不遍历）
-        let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
-        let cell = |p: Vec3| -> (i32, i32, i32) {
-            (
-                (p.x / h).floor() as i32,
-                (p.y / h).floor() as i32,
-                (p.z / h).floor() as i32,
-            )
-        };
-        for (i, p) in self.predicted.iter().enumerate() {
-            grid.entry(cell(*p)).or_default().push(i as u32);
-        }
+        // 2. 稠密网格邻域（固定 27 格顺序；网格每步重建一次）
         self.neighbors.resize_with(n, Vec::new);
         for v in &mut self.neighbors {
             v.clear();
         }
-        for i in 0..n {
-            let pi = self.predicted[i];
-            let (cx, cy, cz) = cell(pi);
-            for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        if let Some(list) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
-                            for &j in list {
-                                let j = j as usize;
-                                if j == i {
-                                    continue;
-                                }
-                                if (pi - self.predicted[j]).length_squared() < h2 {
-                                    self.neighbors[i].push(j as u32);
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Some(grid) = FluidGrid::new(&self.predicted, h) {
+            for i in 0..n {
+                grid.neighbors(&self.predicted, i, h2, &mut self.neighbors[i]);
             }
+        } else {
+            build_neighbors_hash(&self.predicted, h, h2, &mut self.neighbors);
         }
 
         // 3. 密度与 lambda：PBF 的 lambda 必须**每次迭代重算**。
@@ -1397,21 +1563,6 @@ impl Fluid {
         }
     }
 
-    /// 局部有效静止密度；气体分数为 0 时逐位等于 `rho0`。
-    #[inline]
-    fn effective_rho0(&self, i: usize, rho0: f32) -> f32 {
-        if self.gas_fractions.is_empty() {
-            return rho0;
-        }
-        let gas = self
-            .gas_fractions
-            .get(i)
-            .copied()
-            .unwrap_or(0.0)
-            .clamp(0.0, 0.9);
-        rho0 * (1.0 - gas)
-    }
-
     /// 当前每个粒子的气体体积分数（测试/诊断；无耦合时为空）。
     pub fn gas_fractions(&self) -> &[f32] {
         &self.gas_fractions
@@ -1429,39 +1580,73 @@ impl Fluid {
         spiky: f32,
         w0: f32,
     ) {
+        // 粒子多时按区间并行：每颗粒子只写自己的密度/lambda，区间互不共享，
+        // 与串行逐位相同。少粒子仍走单线程，避免线程创建开销。
+        #[cfg(not(target_arch = "wasm32"))]
         let n = self.predicted.len();
-        for i in 0..n {
-            let mut rho = w0;
-            for &j in &self.neighbors[i] {
-                let r2 = (self.predicted[i] - self.predicted[j as usize]).length_squared();
-                if r2 < h2 {
-                    let x = h2 - r2;
-                    rho += poly6 * x * x * x;
-                }
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if n >= 1024 {
+            std::thread::available_parallelism()
+                .map(|v| v.get())
+                .unwrap_or(1)
+                .min(8)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1usize;
+        if workers <= 1 {
+            density_lambda_range(
+                &self.predicted,
+                &self.neighbors,
+                &self.gas_fractions,
+                mass,
+                rho0,
+                h,
+                h2,
+                poly6,
+                spiky,
+                w0,
+                0,
+                &mut self.densities,
+                &mut self.lambdas,
+            );
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let predicted = &self.predicted;
+                let neighbors = &self.neighbors;
+                let gas_fractions = &self.gas_fractions;
+                let densities = &mut self.densities;
+                let lambdas = &mut self.lambdas;
+                let chunk = n.div_ceil(workers);
+                std::thread::scope(|scope| {
+                    for (chunk_index, (density_chunk, lambda_chunk)) in densities
+                        .chunks_mut(chunk)
+                        .zip(lambdas.chunks_mut(chunk))
+                        .enumerate()
+                    {
+                        let start = chunk_index * chunk;
+                        scope.spawn(move || {
+                            density_lambda_range(
+                                predicted,
+                                neighbors,
+                                gas_fractions,
+                                mass,
+                                rho0,
+                                h,
+                                h2,
+                                poly6,
+                                spiky,
+                                w0,
+                                start,
+                                density_chunk,
+                                lambda_chunk,
+                            );
+                        });
+                    }
+                });
             }
-            let rho = rho * mass;
-            self.densities[i] = rho;
-            // 只压不拉：负压（吸引）会引发张力不稳定（实测：无重力也会自己"沸腾"）。
-            // 初始质量已按晶格静止密度校准，所以静止时 C≈0，不会被压塌。
-            // 气泡耦合时用局部有效静止密度；无气体时 effective_rho0 逐位返回 rho0。
-            let rho0_i = self.effective_rho0(i, rho0);
-            let c = (rho / rho0_i - 1.0).clamp(0.0, 10.0);
-            if c < 0.01 {
-                self.lambdas[i] = 0.0;
-                continue;
-            }
-            let mut sum_grad2 = 0.0f32;
-            for &j in &self.neighbors[i] {
-                let r = self.predicted[i] - self.predicted[j as usize];
-                let len = r.length();
-                if len > EPS && len < h {
-                    let x = h - len;
-                    let g = spiky * x * x / len;
-                    let g = r * g * (mass / rho0_i);
-                    sum_grad2 += g.length_squared();
-                }
-            }
-            self.lambdas[i] = -c / (sum_grad2 + 1e-4);
         }
     }
 
@@ -1635,6 +1820,59 @@ mod tests {
         );
         world.add_fluid(box_desc()).expect("参数合法");
         world
+    }
+
+    /// 4000 级粒子的整步预算（默认跳过；显式 `--ignored` 才跑）。
+    #[test]
+    #[ignore = "慢：4000 级流体粒子，显式 --ignored 运行"]
+    fn fluid_4000_particles_perf() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        let mut d = box_desc();
+        d.center = vec3(0.0, 1.6, 0.0);
+        d.half_extents = vec3(0.8, 0.8, 0.8);
+        d.spacing = 0.1;
+        d.radius = 0.05;
+        d.max_particles = 5000;
+        world.add_fluid(d).expect("参数合法");
+        let fluid = &world.fluids()[0];
+        println!("流体粒子数：{}", fluid.particles().len());
+        for _ in 0..10 {
+            world.step(1.0 / 60.0);
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+        let per_step = start.elapsed().as_secs_f64() * 1000.0 / 30.0;
+        println!("4000 级流体：{per_step:.2} ms/步");
+        assert!(per_step < 16.0, "流体 {per_step:.2} ms/步，超过 16 ms 目标");
+    }
+
+    #[test]
+    fn fluid_grid_matches_the_hash_neighbour_order() {
+        // 稠密网格必须与旧哈希路径给出完全相同的邻居表（集合和顺序）：
+        // 邻居顺序会影响浮点求和，顺序变了就不再是“旧场景逐位不变”。
+        let h = 0.2f32;
+        let h2 = h * h;
+        let mut points = Vec::new();
+        for i in 0..240 {
+            let x = (i % 12) as f32 * 0.055 - 0.3;
+            let y = (i / 12 % 10) as f32 * 0.06 - 0.25;
+            let z = (i / 120) as f32 * 0.07 - 0.1;
+            points.push(vec3(x, y, z));
+        }
+        let mut grid_neighbors = vec![Vec::new(); points.len()];
+        let grid = FluidGrid::new(&points, h).expect("小点集应能建网格");
+        for (i, out) in grid_neighbors.iter_mut().enumerate() {
+            grid.neighbors(&points, i, h2, out);
+        }
+        let mut hash_neighbors = vec![Vec::new(); points.len()];
+        build_neighbors_hash(&points, h, h2, &mut hash_neighbors);
+        assert_eq!(grid_neighbors, hash_neighbors);
     }
 
     #[test]

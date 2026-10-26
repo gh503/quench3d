@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **4000 级流体性能**：邻域从每步 `HashMap` 27 格查询改为稠密网格 + 复用链表
+  （邻居集合/顺序与旧哈希路径逐位一致，回归 `fluid_grid_matches_the_hash_neighbour_order`）；
+  密度/lambda 在粒子数 ≥1024 时按区间并行（每颗只写自己的值，native）。4913 颗粒子
+  release 下 **18.7 → 15.5 ms/步**（显式 ignored 基准），低于 16 ms 的 60 Hz 预算；
+  wasm 仍单线程。默认路径参数不变，旧流体结果逐位不变。
+
+
 - **气泡-液体动量反冲**：新增 `fluids[].bubble_momentum_coupling`（0~2，缺省 0）。
   把径向排开/过压/尾流注入液体的总动量按 0.5·ρ·V 附加质量反推给气泡，
   速度仍封顶 10 m/s。回归 `bubble_momentum_recoil_reduces_injected_liquid_momentum`
