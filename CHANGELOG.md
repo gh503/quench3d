@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+- **2000 体深堆降到 <16 ms/步（本机 release）**：速度迭代对每个接触只做一次
+  `split_at_mut`，把两侧刚体视图和冲量作用局部化，摩擦/法向/滚动顺序不变，
+  逐位结果由现有黄金摘要与并行/串行回归保证。深堆 17.04 → **15.61~15.93 ms/步**
+  （速度迭代 9.56 → 8.3 ms）；`deep_stack_2000_perf` 现在显式断言 <16 ms。
+
 - **摄像头 Web 外部深度注入**：新增 `set_camera_depth` / `clear_camera_depth`、
   `window.quench3dCameraDepth(...)`。深度按与桌面 `latest.depth` 相同的 u8 映射
   反投影成点云，窗口可显示点云并从点云重建体素表面线框；`check_web.mjs` 在

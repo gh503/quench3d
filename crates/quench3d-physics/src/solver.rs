@@ -209,7 +209,7 @@ impl BodyView {
     }
 
     /// 世界逆惯量张量作用。
-    #[inline]
+    #[inline(always)]
     pub fn inv_i_world(&self, v: Vec3) -> Vec3 {
         self.inv_i_world_mat.mul_vec3(v)
     }
@@ -709,104 +709,144 @@ fn anisotropic_friction(
 /// 避免两条路径的浮点运算顺序悄悄分叉。调用方必须保证切片内接触的下标
 /// 已经映射到 `views` 的局部下标。
 pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mut [BodyView]) {
-    {
-        for c in contacts.iter_mut() {
-            let mut vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
-            // 摩擦（用上一轮的法向冲量作为上界）
-            let max_friction = c.friction * c.normal_impulse;
-            // 各向异性时两个切向的上界不同；ratio=0 时两值逐位等于 friction，
-            // 下面仍走原来的标量路径，旧场景/旧测试逐位不变。
-            let anisotropic = c.friction_tangent[0].to_bits() != c.friction.to_bits()
-                || c.friction_tangent[1].to_bits() != c.friction.to_bits();
-            if c.friction_cone {
-                // 圆形摩擦锥：两个切向方向一起投影，再按总量缩放。旧路径的
-                // 逐轴 clamp 在对角线方向允许 √2·μ·N。
-                if c.k_tangent[0] > 1e-12 && c.k_tangent[1] > 1e-12 {
-                    let d0 = -vrel.dot(c.tangent[0]) / c.k_tangent[0];
-                    let d1 = -vrel.dot(c.tangent[1]) / c.k_tangent[1];
-                    let mut next = [c.tangent_impulse[0] + d0, c.tangent_impulse[1] + d1];
-                    let len = (next[0] * next[0] + next[1] * next[1]).sqrt();
-                    // 各向异性 + 圆形锥没有单一 μ：取两个方向上限的平均值作为
-                    // 保守上界。真正沿椭圆锥的投影留给后续版本。
-                    let cone_limit = if anisotropic {
-                        (c.friction_tangent[0] + c.friction_tangent[1]) * 0.5 * c.normal_impulse
-                    } else {
-                        max_friction
-                    };
-                    if len > cone_limit {
-                        let scale = cone_limit / len;
-                        next[0] *= scale;
-                        next[1] *= scale;
-                    }
-                    for (i, n) in next.iter().enumerate() {
-                        let d = *n - c.tangent_impulse[i];
-                        c.tangent_impulse[i] = *n;
-                        apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);
-                    }
-                    vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
-                }
-            } else {
-                for i in 0..2 {
-                    let k = c.k_tangent[i];
-                    if k <= 1e-12 {
-                        continue;
-                    }
-                    let vt = vrel.dot(c.tangent[i]);
-                    let mut d = -vt / k;
-                    let limit = if anisotropic {
-                        c.friction_tangent[i] * c.normal_impulse
-                    } else {
-                        max_friction
-                    };
-                    let new = clamp(c.tangent_impulse[i] + d, -limit, limit);
-                    d = new - c.tangent_impulse[i];
-                    c.tangent_impulse[i] = new;
-                    apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);
-                    vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
-                }
-            }
-            // 法向
-            let vn = vrel.dot(c.normal);
-            // `speculative_bias` 见 prepare：分离的接触点允许以 separation/dt 逼近
-            let mut d = -(vn - (c.restitution_bias + c.speculative_bias)) / c.k_normal;
-            let new = (c.normal_impulse + d).max(0.0);
-            d = new - c.normal_impulse;
-            c.normal_impulse = new;
-            apply_impulse(views, c.a, c.b, c.ra, c.rb, c.normal * d);
+    for c in contacts.iter_mut() {
+        let Some((va, vb)) = split_body_pair(views, c.a, c.b) else {
+            continue;
+        };
+        solve_velocity_contact(c, va, vb);
+    }
+}
 
-            // 滚动阻力：用角冲量把相对角速度往 0 拉，上限与法向冲量成正比；
-            // 缺省 0 时这条分支完全不会进入，历史结果逐位不变。
-            if c.rolling_friction > 0.0 && c.normal_impulse > 0.0 {
-                let wa = views[c.a].ang;
-                let wb = views[c.b].ang;
-                let wrel = wb - wa;
-                // 标量近似 1/trace(invI_a + invI_b)，避免为每个接触求 3x3 逆。
-                let k = views[c.a].inv_i_world_mat.cols[0].x
-                    + views[c.a].inv_i_world_mat.cols[1].y
-                    + views[c.a].inv_i_world_mat.cols[2].z
-                    + views[c.b].inv_i_world_mat.cols[0].x
-                    + views[c.b].inv_i_world_mat.cols[1].y
-                    + views[c.b].inv_i_world_mat.cols[2].z;
-                if k.is_finite() && k > 1e-9 {
-                    let limit = c.rolling_friction * c.normal_impulse * 0.5;
-                    let dl = (wrel * (-1.0 / k)).clamp_length(limit);
-                    apply_angular_impulse(views, c.a, c.b, dl);
-                }
+#[inline(always)]
+fn solve_velocity_contact(c: &mut SolverContact, va: &mut BodyView, vb: &mut BodyView) {
+    let mut vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
+    // 摩擦（用上一轮的法向冲量作为上界）
+    let max_friction = c.friction * c.normal_impulse;
+    // 各向异性时两个切向的上界不同；ratio=0 时两值逐位等于 friction，
+    // 下面仍走原来的标量路径，旧场景/旧测试逐位不变。
+    let anisotropic = c.friction_tangent[0].to_bits() != c.friction.to_bits()
+        || c.friction_tangent[1].to_bits() != c.friction.to_bits();
+    if c.friction_cone {
+        // 圆形摩擦锥：两个切向方向一起投影，再按总量缩放。旧路径的
+        // 逐轴 clamp 在对角线方向允许 √2·μ·N。
+        if c.k_tangent[0] > 1e-12 && c.k_tangent[1] > 1e-12 {
+            let d0 = -vrel.dot(c.tangent[0]) / c.k_tangent[0];
+            let d1 = -vrel.dot(c.tangent[1]) / c.k_tangent[1];
+            let mut next = [c.tangent_impulse[0] + d0, c.tangent_impulse[1] + d1];
+            let len = (next[0] * next[0] + next[1] * next[1]).sqrt();
+            // 各向异性 + 圆形锥没有单一 μ：取两个方向上限的平均值作为
+            // 保守上界。真正沿椭圆锥的投影留给后续版本。
+            let cone_limit = if anisotropic {
+                (c.friction_tangent[0] + c.friction_tangent[1]) * 0.5 * c.normal_impulse
+            } else {
+                max_friction
+            };
+            if len > cone_limit {
+                let scale = cone_limit / len;
+                next[0] *= scale;
+                next[1] *= scale;
             }
+            for (i, n) in next.iter().enumerate() {
+                let d = *n - c.tangent_impulse[i];
+                c.tangent_impulse[i] = *n;
+                pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
+            }
+            vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
+        }
+    } else {
+        for i in 0..2 {
+            let k = c.k_tangent[i];
+            if k <= 1e-12 {
+                continue;
+            }
+            let vt = vrel.dot(c.tangent[i]);
+            let mut d = -vt / k;
+            let limit = if anisotropic {
+                c.friction_tangent[i] * c.normal_impulse
+            } else {
+                max_friction
+            };
+            let new = clamp(c.tangent_impulse[i] + d, -limit, limit);
+            d = new - c.tangent_impulse[i];
+            c.tangent_impulse[i] = new;
+            pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
+            vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
+        }
+    }
+    // 法向
+    let vn = vrel.dot(c.normal);
+    // `speculative_bias` 见 prepare：分离的接触点允许以 separation/dt 逼近
+    let mut d = -(vn - (c.restitution_bias + c.speculative_bias)) / c.k_normal;
+    let new = (c.normal_impulse + d).max(0.0);
+    d = new - c.normal_impulse;
+    c.normal_impulse = new;
+    pair_apply_impulse(va, vb, c.ra, c.rb, c.normal * d);
+
+    // 滚动阻力：用角冲量把相对角速度往 0 拉，上限与法向冲量成正比；
+    // 缺省 0 时这条分支完全不会进入，历史结果逐位不变。
+    if c.rolling_friction > 0.0 && c.normal_impulse > 0.0 {
+        let wrel = vb.ang - va.ang;
+        // 标量近似 1/trace(invI_a + invI_b)，避免为每个接触求 3x3 逆。
+        let k = va.inv_i_world_mat.cols[0].x
+            + va.inv_i_world_mat.cols[1].y
+            + va.inv_i_world_mat.cols[2].z
+            + vb.inv_i_world_mat.cols[0].x
+            + vb.inv_i_world_mat.cols[1].y
+            + vb.inv_i_world_mat.cols[2].z;
+        if k.is_finite() && k > 1e-9 {
+            let limit = c.rolling_friction * c.normal_impulse * 0.5;
+            let dl = (wrel * (-1.0 / k)).clamp_length(limit);
+            pair_apply_angular_impulse(va, vb, dl);
         }
     }
 }
 
-/// 对两个刚体施加等大反向的纯角冲量（`l` 给 B，`-l` 给 A）。
-#[inline]
-fn apply_angular_impulse(views: &mut [BodyView], a: usize, b: usize, l: Vec3) {
+/// 从 `views` 里安全取出两个**不同下标**的可变引用（保持 `(a, b)` 顺序）。
+#[inline(always)]
+fn split_body_pair(
+    views: &mut [BodyView],
+    a: usize,
+    b: usize,
+) -> Option<(&mut BodyView, &mut BodyView)> {
+    if a == b || a >= views.len() || b >= views.len() {
+        return None;
+    }
+    if a < b {
+        let (left, right) = views.split_at_mut(b);
+        Some((&mut left[a], &mut right[0]))
+    } else {
+        let (left, right) = views.split_at_mut(a);
+        Some((&mut right[0], &mut left[b]))
+    }
+}
+
+#[inline(always)]
+fn pair_relative_velocity(va: &BodyView, vb: &BodyView, ra: Vec3, rb: Vec3) -> Vec3 {
+    (vb.lin + vb.ang.cross(rb)) - (va.lin + va.ang.cross(ra))
+}
+
+#[inline(always)]
+fn pair_apply_impulse(va: &mut BodyView, vb: &mut BodyView, ra: Vec3, rb: Vec3, impulse: Vec3) {
+    if !impulse.is_finite() {
+        return;
+    }
+    if va.inv_m > 0.0 {
+        va.lin -= impulse * va.inv_m;
+        va.ang -= va.inv_i_world(ra.cross(impulse));
+    }
+    if vb.inv_m > 0.0 {
+        vb.lin += impulse * vb.inv_m;
+        vb.ang += vb.inv_i_world(rb.cross(impulse));
+    }
+}
+
+#[inline(always)]
+fn pair_apply_angular_impulse(va: &mut BodyView, vb: &mut BodyView, l: Vec3) {
     if !l.is_finite() {
         return;
     }
-    let ia = views[a].inv_i_world(l);
-    let ib = views[b].inv_i_world(l);
-    views[a].ang -= ia;
-    views[b].ang += ib;
+    va.ang -= va.inv_i_world(l);
+    vb.ang += vb.inv_i_world(l);
 }
 
 /// 对一组接触做松弛（实现见 [`ContactSolver::relax`]）。
