@@ -1701,7 +1701,15 @@ quench3d bench --bodies 500,2000,5000 --no-sleep        # 「一直在算」的�
 quench3d bench --layout stack --no-render               # 深堆场景，跳过渲染
 QUENCH3D_BENCH_PHASES=1 quench3d bench --layout stack --no-render
                                                         # 打印阶段分解（积分/宽相/窄相/准备/速度/位置/写回）
+QUENCH3D_BENCH_VEL_ITER=6 quench3d bench --layout stack --no-render
+                                                        # 临时改速度迭代数做 A/B（诊断用）
 ```
+
+`--phases` 行尾还会打印最终动态体的 `y[min,max]` 与最大速度，用来一眼看出
+“数字快了，但堆已经塌了”——只看 ms 的基准很容易把塌堆当成优化。实测 2000 体深堆
+把速度迭代从 10 降到 8/6/5/4 时，接触数反而从 5526 涨到 5894/6172/6286/7083，
+总耗时并没有变好（23.1 / 23.0 / 21.7 / 26.2 / 29.6 ms），所以缺省 10 次迭代是有理由的，
+不能靠减迭代换性能。
 
 输出包含：启动开销、常驻/峰值内存、每个规模的每步耗时与「体·步/秒」吞吐、
 轨迹采样开销、单帧渲染耗时。它**不需要 GPU、不需要网络、不写任何文件**，

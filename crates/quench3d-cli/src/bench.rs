@@ -100,6 +100,12 @@ pub struct ScaleResult {
     pub sleeping: usize,
     /// 最终接触数。
     pub contacts: usize,
+    /// 跑完后动态刚体的最低/最高 y（堆是否塌了的快速诊断）。
+    pub final_min_y: f64,
+    /// 跑完后动态刚体的最高 y。
+    pub final_max_y: f64,
+    /// 跑完后动态刚体的最大速度（m/s）。
+    pub final_max_speed: f64,
 }
 
 /// 轨迹采样的开销对比。
@@ -195,6 +201,12 @@ fn make_world(n: usize, layout: Layout, sleep: bool) -> PhysicsWorld {
     let mut world = PhysicsWorld::new();
     world.set_gravity(Vec3::new(0.0, -9.81, 0.0));
     world.config.sleep_enabled = sleep;
+    if let Some(v) = std::env::var("QUENCH3D_BENCH_VEL_ITER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        world.config.velocity_iterations = v.clamp(1, 64);
+    }
     // 诊断用：同一个二进制里 A/B 窄相并行，排除机器频率/负载差异。
     if std::env::var_os("QUENCH3D_BENCH_SERIAL_NARROW").is_some() {
         world.config.parallel_narrowphase = false;
@@ -251,11 +263,30 @@ fn measure(bodies: usize, options: &BenchOptions) -> ScaleResult {
     }
     let elapsed = started.elapsed().as_secs_f64();
     let steps = options.steps.max(1);
+    let (final_min_y, final_max_y, final_max_speed) = {
+        let mut min_y = f64::INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        let mut max_speed: f64 = 0.0;
+        for (_, b) in world.bodies() {
+            if b.body_type != quench3d::physics::BodyType::Dynamic {
+                continue;
+            }
+            let p = b.position();
+            min_y = min_y.min(p.y as f64);
+            max_y = max_y.max(p.y as f64);
+            max_speed = max_speed.max(b.linear_velocity.length() as f64);
+        }
+        if !min_y.is_finite() {
+            min_y = 0.0;
+            max_y = 0.0;
+        }
+        (min_y, max_y, max_speed)
+    };
     if phases {
         let t = world.phase_timings();
         let n = t.steps.max(1) as f64;
         eprintln!(
-            "阶段/步 (n={bodies}, {:.2} ms): 积分 {:.2} 宽相 {:.2} 窄相 {:.2} 准备 {:.2} 速度 {:.2} 位置 {:.2} 写回 {:.2} 记账 {:.2} 总计 {:.2} · 候选 {} 流形 {}",
+            "阶段/步 (n={bodies}, {:.2} ms): 积分 {:.2} 宽相 {:.2} 窄相 {:.2} 准备 {:.2} 速度 {:.2} 位置 {:.2} 写回 {:.2} 记账 {:.2} 总计 {:.2} · 候选 {} 流形 {} · y[{:.2},{:.2}] vmax {:.2}",
             elapsed * 1000.0 / steps as f64,
             t.integrate_velocity_us / n / 1000.0,
             t.broadphase_us / n / 1000.0,
@@ -268,6 +299,9 @@ fn measure(bodies: usize, options: &BenchOptions) -> ScaleResult {
             t.total_us / n / 1000.0,
             t.candidate_pairs / t.steps.max(1),
             t.manifolds / t.steps.max(1),
+            final_min_y,
+            final_max_y,
+            final_max_speed,
         );
     }
     let mut sleeping = 0usize;
@@ -285,6 +319,9 @@ fn measure(bodies: usize, options: &BenchOptions) -> ScaleResult {
         body_steps_per_sec: steps as f64 * bodies as f64 / elapsed,
         sleeping,
         contacts: world.contacts().len(),
+        final_min_y,
+        final_max_y,
+        final_max_speed,
     }
 }
 
