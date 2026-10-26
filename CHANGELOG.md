@@ -46,8 +46,11 @@
   做保守推进，按 `Δ距离/(|v_rel|+|ω_a|R_a+|ω_b|R_b)` 找真实首次接触，不再依赖
   角点/16 边环采样。回归 `precise_ccd_catches_a_convex_hull_spike_between_samples`
   （尖刺凸包侧向撞薄墙：旧路径 y>1.0 穿过，精确路径 y<0.5 截住）与 CLI
-  `precise_ccd_is_wired_from_the_scene_file`。每开一个精确体每子步 O(其它凸体)；
-  半空间/三角网仍走默认路径，默认 `false` 时旧场景逐位不变。
+  `precise_ccd_is_wired_from_the_scene_file`。现在**半空间**也用支持函数沿法线
+  做 1-Lipschitz 推进：回归 `precise_ccd_stops_a_rotating_hull_spike_on_a_plane`
+  （300+ 点凸包、长刺在采样间隙、只靠旋转扫向地面：旧采样路径转 2.5 rad 穿地，
+  精确路径在 1.7 rad 截住）。每开一个精确体每子步 O(其它凸体)；三角网仍走默认
+  路径，默认 `false` 时旧场景逐位不变。
 
 - **摄像头重建无光照直出**：有摄像头 RGB 时重建材质 `unlit = true`，原图不再被
   场景灯光/阴影二次调制；没有 RGB 的蓝灰占位表面仍走光照。GPU 回归

@@ -2321,10 +2321,16 @@ impl PhysicsWorld {
                 continue;
             }
             let Some(b) = &slot.body else { continue };
-            if b.sensor || b.shape.is_static_only() || !b.groups.interacts(groups) {
+            let plane = matches!(b.shape, Shape::Plane { .. });
+            if b.sensor || (b.shape.is_static_only() && !plane) || !b.groups.interacts(groups) {
                 continue;
             }
-            let rb = b.shape.bounding_radius();
+            // 半空间没有有限包围球；它的支持点就是平面本身，按 0 处理。
+            let rb = if plane {
+                0.0
+            } else {
+                b.shape.bounding_radius()
+            };
             if !(ra.is_finite() && rb.is_finite()) {
                 continue;
             }
@@ -2336,27 +2342,54 @@ impl PhysicsWorld {
                 continue;
             }
             let step = bound * dt;
+            let tf = |body: &RigidBody, t: f32| {
+                let speed = body.angular_velocity.length();
+                let rotation = if speed > 1e-9 {
+                    body.transform.rotation
+                        * Quat::from_axis_angle(
+                            body.angular_velocity.normalize_or_zero(),
+                            speed * dt * t,
+                        )
+                } else {
+                    body.transform.rotation
+                };
+                Transform {
+                    position: body.transform.position + body.linear_velocity * (dt * t),
+                    rotation,
+                    scale: body.transform.scale,
+                }
+            };
             let mut t = 0.0f32;
             for _ in 0..64 {
-                let tf = |body: &RigidBody| {
-                    let speed = body.angular_velocity.length();
-                    let rotation = if speed > 1e-9 {
-                        body.transform.rotation
-                            * Quat::from_axis_angle(
-                                body.angular_velocity.normalize_or_zero(),
-                                speed * dt * t,
-                            )
-                    } else {
-                        body.transform.rotation
-                    };
-                    Transform {
-                        position: body.transform.position + body.linear_velocity * (dt * t),
-                        rotation,
-                        scale: body.transform.scale,
+                let ta = tf(a, t);
+                let tb = tf(b, t);
+                // 半空间是无限支撑，GJK 没有有限支持点；用形状沿 -法线 的
+                // 支持点做 1-Lipschitz 保守推进。盒子/凸包/任意凸形状都适用。
+                if let Shape::Plane { normal } = &b.shape {
+                    let n = tb.rotation.mul_vec3(*normal);
+                    if n.length_squared() < 0.5 {
+                        break;
                     }
-                };
-                let ta = tf(a);
-                let tb = tf(b);
+                    let n = n.normalize();
+                    let sa = gjk::Support::new(&a.shape, &ta);
+                    let support = sa.support(-n);
+                    let distance = (support - tb.position).dot(n);
+                    if distance <= 1e-4 {
+                        if t > 1e-5 && best.is_none_or(|cur| t < cur) {
+                            best = Some(t);
+                        }
+                        break;
+                    }
+                    let advance = distance / step;
+                    if !(advance.is_finite() && advance > 1e-6) {
+                        break;
+                    }
+                    t += advance;
+                    if t >= 1.0 {
+                        break;
+                    }
+                    continue;
+                }
                 let ga = gjk::Support::new(&a.shape, &ta);
                 let gb = gjk::Support::new(&b.shape, &tb);
                 let hit = gjk::gjk(&ga, &gb);

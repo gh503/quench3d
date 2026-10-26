@@ -1568,6 +1568,54 @@ fn ccd_catches_a_sphere_grazing_a_box_corner() {
 }
 
 #[test]
+fn precise_ccd_stops_a_rotating_hull_spike_on_a_plane() {
+    // 凸包有 300+ 个点，旧旋转扫掠按 stride 抽样；把长刺放在 index 1（会被跳过），
+    // 其余点都贴着中心。无重力、零线速度，只靠绕 X 轴 180° 的旋转把刺扫到地面。
+    // 旧路径会漏掉这根刺；精确 CCD 必须用支持函数看到它。
+    let mut points = vec![Vec3::new(0.03, 0.02, 0.0)];
+    points.push(Vec3::new(0.0, 1.0, 0.0));
+    for i in 0..300 {
+        let a = i as f32 * 0.37;
+        points.push(Vec3::new(
+            0.06 * a.cos(),
+            0.04 + 0.03 * a.sin(),
+            0.06 * a.sin(),
+        ));
+    }
+    let hull_points = points.clone();
+    let shape = Shape::ConvexHull { points };
+    let dt = 0.05;
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vec3::ZERO);
+    world.set_fixed_dt(dt);
+    world.add_builder(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO));
+    let body = world.add_builder(
+        BodyBuilder::dynamic(shape.clone())
+            .position(vec3(0.0, 0.6, 0.0))
+            .angular_velocity(Vec3::X * (core::f32::consts::TAU / dt))
+            .ccd(true)
+            .ccd_precise(true),
+    );
+    world.step(dt);
+    let body = world.body(body).unwrap();
+    let lowest = hull_points
+        .iter()
+        .map(|p| (body.position() + body.rotation().mul_vec3(*p)).y)
+        .fold(f32::INFINITY, f32::min);
+    let angle = 2.0 * body.rotation().w.abs().clamp(-1.0, 1.0).acos();
+    let body_y = body.position().y;
+    println!("ccd hull after: lowest={lowest:.4} y={body_y:.4} angle={angle:.3}");
+    assert!(
+        lowest > -0.05,
+        "精确 CCD 应把旋转刺截在地面之上，最低点 {lowest:.3}"
+    );
+    assert!(
+        angle < 2.3,
+        "精确 CCD 应在刺碰到地面前截断旋转，实际转了 {angle:.3} rad"
+    );
+}
+
+#[test]
 fn ccd_catches_a_sphere_grazing_a_cylinder_rim() {
     // 圆柱半高 1、半径 0.5；球心沿 y=1.05 飞过。中心射线在顶盖上方，
     // 但半径 0.1 的球面会擦到顶盖边缘——旧路径只对盒/球/平面做扫掠。
