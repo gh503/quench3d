@@ -997,6 +997,8 @@ impl Fluid {
         let buoyancy = self.desc.bubble_buoyancy.max(0.0);
         let drag = self.desc.bubble_drag.max(0.0);
         let particle_radius = self.desc.radius.max(0.0);
+        let foam_enabled = self.desc.foam;
+        let max_foam = self.desc.max_foam;
         let up = if gravity.length_squared() > 1e-6 {
             -gravity.normalize()
         } else {
@@ -1052,7 +1054,18 @@ impl Fluid {
                 }
             }
             if b.position.y > surface + b.radius {
-                // 到达液面：破裂消失（后续可视化可以在这里生成泡沫）。
+                // 到达液面：气泡破裂消失，并在液面留下一颗**被动泡沫**。
+                // 只有开启 `foam` 时才留；泡沫数量仍受 `max_foam` 限制。
+                if foam_enabled && self.foam.len() < max_foam {
+                    let mut v = b.velocity * 0.2;
+                    v.y = v.y.max(0.25);
+                    self.foam.push(FoamParticle {
+                        position: b.position,
+                        velocity: v,
+                        life: 0.8,
+                        kind: FoamKind::Foam,
+                    });
+                }
                 continue;
             }
             if let Some(y) = self.desc.drain_y {
@@ -1437,6 +1450,40 @@ mod tests {
         );
         assert!(max_speed < 20.0, "气泡速度失控：{max_speed}");
         assert_eq!(fluid.stats().bubbles, bubbles.len());
+    }
+
+    #[test]
+    fn bursting_bubbles_leave_foam_at_the_surface() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        let mut d = box_desc();
+        d.bubbles = true;
+        d.bubble_rate = 60.0;
+        d.max_bubbles = 16;
+        d.emit_position = Vec3::new(0.0, 0.5, 0.0);
+        d.emit_radius = 0.1;
+        d.foam = true;
+        d.foam_rate = 0.0; // 只允许气泡破裂产生泡沫
+        d.max_foam = 8;
+        world.add_fluid(d).expect("参数合法");
+        for _ in 0..240 {
+            world.step(1.0 / 60.0);
+        }
+        let fluid = &world.fluids()[0];
+        let foam = fluid.foam();
+        assert!(!foam.is_empty(), "气泡到达液面破裂应留下泡沫；当前泡沫数 0");
+        assert!(
+            foam.iter().all(|f| f.kind == FoamKind::Foam),
+            "气泡破裂产生的是泡沫，不是高速飞沫"
+        );
+        assert!(
+            foam.iter()
+                .all(|f| f.position.is_finite() && f.position.y > 0.0),
+            "泡沫位置必须有限且在地面以上"
+        );
     }
 
     #[test]
