@@ -21,13 +21,14 @@
 - **流体气泡/气相粒子 + 局部曝气浮力**（`fluids[].bubbles`，缺省关闭）：`FluidDesc::bubbles` 生成
   轻质气泡，反向重力浮升 + 阻尼 + 刚体/地面碰撞；每步把气泡体积内的液体粒子径向
   推开并给速度（气泡受反作用）；浮出液面会破裂并生成一颗被动泡沫（需 `foam=true`），
-  寿命结束则消失。场景字段
+  寿命结束则消失；两颗接触气泡按体积守恒合并。场景字段
   `bubble_rate/max_bubbles/bubble_radius/bubble_buoyancy/bubble_drag/bubble_expansion`，CLI 低模球
   可视、`simulate` 报告气泡数。回归：气泡不穿地板且不超上限；气泡上浮并排开液体
   （与关闭气泡的同一初始状态逐粒子比较）。**不是**严格两相流：不参与 PBF 密度
   约束，没有相变；局部气体体积分数会折算进刚体浮力（`density *= 1 - gas_fraction`，
   上限 0.9）。回归 `aerated_fluid_reduces_buoyancy_on_a_body`：一颗贴体气泡把浮力
   降到约 0.70 倍；`bubble_expansion` 让气泡半径随上升指数膨胀（上限 4 倍）；
+  接触气泡合并（`touching_bubbles_coalesce_and_conserve_gas_volume`）；
   气泡破裂留泡沫（`bursting_bubbles_leave_foam_at_the_surface`）。
   缺省关闭时旧场景逐位不变。
 

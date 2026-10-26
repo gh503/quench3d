@@ -1094,6 +1094,46 @@ impl Fluid {
             keep += 1;
         }
         self.bubbles.truncate(keep);
+        self.coalesce_bubbles();
+    }
+
+    /// 两颗气泡接触时合并：位置/速度按体积加权，半径按体积守恒
+    /// `r = (r1³ + r2³)^(1/3)`；age 取较大、life 取较长。
+    fn coalesce_bubbles(&mut self) {
+        if self.bubbles.len() < 2 {
+            return;
+        }
+        let mut i = 0;
+        while i < self.bubbles.len() {
+            let mut j = i + 1;
+            while j < self.bubbles.len() {
+                let a = self.bubbles[i];
+                let b = self.bubbles[j];
+                let sr = (a.radius + b.radius).max(1e-4);
+                if (a.position - b.position).length_squared() <= sr * sr {
+                    let va = a.radius.max(0.0).powi(3);
+                    let vb = b.radius.max(0.0).powi(3);
+                    let total = va + vb;
+                    if total > 1e-12 {
+                        let merged = Bubble {
+                            position: (a.position * va + b.position * vb) / total,
+                            velocity: (a.velocity * va + b.velocity * vb) / total,
+                            radius: total.cbrt(),
+                            age: a.age.max(b.age),
+                            life: a.life.max(b.life),
+                        };
+                        self.bubbles[i] = merged;
+                        self.bubbles.swap_remove(j);
+                        // swap_remove 把末尾元素放到 j；不递增 j，继续检查它。
+                    } else {
+                        j += 1;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
     }
 
     /// 被动泡沫的寿命/重力/阻尼 + **与刚体碰撞**。
@@ -1523,6 +1563,35 @@ mod tests {
             foam.iter()
                 .all(|f| f.position.is_finite() && f.position.y > 0.0),
             "泡沫位置必须有限且在地面以上"
+        );
+    }
+
+    #[test]
+    fn touching_bubbles_coalesce_and_conserve_gas_volume() {
+        let mut fluid = Fluid::new(box_desc()).unwrap();
+        for x in [-0.05f32, 0.05] {
+            fluid.add_bubble(Bubble {
+                position: Vec3::new(x, 0.8, 0.0),
+                velocity: Vec3::ZERO,
+                radius: 0.1,
+                age: 0.0,
+                life: 10.0,
+            });
+        }
+        let bounds = Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let before = fluid.gas_volume_near(bounds);
+        let mut bodies = [];
+        fluid.step(&mut bodies, Vec3::ZERO, 1.0 / 60.0);
+        assert_eq!(
+            fluid.bubbles().len(),
+            1,
+            "两颗重叠气泡应合并成一颗，实际 {}",
+            fluid.bubbles().len()
+        );
+        let after = fluid.gas_volume_near(bounds);
+        assert!(
+            (after - before).abs() <= before * 0.02,
+            "合并必须近似守恒气体体积：before {before}, after {after}"
         );
     }
 
