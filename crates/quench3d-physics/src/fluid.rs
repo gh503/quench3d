@@ -511,7 +511,8 @@ impl Fluid {
         let n = self.positions.len();
         if n == 0 {
             // 水排空后泡沫还要继续飞/淡出，不能在这里把统计和泡沫一起清掉。
-            self.update_foam(gravity, dt);
+            let foam_radius = (self.desc.radius * 0.5).max(0.005);
+            self.update_foam(gravity, dt, bodies, foam_radius);
             self.recompute_stats();
             self.revision = self.revision.wrapping_add(1);
             return;
@@ -804,7 +805,8 @@ impl Fluid {
             self.velocities.truncate(keep);
         }
         self.spawn_foam(dt);
-        self.update_foam(gravity, dt);
+        let foam_radius = (self.desc.radius * 0.5).max(0.005);
+        self.update_foam(gravity, dt, bodies, foam_radius);
         self.recompute_stats();
         self.revision = self.revision.wrapping_add(1);
     }
@@ -863,8 +865,12 @@ impl Fluid {
         self.foam_accum -= spawned as f32;
     }
 
-    /// 被动泡沫的寿命/重力/阻尼；不做碰撞，纯视觉白水。
-    fn update_foam(&mut self, gravity: Vec3, dt: f32) {
+    /// 被动泡沫的寿命/重力/阻尼 + **与刚体碰撞**。
+    ///
+    /// 泡沫仍是纯视觉粒子（不产生反作用力），但不应该穿过地板/墙：用与流体粒子
+    /// 相同的 `collide_position` 把它推出表面，并消掉朝表面的法向速度（轻微回弹 +
+    /// 切向摩擦）。弹道/飞沫都走这条路，所以水花不会掉到地下。
+    fn update_foam(&mut self, gravity: Vec3, dt: f32, bodies: &[BodySlot], radius: f32) {
         if self.foam.is_empty() || !dt.is_finite() || dt <= 0.0 {
             return;
         }
@@ -879,8 +885,22 @@ impl Fluid {
                 FoamKind::Spray => gravity,
                 FoamKind::Foam => gravity * 0.2 + Vec3::Y * 0.8,
             };
+            let prev = f.position;
             f.velocity = (f.velocity + g * dt) * (1.0 - 2.2 * dt).clamp(0.0, 1.0);
             f.position += f.velocity * dt;
+            let (corrected, contact) = collide_position(prev, f.position, bodies, radius);
+            f.position = corrected;
+            if let Some(contact) = contact {
+                let vn = f.velocity.dot(contact.normal);
+                if vn < 0.0 {
+                    // 5% 回弹，避免泡沫贴着地面时完全失去法向速度而抖动。
+                    f.velocity -= contact.normal * (vn * 1.05);
+                }
+                // 切向摩擦：水花碰到斜面会顺着坡滑，而不是继续原方向钻进去。
+                let vn_after = f.velocity.dot(contact.normal);
+                let tangential = f.velocity - contact.normal * vn_after;
+                f.velocity = contact.normal * vn_after + tangential * 0.94;
+            }
             if let Some(y) = self.desc.drain_y {
                 if f.position.y < y {
                     continue;
@@ -1136,6 +1156,36 @@ mod tests {
         let mut d = box_desc();
         d.max_particles = 0;
         assert!(Fluid::new(d).is_none());
+    }
+
+    #[test]
+    fn foam_does_not_fall_through_the_floor() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+        );
+        let mut d = box_desc();
+        d.center = Vec3::new(0.0, 1.2, 0.0);
+        d.foam = true;
+        d.foam_rate = 2000.0;
+        d.foam_speed = 0.2;
+        d.max_foam = 128;
+        world.add_fluid(d).expect("参数合法");
+        for _ in 0..75 {
+            world.step(1.0 / 60.0);
+        }
+        let foam = world.fluids()[0].foam();
+        assert!(!foam.is_empty(), "高速粒子应甩出泡沫");
+        let min_y = foam
+            .iter()
+            .map(|f| f.position.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            min_y > -0.05,
+            "泡沫不能穿过地板；min_y = {min_y}（{} 颗）",
+            foam.len()
+        );
     }
 
     #[test]
