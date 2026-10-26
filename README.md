@@ -811,7 +811,7 @@ cargo run -p quench3d-editor
 没有摄像头时用 `--source synthetic` 验证协议；深度模型需要显式下载一次，详见
 [`tools/camera_mocap/README.md`](tools/camera_mocap/README.md)。
 
-**Web 端是预览 + 外部姿态注入 + 3D 背景**：顶部「摄像头」按钮 → `getUserMedia` →
+**Web 端是预览 + 外部姿态/深度注入 + 3D 背景**：顶部「摄像头」按钮 → `getUserMedia` →
 `<video>` → canvas → egui 纹理；窗口里勾选「作为 3D 背景」后，同一帧 RGBA 会上传为
 3D 视口背景（同帧不重传，关掉即清除）。页面脚本（例如 MediaPipe Tasks Vision）可调用
 
@@ -825,7 +825,23 @@ window.quench3dCameraPose(JSON.stringify({
 window.quench3dCameraPoseClear();
 ```
 
-桌面「打开」与「导出 glTF/GLB」都会先弹内置文件选择器（导出可改路径/文件名）。
+外部深度（WebXR Depth Sensing / 服务端推流）也可注入。参数与桌面 `latest.depth`
+同一套约定：`u8=255 → zNear`、`u8=0 → zFar`，`step` 是像素下采样步长，
+`origin` 是反投影后加的世界坐标：
+
+```js
+window.quench3dCameraDepth(
+  width, height,
+  new Uint8Array(depthBuffer),       // 长度必须是 width*height
+  fx, fy, cx, cy, zNear, zFar, step,
+  [0, 0, 0],
+);
+// 窗口里勾「显示注入深度的点云」，或点「从注入深度重建表面」画体素表面线框
+window.quench3dCameraDepthClear();
+```
+
+浏览器**不把普通 RGB 猜成深度**；没有外部深度源时点云/表面保持空。深度点云只用于
+调试线框，不写回场景 JSON。桌面「打开」与「导出 glTF/GLB」都会先弹内置文件选择器（导出可改路径/文件名）。
 读端把 2D 33 点连接画成洋红骨架，有 `world` 时按同一套 35 根骨在 3D 视口里画
 teal/gold 骨架。**浏览器里不内置推理**（没有 MediaPipe 模型与文件协议），
 骨架/轮廓/深度仍走桌面 Python 管线。需要 https 或 `localhost`。
@@ -833,8 +849,10 @@ teal/gold 骨架。**浏览器里不内置推理**（没有 MediaPipe 模型与�
 并注入 33 点姿态、断言 `camera_pose=true` 且截图里真的有洋红像素。
 
 **边界（诚实）**：没有 SMPL/SMPL-X 体型拟合、没有多人体、没有米制深度、没有
-TSDF 网格重建（只有相对尺度点云）、没有时间同步/IMU 融合；3D 骨骼是 MediaPipe 的 33 点近似，
-不是精确关节角。所有推理在本地完成，不把画面发到网络。
+TSDF 网格重建（只有相对尺度点云；Web 表面是体素/Surface Nets 线框，不是可编辑网格）、
+没有时间同步/IMU 融合；Web 普通 RGB 摄像头不产生深度，深度必须由 WebXR Depth
+Sensing 或服务端等外部源注入。3D 骨骼是 MediaPipe 的 33 点近似，不是精确关节角。
+所有推理在本地完成，不把画面发到网络。
 
 ## 5. 示例清单
 

@@ -39,6 +39,65 @@ pub fn clear_camera_pose() {
     quench3d_editor::camera::clear_web_pose();
 }
 
+/// 外部深度注入：把一帧 u8 相对深度（Uint8Array）按针孔内参反投影成点云。
+///
+/// 浏览器普通 RGB 摄像头没有深度；这个入口给 WebXR Depth Sensing / 服务端深度流
+/// 之类的源用。参数与桌面 `latest.depth` 同一套约定：u8=255 → `z_near`，
+/// u8=0 → `z_far`；`origin` 是反投影后加的引擎坐标（长度不足 3 时补 0）。
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn set_camera_depth(
+    width: u32,
+    height: u32,
+    depth: Vec<u8>,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    z_near: f32,
+    z_far: f32,
+    step: u32,
+    origin: Vec<f32>,
+) -> Result<(), wasm_bindgen::JsValue> {
+    let mut o = [0.0f32; 3];
+    for (i, v) in origin.iter().take(3).enumerate() {
+        o[i] = *v;
+    }
+    quench3d_editor::camera::set_web_depth(
+        width, height, &depth, fx, fy, cx, cy, z_near, z_far, step, o,
+    )
+    .map_err(|e| wasm_bindgen::JsValue::from_str(&e))
+}
+
+/// 清空外部深度与重建表面。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn clear_camera_depth() {
+    quench3d_editor::camera::clear_web_depth();
+}
+
+/// 当前外部深度点/表面三角形计数（页面/自检探针）。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn camera_depth_probe() -> String {
+    let (points, triangles) = quench3d_editor::camera::web_depth_counts();
+    format!("{points},{triangles}")
+}
+
+/// 用当前注入点云重建一次体素表面，返回 `点,三角形`（失败返回 `err:...`）。
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn camera_depth_surface_probe() -> String {
+    match quench3d_editor::camera::rebuild_web_depth_surface(0.05) {
+        Ok(_) => {
+            let (points, triangles) = quench3d_editor::camera::web_depth_counts();
+            format!("{points},{triangles}")
+        }
+        Err(e) => format!("err:{e}"),
+    }
+}
+
 /// 时钟探针：读一次引擎时钟（秒）。
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]

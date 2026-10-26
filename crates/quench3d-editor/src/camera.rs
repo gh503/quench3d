@@ -1077,41 +1077,49 @@ fn read_frame(dir: &Path) -> Result<Option<FeedFrame>, String> {
     }))
 }
 
-/// 用 `latest.json` 的内参与深度映射把 u8 相对深度反投影成引擎坐标点云。
-#[cfg(not(target_arch = "wasm32"))]
+/// 用 u8 相对深度 + 针孔内参反投影成引擎坐标点云。
 ///
 /// 与采集端 `camera_mocap.py::depth_to_points` 同一套约定：u8=255 → `z_near`，
 /// u8=0 → `z_far`；像素 `(x, y)` 按 `(x-cx)/fx`、`-(y-cy)/fy` 反投影，再转成
-/// 引擎 x 右 / y 上 / z 向屏幕外。没有有效内参时返回错误（调用方保持无点云）。
-fn depth_to_points(json: &FeedJson, depth: &[u8]) -> Result<Vec<Vec3>, String> {
-    let intrinsics = &json.intrinsics;
-    if !(intrinsics.fx.is_finite()
-        && intrinsics.fy.is_finite()
-        && intrinsics.fx > 0.0
-        && intrinsics.fy > 0.0)
-    {
+/// 引擎 x 右 / y 上 / z 向屏幕外。桌面读文件和 Web 端外部注入深度共用它。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn depth_to_points_grid(
+    depth: &[u8],
+    width: usize,
+    height: usize,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    z_near: f32,
+    z_far: f32,
+    origin: [f32; 3],
+    point_step: u32,
+) -> Result<Vec<Vec3>, String> {
+    if !(fx.is_finite() && fy.is_finite() && fx > 0.0 && fy > 0.0) {
         return Err("缺少有效内参（fx/fy）".to_string());
     }
-    let w = json.width as usize;
-    let h = json.height as usize;
-    if depth.len() != w * h {
+    if width == 0 || height == 0 {
+        return Err("深度图尺寸不能为 0".to_string());
+    }
+    if depth.len() != width * height {
         return Err("深度图长度与画面尺寸不符".to_string());
     }
-    let step = usize::try_from(json.depth.point_step)
+    let step = usize::try_from(point_step)
         .ok()
         .filter(|s| *s > 0)
         .unwrap_or(6);
-    let z_near = json.depth.z_near.unwrap_or(0.3);
-    let z_far = json.depth.z_far.unwrap_or(3.0);
     if !(z_near.is_finite() && z_far.is_finite() && z_far > z_near) {
         return Err("深度 z_near/z_far 非法".to_string());
     }
-    let origin = json.depth.origin.unwrap_or([2.2, 1.0, 0.0]);
+    if !(cx.is_finite() && cy.is_finite()) {
+        return Err("深度内参 cx/cy 非法".to_string());
+    }
     if !origin.iter().all(|v| v.is_finite()) {
         return Err("深度原点含非有限值".to_string());
     }
-    let xs: Vec<usize> = (0..w).step_by(step).collect();
-    let ys: Vec<usize> = (0..h).step_by(step).collect();
+    let xs: Vec<usize> = (0..width).step_by(step).collect();
+    let ys: Vec<usize> = (0..height).step_by(step).collect();
     let count = xs
         .len()
         .checked_mul(ys.len())
@@ -1122,18 +1130,36 @@ fn depth_to_points(json: &FeedJson, depth: &[u8]) -> Result<Vec<Vec3>, String> {
     let mut out = Vec::with_capacity(count);
     for &y in &ys {
         for &x in &xs {
-            let d = f32::from(depth[y * w + x]) / 255.0;
+            let d = f32::from(depth[y * width + x]) / 255.0;
             let z = z_near + (1.0 - d) * (z_far - z_near);
-            let gx = (x as f32 - intrinsics.cx) / intrinsics.fx * z;
-            let gy = -(y as f32 - intrinsics.cy) / intrinsics.fy * z;
+            let gx = (x as f32 - cx) / fx * z;
+            let gy = -(y as f32 - cy) / fy * z;
             out.push(Vec3::new(gx + origin[0], gy + origin[1], -z + origin[2]));
         }
     }
     Ok(out)
 }
 
-/// 把点云画成小十字。深度反投影没有拓扑，点本身就是最小可读单元。
+/// 用 `latest.json` 的内参与深度映射把 u8 相对深度反投影成引擎坐标点云。
 #[cfg(not(target_arch = "wasm32"))]
+fn depth_to_points(json: &FeedJson, depth: &[u8]) -> Result<Vec<Vec3>, String> {
+    let intrinsics = &json.intrinsics;
+    depth_to_points_grid(
+        depth,
+        json.width as usize,
+        json.height as usize,
+        intrinsics.fx,
+        intrinsics.fy,
+        intrinsics.cx,
+        intrinsics.cy,
+        json.depth.z_near.unwrap_or(0.3),
+        json.depth.z_far.unwrap_or(3.0),
+        json.depth.origin.unwrap_or([2.2, 1.0, 0.0]),
+        json.depth.point_step,
+    )
+}
+
+/// 把点云画成小十字。深度反投影没有拓扑，点本身就是最小可读单元。
 fn add_point_lines(lines: &mut DebugLines, points: &[Vec3]) {
     let color = quench3d_math::Vec4::new(0.3, 0.85, 1.0, 0.85);
     let d = 0.006;
@@ -1293,6 +1319,17 @@ fn web_pose() -> Option<WebPoseJson> {
     WEB_POSE.with(|slot| slot.borrow().clone())
 }
 
+/// 把重建表面画成线框（Web 端没有场景网格时也能看到表面）。
+#[cfg(target_arch = "wasm32")]
+fn add_surface_lines(lines: &mut DebugLines, triangles: &[[Vec3; 3]]) {
+    let color = quench3d_math::Vec4::new(0.95, 0.75, 0.25, 0.9);
+    for t in triangles.iter().take(20_000) {
+        lines.line(t[0], t[1], color);
+        lines.line(t[1], t[2], color);
+        lines.line(t[2], t[0], color);
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn draw_web_pose(ui: &egui::Ui, rect: egui::Rect, pose: &WebPoseJson) {
     let painter = ui.painter_at(rect);
@@ -1322,6 +1359,134 @@ fn draw_web_pose(ui: &egui::Ui, rect: egui::Rect, pose: &WebPoseJson) {
         egui::FontId::monospace(11.0),
         egui::Color32::from_rgb(255, 230, 80),
     );
+}
+
+/// Web 端外部注入的深度帧与重建结果。
+#[cfg(target_arch = "wasm32")]
+struct WebDepthFrame {
+    frame: u64,
+    points: Vec<Vec3>,
+    triangles: Vec<[Vec3; 3]>,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WEB_DEPTH: RefCell<Option<WebDepthFrame>> = const { RefCell::new(None) };
+}
+
+/// 注入一帧 u8 深度图，按针孔内参反投影成引擎坐标点云。
+///
+/// 参数约定与桌面 `latest.depth` 相同：u8=255 → `z_near`，u8=0 → `z_far`。
+/// 浏览器普通 RGB 摄像头没有深度；这里只接外部提供深度的源（如 WebXR Depth
+/// Sensing / 服务端推流），不会假装平面视频能猜出可靠深度。
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+pub fn set_web_depth(
+    width: u32,
+    height: u32,
+    depth: &[u8],
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    z_near: f32,
+    z_far: f32,
+    step: u32,
+    origin: [f32; 3],
+) -> Result<(), String> {
+    let points = depth_to_points_grid(
+        depth,
+        width as usize,
+        height as usize,
+        fx,
+        fy,
+        cx,
+        cy,
+        z_near,
+        z_far,
+        origin,
+        step,
+    )?;
+    WEB_DEPTH.with(|slot| {
+        let frame = slot
+            .borrow()
+            .as_ref()
+            .map_or(1, |d| d.frame.wrapping_add(1));
+        *slot.borrow_mut() = Some(WebDepthFrame {
+            frame,
+            points,
+            triangles: Vec::new(),
+        });
+    });
+    Ok(())
+}
+
+/// 清空外部深度与重建表面。
+#[cfg(target_arch = "wasm32")]
+pub fn clear_web_depth() {
+    WEB_DEPTH.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// 当前注入点云/表面计数，给页面与探针显示。
+#[cfg(target_arch = "wasm32")]
+pub fn web_depth_counts() -> (usize, usize) {
+    WEB_DEPTH.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or((0, 0), |d| (d.points.len(), d.triangles.len()))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_depth_points() -> Option<Vec<Vec3>> {
+    WEB_DEPTH.with(|slot| slot.borrow().as_ref().map(|d| d.points.clone()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_depth_surface() -> Option<Vec<[Vec3; 3]>> {
+    WEB_DEPTH.with(|slot| slot.borrow().as_ref().map(|d| d.triangles.clone()))
+}
+
+/// 从当前注入点云重建体素表面（Web 端没有场景网格，用线框显示）。
+#[cfg(target_arch = "wasm32")]
+pub fn rebuild_web_depth_surface(voxel: f32) -> Result<usize, String> {
+    let points = WEB_DEPTH.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|d| d.points.clone())
+            .ok_or_else(|| "还没有注入深度".to_string())
+    })?;
+    if points.len() < 8 {
+        return Err("点太少，无法重建表面".to_string());
+    }
+    let mesh = crate::reconstruct::voxel_surface_robust(&points, voxel.clamp(0.002, 0.5));
+    if mesh.indices.is_empty() {
+        return Err("没有生成面（体素可能太大）".to_string());
+    }
+    let mut triangles = Vec::with_capacity(mesh.indices.len() / 3);
+    for tri in mesh.indices.as_chunks::<3>().0 {
+        let Some(a) = mesh.vertices.get(tri[0] as usize) else {
+            continue;
+        };
+        let Some(b) = mesh.vertices.get(tri[1] as usize) else {
+            continue;
+        };
+        let Some(c) = mesh.vertices.get(tri[2] as usize) else {
+            continue;
+        };
+        triangles.push([
+            Vec3::from_array(a.position),
+            Vec3::from_array(b.position),
+            Vec3::from_array(c.position),
+        ]);
+    }
+    let count = triangles.len();
+    WEB_DEPTH.with(|slot| {
+        if let Some(d) = slot.borrow_mut().as_mut() {
+            d.triangles = triangles;
+        }
+    });
+    Ok(count)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1356,6 +1521,12 @@ pub struct CameraFeed {
     background_3d: bool,
     /// 已上传背景的帧序号。
     background_frame: u64,
+    /// 是否画外部注入深度的点云。
+    show_points: bool,
+    /// 是否画外部深度重建的线框表面。
+    show_surface: bool,
+    /// 最近一次重建结果/错误。
+    depth_status: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1379,6 +1550,9 @@ impl CameraFeed {
             autostart,
             background_3d: false,
             background_frame: u64::MAX,
+            show_points: true,
+            show_surface: false,
+            depth_status: String::new(),
         }
     }
 
@@ -1395,6 +1569,16 @@ impl CameraFeed {
 
     /// 无 3D 骨架可叠；Web 端只画预览图上的外部注入 2D 骨架。
     pub fn add_lines(&self, lines: &mut DebugLines) {
+        if self.show_points {
+            if let Some(points) = web_depth_points() {
+                add_point_lines(lines, &points);
+            }
+        }
+        if self.show_surface {
+            if let Some(triangles) = web_depth_surface() {
+                add_surface_lines(lines, &triangles);
+            }
+        }
         if let Some(pose) = web_pose() {
             if pose.world.len() >= 2 {
                 add_pose_lines(lines, &pose.world);
@@ -1591,8 +1775,28 @@ impl CameraFeed {
                             draw_web_pose(ui, image.rect, &pose);
                         }
                     }
+                    ui.separator();
+                    ui.checkbox(&mut self.show_points, "显示注入深度的点云");
+                    ui.horizontal(|ui| {
+                        if ui.button("从注入深度重建表面").clicked() {
+                            self.depth_status = match rebuild_web_depth_surface(0.02) {
+                                Ok(n) => format!("已重建 {n} 个三角形"),
+                                Err(e) => e,
+                            };
+                        }
+                        ui.checkbox(&mut self.show_surface, "显示表面线框");
+                    });
+                    let (points, tris) = web_depth_counts();
                     ui.label(
-                        egui::RichText::new("预览 + 外部 JS 注入的 2D 骨架 / 3D 世界点；深度/轮廓仍用桌面 Python 管线")
+                        egui::RichText::new(format!(
+                            "深度点 {points} · 表面三角形 {tris} · {}",
+                            self.depth_status
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                    ui.label(
+                        egui::RichText::new("预览 + 外部 JS 注入的 2D 骨架 / 3D 世界点；浏览器普通摄像头没有深度，点云/表面需外部注入深度（set_camera_depth）")
                             .small()
                             .weak(),
                     );
@@ -1642,6 +1846,30 @@ async fn open_camera() -> Result<HtmlVideoElement, String> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_grid_backprojects_in_engine_axes() {
+        // u8=255 → z_near、u8=0 → z_far；x 向右、y 向上、z 向屏幕外（-z）。
+        let pts = depth_to_points_grid(
+            &[255, 0, 255, 0],
+            2,
+            2,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.5,
+            2.0,
+            [10.0, 20.0, 30.0],
+            1,
+        )
+        .expect("反投影");
+        assert_eq!(pts.len(), 4);
+        assert_eq!(pts[0], Vec3::new(10.0, 20.0, 29.5));
+        assert_eq!(pts[1], Vec3::new(12.0, 20.0, 28.0));
+        assert_eq!(pts[2], Vec3::new(10.0, 19.5, 29.5));
+        assert_eq!(pts[3], Vec3::new(12.0, 18.0, 28.0));
+    }
 
     #[test]
     fn pose_screen_pos_maps_and_clamps() {

@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **摄像头 Web 外部深度注入**：新增 `set_camera_depth` / `clear_camera_depth`、
+  `window.quench3dCameraDepth(...)`。深度按与桌面 `latest.depth` 相同的 u8 映射
+  反投影成点云，窗口可显示点云并从点云重建体素表面线框；`check_web.mjs` 在
+  Node 里实测 2×2 深度→4 点、64×64 平面→5180 三角形、清空归零。普通 RGB
+  摄像头没有深度，这个入口只接 WebXR Depth Sensing / 服务端深度流等外部源。
+
 - **旋转目标 CCD 扩展到非平面形状**：盒子之外的胶囊/圆柱/圆锥/圆角盒/凸包/
   三角网在球体扫掠中改用时间采样（角点移动 ≤ 半径/4），不再按起始姿态。回归
   `sphere_sweep_sees_a_rotating_capsule`（修复前返回 None）。旋转平面/球仍不参与；

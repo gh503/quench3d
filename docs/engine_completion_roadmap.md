@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**1009 通过 / 0 失败 / 5 ignored**
-- wasm：**13,824,379 字节**
+- 测试：**1010 通过 / 0 失败 / 5 ignored**
+- wasm：**13,852,644 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -175,6 +175,11 @@
 - [x] 深度-only 摄像头点云：采集端 `--no-points` 时，编辑器用 JSON 内参与
   `depth.point_step/z_near/z_far/origin` 现算点云；缺内参不猜，声明了
   `latest.points` 但文件缺失时也不偷偷改用深度。3 条回归覆盖映射约定、步长与缺文件。
+- [x] Web 外部深度注入：`window.quench3dCameraDepth(...)` 把 u8 相对深度按
+  fx/fy/cx/cy/z_near/z_far/step/origin 反投影成引擎点云，画成青色十字；
+  「从注入深度重建表面」用同一套体素/Surface Nets 生成线框。Node 探针
+  `check_web.mjs` 实测 2×2 深度 → 4 点、64×64 平面 → 5180 三角形；清空后归零。
+  普通 RGB 摄像头仍不产生深度，必须外部注入。
 - [x] 摄像头点云时间累积（编辑器「时间累积」开关，缺省关）：最近约 90 帧按
   1.5 cm 体素去重/平均，最多 25 万体素，过期 90 帧自动丢弃；缺省关时仍走单帧
   旧路径。回归：互补帧合并、同体素平均/排序、上限/NaN/过期、两次运行逐位一致。

@@ -306,6 +306,79 @@ if (!defaultBinding && namedFromGlue.size === 0) {
       bad("胶水没有导出 model_bytes_probe()：无法验证 Web 端能否加载模型");
     }
 
+    // Web 深度注入探针：外部深度必须真的反投影成点，不是空导出。
+    if (
+      typeof exported.set_camera_depth === "function" &&
+      typeof exported.camera_depth_probe === "function"
+    ) {
+      const depth = new Uint8Array([255, 0, 255, 0]);
+      try {
+        exported.set_camera_depth(
+          2,
+          2,
+          depth,
+          1,
+          1,
+          0,
+          0,
+          0.3,
+          3.0,
+          1,
+          new Float32Array([0, 0, 0]),
+        );
+        const got = exported.camera_depth_probe();
+        if (got === "4,0") {
+          ok(`Web 深度注入可反投影：2×2 深度 → ${got}`);
+        } else {
+          bad(`Web 深度注入结果不对：期望 4,0，实际 ${got}`);
+        }
+        exported.clear_camera_depth();
+        if (exported.camera_depth_probe() === "0,0") {
+          ok("Web 深度清空可用");
+        } else {
+          bad("clear_camera_depth() 后探针仍有点");
+        }
+      } catch (e) {
+        bad(`Web 深度注入失败：${String(e).slice(0, 160)}`);
+      }
+    } else {
+      bad("胶水缺少 set_camera_depth()/camera_depth_probe()");
+    }
+
+    // 深度重建表面探针：点云 → 体素表面必须真的产出三角形。
+    if (typeof exported.camera_depth_surface_probe === "function") {
+      const w = 64;
+      const h = 64;
+      const depth = new Uint8Array(w * h).fill(128);
+      try {
+        exported.set_camera_depth(
+          w,
+          h,
+          depth,
+          60,
+          60,
+          32,
+          32,
+          0.3,
+          3.0,
+          1,
+          new Float32Array([0, 0, 0]),
+        );
+        const got = exported.camera_depth_surface_probe();
+        const [points, tris] = got.split(",").map(Number);
+        if (Number.isFinite(points) && points > 0 && Number.isFinite(tris) && tris > 0) {
+          ok(`Web 深度表面重建可用：${points} 点 → ${tris} 三角形`);
+        } else {
+          bad(`Web 深度表面重建没有产出：${got}`);
+        }
+        exported.clear_camera_depth();
+      } catch (e) {
+        bad(`Web 深度表面重建失败：${String(e).slice(0, 160)}`);
+      }
+    } else {
+      bad("胶水缺少 camera_depth_surface_probe()");
+    }
+
     // P1-3：无窗口机械臂 API。用 CLI 的 modkit 场景在 Node 里真的装载、改目标、
     // 步进、读关节状态与世界矩阵 —— 这是「wasm 导出不是空壳」的硬证据。
     const robotApis = ["loadScene", "setJointTarget", "step", "getJointStates", "getBodyTransform"];
