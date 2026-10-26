@@ -379,6 +379,16 @@ impl Default for PhysicsWorld {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RotatingSweep {
+    omega: Vec3,
+    p0: Vec3,
+    rel_motion: Vec3,
+    radius: f32,
+    rotation_reach: f32,
+    dt: f32,
+}
+
 impl PhysicsWorld {
     /// 使用默认重力 `(0, -9.81, 0)` 创建空世界。
     /// 打开/关闭阶段耗时采集。
@@ -2194,8 +2204,62 @@ impl PhysicsWorld {
     /// 用 `distance_point_to_shape` 的距离场做保守推进（距离场 1-Lipschitz，
     /// `t += (dist-r)/|motion|` 不会越过首次接触），法线取距离场中心差分。
     /// 扫掠用**相对运动**：目标这一步按速度线形外推（静态体为零），所以“目标撞上来”
-    /// 也能被看到。目标自转目前只支持盒子：按角点移动不超过半径/4 采样若干时刻；
-    /// 其它形状仍按静态姿态扫。
+    /// 也能被看到。目标自转对盒子与其它非平面形状用时间采样（角点移动不超过
+    /// 半径/4）；旋转平面与球仍按静态姿态。
+    /// 旋转目标的球心扫掠（时间采样）：把这一步按“角点移动 ≤ 半径/4”采样，
+    /// 每个时刻用旋转后的形状距离场判断球面接触。盒子与其它凸形状共用。
+    fn sphere_sweep_rotating_shape(
+        &self,
+        shape: &Shape,
+        base: &Transform,
+        sweep: RotatingSweep,
+    ) -> Option<(f32, Vec3)> {
+        let RotatingSweep {
+            omega,
+            p0,
+            rel_motion,
+            radius,
+            rotation_reach,
+            dt,
+        } = sweep;
+        let omega_speed = omega.length();
+        if omega_speed <= 1e-6 || !(rotation_reach.is_finite() && rotation_reach > 0.0) {
+            return None;
+        }
+        let samples = ((rotation_reach / (radius * 0.25).max(1e-3)).ceil() as usize).clamp(16, 512);
+        for k in 0..=samples {
+            let t = k as f32 / samples as f32;
+            let p = p0 + rel_motion * t;
+            let tf = Transform {
+                position: base.position,
+                rotation: base.rotation
+                    * Quat::from_axis_angle(omega.normalize_or_zero(), omega_speed * t * dt),
+                scale: base.scale,
+            };
+            let dist = gjk::distance_point_to_shape(shape, &tf, p);
+            if !dist.is_finite() {
+                return None;
+            }
+            if dist <= radius + 1e-4 {
+                let eps = (radius * 0.125).max(1e-4);
+                let dx = gjk::distance_point_to_shape(shape, &tf, p + Vec3::X * eps)
+                    - gjk::distance_point_to_shape(shape, &tf, p - Vec3::X * eps);
+                let dy = gjk::distance_point_to_shape(shape, &tf, p + Vec3::Y * eps)
+                    - gjk::distance_point_to_shape(shape, &tf, p - Vec3::Y * eps);
+                let dz = gjk::distance_point_to_shape(shape, &tf, p + Vec3::Z * eps)
+                    - gjk::distance_point_to_shape(shape, &tf, p - Vec3::Z * eps);
+                let grad = Vec3::new(dx, dy, dz);
+                let n = if grad.length_squared() > 1e-12 {
+                    grad.normalize()
+                } else {
+                    -rel_motion.normalize_or_zero()
+                };
+                return Some((t, n));
+            }
+        }
+        None
+    }
+
     fn sphere_sweep_bodies(
         &self,
         self_index: usize,
@@ -2310,7 +2374,7 @@ impl PhysicsWorld {
                                 rotation: body.transform.rotation
                                     * Quat::from_axis_angle(
                                         target_omega.normalize_or_zero(),
-                                        omega_speed * t,
+                                        omega_speed * t * dt,
                                     ),
                                 scale: body.transform.scale,
                             };
@@ -2396,7 +2460,21 @@ impl PhysicsWorld {
                     // 其它凸形状/三角网：球心到表面的距离做保守推进。距离场是
                     // 1-Lipschitz 的，`t += (dist-r)/speed` 不会越过首次接触；
                     // 法线用距离场中心差分，退化时退回“朝运动反方向”。
-                    if rel_speed <= 1e-9 {
+                    // 目标自转时改用时间采样（与盒子同一套），否则静态姿态会漏。
+                    if target_omega.length() > 1e-6 {
+                        self.sphere_sweep_rotating_shape(
+                            &body.shape,
+                            &body.transform,
+                            RotatingSweep {
+                                omega: target_omega,
+                                p0,
+                                rel_motion,
+                                radius,
+                                rotation_reach,
+                                dt,
+                            },
+                        )
+                    } else if rel_speed <= 1e-9 {
                         None
                     } else {
                         let mut t = 0.0f32;
@@ -3244,6 +3322,32 @@ mod tests {
         let hit =
             w.sphere_sweep_bodies(s, Vec3::new(-4.0, 0.0, 0.0), Vec3::X * 4.0, 0.1, 1.0 / 60.0);
         assert!(hit.is_some(), "旋转盒的下角扫过球心航线时必须被截住");
+    }
+
+    #[test]
+    fn sphere_sweep_sees_a_rotating_capsule() {
+        // 长胶囊水平放在 y=2，静止姿态从球上方掠过；一步转 90° 后下端盖扫到
+        // y=0。旋转盒已覆盖，但胶囊走的是另一条距离场分支，必须同样看到。
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        let sphere = w.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::new(-4.0, 0.0, 0.0))
+                .linear_velocity(Vec3::new(4.0, 0.0, 0.0)),
+        );
+        let s = sphere.index as usize;
+        w.add_builder(
+            BodyBuilder::kinematic(Shape::Capsule {
+                half_height: 2.0,
+                radius: 0.1,
+            })
+            .position(Vec3::new(0.0, 2.0, 0.0))
+            .rotation(Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2))
+            .angular_velocity(Vec3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2 * 60.0)),
+        );
+        let hit =
+            w.sphere_sweep_bodies(s, Vec3::new(-4.0, 0.0, 0.0), Vec3::X * 4.0, 0.1, 1.0 / 60.0);
+        assert!(hit.is_some(), "旋转胶囊的下端盖扫过球心航线时必须被截住");
     }
 
     #[test]
