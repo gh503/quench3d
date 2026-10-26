@@ -2006,6 +2006,48 @@ fn static_friction_holds_a_box_that_low_static_friction_lets_slide() {
 }
 
 #[test]
+fn anisotropic_friction_stops_axis_sliding_sooner_than_cross_sliding() {
+    // 同一地面上两块同样的盒子：一块沿本地 X 滑，一块沿 Z 滑。X 是各向异性
+    // 主轴（ratio=0.9），所以 X 方向的摩擦大、Z 方向小；Z 那块必须滑得更远。
+    let mut w = PhysicsWorld::new();
+    add_ground(&mut w, 0.5, 0.0);
+    let along = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .position(vec3(-3.0, 0.5, 0.0))
+        .linear_velocity(vec3(3.0, 0.0, 0.0))
+        .friction(0.5)
+        .anisotropic_friction(Vec3::X, 0.9)
+        .build(),
+    );
+    let across = w.add_body(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .position(vec3(3.0, 0.5, 0.0))
+        .linear_velocity(vec3(0.0, 0.0, 3.0))
+        .friction(0.5)
+        .anisotropic_friction(Vec3::X, 0.9)
+        .build(),
+    );
+    for _ in 0..180 {
+        w.step(DT);
+    }
+    let along_distance = w.body(along).unwrap().position().x + 3.0;
+    let across_distance = w.body(across).unwrap().position().z;
+    assert!(
+        along_distance > 0.0 && across_distance > 0.0,
+        "前提：两块都应滑动（along={along_distance}, across={across_distance}）"
+    );
+    assert!(
+        along_distance < across_distance * 0.75,
+        "各向异性应让沿轴滑动更短：along={along_distance}, across={across_distance}"
+    );
+    assert_all_finite(&w, "anisotropic_friction");
+}
+
+#[test]
 fn friction_combine_rule_changes_how_far_a_box_slides() {
     // 箱子与地面各写自己的摩擦，`friction_combine` 决定听谁的：
     // `min` → 0.3，`max` → 0.5（地面 0.5）。摩擦越大滑得越近。

@@ -358,6 +358,15 @@ pub struct RigidBody {
     /// 抑制球/轮子/圆柱的纯滚动。它是**滚动阻力**，不是滚动摩擦锥；缺省 0
     /// 时完全不执行，旧场景逐位不变。
     pub rolling_friction: f32,
+    /// 各向异性摩擦的**本地**主轴（缺省 +X）。
+    ///
+    /// 只在 [`RigidBody::friction_anisotropy`] > 0 时生效；世界方向由刚体旋转换算。
+    pub friction_axis: Vec3,
+    /// 各向异性摩擦强度 `0..=0.95`（缺省 0 = 完全各向同性，旧路径逐位不变）。
+    ///
+    /// 沿 `friction_axis` 的切向摩擦放大为 `μ·(1+ratio)`，垂直方向缩小为
+    /// `μ·(1-ratio)`；中间方向按投影平方插值。静/动摩擦会被同样缩放。
+    pub friction_anisotropy: f32,
     /// 摩擦系数的合成规则；`None` = 没指定，用世界的缺省规则。
     ///
     /// 为什么要区分"没指定"和"指定成几何平均"：两端都写了规则时得有个确定的
@@ -749,6 +758,8 @@ pub struct BodyBuilder {
     /// `None` = 跟随 `friction`（在 `build()` 里定下来）。
     static_friction: Option<f32>,
     rolling_friction: f32,
+    friction_axis: Vec3,
+    friction_anisotropy: f32,
     friction_combine: Option<CombineRule>,
     restitution_combine: Option<CombineRule>,
     linear_damping: f32,
@@ -776,6 +787,8 @@ impl BodyBuilder {
             friction: 0.5,
             static_friction: None,
             rolling_friction: 0.0,
+            friction_axis: Vec3::X,
+            friction_anisotropy: 0.0,
             friction_combine: None,
             restitution_combine: None,
             linear_damping: 0.0,
@@ -895,6 +908,25 @@ impl BodyBuilder {
         if f.is_finite() {
             self.rolling_friction = f.max(0.0);
         }
+        self
+    }
+
+    /// 各向异性摩擦：沿本地 `axis` 的摩擦放大 `μ(1+ratio)`，垂直方向缩小
+    /// `μ(1-ratio)`；`ratio` 夹到 `0..=0.95`，零/非法轴回退本地 +X。
+    ///
+    /// 只有动态刚体需要设置；接触时会选两端中**各向异性更大**的那个（相同取 A），
+    /// 所以地面保持各向同性、滑板设置方向也能生效。缺省 ratio=0，旧场景逐位不变。
+    pub fn anisotropic_friction(mut self, axis: Vec3, ratio: f32) -> Self {
+        if axis.is_finite() && axis.length_squared() > 1e-12 {
+            self.friction_axis = axis.normalize();
+        } else {
+            self.friction_axis = Vec3::X;
+        }
+        self.friction_anisotropy = if ratio.is_finite() {
+            ratio.clamp(0.0, 0.95)
+        } else {
+            0.0
+        };
         self
     }
 
@@ -1035,6 +1067,8 @@ impl BodyBuilder {
             friction: self.friction,
             static_friction: self.static_friction.unwrap_or(self.friction),
             rolling_friction: self.rolling_friction,
+            friction_axis: self.friction_axis,
+            friction_anisotropy: self.friction_anisotropy,
             friction_combine: self.friction_combine,
             restitution_combine: self.restitution_combine,
             linear_damping: self.linear_damping,

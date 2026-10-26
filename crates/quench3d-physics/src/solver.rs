@@ -142,6 +142,10 @@ pub(crate) struct BodyView {
     /// 而它在求解器里每个接触每次迭代都要调用（两侧各一次），
     /// 深堆场景一步就是十几万次，占了相当一部分时间。
     pub inv_i_world_mat: Mat3,
+    /// 各向异性摩擦的本地主轴。
+    pub friction_axis: Vec3,
+    /// 各向异性摩擦强度（0 = 各向同性）。
+    pub friction_anisotropy: f32,
 }
 
 /// 世界坐标下的逆惯量张量：`R·diag(local)·Rᵀ`。
@@ -176,6 +180,8 @@ impl BodyView {
             } else {
                 world_inv_inertia(b.transform.rotation, b.inv_inertia_local)
             },
+            friction_axis: b.friction_axis,
+            friction_anisotropy: b.friction_anisotropy,
         }
     }
 
@@ -191,6 +197,8 @@ impl BodyView {
             pseudo_ang: Vec3::ZERO,
             inv_m: 0.0,
             inv_i_world_mat: Mat3::ZERO,
+            friction_axis: Vec3::X,
+            friction_anisotropy: 0.0,
         }
     }
 
@@ -375,8 +383,10 @@ pub(crate) struct SolverContact {
     pub k_normal: f32,
     /// 切向有效质量倒数。
     pub k_tangent: [f32; 2],
-    /// 摩擦系数。
+    /// 摩擦系数（各向同性路径的标量值，也保留给缓存/诊断）。
     pub friction: f32,
+    /// 两个切向方向的摩擦系数（各向异性时不同；缺省都等于 `friction`）。
+    pub friction_tangent: [f32; 2],
     /// 滚动阻力系数（米）。
     pub rolling_friction: f32,
     /// 是否用圆形摩擦锥（准备时从配置冻结，迭代中不变）。
@@ -565,6 +575,20 @@ impl ContactSolver {
                 } else {
                     friction_static
                 };
+                let anisotropy = if va.friction_anisotropy >= vb.friction_anisotropy {
+                    (va.friction_axis, va.friction_anisotropy, va.rot)
+                } else {
+                    (vb.friction_axis, vb.friction_anisotropy, vb.rot)
+                };
+                let friction_tangent = anisotropic_friction(
+                    friction,
+                    anisotropy.0,
+                    anisotropy.1,
+                    anisotropy.2,
+                    n,
+                    t1,
+                    t2,
+                );
                 let mut normal_impulse = 0.0;
                 let mut tangent_impulse = [0.0f32; 2];
                 if cfg.warm_starting {
@@ -587,6 +611,7 @@ impl ContactSolver {
                     k_normal,
                     k_tangent: [k1, k2],
                     friction,
+                    friction_tangent,
                     rolling_friction,
                     friction_cone: cfg.friction_cone,
                     restitution_bias,
@@ -641,6 +666,37 @@ impl ContactSolver {
     }
 }
 
+/// 把标量摩擦系数按刚体本地主轴投影成两个切向方向的系数。
+///
+/// `axis` 是本地轴、`rot` 是刚体旋转；投影到接触切平面后，切向基上的分量平方
+/// 决定插值：沿轴方向 `μ(1+ratio)`，垂直方向 `μ(1-ratio)`。轴与法线平行
+/// （投影退化）时保持各向同性。缺省 ratio=0 时两个返回值都逐位等于 `friction`。
+#[allow(clippy::too_many_arguments)]
+fn anisotropic_friction(
+    friction: f32,
+    axis_local: Vec3,
+    ratio: f32,
+    rot: Quat,
+    n: Vec3,
+    t1: Vec3,
+    t2: Vec3,
+) -> [f32; 2] {
+    if ratio <= 0.0 {
+        return [friction, friction];
+    }
+    let world_axis = rot.mul_vec3(axis_local);
+    let projected = world_axis - n * world_axis.dot(n);
+    if projected.length_squared() <= 1e-10 {
+        return [friction, friction];
+    }
+    let axis = projected.normalize();
+    let d0 = axis.dot(t1);
+    let d1 = axis.dot(t2);
+    let scale0 = 1.0 + ratio * (2.0 * d0 * d0 - 1.0);
+    let scale1 = 1.0 + ratio * (2.0 * d1 * d1 - 1.0);
+    [(friction * scale0).max(0.0), (friction * scale1).max(0.0)]
+}
+
 /// 对一组接触做一轮速度迭代。
 ///
 /// 串行路径传整张接触表，并行路径传某个 island 的接触切片——**同一份实现**，
@@ -654,6 +710,10 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
             let mut vrel = vb.velocity_at(c.rb) - va.velocity_at(c.ra);
             // 摩擦（用上一轮的法向冲量作为上界）
             let max_friction = c.friction * c.normal_impulse;
+            // 各向异性时两个切向的上界不同；ratio=0 时两值逐位等于 friction，
+            // 下面仍走原来的标量路径，旧场景/旧测试逐位不变。
+            let anisotropic = c.friction_tangent[0].to_bits() != c.friction.to_bits()
+                || c.friction_tangent[1].to_bits() != c.friction.to_bits();
             if c.friction_cone {
                 // 圆形摩擦锥：两个切向方向一起投影，再按总量缩放。旧路径的
                 // 逐轴 clamp 在对角线方向允许 √2·μ·N。
@@ -662,8 +722,15 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
                     let d1 = -vrel.dot(c.tangent[1]) / c.k_tangent[1];
                     let mut next = [c.tangent_impulse[0] + d0, c.tangent_impulse[1] + d1];
                     let len = (next[0] * next[0] + next[1] * next[1]).sqrt();
-                    if len > max_friction {
-                        let scale = max_friction / len;
+                    // 各向异性 + 圆形锥没有单一 μ：取两个方向上限的平均值作为
+                    // 保守上界。真正沿椭圆锥的投影留给后续版本。
+                    let cone_limit = if anisotropic {
+                        (c.friction_tangent[0] + c.friction_tangent[1]) * 0.5 * c.normal_impulse
+                    } else {
+                        max_friction
+                    };
+                    if len > cone_limit {
+                        let scale = cone_limit / len;
                         next[0] *= scale;
                         next[1] *= scale;
                     }
@@ -684,7 +751,12 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
                     }
                     let vt = vrel.dot(c.tangent[i]);
                     let mut d = -vt / k;
-                    let new = clamp(c.tangent_impulse[i] + d, -max_friction, max_friction);
+                    let limit = if anisotropic {
+                        c.friction_tangent[i] * c.normal_impulse
+                    } else {
+                        max_friction
+                    };
+                    let new = clamp(c.tangent_impulse[i] + d, -limit, limit);
                     d = new - c.tangent_impulse[i];
                     c.tangent_impulse[i] = new;
                     apply_impulse(views, c.a, c.b, c.ra, c.rb, c.tangent[i] * d);

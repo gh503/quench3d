@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**958 通过 / 0 失败 / 5 ignored**
-- wasm：**13,738,030 字节**
+- 测试：**961 通过 / 0 失败 / 5 ignored**
+- wasm：**13,742,348 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -151,7 +151,9 @@
 - [ ] 关节并行求解；多体/articulation。
 - [x] 滚动摩擦（`rolling_friction`，缺省关闭，球体回归测试）。
 - [x] 圆形摩擦锥（`physics.friction_cone`，缺省关闭，斜向滑动单测）。
-- [ ] 0.2 mm 径向间隙、各向异性摩擦、TGS/SIMD 求解器。
+- [x] 各向异性摩擦（`friction_anisotropy` + `friction_axis`，缺省关闭；
+  沿轴/横轴滑动距离回归、CLI 校验/接线）。
+- [ ] 0.2 mm 径向间隙、TGS/SIMD 求解器。
 - [ ] 深堆 2000 体实时（目标 <16 ms/步，本机量化）。
   - [x] ≥512 代理切 BVH 宽相：2000 体宽相 21.3 → 2.5 ms/步，整步 43.7 → 25.3 ms；
     官方 bench 同会话 34.3 → 29.6 ms/步；候选对与网格逐对相等。

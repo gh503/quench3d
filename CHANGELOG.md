@@ -89,6 +89,10 @@
   extensible）、多源混音/线性重采样/循环、3D 距离衰减与等功率声像，`Engine::audio`
   直接可用；无设备单测覆盖解码、往返、声像、衰减、循环、pitch 与 NaN/clamp。
   **没有内置设备输出**：宿主把 `mix` 的缓冲交给 cpal/WebAudio。
+- **各向异性摩擦**：`BodyBuilder::anisotropic_friction(axis, ratio)` /
+  场景 `friction_anisotropy` + `friction_axis`。沿本地主轴 `μ(1+ratio)`、垂直
+  `μ(1-ratio)`，静/动摩擦同步缩放；缺省 0 走原标量路径逐位不变。新增沿轴/横轴
+  滑动距离对比测试、CLI 接线与校验测试。
 - **流体连续发射器**：`fluids[].emit_rate`（粒子/秒）+ `emit_position` /
   `emit_radius` / `emit_velocity` / `emit_spread`，按黄金角在圆盘内确定撒点，
   不用随机数；到达 `max_particles` 即停，水排空后还能继续补水。缺省 0 不改变旧场景；

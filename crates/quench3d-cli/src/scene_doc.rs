@@ -811,6 +811,8 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         friction: o.friction.or(t.friction),
         static_friction: o.static_friction.or(t.static_friction),
         rolling_friction: o.rolling_friction.or(t.rolling_friction),
+        friction_anisotropy: o.friction_anisotropy.or(t.friction_anisotropy),
+        friction_axis: o.friction_axis.or(t.friction_axis),
         friction_combine: o.friction_combine.or(t.friction_combine),
         restitution_combine: o.restitution_combine.or(t.restitution_combine),
         velocity: o.velocity.or(t.velocity),
@@ -1666,6 +1668,15 @@ pub struct ObjectDoc {
     /// 滚动阻力系数（米，>= 0），缺省 0 = 关闭；适合球/轮子/圆柱。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rolling_friction: Option<f32>,
+    /// 各向异性摩擦强度 `0..=0.95`，缺省 0 = 各向同性（旧路径逐位不变）。
+    ///
+    /// 只有写这个字段才启用；接触时选两端中较大的那个（地面保持 0 也能生效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_anisotropy: Option<f32>,
+    /// 各向异性摩擦的**本地**主轴，缺省 `[1, 0, 0]`；只在
+    /// `friction_anisotropy > 0` 时有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_axis: Option<[f32; 3]>,
     /// 这个物体的摩擦系数合成规则（覆盖 `physics.friction_combine`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub friction_combine: Option<CombineRuleDoc>,
@@ -3223,6 +3234,8 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     check_field::<f32>(map, "density", path, out);
     check_field::<f32>(map, "restitution", path, out);
     check_field::<f32>(map, "friction", path, out);
+    check_field::<f32>(map, "friction_anisotropy", path, out);
+    check_field::<[f32; 3]>(map, "friction_axis", path, out);
     check_field::<[f32; 3]>(map, "velocity", path, out);
     check_field::<[f32; 3]>(map, "angular_velocity", path, out);
     check_field::<f32>(map, "linear_damping", path, out);
@@ -5700,6 +5713,31 @@ impl SceneDoc {
                         "滚动阻力系数必须是非负数",
                     ));
                 }
+            }
+            if let Some(a) = o.friction_anisotropy {
+                if !a.is_finite() || !(0.0..=0.95).contains(&a) {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.friction_anisotropy"),
+                        "各向异性强度应在 0~0.95 之间（0 = 各向同性，1 会让垂直方向摩擦归零）",
+                    ));
+                }
+            }
+            if let Some(axis) = o.friction_axis {
+                if !finite3(&axis) || axis.iter().map(|v| v * v).sum::<f32>() < 1e-12 {
+                    out.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.friction_axis"),
+                        "摩擦主轴必须是有限非零向量",
+                    ));
+                }
+            }
+            if o.friction_anisotropy.is_some() && o.body == BodyKind::None {
+                out.push(Diagnostic::warn_code(
+                    ErrorCode::Ineffective,
+                    &p,
+                    "这个物体没有刚体（body = none），friction_anisotropy 不会生效",
+                ));
             }
             if o.friction_combine.is_some() && o.body == BodyKind::None {
                 out.push(Diagnostic::warn_code(
@@ -9276,6 +9314,37 @@ mod tests {
             .validate()
             .iter()
             .any(|d| d.path == "ground.restitution"));
+    }
+
+    #[test]
+    fn anisotropic_friction_is_validated() {
+        let ok = SceneDoc::from_value(json!({
+            "objects": [{
+                "body": "dynamic",
+                "friction_anisotropy": 0.5,
+                "friction_axis": [0.0, 1.0, 0.0]
+            }]
+        }))
+        .unwrap();
+        assert!(!SceneDoc::has_errors(&ok.validate()), "{:?}", ok.validate());
+
+        let bad = SceneDoc::from_value(json!({
+            "objects": [{
+                "body": "dynamic",
+                "friction_anisotropy": 1.2,
+                "friction_axis": [0.0, 0.0, 0.0]
+            }]
+        }))
+        .unwrap();
+        let paths: Vec<_> = bad.validate().iter().map(|d| d.path.clone()).collect();
+        assert!(
+            paths.contains(&"objects[0].friction_anisotropy".to_string()),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&"objects[0].friction_axis".to_string()),
+            "{paths:?}"
+        );
     }
 
     /// 定时动作：目标、时序、参数怎么错都要报出来。

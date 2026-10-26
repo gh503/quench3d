@@ -2250,6 +2250,10 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if let Some(rf) = o.rolling_friction {
             builder = builder.rolling_friction(rf);
         }
+        if let Some(ratio) = o.friction_anisotropy {
+            builder =
+                builder.anisotropic_friction(v3(o.friction_axis.unwrap_or([1.0, 0.0, 0.0])), ratio);
+        }
         if let Some(r) = o.friction_combine {
             builder = builder.friction_combine(r.into());
         }
@@ -6117,6 +6121,21 @@ mod tests {
         let build = build_world(&doc).unwrap();
         let b = build.world.bodies().next().unwrap().1;
         assert!((b.rolling_friction - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn anisotropic_friction_is_wired_from_scene_doc() {
+        let doc = SceneDoc::from_json(
+            r#"{ "objects": [ { "name": "板", "body": "dynamic",
+                 "shape": { "type": "box" }, "friction_anisotropy": 0.6,
+                 "friction_axis": [0.0, 0.0, 2.0] } ] }"#,
+        )
+        .unwrap();
+        assert!(doc.validate().is_empty());
+        let build = build_world(&doc).unwrap();
+        let b = build.world.bodies().next().unwrap().1;
+        assert!((b.friction_anisotropy - 0.6).abs() < 1e-6);
+        assert!((b.friction_axis.z - 1.0).abs() < 1e-6, "轴应归一化");
     }
 
     #[test]

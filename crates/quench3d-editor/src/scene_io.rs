@@ -529,6 +529,14 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             friction: body.map(|b| b.friction),
             static_friction: body.map(|b| b.static_friction),
             rolling_friction: body.map(|b| b.rolling_friction).filter(|v| *v > 0.0),
+            friction_anisotropy: body.map(|b| b.friction_anisotropy).filter(|v| *v > 0.0),
+            friction_axis: body.and_then(|b| {
+                if b.friction_anisotropy > 0.0 {
+                    Some([b.friction_axis.x, b.friction_axis.y, b.friction_axis.z])
+                } else {
+                    None
+                }
+            }),
             // 合成规则：编辑器能改（见光照面板下面的物理段），导出时从刚体读回来，
             // 这样"载入带规则的场景 → 存盘"不会把规则丢掉。
             friction_combine: body
