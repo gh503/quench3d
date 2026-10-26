@@ -1210,6 +1210,9 @@ pub struct FluidDoc {
     /// 气泡半径随上升膨胀的速率（1/s），缺省 0 = 不膨胀。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_expansion: Option<f32>,
+    /// 气泡是否参与 PBF 密度约束，缺省 true；关闭后只保留径向排开。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_density_coupling: Option<bool>,
     /// 是否把粒子提取成**连续自由表面**（Surface Nets），缺省 false = 抬高的平面。
     ///
     /// 打开后每帧按粒子重建网格；比平面慢，但能看到真正的液滴/水花轮廓。
@@ -9103,7 +9106,8 @@ mod tests {
                   "particle_collision": true, "bubbles": true,
                   "bubble_rate": 40.0, "max_bubbles": 12,
                   "bubble_radius": 0.04, "bubble_buoyancy": 2.0,
-                  "bubble_drag": 1.5, "bubble_expansion": 0.7 }
+                  "bubble_drag": 1.5, "bubble_expansion": 0.7,
+                  "bubble_density_coupling": false }
             ]
         }))
         .expect("fluids 要能解析");
@@ -9128,6 +9132,7 @@ mod tests {
         assert_eq!(again.fluids[1].bubble_buoyancy, Some(2.0));
         assert_eq!(again.fluids[1].bubble_drag, Some(1.5));
         assert_eq!(again.fluids[1].bubble_expansion, Some(0.7));
+        assert_eq!(again.fluids[1].bubble_density_coupling, Some(false));
 
         for (fluid, path) in [
             (json!({"size": [0, 1, 1]}), "fluids[0].size"),

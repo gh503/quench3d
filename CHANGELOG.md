@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+- **气泡进入 PBF 密度约束 / 修复 CLI 气泡接线**：新增
+  `FluidDesc::bubble_density_coupling`（缺省 true）。气泡局部的气体体积分数
+  把有效静止密度降为 `rho0 * (1 - gas)`，液体在气泡周围膨胀；关闭后退回原来的
+  径向排开。回归 `gas_density_coupling_expands_liquid_around_a_bubble`。
+  同时把场景 `FluidDoc` 的气泡字段真正接进 `FluidDesc`（此前只建可视化占位，
+  `simulate` 报告 bubbles 永远 0）；回归
+  `scene_bubble_fields_are_actually_simulated`。仍不是严格两相流。
+
 - **Web 深度时间累积**：`set_camera_depth_accumulation` / 窗口「深度时间累积」
   把外部注入的多帧深度点云按 2 cm 体素、90 帧 TTL 平均；关闭立即回到单帧。
   `check_web.mjs` 实测单帧 4096 点 → 两帧 5632 点，关闭后 4096。

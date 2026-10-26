@@ -2164,6 +2164,16 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             foam: f.foam,
             particle_collision: f.particle_collision,
             contact_friction: f.contact_friction.unwrap_or(0.0),
+            // 场景里的气泡字段必须真的接进流体；此前只建了可视化占位，
+            // 模拟里 `bubbles` 仍是默认 false，报告永远为 0。
+            bubbles: f.bubbles,
+            bubble_rate: f.bubble_rate.unwrap_or(20.0),
+            max_bubbles: f.max_bubbles.unwrap_or(128),
+            bubble_radius: f.bubble_radius.unwrap_or(0.03),
+            bubble_buoyancy: f.bubble_buoyancy.unwrap_or(1.8),
+            bubble_drag: f.bubble_drag.unwrap_or(2.0),
+            bubble_expansion: f.bubble_expansion.unwrap_or(0.0),
+            bubble_density_coupling: f.bubble_density_coupling.unwrap_or(true),
             ..quench3d::physics::FluidDesc::default()
         };
         if world.add_fluid(desc).is_none() {

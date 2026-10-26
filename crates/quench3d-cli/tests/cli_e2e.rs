@@ -435,6 +435,39 @@ fn fluid_particles_settle_and_are_reported() {
 }
 
 #[test]
+fn scene_bubble_fields_are_actually_simulated() {
+    let dir = temp_dir("fluid_bubbles");
+    let scene = dir.join("bubbles.json");
+    // 气泡浮升关掉，保证模拟结束时报告里仍有气泡；如果 CLI 没把
+    // FluidDoc.bubbles 接进 FluidDesc，这里会是 0。
+    std::fs::write(
+        &scene,
+        r#"{
+          "ground": { "size": 20, "y": 0 },
+          "fluids": [
+            { "center": [0, 1.2, 0], "size": [1, 1, 1],
+              "spacing": 0.1, "radius": 0.05, "max_particles": 1200,
+              "bubbles": true, "bubble_rate": 10, "max_bubbles": 4,
+              "bubble_buoyancy": 0, "bubble_drag": 0,
+              "emit_position": [0, 1.2, 0], "emit_radius": 0.02 }
+          ],
+          "simulate": { "steps": 60, "dt": 0.0166667 }
+        }"#,
+    )
+    .unwrap();
+
+    let r = run(&["simulate", scene.to_str().unwrap(), "--json"]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let env = r.json();
+    let f = &env["data"]["fluids"].as_array().expect("fluids")[0];
+    let bubbles = f["bubbles"].as_u64().unwrap_or(0);
+    assert!(
+        bubbles > 0,
+        "场景里 bubbles=true 必须真的生成气泡，报告: {f}"
+    );
+}
+
+#[test]
 fn fluid_buoyancy_floats_a_light_body() {
     let dir = temp_dir("fluid_buoyancy");
     let scene = dir.join("float.json");

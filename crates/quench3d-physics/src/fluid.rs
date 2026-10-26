@@ -115,6 +115,12 @@ pub struct FluidDesc {
     /// 这是简化压力模型：没有真正解气泡内压/表面张力，只让气泡在上升时按指数
     /// 长大（体积分数随之增大）；半径封顶到初始值的 4 倍。
     pub bubble_expansion: f32,
+    /// 气泡是否参与 PBF 密度约束（缺省开；只在 `bubbles`/手动注入气泡时生效）。
+    ///
+    /// 开：气泡占据的局部体积把有效静止密度降为 `rho0 * (1 - gas)`，液体在
+    /// 气泡周围膨胀；关：只保留原来的径向排开，密度约束视为纯液相。旧场景
+    /// （没有气泡）两条路径都逐位不变。
+    pub bubble_density_coupling: bool,
 }
 
 impl Default for FluidDesc {
@@ -151,6 +157,7 @@ impl Default for FluidDesc {
             bubble_buoyancy: 1.8,
             bubble_drag: 2.0,
             bubble_expansion: 0.0,
+            bubble_density_coupling: true,
         }
     }
 }
@@ -328,6 +335,8 @@ pub struct Fluid {
     foam_emitted: u64,
     /// 气泡/气相粒子。
     bubbles: Vec<Bubble>,
+    /// 每个液体粒子所在处的气体体积分数（0 = 纯液体，只在密度耦合开启时非空）。
+    gas_fractions: Vec<f32>,
     /// 气泡生成不足一颗的累积量。
     bubble_accum: f32,
     /// 已经生成的气泡序号（确定性轮转起点）。
@@ -364,6 +373,7 @@ impl Fluid {
             foam_accum: 0.0,
             foam_emitted: 0,
             bubbles: Vec::new(),
+            gas_fractions: Vec::new(),
             bubble_accum: 0.0,
             bubble_emitted: 0,
         };
@@ -616,6 +626,7 @@ impl Fluid {
         let poly6 = 315.0 / (64.0 * PI * h.powi(9));
         let spiky = -45.0 / (PI * h.powi(6));
         let w0 = poly6 * h2 * h2 * h2;
+        self.update_gas_fractions(h);
 
         // 1. 重力 + 预测
         self.predicted.resize(n, Vec3::ZERO);
@@ -680,7 +691,13 @@ impl Fluid {
             self.update_density_lambda(mass, rho0, h, h2, poly6, spiky, w0);
             self.delta.clear();
             self.delta.resize(n, Vec3::ZERO);
+            let gas = &self.gas_fractions;
             for (i, d) in self.delta.iter_mut().enumerate() {
+                let rho0_i = if gas.is_empty() {
+                    rho0
+                } else {
+                    rho0 * (1.0 - gas.get(i).copied().unwrap_or(0.0).clamp(0.0, 0.9))
+                };
                 let mut dp = Vec3::ZERO;
                 for &j in &self.neighbors[i] {
                     let j = j as usize;
@@ -693,7 +710,7 @@ impl Fluid {
                     let w = spiky * x * x / len;
                     dp += r * (w * (self.lambdas[i] + self.lambdas[j]));
                 }
-                *d = (dp / rho0).clamp_length(0.1 * h);
+                *d = (dp / rho0_i).clamp_length(0.1 * h);
             }
             for (i, d) in self.delta.iter().enumerate() {
                 let prev = self.predicted[i];
@@ -1186,6 +1203,62 @@ impl Fluid {
         self.foam.truncate(keep);
     }
 
+    /// 用当前气泡位置计算每个液体粒子的局部气体体积分数。
+    ///
+    /// 这不是严格的两相状态方程：用气泡体积与核支持体积的比值近似空隙率，
+    /// 只用于降低局部有效静止密度，让液体在气泡周围膨胀。没有气泡/关闭耦合时
+    /// 清空，后续路径逐位回到旧行为。
+    fn update_gas_fractions(&mut self, h: f32) {
+        self.gas_fractions.clear();
+        if !self.desc.bubble_density_coupling
+            || self.bubbles.is_empty()
+            || self.positions.is_empty()
+            || !(h.is_finite() && h > 0.0)
+        {
+            return;
+        }
+        let support = 4.0 / 3.0 * PI * h * h * h;
+        if support <= 0.0 {
+            return;
+        }
+        let n = self.positions.len();
+        self.gas_fractions.resize(n, 0.0);
+        for i in 0..n {
+            let p = self.positions[i];
+            let mut volume = 0.0f32;
+            for b in &self.bubbles {
+                let d = (p - b.position).length();
+                if d >= h {
+                    continue;
+                }
+                let r = b.radius.max(0.0);
+                // 气泡体积按核内重叠比例计入：中心全算，离得越远权重越低。
+                volume += 4.0 / 3.0 * PI * r * r * r * (1.0 - d / h);
+            }
+            self.gas_fractions[i] = (volume / support).clamp(0.0, 0.9);
+        }
+    }
+
+    /// 局部有效静止密度；气体分数为 0 时逐位等于 `rho0`。
+    #[inline]
+    fn effective_rho0(&self, i: usize, rho0: f32) -> f32 {
+        if self.gas_fractions.is_empty() {
+            return rho0;
+        }
+        let gas = self
+            .gas_fractions
+            .get(i)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.9);
+        rho0 * (1.0 - gas)
+    }
+
+    /// 当前每个粒子的气体体积分数（测试/诊断；无耦合时为空）。
+    pub fn gas_fractions(&self) -> &[f32] {
+        &self.gas_fractions
+    }
+
     /// 用当前 `predicted` 位置重算密度与 lambda（每次 PBF 迭代前调用）。
     #[allow(clippy::too_many_arguments)]
     fn update_density_lambda(
@@ -1212,7 +1285,9 @@ impl Fluid {
             self.densities[i] = rho;
             // 只压不拉：负压（吸引）会引发张力不稳定（实测：无重力也会自己"沸腾"）。
             // 初始质量已按晶格静止密度校准，所以静止时 C≈0，不会被压塌。
-            let c = (rho / rho0 - 1.0).clamp(0.0, 10.0);
+            // 气泡耦合时用局部有效静止密度；无气体时 effective_rho0 逐位返回 rho0。
+            let rho0_i = self.effective_rho0(i, rho0);
+            let c = (rho / rho0_i - 1.0).clamp(0.0, 10.0);
             if c < 0.01 {
                 self.lambdas[i] = 0.0;
                 continue;
@@ -1224,7 +1299,7 @@ impl Fluid {
                 if len > EPS && len < h {
                     let x = h - len;
                     let g = spiky * x * x / len;
-                    let g = r * g * (mass / rho0);
+                    let g = r * g * (mass / rho0_i);
                     sum_grad2 += g.length_squared();
                 }
             }
@@ -1592,6 +1667,53 @@ mod tests {
         assert!(
             (after - before).abs() <= before * 0.02,
             "合并必须近似守恒气体体积：before {before}, after {after}"
+        );
+    }
+
+    #[test]
+    fn gas_density_coupling_expands_liquid_around_a_bubble() {
+        let mut off = Fluid::new(box_desc()).unwrap();
+        let mut on = Fluid::new(box_desc()).unwrap();
+        off.desc.bubble_density_coupling = false;
+        for f in [&mut off, &mut on] {
+            f.desc.bubble_buoyancy = 0.0;
+            f.desc.bubble_drag = 0.0;
+            f.desc.viscosity = 0.0;
+            f.add_bubble(Bubble {
+                position: Vec3::new(0.0, 1.0, 0.0),
+                velocity: Vec3::ZERO,
+                radius: 0.18,
+                age: 0.0,
+                life: 10.0,
+            });
+        }
+        let mut bodies = [];
+        for _ in 0..2 {
+            off.step(&mut bodies, Vec3::ZERO, 1.0 / 60.0);
+            on.step(&mut bodies, Vec3::ZERO, 1.0 / 60.0);
+        }
+        assert!(
+            !on.gas_fractions().is_empty(),
+            "开启密度耦合后应记录每个粒子的气体分数"
+        );
+        assert!(
+            on.gas_fractions().iter().any(|g| *g > 0.01),
+            "气泡附近的气体分数应大于 0：{:?}",
+            on.gas_fractions().iter().fold(0.0f32, |a, b| a.max(*b))
+        );
+        assert!(off.gas_fractions().is_empty(), "关闭耦合时不应写入气体分数");
+        let center = Vec3::new(0.0, 1.0, 0.0);
+        let mean = |f: &Fluid| {
+            f.positions
+                .iter()
+                .map(|p| (*p - center).length())
+                .sum::<f32>()
+                / f.positions.len() as f32
+        };
+        let (off_mean, on_mean) = (mean(&off), mean(&on));
+        assert!(
+            on_mean > off_mean * 1.005,
+            "气体密度耦合应让液体在气泡周围膨胀：off {off_mean:.5}, on {on_mean:.5}"
         );
     }
 

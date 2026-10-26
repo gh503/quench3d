@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**1010 通过 / 0 失败 / 5 ignored**
-- wasm：**13,874,141 字节**
+- 测试：**1012 通过 / 0 失败 / 5 ignored**
+- wasm：**13,873,698 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -159,11 +159,17 @@
   寿命结束则消失。CLI 低模球可视、`simulate` 报告气泡数。回归两条：气泡不穿地板/数量上限，气泡上浮且确实排开液体（与关闭气泡的
   同一初始状态逐粒子比较；`bubble_expansion` 让半径从 0.03 涨到 >0.036；
   两颗重叠气泡合并后气体体积变化 ≤2%）。
-  **不是**严格两相流：气泡不参与 PBF 密度约束、没有
-  相变；但会排开液体、对液体做功，并把局部气体体积分数折算进刚体浮力（气泡
-  占据的体积不再排开液体，`density *= 1 - gas_fraction`，上限 0.9）。回归
-  `aerated_fluid_reduces_buoyancy_on_a_body`：一颗贴着表面的气泡让浮力降到约
-  0.70 倍。仍不是严格两相流。
+  [x] 气泡参与 PBF 密度约束（`bubble_density_coupling`，缺省 true，可关）：
+  用核支持体积上的局部气体体积分数把有效静止密度降为 `rho0 * (1 - gas)`，
+  气泡周围液体膨胀；回归 `gas_density_coupling_expands_liquid_around_a_bubble`
+  （同一气泡、开/关耦合对照，开启后粒子平均半径 >关闭 0.5%）。同时修正 CLI：
+  `FluidDoc` 的 bubbles/bubble_rate/max_bubbles/半径/浮力/阻尼/膨胀/耦合现在
+  真的接进 `FluidDesc`；回归 `scene_bubble_fields_are_actually_simulated`
+  （修复前报告 bubbles 永远为 0）。
+  仍**不是**严格两相流：没有独立气相压力/相变/表面张力，`gas` 是体积分数近似；
+  局部气体分数还会折算进刚体浮力（气泡占据体积不再排开液体，上限 0.9）。
+  回归 `aerated_fluid_reduces_buoyancy_on_a_body`：一颗贴着表面的气泡让浮力降到
+  约 0.70 倍。
 - [x] 粒子间最小分离（`fluids[].particle_collision`，缺省关闭）：每步 PBF 位置
   迭代后把距离小于直径的邻居沿连线推开（各半），再投影刚体边界；0 时旧路径逐位
   不变。回归：两颗几乎重合粒子在开关下分离到直径外。
