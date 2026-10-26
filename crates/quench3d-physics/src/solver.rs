@@ -389,6 +389,12 @@ pub(crate) struct SolverContact {
     pub k_normal: f32,
     /// 切向有效质量倒数。
     pub k_tangent: [f32; 2],
+    /// 单位法向冲量在 A/B 上产生的角速度变化（准备阶段预乘，迭代里直接缩放）。
+    pub normal_arm: [Vec3; 2],
+    /// 单位切向冲量在 A/B 上产生的角速度变化。
+    pub tangent_arm: [[Vec3; 2]; 2],
+    /// 本接触是否使用预算好的角速度响应（大场景快速路径）。
+    pub precomputed: bool,
     /// 摩擦系数（各向同性路径的标量值，也保留给缓存/诊断）。
     pub friction: f32,
     /// 两个切向方向的摩擦系数（各向异性时不同；缺省都等于 `friction`）。
@@ -485,6 +491,7 @@ impl ContactSolver {
         cache: &ContactCache,
         cfg: &SolverConfig,
         dt: f32,
+        precompute: bool,
     ) {
         self.contacts.clear();
         for m in manifolds {
@@ -538,6 +545,26 @@ impl ContactSolver {
                 let (t1, t2) = n.any_orthonormal_pair();
                 let k1 = va.k_axis(ra, t1) + vb.k_axis(rb, t1);
                 let k2 = va.k_axis(ra, t2) + vb.k_axis(rb, t2);
+                // 单位冲量产生的角速度变化只与接触几何有关，准备阶段算一次，
+                // 10 次速度迭代里直接乘标量，省掉每次的叉积 + 3x3 乘法。
+                let (normal_arm, tangent_arm) = if precompute {
+                    let arm = |v: &BodyView, r: Vec3, dir: Vec3| {
+                        if v.inv_m > 0.0 {
+                            v.inv_i_world(r.cross(dir))
+                        } else {
+                            Vec3::ZERO
+                        }
+                    };
+                    (
+                        [arm(&va, ra, n), arm(&vb, rb, n)],
+                        [
+                            [arm(&va, ra, t1), arm(&vb, rb, t1)],
+                            [arm(&va, ra, t2), arm(&vb, rb, t2)],
+                        ],
+                    )
+                } else {
+                    ([Vec3::ZERO; 2], [[Vec3::ZERO; 2]; 2])
+                };
                 // 恢复：用求解前的相对法向速度。
                 let vrel = vb.velocity_at(rb) - va.velocity_at(ra);
                 let vn = vrel.dot(n);
@@ -616,6 +643,9 @@ impl ContactSolver {
                     tangent: [t1, t2],
                     k_normal,
                     k_tangent: [k1, k2],
+                    normal_arm,
+                    tangent_arm,
+                    precomputed: precompute,
                     friction,
                     friction_tangent,
                     rolling_friction,
@@ -749,7 +779,13 @@ fn solve_velocity_contact(c: &mut SolverContact, va: &mut BodyView, vb: &mut Bod
             for (i, n) in next.iter().enumerate() {
                 let d = *n - c.tangent_impulse[i];
                 c.tangent_impulse[i] = *n;
-                pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
+                if d != 0.0 {
+                    if c.precomputed {
+                        apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
+                    } else {
+                        pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
+                    }
+                }
             }
             vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
         }
@@ -769,8 +805,15 @@ fn solve_velocity_contact(c: &mut SolverContact, va: &mut BodyView, vb: &mut Bod
             let new = clamp(c.tangent_impulse[i] + d, -limit, limit);
             d = new - c.tangent_impulse[i];
             c.tangent_impulse[i] = new;
-            pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
-            vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
+            // 冲量没变时不需要再乘一遍/重算相对速度；结果逐位相同。
+            if d != 0.0 {
+                if c.precomputed {
+                    apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
+                } else {
+                    pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
+                }
+                vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
+            }
         }
     }
     // 法向
@@ -780,7 +823,13 @@ fn solve_velocity_contact(c: &mut SolverContact, va: &mut BodyView, vb: &mut Bod
     let new = (c.normal_impulse + d).max(0.0);
     d = new - c.normal_impulse;
     c.normal_impulse = new;
-    pair_apply_impulse(va, vb, c.ra, c.rb, c.normal * d);
+    if d != 0.0 {
+        if c.precomputed {
+            apply_precomputed(va, vb, c.normal, c.normal_arm, d);
+        } else {
+            pair_apply_impulse(va, vb, c.ra, c.rb, c.normal * d);
+        }
+    }
 
     // 滚动阻力：用角冲量把相对角速度往 0 拉，上限与法向冲量成正比；
     // 缺省 0 时这条分支完全不会进入，历史结果逐位不变。
@@ -820,9 +869,48 @@ fn split_body_pair(
     }
 }
 
+/// 测试用的整表版本；生产路径已改为 [`pair_relative_velocity`]。
+#[cfg(test)]
+#[inline]
+fn relative_velocity(views: &[BodyView], a: usize, b: usize, ra: Vec3, rb: Vec3) -> Vec3 {
+    let va = &views[a];
+    let vb = &views[b];
+    (vb.lin + vb.ang.cross(rb)) - (va.lin + va.ang.cross(ra))
+}
+
+/// 测试用的整表版本；生产路径已改为 [`pair_relative_pseudo_velocity`]。
+#[cfg(test)]
+#[inline]
+fn relative_pseudo_velocity(views: &[BodyView], a: usize, b: usize, ra: Vec3, rb: Vec3) -> Vec3 {
+    let va = &views[a];
+    let vb = &views[b];
+    (vb.pseudo_lin + vb.pseudo_ang.cross(rb)) - (va.pseudo_lin + va.pseudo_ang.cross(ra))
+}
+
 #[inline(always)]
 fn pair_relative_velocity(va: &BodyView, vb: &BodyView, ra: Vec3, rb: Vec3) -> Vec3 {
     (vb.lin + vb.ang.cross(rb)) - (va.lin + va.ang.cross(ra))
+}
+
+/// 用准备阶段预乘好的角速度响应施加单位方向冲量。
+///
+/// 线性部分保持 `(dir * d) * inv_m` 的原运算顺序；角速度部分把
+/// `inv_i_world(r × (dir*d))` 改成 `inv_i_world(r × dir) * d`。两者数学等价，
+/// 但浮点末位可能差 1 ulp，所以只有几何预乘这一步在准备阶段做。
+#[inline(always)]
+fn apply_precomputed(va: &mut BodyView, vb: &mut BodyView, dir: Vec3, arm: [Vec3; 2], d: f32) {
+    if !d.is_finite() {
+        return;
+    }
+    let impulse = dir * d;
+    if va.inv_m > 0.0 {
+        va.lin -= impulse * va.inv_m;
+        va.ang -= arm[0] * d;
+    }
+    if vb.inv_m > 0.0 {
+        vb.lin += impulse * vb.inv_m;
+        vb.ang += arm[1] * d;
+    }
 }
 
 #[inline(always)]
@@ -859,14 +947,21 @@ pub(crate) fn relax_contacts(
     {
         for _ in 0..iterations {
             for c in contacts.iter_mut() {
-                let vrel = relative_velocity(views, c.a, c.b, c.ra, c.rb);
+                let Some((va, vb)) = split_body_pair(views, c.a, c.b) else {
+                    continue;
+                };
+                let vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
                 let vn = vrel.dot(c.normal);
                 if vn >= 0.0 || c.normal_impulse <= 0.0 {
                     continue;
                 }
                 let d = -gain * vn / c.k_normal;
                 c.normal_impulse += d;
-                apply_impulse(views, c.a, c.b, c.ra, c.rb, c.normal * d);
+                if c.precomputed {
+                    apply_precomputed(va, vb, c.normal, c.normal_arm, d);
+                } else {
+                    pair_apply_impulse(va, vb, c.ra, c.rb, c.normal * d);
+                }
             }
         }
     }
@@ -895,9 +990,12 @@ pub(crate) fn solve_position_contacts(
                 if pen <= cfg.slop {
                     continue;
                 }
+                let Some((va, vb)) = split_body_pair(views, c.a, c.b) else {
+                    continue;
+                };
                 let target =
                     ((cfg.baumgarte / dt) * (pen - cfg.slop)).min(cfg.max_correction_velocity);
-                let vrel = relative_pseudo_velocity(views, c.a, c.b, c.ra, c.rb);
+                let vrel = pair_relative_pseudo_velocity(va, vb, c.ra, c.rb);
                 let vn = vrel.dot(c.normal);
                 let mut d = (target - vn) / c.k_normal;
                 let new = (c.pseudo_impulse + d).max(0.0);
@@ -906,26 +1004,57 @@ pub(crate) fn solve_position_contacts(
                     continue;
                 }
                 c.pseudo_impulse = new;
-                apply_pseudo_impulse(views, c.a, c.b, c.ra, c.rb, c.normal * d);
+                if c.precomputed {
+                    apply_pseudo_precomputed(va, vb, c.normal, c.normal_arm, d);
+                } else {
+                    apply_pseudo_pair(va, vb, c.ra, c.rb, c.normal * d);
+                }
             }
         }
     }
 }
 
-/// 相对速度 `v_b(rb) - v_a(ra)`，只读字段，不复制整个 [`BodyView`]。
-#[inline]
-fn relative_velocity(views: &[BodyView], a: usize, b: usize, ra: Vec3, rb: Vec3) -> Vec3 {
-    let va = &views[a];
-    let vb = &views[b];
-    (vb.lin + vb.ang.cross(rb)) - (va.lin + va.ang.cross(ra))
+#[inline(always)]
+fn pair_relative_pseudo_velocity(va: &BodyView, vb: &BodyView, ra: Vec3, rb: Vec3) -> Vec3 {
+    (vb.pseudo_lin + vb.pseudo_ang.cross(rb)) - (va.pseudo_lin + va.pseudo_ang.cross(ra))
 }
 
-/// 相对伪速度；同上。
-#[inline]
-fn relative_pseudo_velocity(views: &[BodyView], a: usize, b: usize, ra: Vec3, rb: Vec3) -> Vec3 {
-    let va = &views[a];
-    let vb = &views[b];
-    (vb.pseudo_lin + vb.pseudo_ang.cross(rb)) - (va.pseudo_lin + va.pseudo_ang.cross(ra))
+/// 与 [`apply_pseudo_impulse`] 逐位相同的双引用版本。
+#[inline(always)]
+fn apply_pseudo_pair(va: &mut BodyView, vb: &mut BodyView, ra: Vec3, rb: Vec3, impulse: Vec3) {
+    if !impulse.is_finite() {
+        return;
+    }
+    if va.inv_m > 0.0 {
+        va.pseudo_lin -= impulse * va.inv_m;
+        va.pseudo_ang -= va.inv_i_world(ra.cross(impulse));
+    }
+    if vb.inv_m > 0.0 {
+        vb.pseudo_lin += impulse * vb.inv_m;
+        vb.pseudo_ang += vb.inv_i_world(rb.cross(impulse));
+    }
+}
+
+#[inline(always)]
+fn apply_pseudo_precomputed(
+    va: &mut BodyView,
+    vb: &mut BodyView,
+    dir: Vec3,
+    arm: [Vec3; 2],
+    d: f32,
+) {
+    if !d.is_finite() {
+        return;
+    }
+    let impulse = dir * d;
+    if va.inv_m > 0.0 {
+        va.pseudo_lin -= impulse * va.inv_m;
+        va.pseudo_ang -= arm[0] * d;
+    }
+    if vb.inv_m > 0.0 {
+        vb.pseudo_lin += impulse * vb.inv_m;
+        vb.pseudo_ang += arm[1] * d;
+    }
 }
 
 /// 对一对刚体施加世界冲量（作用于指定力臂）。

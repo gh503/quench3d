@@ -260,8 +260,12 @@ impl Broadphase {
         } else {
             2
         };
+        let mid = start + (end - start) / 2;
         let order = &mut self.bvh_order[start..end];
-        order.sort_unstable_by(|a, b| {
+        // 只把「中间元素」放到中位，不整段排序：建树总比较次数从
+        // O(n log² n) 降到 O(n log n)。左右子树的遍历顺序会变，但候选对
+        // 最终统一排序去重，集合与旧实现相同。
+        order.select_nth_unstable_by(mid - start, |a, b| {
             let ca = proxies[*a as usize].aabb.center();
             let cb = proxies[*b as usize].aabb.center();
             let (a, b) = match axis {
@@ -271,7 +275,6 @@ impl Broadphase {
             };
             a.total_cmp(&b)
         });
-        let mid = start + (end - start) / 2;
         let left = self.build_bvh(proxies, start, mid, depth + 1);
         let right = self.build_bvh(proxies, mid, end, depth + 1);
         self.bvh_nodes[idx as usize].left = left;

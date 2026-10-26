@@ -3638,8 +3638,8 @@ fn slider_pd_drives_to_target_displacement() {
 
 /// 2000 体深堆性能基准（默认跳过；显式 `--ignored` 才跑）。
 ///
-/// 只断言数值有限/没有炸开，不断言墙钟时间：CI 机器差异太大。数字打出来供
-/// 与发布构建对比，不能把本机 llvmpipe 当行业验收。
+/// 显式跑时同时断言本机 release 的 <16 ms 实时预算；数字只代表本机，CI 机器
+/// 差异太大，不能把本机 llvmpipe 当行业验收。
 #[test]
 #[ignore = "慢：2000 体深堆，显式 --ignored 运行"]
 fn deep_stack_2000_perf() {
@@ -3673,7 +3673,8 @@ fn deep_stack_2000_perf() {
     }
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     let per_step = ms / 60.0;
-    println!("2000 体深堆：60 步 {ms:.1} ms（{per_step:.2} ms/步）");
+    let awake = world.bodies().filter(|(_, b)| !b.is_sleeping()).count();
+    println!("2000 体深堆：60 步 {ms:.1} ms（{per_step:.2} ms/步），清醒 {awake}");
     let t = world.phase_timings();
     println!(
         "  候选对/步 {:.0}，流形/步 {:.0}，岛 {}（最大 {}，多体 {}）",

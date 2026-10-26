@@ -21,6 +21,14 @@ use quench3d_math::*;
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{Broadphase, Proxy};
+
+/// 接触点达到这个数才启用「预算角速度响应」的求解快速路径。
+///
+/// 小场景（包括所有黄金摘要回归）继续逐次做叉积/3x3 乘法，结果与历史**逐位相同**；
+/// 大场景把 `inv_i_world(r × dir)` 预乘一次，速度/位置/松弛迭代只乘标量，本机
+/// 2000 体深堆从约 16.7 降到 14.7~15.3 ms/步。代价是角速度末位可能差 1 ulp，
+/// 因此不把它设为无条件路径，也不改小场景的默认行为。
+const PRECOMPUTE_CONTACT_RESPONSE_MIN: usize = 2048;
 use crate::contact::{ContactManifold, ContactPair, ContactPoint};
 use crate::fluid::{self, Fluid, FluidDesc, FluidStats};
 use crate::gjk;
@@ -1610,6 +1618,11 @@ impl PhysicsWorld {
             self.scratch_joint_entries = entries;
         }
         // 5. 准备接触
+        // 大场景（深堆）每个接触要迭代 10 次；把与几何有关的角速度响应预乘，
+        // 速度迭代能省掉大量叉积/矩阵乘法。小场景保持旧的逐次运算，摘要逐位不变。
+        // 阈值用接触点数（不是流形数）：4 点流形的开销是单点流形的 4 倍。
+        let contact_points: usize = self.manifolds.iter().map(|m| m.points.len()).sum();
+        let precompute = contact_points >= PRECOMPUTE_CONTACT_RESPONSE_MIN;
         self.contact_solver.prepare(
             &views,
             &materials,
@@ -1618,6 +1631,7 @@ impl PhysicsWorld {
             &self.cache,
             &self.config,
             dt,
+            precompute,
         );
         // 5.5 确定性 island 划分（诊断 + 将来并行求解的依据）
         self.islands.begin(&views);
