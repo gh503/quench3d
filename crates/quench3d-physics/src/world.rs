@@ -3279,6 +3279,7 @@ mod tests {
                     position: Vec3::new(0.33, 2.0, 0.0),
                     velocity: Vec3::ZERO,
                     radius: 0.15,
+                    rest_radius: 0.15,
                     age: 0.0,
                     life: 10.0,
                 });

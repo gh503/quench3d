@@ -97,8 +97,9 @@ pub struct FluidDesc {
     /// 是否模拟气泡/气相（缺省 false；旧场景逐位不变）。
     ///
     /// 气泡是**轻质气相粒子**：受反向重力浮升、与刚体/地面碰撞、把液体粒子
-    /// 从气泡体积里推开，到液面/寿命结束消失。它不参与 PBF 密度约束，也还没有
-    /// 气泡体积分数/相变，所以**不是**严格的两相流；但会排开液体并对液体做功。
+    /// 从气泡体积里推开，到液面/寿命结束消失。它把局部气体体积分数耦合进 PBF
+    /// 密度约束（`bubble_density_coupling`），但还没有独立气相压力/相变，所以
+    /// **不是**严格的两相流；会排开液体并对液体做功。
     pub bubbles: bool,
     /// 气泡生成速率（颗/秒），缺省 20。
     pub bubble_rate: f32,
@@ -115,6 +116,9 @@ pub struct FluidDesc {
     /// 这是简化压力模型：没有真正解气泡内压/表面张力，只让气泡在上升时按指数
     /// 长大（体积分数随之增大）；半径封顶到初始值的 4 倍。
     pub bubble_expansion: f32,
+    /// 静水压压缩系数（1/m，0 = 不压缩）。深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)`
+    /// 收缩，近似 `pV = const`；缺省 0，旧路径逐位不变。
+    pub bubble_compressibility: f32,
     /// 气泡是否参与 PBF 密度约束（缺省开；只在 `bubbles`/手动注入气泡时生效）。
     ///
     /// 开：气泡占据的局部体积把有效静止密度降为 `rho0 * (1 - gas)`，液体在
@@ -157,6 +161,7 @@ impl Default for FluidDesc {
             bubble_buoyancy: 1.8,
             bubble_drag: 2.0,
             bubble_expansion: 0.0,
+            bubble_compressibility: 0.0,
             bubble_density_coupling: true,
         }
     }
@@ -273,8 +278,10 @@ pub struct Bubble {
     pub position: Vec3,
     /// 速度。
     pub velocity: Vec3,
-    /// 半径（米）。
+    /// 当前半径（米，已含静水压压缩）。
     pub radius: f32,
+    /// 无压缩时的表面半径（米）；`bubble_expansion` 改这个值，合并时按体积守恒。
+    pub rest_radius: f32,
     /// 已存活时间。
     pub age: f32,
     /// 寿命；到点后消失。
@@ -995,6 +1002,7 @@ impl Fluid {
                 position,
                 velocity,
                 radius,
+                rest_radius: radius,
                 age: 0.0,
                 life: 4.0,
             });
@@ -1047,12 +1055,26 @@ impl Fluid {
             if b.age >= b.life {
                 continue;
             }
-            if expansion > 0.0 {
-                // 简化压力膨胀：半径按指数长大，封顶到初始半径的 4 倍。
-                // 不改变已经比上限大的注入气泡。
-                let cap = max_bubble_radius.max(b.radius);
-                b.radius = (b.radius * (1.0 + expansion * dt)).min(cap);
+            // 兼容手工构造的旧调用：没有表面半径时用当前半径补上。
+            if !(b.rest_radius.is_finite() && b.rest_radius > 0.0) {
+                b.rest_radius = b.radius.max(0.005);
             }
+            if expansion > 0.0 {
+                // 简化压力膨胀：表面半径按指数长大，封顶到初始半径的 4 倍。
+                // 不改变已经比上限大的注入气泡。
+                let cap = max_bubble_radius.max(b.rest_radius);
+                b.rest_radius = (b.rest_radius * (1.0 + expansion * dt)).min(cap);
+            }
+            // 静水压：pV=const 的等温近似，深处半径按 (1+k·depth)^(-1/3) 收缩。
+            // k=0 直接走旧路径，连 cbrt 都不做，旧气泡逐位不变。
+            let compression = self.desc.bubble_compressibility.max(0.0);
+            b.radius = if compression > 0.0 {
+                let depth = (surface - b.position.y).max(0.0);
+                let pressure = 1.0 + compression * depth;
+                (b.rest_radius / pressure.cbrt()).max(0.005)
+            } else {
+                b.rest_radius
+            };
             let prev = b.position;
             // 气泡浮力 ∝ r³、阻力 ∝ r²，终端速度 ∝ √r；合并/膨胀后的大泡更快。
             // 半径等于 `bubble_radius` 时因子逐位为 1，旧气泡路径不变。
@@ -1136,11 +1158,19 @@ impl Fluid {
                     let va = a.radius.max(0.0).powi(3);
                     let vb = b.radius.max(0.0).powi(3);
                     let total = va + vb;
+                    let ra = a.rest_radius.max(0.0).powi(3);
+                    let rb = b.rest_radius.max(0.0).powi(3);
+                    let rest_total = ra + rb;
                     if total > 1e-12 {
                         let merged = Bubble {
                             position: (a.position * va + b.position * vb) / total,
                             velocity: (a.velocity * va + b.velocity * vb) / total,
                             radius: total.cbrt(),
+                            rest_radius: if rest_total > 1e-12 {
+                                rest_total.cbrt()
+                            } else {
+                                total.cbrt()
+                            },
                             age: a.age.max(b.age),
                             life: a.life.max(b.life),
                         };
@@ -1654,6 +1684,7 @@ mod tests {
                 position: Vec3::new(x, 0.8, 0.0),
                 velocity: Vec3::ZERO,
                 radius: 0.1,
+                rest_radius: 0.1,
                 age: 0.0,
                 life: 10.0,
             });
@@ -1688,6 +1719,7 @@ mod tests {
                 position: Vec3::new(0.0, 1.0, 0.0),
                 velocity: Vec3::ZERO,
                 radius: 0.18,
+                rest_radius: 0.18,
                 age: 0.0,
                 life: 10.0,
             });
@@ -1734,6 +1766,7 @@ mod tests {
             position: Vec3::new(-0.2, 0.8, 0.0),
             velocity: Vec3::ZERO,
             radius: 0.03,
+            rest_radius: 0.03,
             age: 0.0,
             life: 10.0,
         });
@@ -1741,6 +1774,7 @@ mod tests {
             position: Vec3::new(0.2, 0.8, 0.0),
             velocity: Vec3::ZERO,
             radius: 0.12,
+            rest_radius: 0.12,
             age: 0.0,
             life: 10.0,
         });
@@ -1755,6 +1789,51 @@ mod tests {
             "大泡应比小泡升得快：small={}, large={}",
             ys[0],
             ys[1]
+        );
+    }
+
+    #[test]
+    fn deeper_bubbles_are_compressed_by_hydrostatic_pressure() {
+        let mut fluid = Fluid::new(box_desc()).unwrap();
+        fluid.positions.clear();
+        fluid.velocities.clear();
+        fluid.desc.bubble_compressibility = 2.0;
+        fluid.desc.bubble_buoyancy = 0.0;
+        fluid.desc.bubble_drag = 0.0;
+        fluid.add_bubble(Bubble {
+            position: Vec3::new(-0.2, 0.2, 0.0),
+            velocity: Vec3::ZERO,
+            radius: 0.1,
+            rest_radius: 0.1,
+            age: 0.0,
+            life: 10.0,
+        });
+        fluid.add_bubble(Bubble {
+            position: Vec3::new(0.2, 1.2, 0.0),
+            velocity: Vec3::ZERO,
+            radius: 0.1,
+            rest_radius: 0.1,
+            age: 0.0,
+            life: 10.0,
+        });
+        for _ in 0..2 {
+            fluid.update_bubbles(Vec3::ZERO, 1.0 / 60.0, &[]);
+        }
+        let deep = fluid
+            .bubbles()
+            .iter()
+            .find(|b| b.position.x < 0.0)
+            .unwrap()
+            .radius;
+        let shallow = fluid
+            .bubbles()
+            .iter()
+            .find(|b| b.position.x > 0.0)
+            .unwrap()
+            .radius;
+        assert!(
+            deep < shallow * 0.95,
+            "深处气泡应被压缩得更小：deep={deep:.5}, shallow={shallow:.5}"
         );
     }
 

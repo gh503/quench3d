@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **气泡静水压压缩**：新增 `FluidDesc::bubble_compressibility`（缺省 0）。
+  深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)` 的等温 `pV≈const` 近似收缩，
+  到浅处恢复；`bubble_expansion` 仍作用在表面半径上。回归
+  `deeper_bubbles_are_compressed_by_hydrostatic_pressure`；k=0 走旧路径逐位不变。
+  CLI 场景字段 `bubble_compressibility` 已接线并做 0~10 校验。
+
 - **气泡上升速度随半径增大**：浮力按 r³、阻力按 r² 的终端速度近似为 ∝ √r；
   合并/膨胀后的大泡升得更快，半径等于 `bubble_radius` 时因子为 1，旧路径不变。
   回归 `larger_bubbles_rise_faster`。
