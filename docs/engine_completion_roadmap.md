@@ -214,9 +214,11 @@
 - [x] Web 深度时间累积：`window.quench3dCameraDepthAccumulation(true)` 或窗口
   「深度时间累积」用 `PointCloudAccumulator`（2 cm 体素、90 帧 TTL）合并多帧；
   Node 探针实测单帧 4096 点 → 两帧 5632 点，关闭后回到 4096。
-- [x] 摄像头 ICP 实时预算：`PointCloudRegistration.iterations` 记录实际收敛轮数；
-  4k 参考 + 1.5k 当前点 release 下 **3.4 ms / 3 轮**（显式 ignored 基准），
-  小运动回归断言 <24 轮。只加诊断字段，配准结果不变。
+- [x] 摄像头 ICP 实时预算与稠密网格最近邻：最近邻从每轮 27 次 `HashMap`
+  查询改为构建一次的稠密网格链表（自适应格子、每轴 ≤120 格），4k 参考 +
+  1.5k 当前点 release 下 **3.4 → 1.35 ms / 3 轮**（显式 ignored 基准）；
+  `grid_nearest_matches_a_brute_force_search` 与暴力搜索逐点对照；
+  `PointCloudRegistration.iterations` 记录收敛轮数，小运动回归断言 <24 轮。
 - [x] Web 深度 ICP 位姿跟踪：`window.quench3dCameraDepthTracking(true)` 或 Web
   摄像头窗口「跟踪位姿（ICP，移动相机）」把注入的相邻深度帧用同一套
   `register_point_clouds` 搬到参考系；打开时自动开时间累积，关闭累积同时关跟踪。

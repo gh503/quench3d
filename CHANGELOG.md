@@ -14,10 +14,12 @@
   （开/关对照：总动量更接近守恒、液体动量不增加、气泡速度有限）；CLI 解析/
   校验/往返与场景字段接线已补。0 时旧路径逐位不变，仍不是完整气相状态方程/相变。
 
-- **ICP 实时预算与收敛诊断**：`PointCloudRegistration` 新增 `iterations` 字段；
-  4k 参考点 + 1.5k 当前点的合成点云在 release 下 **3.4 ms / 3 轮**收敛（显式
-  `--ignored` 基准），远低于 60 Hz 一帧预算；小运动回归同时断言迭代数 <24，
-  防止以后把提前收敛改回固定满跑。只增诊断字段，配准结果与缺省路径不变。
+- **ICP 实时预算与稠密网格最近邻**：最近邻从每轮 27 次 `HashMap` 格子查询改为
+  构建一次的稠密网格链表（格子边长自适应、每轴约 120 格），4k 参考点 + 1.5k
+  当前点在 release 下 **3.4 → 1.35 ms / 3 轮**收敛（显式 `--ignored` 基准）；
+  新回归 `grid_nearest_matches_a_brute_force_search` 逐点对照暴力搜索。
+  `PointCloudRegistration.iterations` 记录实际收敛轮数，小运动回归断言 <24；
+  配准结果/缺省路径不变。
 
 - **Web 深度 ICP 位姿跟踪**：`window.quench3dCameraDepthTracking(true)` 或摄像头
   窗口「跟踪位姿（ICP，移动相机）」把 Web 注入的相邻深度帧做同一套 ICP，再进

@@ -345,6 +345,115 @@ pub struct PointCloudRegistration {
     pub iterations: u32,
 }
 
+/// 固定半径最近邻的稠密网格：每个格一条链表，查询 27 个格子。
+///
+/// 旧实现用 `HashMap<(i32,i32,i32), Vec<usize>>`，每轮每个点 27 次 SipHash；
+/// 4k 参考点 × 1.5k 当前点 × 多轮时哈希成了主成本。网格直接把格子映射到
+/// `heads` 下标，链表节点复用，构建一次、查询零分配。格子边长至少 8 cm，
+/// 且按点云范围自适应放大到每轴最多约 120 格，避免大场景分配爆炸。
+struct GridIndex {
+    min: Vec3,
+    cell: f32,
+    dims: [i32; 3],
+    heads: Vec<i32>,
+    next: Vec<i32>,
+}
+
+impl GridIndex {
+    fn new(points: &[Vec3]) -> Self {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for p in points {
+            min = min.min(*p);
+            max = max.max(*p);
+        }
+        if !min.is_finite() || !max.is_finite() {
+            min = Vec3::ZERO;
+            max = Vec3::ZERO;
+        }
+        // 查询点可能被配准增量挪出参考点范围；向外扩一个最近邻半径。
+        min -= Vec3::splat(0.12);
+        max += Vec3::splat(0.12);
+        let extent = (max - min).max(Vec3::splat(1e-4));
+        let longest = extent.x.max(extent.y).max(extent.z);
+        let cell = longest / 120.0;
+        let cell = cell.max(0.08).max(1e-4);
+        let dims = [
+            ((extent.x / cell).floor() as i32 + 1).clamp(1, 128),
+            ((extent.y / cell).floor() as i32 + 1).clamp(1, 128),
+            ((extent.z / cell).floor() as i32 + 1).clamp(1, 128),
+        ];
+        let cells = (dims[0] * dims[1] * dims[2]) as usize;
+        let mut heads = vec![-1i32; cells];
+        let mut next = vec![-1i32; points.len()];
+        for (i, p) in points.iter().enumerate() {
+            if let Some([x, y, z]) = grid_cell(*p, min, cell, dims) {
+                let slot = (x + dims[0] * (y + dims[1] * z)) as usize;
+                next[i] = heads[slot];
+                heads[slot] = i as i32;
+            }
+        }
+        Self {
+            min,
+            cell,
+            dims,
+            heads,
+            next,
+        }
+    }
+
+    fn nearest(&self, points: &[Vec3], target: Vec3, max_distance: f32) -> Option<(usize, f32)> {
+        let [bx, by, bz] = grid_cell(target, self.min, self.cell, self.dims)?;
+        let max_d2 = max_distance * max_distance;
+        let mut best: Option<(usize, f32)> = None;
+        for dz in -1..=1 {
+            let z = bz + dz;
+            if z < 0 || z >= self.dims[2] {
+                continue;
+            }
+            for dy in -1..=1 {
+                let y = by + dy;
+                if y < 0 || y >= self.dims[1] {
+                    continue;
+                }
+                for dx in -1..=1 {
+                    let x = bx + dx;
+                    if x < 0 || x >= self.dims[0] {
+                        continue;
+                    }
+                    let slot = (x + self.dims[0] * (y + self.dims[1] * z)) as usize;
+                    let mut i = self.heads[slot];
+                    while i >= 0 {
+                        let index = i as usize;
+                        let d2 = (points[index] - target).length_squared();
+                        if d2 <= max_d2 {
+                            let better = match best {
+                                None => true,
+                                Some((best_index, best_d2)) => {
+                                    d2 < best_d2 || (d2 == best_d2 && index < best_index)
+                                }
+                            };
+                            if better {
+                                best = Some((index, d2));
+                            }
+                        }
+                        i = self.next[index];
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+fn grid_cell(p: Vec3, min: Vec3, cell: f32, dims: [i32; 3]) -> Option<[i32; 3]> {
+    let local = (p - min) / cell;
+    let x = local.x.floor() as i32;
+    let y = local.y.floor() as i32;
+    let z = local.z.floor() as i32;
+    (x >= 0 && x < dims[0] && y >= 0 && y < dims[1] && z >= 0 && z < dims[2]).then_some([x, y, z])
+}
+
 /// 两帧点云刚体配准：点到点 ICP + 小角度线性化，返回把当前帧映射到上一帧的
 /// `R, t`。
 ///
@@ -359,7 +468,6 @@ pub fn register_point_clouds(
     const MAX_PREVIOUS: usize = 4000;
     const MAX_CURRENT: usize = 1500;
     const MAX_DISTANCE: f32 = 0.12;
-    const CELL: f32 = 0.08;
     const ITERATIONS: usize = 24;
 
     fn sample(points: &[Vec3], max: usize) -> Vec<Vec3> {
@@ -377,42 +485,12 @@ pub fn register_point_clouds(
     if previous.len() < 6 || current.len() < 6 {
         return None;
     }
-    let key = |p: Vec3| {
-        (
-            (p.x / CELL).floor() as i32,
-            (p.y / CELL).floor() as i32,
-            (p.z / CELL).floor() as i32,
-        )
-    };
-    let mut index: std::collections::HashMap<(i32, i32, i32), Vec<usize>> =
-        std::collections::HashMap::new();
-    for (i, p) in previous.iter().enumerate() {
-        index.entry(key(*p)).or_default().push(i);
-    }
+    let grid = GridIndex::new(&previous);
     let nearest_pairs = |rotation: Quat, translation: Vec3| -> Vec<(Vec3, Vec3)> {
         let mut pairs = Vec::with_capacity(current.len());
         for p in &current {
             let q = rotation.mul_vec3(*p) + translation;
-            let (cx, cy, cz) = key(q);
-            let mut nearest: Option<(usize, f32)> = None;
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let Some(cell) = index.get(&(cx + dx, cy + dy, cz + dz)) else {
-                            continue;
-                        };
-                        for &i in cell {
-                            let d = (previous[i] - q).length_squared();
-                            if d <= MAX_DISTANCE * MAX_DISTANCE
-                                && nearest.is_none_or(|(_, best)| d < best)
-                            {
-                                nearest = Some((i, d));
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some((i, _)) = nearest {
+            if let Some((i, _)) = grid.nearest(&previous, q, MAX_DISTANCE) {
                 pairs.push((previous[i], q));
             }
         }
@@ -912,7 +990,49 @@ mod accumulator_tests {
             assert!(found.pairs > 500);
         }
         println!("ICP 4k 参考 + 1.5k 当前：{best:.2} ms，{used} 轮");
-        assert!(best < 16.0, "ICP 单帧 {best:.2} ms 超过 60 Hz 预算");
+        assert!(best < 2.5, "ICP 单帧 {best:.2} ms 超过 2.5 ms 实时目标");
+    }
+
+    #[test]
+    fn grid_nearest_matches_a_brute_force_search() {
+        // 网格索引是 ICP 的性能路径；最近邻必须与暴力搜索逐点一致，
+        // 包括“半径外没有点”和相同距离取小下标两种边界。
+        let mut points = Vec::new();
+        for i in 0..500 {
+            let x = (i % 10) as f32 * 0.07 + (i as f32 * 0.013).sin() * 0.02;
+            let y = (i / 10 % 10) as f32 * 0.06 + (i as f32 * 0.017).cos() * 0.02;
+            let z = (i / 100) as f32 * 0.09 + (i as f32 * 0.019).sin() * 0.02;
+            points.push(vec3(x, y, z));
+        }
+        let grid = GridIndex::new(&points);
+        for i in 0..240 {
+            let q = vec3(
+                (i % 12) as f32 * 0.06 - 0.1,
+                (i / 12 % 12) as f32 * 0.05 - 0.1,
+                (i / 144) as f32 * 0.1 - 0.1,
+            );
+            let mut want: Option<(usize, f32)> = None;
+            for (index, p) in points.iter().enumerate() {
+                let d2 = (*p - q).length_squared();
+                if d2 > 0.12 * 0.12 {
+                    continue;
+                }
+                let better = match want {
+                    None => true,
+                    Some((best_index, best_d2)) => {
+                        d2 < best_d2 || (d2 == best_d2 && index < best_index)
+                    }
+                };
+                if better {
+                    want = Some((index, d2));
+                }
+            }
+            assert_eq!(
+                grid.nearest(&points, q, 0.12),
+                want,
+                "网格最近邻与暴力搜索不一致：q={q:?}"
+            );
+        }
     }
 
     #[test]
