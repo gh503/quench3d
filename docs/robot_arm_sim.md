@@ -206,7 +206,8 @@ node tools/check_web.mjs
 | P0-3 抓取场景/脚本 | **PASS（带理想化）** | 方块从 y=0.061 抬到 0.207（+0.146 m），相对夹爪滑移 0；手指从 ±0.04 合到 ±0.028 |
 | P0-3 滑块位置伺服 | **PASS（单元 + CLI）** | 单元：目标 0.5 m，600 步后误差 <1 cm；CLI：`target_m=0.2` 到 0.19999996 m，报告只有 `target_m/error_m`，没有把米转成度 |
 | P0-3 **真实摩擦夹持** | **PASS** | `modkit_arm_friction_grasp.scene.json`：40 mm 方块与任何刚体间**没有场景关节**，只靠两个滑块手指的接触摩擦；0 s 先抬到肩 −10°/肘 10°，0.8 s 下压回 0°/0°（above→descend），1.5 s 滑块手指闭合到 ±0.0255 m，4 s 起以 5°/s 抬到肩 64°/肘 −64°，18 s 末仍夹住；方块从 y=0.100 升到 y=0.203（**+0.103 m**），相对夹爪滑移 **<1 mm**，手指不撞限位、关节不断裂。测试断言 scene joints 中没有 `cube` |
-| P0-3 100 g 加严 | **PASS** | `modkit_arm_friction_grasp_100g.scene.json`：预紧 ±0.0248 m、手指 kp 8000 / 限力 12 N，抬升 **0.101 m**、滑移 **<0.3 mm**，无 cube 关节；200 g 同参数只到 0.098 m，未声称 |
+| P0-3 100 g 加严 | **PASS** | `modkit_arm_friction_grasp_100g.scene.json`：预紧 ±0.0248 m、手指 kp 8000 / 限力 12 N，抬升 **0.101 m**、滑移 **<0.3 mm**，无 cube 关节 |
+| P0-3 200 g 标定 | **PASS** | `modkit_arm_friction_grasp_200g.scene.json`：预紧 ±0.025 m、手指 kp 12000 / kd 50 / 限力 20 N、接触摩擦 2.2，抬升 **0.118 m**、滑移 **0.42 mm**，无 cube 关节，手指不撞限位；回归 `friction_gripper_also_holds_a_two_hundred_gram_cube` |
 | P0-3 旧“理想抓取” fixture | PASS（保留） | 方块从 t=0 用固定关节挂住，只用于验证脚本时序；真实抓取以上面这一行为准 |
 | P1-1 `objects[].visual` | **PASS（功能与整机渲染）** | `visual` 支持 STL/GLB/GLTF/OBJ，挂成主物体子节点；加/不加 visual 的模拟 `states` 逐位相同；整机 STL 渲染 33,318 三角形 / 11 object；立柱已修正为 90 mm 竖直。上游没有官方装配矩阵，对位按官方尺寸（base 90 / l1 120 / l2 110 / link_bar 100）推导，见 §8 |
 | P1-2 运动学 drive | **PASS** | `physics.mode:"drive"`：重力 0、接触 0，只解关节；`--trace` 新增逐帧四元数；两次运行 301 个采样逐位相同，见 §9 |

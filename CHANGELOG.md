@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **200 g 摩擦夹持标定**：新增 `modkit_arm_friction_grasp_200g.scene.json`，用
+  预紧 ±0.025 m、手指 kp 12000 / kd 50 / 限力 20 N、接触摩擦 2.2，把 40 mm
+  200 g 方块抬升 0.118 m、相对夹爪滑移 0.42 mm，且手指不撞限位、关节不断裂；
+  回归 `friction_gripper_also_holds_a_two_hundred_gram_cube`。这是夹具标定，
+  不是引擎抓取算法变化。
+
 - **深堆 2000 体回到实时预算**：BVH 建树改用 `select_nth_unstable_by` 只定位中位
   （宽相 2.48 → 1.77 ms/步，候选对集合不变）；接触点 ≥2048 时准备阶段预乘
   `inv_i_world(r × dir)`，速度/松弛/位置迭代省掉逐次叉积与 3×3 乘法（深堆

@@ -243,6 +243,49 @@ fn friction_gripper_also_holds_a_hundred_gram_cube() {
     assert!(report.joints.iter().all(|j| !j.broken));
 }
 
+fn friction_grasp_200g_fixture() -> SceneDoc {
+    SceneDoc::from_json(include_str!(
+        "fixtures/modkit_arm_friction_grasp_200g.scene.json"
+    ))
+    .expect("200 g friction grasp fixture")
+}
+
+/// 同一套夹具再加重到 200 g：预紧到 ±0.025 m、手指 kp 12000 / 限力 20 N，
+/// 方块仍抬过 10 cm，相对夹爪滑移 <1 mm，手指不撞限位。
+#[test]
+fn friction_gripper_also_holds_a_two_hundred_gram_cube() {
+    let doc = friction_grasp_200g_fixture();
+    assert!(
+        doc.joints.iter().all(|j| j.a != "cube" && j.b != "cube"),
+        "方块不能靠场景关节挂在夹爪上"
+    );
+    let report = run_simulate(&doc).expect("仿真要能跑");
+    let pos = |n: &str| {
+        report
+            .states
+            .iter()
+            .find(|s| s.name == n)
+            .unwrap_or_else(|| panic!("没有 {n}"))
+            .position
+    };
+    let cube = pos("cube");
+    let grip = pos("gripper");
+    assert!(
+        cube[1] - 0.08 >= 0.10,
+        "200 g 方块只抬起了 {:.3} m",
+        cube[1] - 0.08
+    );
+    let slip =
+        ((cube[0] - grip[0]).powi(2) + (cube[1] - grip[1]).powi(2) + (cube[2] - grip[2]).powi(2))
+            .sqrt();
+    assert!(slip <= 3.0e-3, "200 g 方块滑移 {slip:.4} m");
+    for name in ["finger_l_slide", "finger_r_slide"] {
+        let j = report.joints.iter().find(|j| j.name == name).unwrap();
+        assert_eq!(j.limit_state, "ok", "{name} 撞限位");
+    }
+    assert!(report.joints.iter().all(|j| !j.broken));
+}
+
 #[test]
 fn grasp_script_lifts_the_cube_ten_centimetres_without_slip() {
     let doc = grasp_fixture();
