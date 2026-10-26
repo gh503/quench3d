@@ -180,7 +180,12 @@
   `bubble_pressure_pushes_liquid_outward_without_the_old_path`（开/关对照，径向
   速度总量更大、速度有限），CLI 回归 `scene_bubble_fields_are_actually_simulated`
   接受该字段并保持有限速度。这是**气泡尺度压力耦合**，不是独立气相动量方程。
+  [x] 气泡动量反冲（`fluids[].bubble_momentum_coupling`，0~2，缺省 0）：
+  把液体从径向排开/过压/尾流得到的总动量按 0.5·ρ·V 附加质量反推给气泡，
+  回归 `bubble_momentum_recoil_reduces_injected_liquid_momentum`（总动量更接近
+  守恒、液体动量不增加、速度有限）；CLI 字段已接线。0 时旧路径逐位不变。
   仍**不是**严格两相流：没有独立气相动量/相变/表面张力，`gas` 是体积分数近似；
+
   局部气体分数还会折算进刚体浮力（气泡占据体积不再排开液体，上限 0.9）。
   回归 `aerated_fluid_reduces_buoyancy_on_a_body`：一颗贴着表面的气泡让浮力降到
   约 0.70 倍。
@@ -209,6 +214,9 @@
 - [x] Web 深度时间累积：`window.quench3dCameraDepthAccumulation(true)` 或窗口
   「深度时间累积」用 `PointCloudAccumulator`（2 cm 体素、90 帧 TTL）合并多帧；
   Node 探针实测单帧 4096 点 → 两帧 5632 点，关闭后回到 4096。
+- [x] 摄像头 ICP 实时预算：`PointCloudRegistration.iterations` 记录实际收敛轮数；
+  4k 参考 + 1.5k 当前点 release 下 **3.4 ms / 3 轮**（显式 ignored 基准），
+  小运动回归断言 <24 轮。只加诊断字段，配准结果不变。
 - [x] Web 深度 ICP 位姿跟踪：`window.quench3dCameraDepthTracking(true)` 或 Web
   摄像头窗口「跟踪位姿（ICP，移动相机）」把注入的相邻深度帧用同一套
   `register_point_clouds` 搬到参考系；打开时自动开时间累积，关闭累积同时关跟踪。

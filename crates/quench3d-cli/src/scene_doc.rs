@@ -1217,6 +1217,9 @@ pub struct FluidDoc {
     /// 气泡过压（Pa），缺省 0 = 关闭；按 p0·(r_rest/r)³ 转成液体径向压力。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_pressure: Option<f32>,
+    /// 气泡-液体动量反冲（0~2），缺省 0 = 关闭。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_momentum_coupling: Option<f32>,
     /// 气泡破碎半径上限（米），缺省 0 = 不破碎。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_max_radius: Option<f32>,
@@ -4476,6 +4479,15 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.bubble_pressure"),
                         "气泡过压必须在 0~1000000 Pa 之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.bubble_momentum_coupling {
+                if !(v.is_finite() && (0.0..=2.0).contains(&v)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.bubble_momentum_coupling"),
+                        "气泡动量反冲系数必须在 0~2 之间",
                     ));
                 }
             }
@@ -9190,7 +9202,8 @@ mod tests {
                   "bubble_radius": 0.04, "bubble_buoyancy": 2.0,
                   "bubble_drag": 1.5, "bubble_expansion": 0.7,
                   "bubble_compressibility": 1.5, "bubble_max_radius": 0.25,
-                  "bubble_wake": 0.8, "bubble_pressure": 1200, "bubble_density_coupling": false }
+                  "bubble_wake": 0.8, "bubble_pressure": 1200,
+                  "bubble_momentum_coupling": 0.7, "bubble_density_coupling": false }
             ]
         }))
         .expect("fluids 要能解析");
@@ -9219,6 +9232,7 @@ mod tests {
         assert_eq!(again.fluids[1].bubble_max_radius, Some(0.25));
         assert_eq!(again.fluids[1].bubble_wake, Some(0.8));
         assert_eq!(again.fluids[1].bubble_pressure, Some(1200.0));
+        assert_eq!(again.fluids[1].bubble_momentum_coupling, Some(0.7));
         assert_eq!(again.fluids[1].bubble_density_coupling, Some(false));
 
         for (fluid, path) in [
@@ -9255,6 +9269,10 @@ mod tests {
             (
                 json!({"size": [1, 1, 1], "contact_friction": 1.5}),
                 "fluids[0].contact_friction",
+            ),
+            (
+                json!({"size": [1, 1, 1], "bubble_momentum_coupling": 2.5}),
+                "fluids[0].bubble_momentum_coupling",
             ),
         ] {
             let doc = SceneDoc::from_value(json!({ "fluids": [fluid] })).expect("结构合法");

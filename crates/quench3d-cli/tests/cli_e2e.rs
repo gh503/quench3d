@@ -661,6 +661,7 @@ fn scene_bubble_fields_are_actually_simulated() {
               "spacing": 0.1, "radius": 0.05, "max_particles": 1200,
               "bubbles": true, "bubble_rate": 10, "max_bubbles": 4,
               "bubble_buoyancy": 0, "bubble_drag": 0, "bubble_pressure": 5000,
+              "bubble_momentum_coupling": 0.5,
               "emit_position": [0, 1.2, 0], "emit_radius": 0.02 }
           ],
           "simulate": { "steps": 60, "dt": 0.0166667 }

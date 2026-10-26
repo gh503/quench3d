@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+- **气泡-液体动量反冲**：新增 `fluids[].bubble_momentum_coupling`（0~2，缺省 0）。
+  把径向排开/过压/尾流注入液体的总动量按 0.5·ρ·V 附加质量反推给气泡，
+  速度仍封顶 10 m/s。回归 `bubble_momentum_recoil_reduces_injected_liquid_momentum`
+  （开/关对照：总动量更接近守恒、液体动量不增加、气泡速度有限）；CLI 解析/
+  校验/往返与场景字段接线已补。0 时旧路径逐位不变，仍不是完整气相状态方程/相变。
+
+- **ICP 实时预算与收敛诊断**：`PointCloudRegistration` 新增 `iterations` 字段；
+  4k 参考点 + 1.5k 当前点的合成点云在 release 下 **3.4 ms / 3 轮**收敛（显式
+  `--ignored` 基准），远低于 60 Hz 一帧预算；小运动回归同时断言迭代数 <24，
+  防止以后把提前收敛改回固定满跑。只增诊断字段，配准结果与缺省路径不变。
+
 - **Web 深度 ICP 位姿跟踪**：`window.quench3dCameraDepthTracking(true)` 或摄像头
   窗口「跟踪位姿（ICP，移动相机）」把 Web 注入的相邻深度帧做同一套 ICP，再进
   2 cm 体素累积器；打开时自动打开时间累积，关闭累积会同时关闭跟踪。Node 探针

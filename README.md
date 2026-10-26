@@ -819,7 +819,8 @@ quench3d::write_png(&image, "out.png")?;
   同面板的「跟踪位姿（ICP）」把相邻帧点云做刚体配准，再叠进累积参考系，
   移动相机时不会把同一表面拖成双层；只适合相邻帧小运动（初始猜测是恒等），
   配准失败会清空累积器并以当前帧重开参考系，不会把两个坐标系硬混在一起。
-  这是**增量**跟踪，不是全局 SLAM/回环，也没有 IMU 融合。桌面窗口直接提供开关；
+  合成 4k 参考 + 1.5k 当前点在 release 下约 3.4 ms、3 轮收敛，低于 60 Hz
+  单帧预算；这是**增量**跟踪，不是全局 SLAM/回环，也没有 IMU 融合。桌面窗口直接提供开关；
   Web 端通过 `window.quench3dCameraDepthTracking(true)` 或摄像头窗口的同一开关
   使用（会同时打开时间累积）。
   深度-only 帧（没有 `latest.points`）同样能重建；点云来自读端的内参反投影，
@@ -1200,7 +1201,7 @@ NaN 刚体  : 0
   "particle_collision": false, "bubbles": false,
   "bubble_rate": 20, "max_bubbles": 128, "bubble_radius": 0.03,
   "bubble_buoyancy": 1.8, "bubble_drag": 2.0, "bubble_expansion": 0,
-  "bubble_pressure": 0,
+  "bubble_pressure": 0, "bubble_momentum_coupling": 0,
   "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
@@ -1231,8 +1232,10 @@ NaN 刚体  : 0
   长大并封顶到初始半径 4 倍，模拟上升减压；`bubble_compressibility > 0` 时按
   `pV≈const` 让深处气泡收缩，到浅处恢复；`bubble_max_radius > 0` 时超过上限的
   气泡按体积守恒破碎成多颗；`bubble_wake > 0` 时上浮气泡把上方液体向上拖成
-  尾流；`bubble_pressure > 0` 时按 `p0·(r_rest/r)³` 把过压转成液体径向加速度，
-  是气泡尺度耦合，不是独立气相动量方程）。CLI 把气泡画成低模球，`simulate`
+  尾流；`bubble_pressure > 0` 时按 `p0·(r_rest/r)³` 把过压转成液体径向加速度；
+  `bubble_momentum_coupling`（0~2，缺省 0）把液体从排开/过压/尾流获得的总动量
+  按 0.5·ρ·V 的附加质量反推给气泡，减少单向注入动量，仍是近似而不是独立气相
+  动量方程）。CLI 把气泡画成低模球，`simulate`
   报告 `bubbles` 计数
   （0 时省略）。局部气体体积分数还会折算进刚体浮力：气泡占据的体积不再排开液体，
   浮力密度乘以 `1 - gas_fraction`（上限 0.9），所以曝气的水托不住同样的重物。

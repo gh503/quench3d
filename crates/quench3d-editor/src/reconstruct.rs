@@ -341,6 +341,8 @@ pub struct PointCloudRegistration {
     pub pairs: usize,
     /// 对应点残差均方根（米）。
     pub rms: f32,
+    /// 实际迭代次数（收敛时会小于上限）。
+    pub iterations: u32,
 }
 
 /// 两帧点云刚体配准：点到点 ICP + 小角度线性化，返回把当前帧映射到上一帧的
@@ -419,7 +421,9 @@ pub fn register_point_clouds(
 
     let mut rotation = Quat::IDENTITY;
     let mut translation = Vec3::ZERO;
+    let mut iterations = 0u32;
     for _ in 0..ITERATIONS {
+        iterations += 1;
         let pairs = nearest_pairs(rotation, translation);
         if pairs.len() < 6 {
             return None;
@@ -483,6 +487,7 @@ pub fn register_point_clouds(
         translation,
         pairs: pairs.len(),
         rms,
+        iterations,
     })
 }
 
@@ -880,6 +885,36 @@ mod accumulator_tests {
         out
     }
 
+    /// 摄像头 30/60 Hz 实时预算：4k 参考点 + 1.5k 当前点的 ICP 单次耗时。
+    #[test]
+    #[ignore = "慢：ICP 性能基准，显式 --ignored --release 运行"]
+    fn icp_4k_points_fits_a_camera_frame() {
+        let mut previous = Vec::new();
+        for i in 0..70 {
+            for j in 0..70 {
+                let x = (i as f32 - 34.5) * 0.02;
+                let y = (j as f32 - 34.5) * 0.02;
+                previous.push(vec3(x, y, 0.6 + 0.02 * (x * 3.0).sin()));
+            }
+        }
+        let rotation = Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), 0.01);
+        let current: Vec<Vec3> = previous
+            .iter()
+            .map(|p| rotation.mul_vec3(*p) + vec3(0.005, 0.0, 0.0))
+            .collect();
+        let mut best = f64::INFINITY;
+        let mut used = 0u32;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let found = register_point_clouds(&previous, &current).expect("应配准");
+            best = best.min(start.elapsed().as_secs_f64() * 1000.0);
+            used = found.iterations;
+            assert!(found.pairs > 500);
+        }
+        println!("ICP 4k 参考 + 1.5k 当前：{best:.2} ms，{used} 轮");
+        assert!(best < 16.0, "ICP 单帧 {best:.2} ms 超过 60 Hz 预算");
+    }
+
     #[test]
     fn point_cloud_registration_recovers_a_known_rigid_motion() {
         let previous = wavy_patch();
@@ -891,6 +926,11 @@ mod accumulator_tests {
             .collect();
         let found = register_point_clouds(&previous, &current).expect("同形点云应当配准");
         assert!(found.pairs > 400, "对应点太少：{}", found.pairs);
+        assert!(
+            found.iterations < 24,
+            "小运动应在迭代上限前收敛，实际 {} 轮",
+            found.iterations
+        );
         assert!(found.rms < 0.002, "rms 应小于 2 mm：{}", found.rms);
         let mut worst = 0.0f32;
         for (p, q) in previous.iter().zip(&current) {

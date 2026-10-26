@@ -131,6 +131,12 @@ pub struct FluidDesc {
     /// 到 `reach` 处衰减为零。这是**气泡尺度的压力耦合**，不是独立气相动量方程，
     /// 所以仍不等同于严格两相流；0 时完全不执行，旧场景逐位不变。
     pub bubble_pressure: f32,
+    /// 气泡-液体动量反冲系数（0~2，缺省 0 = 关闭，旧路径逐位不变）。
+    ///
+    /// 上面的径向排开/过压/尾流都会给液体注入动量；这个字段把液体获得的
+    /// 总动量按 0.5·ρ·V（气泡附加质量）反推给气泡，近似两相动量守恒。不是
+    /// 独立气相质量/相变；0 时完全走旧路径。
+    pub bubble_momentum_coupling: f32,
     /// 气泡是否参与 PBF 密度约束（缺省开；只在 `bubbles`/手动注入气泡时生效）。
     ///
     /// 开：气泡占据的局部体积把有效静止密度降为 `rho0 * (1 - gas)`，液体在
@@ -177,6 +183,7 @@ impl Default for FluidDesc {
             bubble_wake: 0.0,
             bubble_compressibility: 0.0,
             bubble_pressure: 0.0,
+            bubble_momentum_coupling: 0.0,
             bubble_density_coupling: true,
         }
     }
@@ -228,6 +235,8 @@ impl FluidDesc {
             && (0.0..=1.0).contains(&self.contact_friction)
             && self.bubble_pressure.is_finite()
             && (0.0..=1_000_000.0).contains(&self.bubble_pressure)
+            && self.bubble_momentum_coupling.is_finite()
+            && (0.0..=2.0).contains(&self.bubble_momentum_coupling)
     }
 
     /// 按晶格估算的粒子数（已按 `max_particles` 截断）。
@@ -1047,6 +1056,7 @@ impl Fluid {
         let expansion = self.desc.bubble_expansion.max(0.0);
         let wake = self.desc.bubble_wake.max(0.0);
         let pressure = self.desc.bubble_pressure.max(0.0);
+        let momentum_coupling = self.desc.bubble_momentum_coupling.max(0.0);
         let max_bubble_radius = self.desc.bubble_radius.max(0.005) * 4.0;
         let particle_radius = self.desc.radius.max(0.0);
         let foam_enabled = self.desc.foam;
@@ -1070,6 +1080,7 @@ impl Fluid {
         let mut keep = 0usize;
         for index in 0..self.bubbles.len() {
             let mut b = self.bubbles[index];
+            let mut liquid_momentum = Vec3::ZERO;
             b.age += dt;
             if b.age >= b.life {
                 continue;
@@ -1126,7 +1137,9 @@ impl Fluid {
                     let n = d / dist;
                     let push = (reach - dist) * 0.5;
                     self.positions[i] += n * push;
-                    self.velocities[i] += n * (push / dt * 0.2);
+                    let dv = n * (push / dt * 0.2);
+                    self.velocities[i] += dv;
+                    liquid_momentum += dv * self.mass;
                     b.position -= n * (push * 0.05);
                 }
             }
@@ -1145,7 +1158,9 @@ impl Fluid {
                         continue;
                     }
                     let falloff = 1.0 - dist / reach;
-                    self.velocities[i] += (d / dist) * (accel * falloff * dt);
+                    let dv = (d / dist) * (accel * falloff * dt);
+                    self.velocities[i] += dv;
+                    liquid_momentum += dv * self.mass;
                 }
             }
             // 尾流：气泡上方锥形区域内的液体被向上拖，气泡受到很小的反作用。
@@ -1166,8 +1181,15 @@ impl Fluid {
                         (1.0 - d.y / reach_y).max(0.0) * (1.0 - horizontal / reach_xz).max(0.0);
                     let dv = wake * b.velocity.y * weight * dt * 2.0;
                     self.velocities[i].y += dv;
+                    liquid_momentum.y += dv * self.mass;
                     b.velocity.y -= dv * 0.01;
                 }
+            }
+            if momentum_coupling > 0.0 && liquid_momentum.length_squared() > 0.0 {
+                let volume = 4.0 / 3.0 * std::f32::consts::PI * b.radius.max(0.005).powi(3);
+                let added_mass = (0.5 * self.desc.rest_density.max(1.0) * volume).max(1e-6);
+                let recoil = liquid_momentum * (momentum_coupling / added_mass);
+                b.velocity = (b.velocity - recoil).clamp_length(10.0);
             }
             if b.position.y > surface + b.radius {
                 // 到达液面：气泡破裂消失，并在液面留下一颗**被动泡沫**。
@@ -1847,6 +1869,56 @@ mod tests {
             "压力速度必须有限：{on_speed}"
         );
         assert!(off_speed.is_finite());
+    }
+
+    #[test]
+    fn bubble_momentum_recoil_reduces_injected_liquid_momentum() {
+        fn added_mass(fluid: &Fluid, radius: f32) -> f32 {
+            let volume = 4.0 / 3.0 * std::f32::consts::PI * radius.powi(3);
+            0.5 * fluid.desc.rest_density.max(1.0) * volume
+        }
+        fn run(coupling: f32) -> (f32, f32, Vec3) {
+            let mut fluid = Fluid::new(box_desc()).unwrap();
+            fluid.desc.bubble_buoyancy = 0.0;
+            fluid.desc.bubble_drag = 0.0;
+            fluid.desc.viscosity = 0.0;
+            fluid.desc.bubble_pressure = 1000.0;
+            fluid.desc.bubble_momentum_coupling = coupling;
+            fluid.add_bubble(Bubble {
+                position: Vec3::new(0.0, 1.0, 0.0),
+                velocity: Vec3::ZERO,
+                radius: 0.18,
+                rest_radius: 0.18,
+                age: 0.0,
+                life: 10.0,
+            });
+            let mut bodies = [];
+            fluid.step(&mut bodies, Vec3::ZERO, 1.0 / 60.0);
+            let liquid: Vec3 = fluid
+                .velocities
+                .iter()
+                .fold(Vec3::ZERO, |sum, v| sum + *v * fluid.mass);
+            let bubble = fluid.bubbles()[0];
+            let gas = added_mass(&fluid, bubble.radius);
+            let total = liquid + bubble.velocity * gas;
+            (liquid.length(), total.length(), bubble.velocity)
+        }
+        let (off_liquid, off_total, _) = run(0.0);
+        let (on_liquid, on_total, on_velocity) = run(1.0);
+        assert!(off_liquid > 0.0, "过压必须真的把动量注入液体");
+        assert!(
+            on_total < off_total * 0.98,
+            "反冲应让液体+气泡的总动量更接近守恒：关 {off_total}，开 {on_total}"
+        );
+        assert!(
+            on_velocity.is_finite() && on_velocity.length() <= 10.0,
+            "反冲不能让气泡速度发散：{on_velocity:?}"
+        );
+        // 液体本身的动量也应被反冲抽走一部分，而不是只改气泡。
+        assert!(
+            on_liquid <= off_liquid,
+            "开反冲后液体动量不应增加：关 {off_liquid}，开 {on_liquid}"
+        );
     }
 
     #[test]
