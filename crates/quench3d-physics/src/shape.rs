@@ -128,6 +128,70 @@ fn box_inertia(mass: f32, he: Vec3) -> Vec3 {
     )
 }
 
+/// 圆锥（本地 Y 轴，底面 `-h`、顶点 `+h`）的精确最近表面点。
+///
+/// 表面只有两块：底面圆盘与侧面圆锥。侧面在 `(rho, y)` 半平面里是一条线段，
+/// 把点投影到线段即得最近点；再和底面候选比距离。法线直接取对应面的外法线，
+/// 不用 AABB 近似。
+fn cone_surface(p: Vec3, half_height: f32, radius: f32) -> Option<(Vec3, Vec3)> {
+    let h = half_height.abs();
+    let r = radius.abs();
+    if !p.is_finite() || h < 1e-6 || r < 1e-6 {
+        return None;
+    }
+    let rho = (p.x * p.x + p.z * p.z).sqrt();
+    let u = if rho > 1e-6 {
+        Vec3::new(p.x / rho, 0.0, p.z / rho)
+    } else {
+        Vec3::X
+    };
+    let mut best: Option<(f32, Vec3, Vec3)> = None;
+    let mut consider = |q: Vec3, n: Vec3| {
+        if !q.is_finite() || !n.is_finite() {
+            return;
+        }
+        let d2 = (p - q).length_squared();
+        if d2.is_finite() && best.is_none_or(|(b2, _, _)| d2 < b2) {
+            best = Some((d2, q, n.normalize_or_zero()));
+        }
+    };
+
+    // 底面圆盘（含边缘）。在盘内法线是 -Y；在盘外最近点是边缘，法线朝外。
+    if rho <= r {
+        consider(vec3(p.x, -h, p.z), Vec3::NEG_Y);
+    } else {
+        let q = vec3(u.x * r, -h, u.z * r);
+        let n = if (p - q).length_squared() > 1e-12 {
+            (p - q).normalize()
+        } else {
+            Vec3::NEG_Y
+        };
+        consider(q, n);
+    }
+
+    // 侧面：底面边缘 (r,-h) → 顶点 (0,h) 的线段。
+    let denom = r * r + 4.0 * h * h;
+    if denom > 1e-12 {
+        let t = (((rho - r) * -r + (p.y + h) * (2.0 * h)) / denom).clamp(0.0, 1.0);
+        let q_rho = r * (1.0 - t);
+        let q_y = -h + 2.0 * h * t;
+        let q = vec3(u.x * q_rho, q_y, u.z * q_rho);
+        let a = r / (2.0 * h);
+        let mut n = vec3(u.x, a, u.z).normalize_or_zero();
+        // 顶点处侧面法线退化（径向方向任取），改用从顶点指向点的方向。
+        if q_rho < 1e-5 {
+            let d = p - q;
+            n = if d.length_squared() > 1e-12 {
+                d.normalize()
+            } else {
+                Vec3::Y
+            };
+        }
+        consider(q, n);
+    }
+    best.map(|(_, q, n)| (q, n))
+}
+
 /// 凸包的**精确**最近表面点：GJK 求外部最近点，EPA 求内部推到最近面的方向。
 ///
 /// 旧实现直接拿 AABB 当凸包（点 (0.8,0.8,0.8) 在四面格外、却在 AABB 内，
@@ -224,8 +288,8 @@ impl Shape {
     ///
     /// 流体粒子碰撞用：`p` 可以在形状外（返回最近表面点，法线朝外），
     /// 也可以在形状内（返回把点推出去的方向）。`Plane` 返回投影点与平面法线。
-    /// `TriMesh` 走逐三角形最近点（薄壳也能挡粒子）；凸包用 GJK/EPA 求**精确**
-    /// 最近表面（不再按 AABB 近似）；圆锥仍按 AABB 近似（已知边界）。
+    /// `TriMesh` 走逐三角形最近点（薄壳也能挡粒子）；凸包用 GJK/EPA，圆锥用
+    /// 底面圆盘 + 侧面线段投影，都是**精确**最近表面（不再按 AABB 近似）。
     pub fn closest_surface(&self, p: Vec3) -> Option<(Vec3, Vec3)> {
         if !p.is_finite() {
             return None;
@@ -317,7 +381,13 @@ impl Shape {
                 box_surface(p - local.center(), local.half_extents())
                     .map(|(q, n)| (q + local.center(), n))
             }
-            Shape::Cone { .. } => {
+            Shape::Cone {
+                half_height,
+                radius,
+            } => {
+                if let Some(hit) = cone_surface(p, *half_height, *radius) {
+                    return Some(hit);
+                }
                 let local = self.local_aabb();
                 if !local.is_valid() {
                     return None;
@@ -1402,6 +1472,43 @@ mod tests {
             n2.dot(vec3(1.0, 1.0, 1.0)) > 0.99,
             "远点法线应朝外，实际 {n2:?}"
         );
+    }
+
+    #[test]
+    fn cone_closest_surface_is_the_side_not_the_aabb() {
+        // 圆锥 h=1, r=1：y=0 处半径 0.5。点 (3,0,0) 的最近侧面点是 (0.5,0,0)，
+        // 法线 (1,0.5,0)/√1.25；AABB 近似会错误地给 (1,0,0)。
+        let c = Shape::Cone {
+            half_height: 1.0,
+            radius: 1.0,
+        };
+        // (3,0,0) 的最近点其实是底圆边缘 (1,-1,0)；AABB 会错误地给 (1,0,0)。
+        let (q, _) = c.closest_surface(vec3(3.0, 0.0, 0.0)).unwrap();
+        assert!((q - vec3(1.0, -1.0, 0.0)).length() < 0.02, "{q:?}");
+
+        // 抬高到 y=0.5 后侧面更近：投影到侧面线段得到 (0.8,-0.6,0)。
+        let (q, n) = c.closest_surface(vec3(3.0, 0.5, 0.0)).unwrap();
+        assert!((q - vec3(0.8, -0.6, 0.0)).length() < 0.03, "{q:?}");
+        assert!(
+            (n - vec3(1.0, 0.5, 0.0).normalize()).length() < 0.03,
+            "{n:?}"
+        );
+
+        // 内部点也在侧面，而不是 AABB 的 +X 面。
+        let (q, _) = c.closest_surface(vec3(0.2, 0.0, 0.0)).unwrap();
+        assert!((q - vec3(0.44, 0.12, 0.0)).length() < 0.03, "{q:?}");
+
+        // 顶点上方 → 顶点；底面下方 → 底面中心。
+        let (q, n) = c.closest_surface(vec3(0.0, 3.0, 0.0)).unwrap();
+        assert!((q - Vec3::Y).length() < 1e-5, "{q:?}");
+        assert!(n.y > 0.99, "{n:?}");
+        let (q, n) = c.closest_surface(vec3(0.0, -3.0, 0.0)).unwrap();
+        assert!((q + Vec3::Y).length() < 1e-5, "{q:?}");
+        assert!(n.y < -0.99, "{n:?}");
+
+        // 底面边缘外侧：最近点在底圆边缘 (−h 平面、半径 1)。
+        let (q, _) = c.closest_surface(vec3(2.0, -2.0, 0.0)).unwrap();
+        assert!((q - vec3(1.0, -1.0, 0.0)).length() < 0.02, "{q:?}");
     }
 
     #[test]

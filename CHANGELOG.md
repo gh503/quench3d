@@ -89,6 +89,9 @@
   extensible）、多源混音/线性重采样/循环、3D 距离衰减与等功率声像，`Engine::audio`
   直接可用；无设备单测覆盖解码、往返、声像、衰减、循环、pitch 与 NaN/clamp。
   **没有内置设备输出**：宿主把 `mix` 的缓冲交给 cpal/WebAudio。
+- **圆锥精确流体碰撞**：`Shape::closest_surface` 的圆锥分支改为底面圆盘候选 +
+  侧面线段投影，法线取对应面外法线；不再用 AABB。补侧面/底面/顶点/边缘与
+  粒子沿锥面滑落测试。
 - **凸包精确流体碰撞**：`Shape::closest_surface` 的凸包分支改用 GJK（外部最近点）
   与 EPA（内部推出方向），不再把凸包当 AABB；补四面体 AABB 内/外点与流体穿过
   AABB 角落的测试。圆锥仍 AABB。

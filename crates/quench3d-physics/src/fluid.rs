@@ -6,8 +6,8 @@
 //! * **双向耦合（M3）**：刚体是流体的边界，流体会被刚体推开；粒子撞到**动态**刚体时
 //!   把法向冲量按动量守恒反推给刚体（静态刚体只挡粒子，不会动）。
 //! * **边界**：对所有非传感器刚体做最近表面投影（球/盒/胶囊/圆柱/圆锥/圆角盒/半空间），
-//!   `TriMesh` 逐三角形最近点；凸包用 GJK/EPA 精确最近表面；圆锥仍按 AABB 近似
-//!   （见 [`crate::Shape::closest_surface`]）。
+//!   `TriMesh` 逐三角形最近点；凸包用 GJK/EPA，圆锥用底面圆盘 + 侧面线段投影，
+//!   都是精确最近表面（见 [`crate::Shape::closest_surface`]）。
 //! * 没有表面张力、涡量约束、粘性应力张量；粘性用 XSPH 近似。
 
 use core::f32::consts::PI;
@@ -1094,6 +1094,39 @@ mod tests {
         }
         assert_eq!(f.particles().len(), g.particles().len());
         assert_eq!(f.particles(), g.particles());
+    }
+
+    #[test]
+    fn particles_slide_down_a_cone_side_not_its_aabb_top() {
+        // 圆锥 h=1,r=1：x=0.8 处侧面在 y≈-0.6，而 AABB 顶面在 y=1。
+        // 旧 AABB 近似会把粒子托在 y≈1；精确侧面应让它们沿锥面滑下。
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(vec3(0.0, -1.2, 0.0)),
+        );
+        world.add_builder(BodyBuilder::r#static(Shape::Cone {
+            half_height: 1.0,
+            radius: 1.0,
+        }));
+        world.add_fluid(FluidDesc {
+            center: vec3(0.8, 2.0, 0.0),
+            half_extents: vec3(0.1, 0.1, 0.1),
+            spacing: 0.1,
+            radius: 0.05,
+            max_particles: 64,
+            ..FluidDesc::default()
+        });
+        for _ in 0..180 {
+            world.step(1.0 / 60.0);
+        }
+        let s = world.fluids()[0].stats();
+        assert!(
+            s.min_y < 0.0,
+            "粒子应沿锥面滑到 y<0，实际 min_y={}（AABB 会托在 1.0 附近）",
+            s.min_y
+        );
+        assert!(s.max_speed < 4.0, "max_speed={}", s.max_speed);
     }
 
     #[test]

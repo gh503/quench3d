@@ -1127,7 +1127,7 @@ NaN 刚体  : 0
   四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：
   `quench3d render examples/particles_showcase.json --out particles.png`。
   `TriMesh` 静态网格对粒子做**逐三角形最近点**碰撞（薄壳不会漏）；凸包用
-  GJK/EPA 求精确最近表面（不再拿 AABB 当凸包），圆锥仍用 AABB 近似。
+  GJK/EPA、圆锥用底面圆盘 + 侧面线段投影求精确最近表面（都不再拿 AABB 近似）。
   粒子**渲染**（M4）：每颗粒子画成低模球（8×6），速度越快颜色越偏青白。`surface_mesh =
   true` 时不再重复画这些球，而是用 **Surface Nets** 从粒子标量场提取连续自由表面
   （真实三角形、顶点法线来自场梯度、拓扑每帧可整体替换）；`surface_resolution`
