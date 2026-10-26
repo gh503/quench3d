@@ -1196,7 +1196,8 @@ NaN 刚体  : 0
   `bubble_drag`（缺省 2）、`bubble_expansion`（缺省 0 = 半径不变；>0 时按指数
   长大并封顶到初始半径 4 倍，模拟上升减压；`bubble_compressibility > 0` 时按
   `pV≈const` 让深处气泡收缩，到浅处恢复；`bubble_max_radius > 0` 时超过上限的
-  气泡按体积守恒破碎成多颗）。CLI 把气泡画成低模球，`simulate` 报告 `bubbles` 计数
+  气泡按体积守恒破碎成多颗；`bubble_wake > 0` 时上浮气泡把上方液体向上拖成
+  尾流）。CLI 把气泡画成低模球，`simulate` 报告 `bubbles` 计数
   （0 时省略）。局部气体体积分数还会折算进刚体浮力：气泡占据的体积不再排开液体，
   浮力密度乘以 `1 - gas_fraction`（上限 0.9），所以曝气的水托不住同样的重物。
   气泡默认也参与 PBF 密度约束（`bubble_density_coupling`，缺省 true）：局部气体

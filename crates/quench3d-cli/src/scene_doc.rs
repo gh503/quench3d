@@ -1216,6 +1216,9 @@ pub struct FluidDoc {
     /// 气泡破碎半径上限（米），缺省 0 = 不破碎。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_max_radius: Option<f32>,
+    /// 气泡尾流强度（0~2），缺省 0 = 关闭。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_wake: Option<f32>,
     /// 气泡是否参与 PBF 密度约束，缺省 true；关闭后只保留径向排开。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_density_coupling: Option<bool>,
@@ -4462,6 +4465,15 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.bubble_max_radius"),
                         "气泡破碎半径必须在 0~1 米之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.bubble_wake {
+                if !(v.is_finite() && (0.0..=2.0).contains(&v)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.bubble_wake"),
+                        "气泡尾流强度必须在 0~2 之间",
                     ));
                 }
             }
@@ -9132,7 +9144,7 @@ mod tests {
                   "bubble_radius": 0.04, "bubble_buoyancy": 2.0,
                   "bubble_drag": 1.5, "bubble_expansion": 0.7,
                   "bubble_compressibility": 1.5, "bubble_max_radius": 0.25,
-                  "bubble_density_coupling": false }
+                  "bubble_wake": 0.8, "bubble_density_coupling": false }
             ]
         }))
         .expect("fluids 要能解析");
@@ -9159,6 +9171,7 @@ mod tests {
         assert_eq!(again.fluids[1].bubble_expansion, Some(0.7));
         assert_eq!(again.fluids[1].bubble_compressibility, Some(1.5));
         assert_eq!(again.fluids[1].bubble_max_radius, Some(0.25));
+        assert_eq!(again.fluids[1].bubble_wake, Some(0.8));
         assert_eq!(again.fluids[1].bubble_density_coupling, Some(false));
 
         for (fluid, path) in [

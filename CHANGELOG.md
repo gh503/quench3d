@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+- **气泡尾流**：新增 `FluidDesc::bubble_wake`（0~2，缺省 0 = 关闭）。上浮气泡
+  在半径 3r、横向 1.5r 的锥形尾流内给液体向上速度，并按小比例扣减气泡速度；
+  回归 `rising_bubbles_drag_a_liquid_wake_upward`（开/关平均向上速度对照）。
+  CLI 字段 `bubble_wake` 已接线并做 0~2 校验；缺省 0 时旧路径逐位不变。
+
 - **固定步长渲染插值**：`RigidBody` 记录上一子步位姿，
   `PhysicsWorld::body_interpolated_transform` 按 alpha 做位置 lerp / 旋转 slerp；
   `Engine::render_interpolation`（缺省关）在 `tick` 中用累加器 alpha 同步场景，

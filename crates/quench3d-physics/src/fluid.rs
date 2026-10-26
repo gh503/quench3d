@@ -119,6 +119,9 @@ pub struct FluidDesc {
     /// 气泡破碎半径上限（米，0 = 关闭）。大于它的气泡按体积守恒拆成多颗；
     /// 受 `max_bubbles` 限制，放不下时保留原气泡。缺省 0，旧路径逐位不变。
     pub bubble_max_radius: f32,
+    /// 气泡尾流强度（0~2，缺省 0 = 关闭）：上浮气泡把上方液体向上拖，
+    /// 形成羽流；关闭时完全走旧路径。
+    pub bubble_wake: f32,
     /// 静水压压缩系数（1/m，0 = 不压缩）。深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)`
     /// 收缩，近似 `pV = const`；缺省 0，旧路径逐位不变。
     pub bubble_compressibility: f32,
@@ -165,6 +168,7 @@ impl Default for FluidDesc {
             bubble_drag: 2.0,
             bubble_expansion: 0.0,
             bubble_max_radius: 0.0,
+            bubble_wake: 0.0,
             bubble_compressibility: 0.0,
             bubble_density_coupling: true,
         }
@@ -1032,6 +1036,7 @@ impl Fluid {
         let buoyancy = self.desc.bubble_buoyancy.max(0.0);
         let drag = self.desc.bubble_drag.max(0.0);
         let expansion = self.desc.bubble_expansion.max(0.0);
+        let wake = self.desc.bubble_wake.max(0.0);
         let max_bubble_radius = self.desc.bubble_radius.max(0.005) * 4.0;
         let particle_radius = self.desc.radius.max(0.0);
         let foam_enabled = self.desc.foam;
@@ -1113,6 +1118,27 @@ impl Fluid {
                     self.positions[i] += n * push;
                     self.velocities[i] += n * (push / dt * 0.2);
                     b.position -= n * (push * 0.05);
+                }
+            }
+            // 尾流：气泡上方锥形区域内的液体被向上拖，气泡受到很小的反作用。
+            // 这是两相动量耦合的近似，不改变 `bubble_wake = 0` 的旧路径。
+            if wake > 0.0 && b.velocity.y > 0.0 && !self.positions.is_empty() {
+                let reach_y = b.radius * 3.0;
+                let reach_xz = b.radius * 1.5;
+                for i in 0..self.positions.len() {
+                    let d = self.positions[i] - b.position;
+                    if d.y <= 0.0 || d.y >= reach_y {
+                        continue;
+                    }
+                    let horizontal = (d.x * d.x + d.z * d.z).sqrt();
+                    if horizontal >= reach_xz {
+                        continue;
+                    }
+                    let weight =
+                        (1.0 - d.y / reach_y).max(0.0) * (1.0 - horizontal / reach_xz).max(0.0);
+                    let dv = wake * b.velocity.y * weight * dt * 2.0;
+                    self.velocities[i].y += dv;
+                    b.velocity.y -= dv * 0.01;
                 }
             }
             if b.position.y > surface + b.radius {
@@ -1920,6 +1946,39 @@ mod tests {
         assert!(
             (after - before).abs() <= before * 0.02,
             "破碎必须守恒气体体积：before={before:.5}, after={after:.5}"
+        );
+    }
+
+    #[test]
+    fn rising_bubbles_drag_a_liquid_wake_upward() {
+        let mut off = Fluid::new(box_desc()).unwrap();
+        let mut on = Fluid::new(box_desc()).unwrap();
+        off.desc.bubble_wake = 0.0;
+        on.desc.bubble_wake = 1.0;
+        for f in [&mut off, &mut on] {
+            f.desc.bubble_buoyancy = 0.0;
+            f.desc.bubble_drag = 0.0;
+            f.desc.viscosity = 0.0;
+            f.add_bubble(Bubble {
+                position: Vec3::new(0.0, 0.75, 0.0),
+                velocity: Vec3::new(0.0, 0.5, 0.0),
+                radius: 0.12,
+                rest_radius: 0.12,
+                age: 0.0,
+                life: 10.0,
+            });
+        }
+        let mut bodies = [];
+        for _ in 0..3 {
+            off.step(&mut bodies, Vec3::new(0.0, -9.81, 0.0), 1.0 / 60.0);
+            on.step(&mut bodies, Vec3::new(0.0, -9.81, 0.0), 1.0 / 60.0);
+        }
+        let mean_vy =
+            |f: &Fluid| f.velocities.iter().map(|v| v.y).sum::<f32>() / f.velocities.len() as f32;
+        let (off_vy, on_vy) = (mean_vy(&off), mean_vy(&on));
+        assert!(
+            on_vy > off_vy + 1e-4,
+            "上浮气泡应向上拖动尾流：off={off_vy:.6}, on={on_vy:.6}"
         );
     }
 

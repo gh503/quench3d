@@ -2175,6 +2175,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             bubble_expansion: f.bubble_expansion.unwrap_or(0.0),
             bubble_compressibility: f.bubble_compressibility.unwrap_or(0.0),
             bubble_max_radius: f.bubble_max_radius.unwrap_or(0.0),
+            bubble_wake: f.bubble_wake.unwrap_or(0.0),
             bubble_density_coupling: f.bubble_density_coupling.unwrap_or(true),
             ..quench3d::physics::FluidDesc::default()
         };
