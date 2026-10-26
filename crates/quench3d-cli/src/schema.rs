@@ -835,6 +835,7 @@ pub fn json_schema() -> Value {
             "surface_mesh",
             "surface_resolution",
             "foam",
+            "particle_collision",
             "contact_friction",
         ]);
         d["description"] = json!(
@@ -860,6 +861,7 @@ pub fn json_schema() -> Value {
         });
         d["properties"]["emit_spread"] = json!({ "type": "number", "minimum": 0 });
         d["properties"]["foam"] = json!({ "type": "boolean" });
+        d["properties"]["particle_collision"] = json!({ "type": "boolean" });
         d["properties"]["contact_friction"] = json!({ "type": "number", "minimum": 0, "maximum": 1 });
         d["properties"]["surface_mesh"] = json!({ "type": "boolean" });
         d["properties"]["surface_resolution"] =

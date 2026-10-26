@@ -2159,6 +2159,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             iterations: f.iterations,
             max_particles: f.max_particles,
             foam: f.foam,
+            particle_collision: f.particle_collision,
             contact_friction: f.contact_friction.unwrap_or(0.0),
             ..quench3d::physics::FluidDesc::default()
         };
@@ -6224,12 +6225,13 @@ mod tests {
     #[test]
     fn fluid_foam_is_wired_from_scene_doc() {
         let doc =
-            SceneDoc::from_json(r#"{ "fluids": [ { "size": [0.3, 0.3, 0.3], "foam": true, "contact_friction": 0.7 } ] }"#)
+            SceneDoc::from_json(r#"{ "fluids": [ { "size": [0.3, 0.3, 0.3], "foam": true, "particle_collision": true, "contact_friction": 0.7 } ] }"#)
                 .unwrap();
         let build = build_world(&doc).unwrap();
         assert!(build.world.fluids()[0].desc().foam);
         assert_eq!(build.world.fluids()[0].desc().max_foam, 256);
         assert_eq!(build.world.fluids()[0].desc().contact_friction, 0.7);
+        assert!(build.world.fluids()[0].desc().particle_collision);
 
         let plain =
             SceneDoc::from_json(r#"{ "fluids": [ { "size": [0.3, 0.3, 0.3] } ] }"#).unwrap();

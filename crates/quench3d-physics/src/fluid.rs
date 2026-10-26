@@ -83,6 +83,12 @@ pub struct FluidDesc {
     pub foam_rate: f32,
     /// 泡沫上限，缺省 256。
     pub max_foam: usize,
+    /// 粒子间最小分离（缺省 false = 只靠 PBF 密度约束，旧场景逐位不变）。
+    ///
+    /// 打开后，每步 PBF 位置迭代结束后把距离小于 `2 * radius` 的邻居沿连线推开
+    /// （各一半），再重新投影到刚体边界。PBF 本身已防止压缩，这一层额外保证
+    /// 自由表面/低迭代次数下粒子不会互相重叠；代价是每步一次邻居遍历。
+    pub particle_collision: bool,
     /// 流体-刚体接触摩擦系数（0~1，缺省 0 = 关闭，旧场景逐位不变）。
     ///
     /// 只作用于粒子碰到动态/静态刚体时的**切向**相对速度；法向冲量仍按原逻辑
@@ -115,6 +121,7 @@ impl Default for FluidDesc {
             foam_speed: 3.0,
             foam_rate: 120.0,
             max_foam: 256,
+            particle_collision: false,
             contact_friction: 0.0,
         }
     }
@@ -458,6 +465,42 @@ impl Fluid {
         }
     }
 
+    /// 粒子间最小分离：把距离小于 `2 * radius` 的邻居沿连线各推开一半。
+    ///
+    /// 邻居表固定在本步预测位置，这里只做一次确定性遍历；推开后重新投影到
+    /// 刚体边界，避免把粒子推进墙里。只在 `particle_collision` 打开时调用。
+    fn separate_particles(&mut self, radius: f32, bodies: &[BodySlot]) {
+        let min_dist = 2.0 * radius;
+        if min_dist <= 0.0 {
+            return;
+        }
+        let n = self.predicted.len();
+        let neighbors = &self.neighbors;
+        let predicted = &mut self.predicted;
+        for i in 0..n {
+            for &j in &neighbors[i] {
+                let j = j as usize;
+                if j <= i || j >= n {
+                    continue;
+                }
+                let delta = predicted[i] - predicted[j];
+                let dist = delta.length();
+                if !dist.is_finite() || dist >= min_dist {
+                    continue;
+                }
+                // 完全重合时给一个确定性的分离方向（X），避免 0/0。
+                let dir = if dist > 1e-6 { delta / dist } else { Vec3::X };
+                let push = (min_dist - dist) * 0.5;
+                predicted[i] += dir * push;
+                predicted[j] -= dir * push;
+            }
+        }
+        // 分离可能把粒子推进墙；重新投影一次（不做速度/摩擦）。
+        for p in &mut self.predicted {
+            *p = collide_position(*p, *p, bodies, radius).0;
+        }
+    }
+
     /// 推进一步（PBF：预测 → 密度约束 → 边界投影 → 速度更新 → XSPH 粘性）。
     fn step(&mut self, bodies: &mut [BodySlot], gravity: Vec3, dt: f32) {
         if !self.spawned {
@@ -567,6 +610,9 @@ impl Fluid {
                     self.contacts[i] = contact;
                 }
             }
+        }
+        if self.desc.particle_collision {
+            self.separate_particles(radius, &*bodies);
         }
         // 统计用的是**求解后**的密度（报告里"密度比"才有意义）。
         self.update_density_lambda(mass, rho0, h, h2, poly6, spiky, w0);
@@ -1344,6 +1390,39 @@ mod tests {
             s.min_y
         );
         assert!(s.max_speed < 4.0, "max_speed={}", s.max_speed);
+    }
+
+    #[test]
+    fn particle_collision_separates_overlapping_neighbors() {
+        fn run(collision: bool) -> f32 {
+            let desc = FluidDesc {
+                center: vec3(0.0, 1.0, 0.0),
+                half_extents: vec3(0.2, 0.2, 0.2),
+                spacing: 0.1,
+                radius: 0.05,
+                iterations: 1,
+                max_particles: 8,
+                particle_collision: collision,
+                ..FluidDesc::default()
+            };
+            let mut fluid = Fluid::new(desc).expect("参数合法");
+            // 只留两颗几乎重合的粒子，绕过晶格初始间距。
+            fluid.positions = vec![vec3(0.0, 1.0, 0.0), vec3(0.01, 1.0, 0.0)];
+            fluid.velocities = vec![Vec3::ZERO, Vec3::ZERO];
+            fluid.contacts = vec![None, None];
+            fluid.step(&mut [], Vec3::ZERO, 1.0 / 60.0);
+            (fluid.positions[0] - fluid.positions[1]).length()
+        }
+        let without = run(false);
+        let with = run(true);
+        assert!(
+            with >= 0.099,
+            "粒子碰撞应把两颗粒子推到直径以外：without={without}, with={with}"
+        );
+        assert!(
+            with > without,
+            "碰撞开关应比纯 PBF 更分离：without={without}, with={with}"
+        );
     }
 
     #[test]

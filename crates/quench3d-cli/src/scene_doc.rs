@@ -1183,6 +1183,9 @@ pub struct FluidDoc {
     /// 是否生成泡沫/飞沫（视觉白水），缺省 false = 完全不生成，旧场景逐位不变。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub foam: bool,
+    /// 粒子间最小分离（缺省 false = 只靠 PBF 密度约束）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub particle_collision: bool,
     /// 流体-刚体接触摩擦系数 0~1，缺省 0 = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_friction: Option<f32>,
@@ -9021,7 +9024,8 @@ mod tests {
                 { "center": [0, 2, 0], "size": [1, 1, 1] },
                 { "size": [2, 1, 1], "spacing": 0.2, "radius": 0.08,
                   "rest_density": 900, "viscosity": 0.1, "iterations": 6,
-                  "max_particles": 500, "contact_friction": 0.6 }
+                  "max_particles": 500, "contact_friction": 0.6,
+                  "particle_collision": true }
             ]
         }))
         .expect("fluids 要能解析");
@@ -9038,6 +9042,7 @@ mod tests {
         assert_eq!(again.fluids[1].radius, Some(0.08));
         assert_eq!(again.fluids[1].max_particles, 500);
         assert_eq!(again.fluids[1].contact_friction, Some(0.6));
+        assert!(again.fluids[1].particle_collision);
 
         for (fluid, path) in [
             (json!({"size": [0, 1, 1]}), "fluids[0].size"),
