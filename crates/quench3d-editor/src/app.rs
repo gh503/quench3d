@@ -350,6 +350,8 @@ impl Inner {
         engine.set_window(window.clone());
         // 相机由 EditorGame 接管；开箱先暂停，让人先看清场景再决定要不要跑。
         engine.auto_camera = false;
+        // 显示器刷新与固定物理步长不同步；编辑器默认插值，避免相机静止时物体顿挫。
+        engine.render_interpolation = true;
         engine.paused = true;
 
         let mut doc = Doc::new();

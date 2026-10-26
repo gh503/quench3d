@@ -236,6 +236,11 @@ pub struct Engine {
     pub time_scale: f32,
     /// 是否请求退出。
     pub should_exit: bool,
+    /// 是否用固定步长之间的插值位姿渲染刚体（默认 `false`，旧场景逐位不变）。
+    ///
+    /// 打开后固定物理步长与显示帧率不一致导致的周期性顿挫会平滑掉；只影响渲染，
+    /// 不写回物理。编辑器默认打开，`render_sequence` 的离屏路径不读它。
+    pub render_interpolation: bool,
     /// 是否由引擎自动把输入映射到相机（默认 `true`）。
     ///
     /// 编辑器这类应用要自己决定「这一下拖动是转相机还是拖物体」时，把它设成
@@ -277,6 +282,7 @@ impl Engine {
             paused: false,
             time_scale: 1.0,
             should_exit: false,
+            render_interpolation: false,
             auto_camera: true,
             audio: crate::audio::AudioMixer::new(48_000),
             stats: RenderStats::default(),
@@ -636,6 +642,7 @@ impl Engine {
         game.update(self, dt);
 
         // 固定步长逻辑（物理）：最多追赶 8 步，避免长时间卡顿后"炸开"。
+        let mut interpolation_alpha = 1.0f32;
         if !self.paused {
             let fixed = self.world.fixed_dt().clamp(1.0 / 1000.0, 1.0 / 10.0);
             self.accumulator += sim_dt;
@@ -645,14 +652,23 @@ impl Engine {
                 self.accumulator -= fixed;
                 steps += 1;
             }
-            if steps == 8 {
+            let clamped = steps == 8;
+            if clamped {
                 self.accumulator = 0.0;
+            }
+            if self.render_interpolation && self.time_scale != 0.0 && !clamped {
+                interpolation_alpha = (self.accumulator / fixed).clamp(0.0, 1.0);
             }
         }
 
         if self.scene.auto_sync_physics {
             let world = &self.world;
-            self.scene.sync_from_physics(world);
+            if self.render_interpolation {
+                self.scene
+                    .sync_from_physics_interpolated(world, interpolation_alpha);
+            } else {
+                self.scene.sync_from_physics(world);
+            }
             // 连续水面网格的拓扑每帧会变，必须整体替换（不是只改顶点）。
             self.scene
                 .refresh_fluid_surfaces(world, &mut self.renderer, &self.gpu);

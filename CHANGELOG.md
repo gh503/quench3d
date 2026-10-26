@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **固定步长渲染插值**：`RigidBody` 记录上一子步位姿，
+  `PhysicsWorld::body_interpolated_transform` 按 alpha 做位置 lerp / 旋转 slerp；
+  `Engine::render_interpolation`（缺省关）在 `tick` 中用累加器 alpha 同步场景，
+  编辑器默认打开。回归 `interpolated_transform_is_between_the_last_two_fixed_steps`、
+  `scene_can_render_interpolated_body_poses`。缺省关时旧渲染路径逐位不变；只插值
+  刚体，不插值粒子/泡沫/气泡/动画。
+
 - **气泡破碎**：新增 `FluidDesc::bubble_max_radius`（缺省 0 = 关闭）。超过上限的
   气泡按体积守恒拆成多颗，沿固定圆环排开，受 `max_bubbles` 限制；放不下时保留
   原气泡。回归 `large_bubbles_break_up_and_conserve_gas_volume`（体积变化 ≤2%）。

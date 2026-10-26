@@ -339,6 +339,8 @@ pub struct RigidBody {
     pub(crate) extra_parts: Vec<ShapePart>,
     /// 位姿（`position` 为形状本地原点在世界中的位置）。
     pub transform: Transform,
+    /// 上一个固定子步开始前的位姿，仅供渲染插值；不参与求解。
+    pub(crate) prev_transform: Transform,
     /// 线速度（质心速度）。
     pub linear_velocity: Vec3,
     /// 角速度。
@@ -1053,15 +1055,17 @@ impl BodyBuilder {
             ),
             _ => (0.0, Vec3::ZERO),
         };
+        let transform = Transform::new(
+            self.transform.position,
+            self.transform.rotation.normalize_or_identity(),
+            Vec3::ONE,
+        );
         RigidBody {
             body_type,
             shape: self.shape,
             extra_parts: self.extra_parts,
-            transform: Transform::new(
-                self.transform.position,
-                self.transform.rotation.normalize_or_identity(),
-                Vec3::ONE,
-            ),
+            transform,
+            prev_transform: transform,
             linear_velocity: self.linear_velocity.clamp_length(MAX_LINEAR_SPEED),
             angular_velocity: self.angular_velocity.clamp_length(MAX_ANGULAR_SPEED),
             restitution: self.restitution,

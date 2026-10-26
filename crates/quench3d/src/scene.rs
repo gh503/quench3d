@@ -2611,7 +2611,17 @@ impl Scene {
     }
 
     /// 从物理世界同步所有已绑定物体的位姿（保留缩放）。
+    ///
+    /// 等价于 `sync_from_physics_interpolated(world, 1.0)`，逐位走当前位姿。
     pub fn sync_from_physics(&mut self, world: &PhysicsWorld) {
+        self.sync_from_physics_interpolated(world, 1.0);
+    }
+
+    /// 从物理世界同步位姿，刚体按 `alpha` 在上一固定子步与当前位姿之间插值。
+    ///
+    /// `alpha = 1.0` 时直接取当前位姿，和老 [`Self::sync_from_physics`] 逐位相同；
+    /// 泡沫/粒子/水面仍用当前值，不做插值。
+    pub fn sync_from_physics_interpolated(&mut self, world: &PhysicsWorld, alpha: f32) {
         for obj in &mut self.objects {
             // 带刚体的物体必然是根（`set_parent` 拒绝给带刚体的物体挂父物体），
             // 所以它的局部变换就是世界变换，直接写没问题。
@@ -2700,7 +2710,13 @@ impl Scene {
             if let Some(handle) = obj.body {
                 if let Some(body) = world.body(handle) {
                     let scale = obj.transform.scale;
-                    obj.transform = body.transform();
+                    obj.transform = if alpha >= 1.0 {
+                        body.transform()
+                    } else {
+                        world
+                            .body_interpolated_transform(handle, alpha)
+                            .unwrap_or_else(|| body.transform())
+                    };
                     obj.transform.scale = scale;
                 }
             }
@@ -3467,6 +3483,31 @@ mod tests {
         assert!(scene.objects[index].visible, "有气泡时应显示");
         assert_eq!(scene.objects[index].transform.position, bubble.position);
         assert!(!scene.objects[index].cast_shadows);
+    }
+
+    #[test]
+    fn scene_can_render_interpolated_body_poses() {
+        use quench3d_physics::{BodyBuilder, Shape};
+
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(0.1);
+        let handle = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::new(0.0, 10.0, 0.0))
+                .linear_velocity(Vec3::new(0.0, 10.0, 0.0))
+                .gravity_scale(0.0),
+        );
+        world.step(0.1);
+        let mut scene = Scene::new();
+        let index = scene.add_with_body(1u32, 1u32, handle, &world, "小球");
+        scene.sync_from_physics_interpolated(&world, 0.5);
+        assert!((scene.objects[index].transform.position.y - 10.5).abs() < 1e-5);
+        // alpha=1 的旧路径仍取当前位姿，逐位不变。
+        scene.sync_from_physics(&world);
+        assert_eq!(
+            scene.objects[index].transform.position,
+            world.body(handle).unwrap().transform().position
+        );
     }
 
     #[test]

@@ -716,6 +716,27 @@ impl PhysicsWorld {
         slot.body.as_ref()
     }
 
+    /// 最近一个固定子步开始前到当前的插值位姿。
+    ///
+    /// `alpha = 0` 返回上一子步开始前的位姿，`alpha = 1` 返回当前位姿；
+    /// 位置线性插值、旋转 `slerp`。只用于渲染，不写回物理状态；缩放保留当前值。
+    /// 不做这一步时，固定步长与显示帧率不一致会出现周期性顿挫。
+    pub fn body_interpolated_transform(&self, handle: BodyHandle, alpha: f32) -> Option<Transform> {
+        let body = self.body(handle)?;
+        let alpha = if alpha.is_finite() {
+            alpha.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let prev = body.prev_transform;
+        let cur = body.transform;
+        Some(Transform {
+            position: prev.position.lerp(cur.position, alpha),
+            rotation: prev.rotation.slerp(cur.rotation, alpha),
+            scale: cur.scale,
+        })
+    }
+
     /// 唤醒**所有**刚体，返回其中原本睡着的个数。
     ///
     /// 用途：整场景被搬动过（批量设置位姿 / 从快照恢复 / 编辑器里拖了一批物体）之后，
@@ -1494,6 +1515,12 @@ impl PhysicsWorld {
     fn substep(&mut self, dt: f32) {
         if dt <= 0.0 || !dt.is_finite() {
             return;
+        }
+        // 渲染插值用：这一子步开始前的位姿。只复制，不参与求解，旧数值路径不变。
+        for slot in &mut self.bodies {
+            if let Some(body) = slot.body.as_mut() {
+                body.prev_transform = body.transform;
+            }
         }
         // 阶段计时（默认关闭：关着的时候连一次取时钟都不会调用）
         let mut lap_at = if self.phase_timing {
@@ -3495,6 +3522,26 @@ mod tests {
         // 删除刚体后不返回悬空关节。
         w.remove_body(b);
         assert!(w.joint_visuals().is_empty());
+    }
+
+    #[test]
+    fn interpolated_transform_is_between_the_last_two_fixed_steps() {
+        let mut w = PhysicsWorld::new();
+        w.set_fixed_dt(0.1);
+        let handle = w.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::new(0.0, 10.0, 0.0))
+                .linear_velocity(Vec3::new(0.0, 10.0, 0.0))
+                .gravity_scale(0.0),
+        );
+        w.step(0.1);
+        assert!((w.body(handle).unwrap().transform.position.y - 11.0).abs() < 1e-5);
+        let start = w.body_interpolated_transform(handle, 0.0).unwrap();
+        let mid = w.body_interpolated_transform(handle, 0.5).unwrap();
+        let end = w.body_interpolated_transform(handle, 1.0).unwrap();
+        assert!((start.position.y - 10.0).abs() < 1e-5, "{start:?}");
+        assert!((mid.position.y - 10.5).abs() < 1e-5, "{mid:?}");
+        assert!((end.position.y - 11.0).abs() < 1e-5, "{end:?}");
     }
 
     #[test]

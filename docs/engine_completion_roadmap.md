@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**1015 通过 / 0 失败 / 5 ignored**
-- wasm：**13,877,328 字节**
+- 测试：**1017 通过 / 0 失败 / 5 ignored**
+- wasm：**13,878,564 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -261,6 +261,12 @@
   - [x] `Engine::time_scale`（0–4，缺省 1）：实时物理/动画/粒子/仿真时长按缩放，
     FPS 与相机手感不缩放；编辑器有拖动条与 0.25×/0.5×/1×/2× 菜单。回归
     `time_scale_scales_physics_and_engine_time_but_not_fps`。
+  - [x] 固定步长渲染插值：`PhysicsWorld::body_interpolated_transform` 保存上一
+    子步位姿，`Engine::render_interpolation`（缺省关）按累加器 alpha 插值，
+    `Scene::sync_from_physics_interpolated`；编辑器默认开。回归
+    `interpolated_transform_is_between_the_last_two_fixed_steps` 与
+    `scene_can_render_interpolated_body_poses`；alpha=1/缺省关仍走旧位姿路径。
+    边界：只插值刚体位姿，不插值流体粒子/泡沫/气泡/动画。
 - [ ] 音频/输入/脚本在桌面与 Web 两端可达；移动端触屏。
 - [ ] UI/文字系统或明确稳定的宿主接口（HUD 不靠第三方示例）。
 
