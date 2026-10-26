@@ -1111,7 +1111,8 @@ NaN 刚体  : 0
   "velocity": [0,0,0], "drain_y": -2.0,
   "emit_rate": 0, "emit_position": [0,1,0], "emit_radius": 0.1,
   "emit_velocity": [0,1,0], "emit_spread": 0.0, "drag": 6, "iterations": 4,
-  "max_particles": 4000, "foam": false, "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
+  "max_particles": 4000, "foam": false, "contact_friction": 0,
+  "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
   粒子质量按晶格静止密度校准（不是随便取 1），所以静止时密度比≈1；`simulate` 报告
@@ -1125,6 +1126,8 @@ NaN 刚体  : 0
   `foam = true`（缺省 false）从高速粒子甩出**被动泡沫/飞沫**：每颗有寿命、重力/阻尼，
   最多 256 颗，渲染成小白球；它不参与 PBF 密度，也不与刚体碰撞，只是视觉白水。
   `simulate --json` 的 `fluids[]` 会多一个 `foam` 计数（0 时省略）。
+  `contact_friction`（0~1，缺省 0 = 关闭）给粒子与刚体接触加切向库仑摩擦：
+  水会拖着动态刚体走，也会被静态地面拖慢；静置接触用重力法向支持力近似载荷。
   **边界**：表面张力不是曲率/真实 mN/m 模型，涡量是视觉/稳定性约束；泡沫是单相
   视觉白水（不是气泡/两相流）；没有粒子间碰撞，敞开的平地上水仍会摊成薄层（这是"液体在无限平面上的解"，不是穿地）；想看"一池水"请用四堵静态墙围起来（`examples/fluid_pool.json`）。
   四种粒子形状/拖尾/自转/颜色渐变的完整场景见 `examples/particles_showcase.json`：

@@ -835,9 +835,10 @@ pub fn json_schema() -> Value {
             "surface_mesh",
             "surface_resolution",
             "foam",
+            "contact_friction",
         ]);
         d["description"] = json!(
-            "一个 CPU PBF 粒子流体：长方体发射器 + 粒子参数；粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；可选泡沫/飞沫（视觉白水）与 Surface Nets 连续自由表面"
+            "一个 CPU PBF 粒子流体：长方体发射器 + 粒子参数；粒子与动态刚体双向耦合（冲量 + 浮力/阻尼）；可选泡沫/飞沫（视觉白水）、接触摩擦与 Surface Nets 连续自由表面"
         );
         for name in ["surface_tension", "vorticity"] {
             d["properties"][name] = json!({ "type": "number", "minimum": 0, "maximum": 5 });
@@ -859,6 +860,7 @@ pub fn json_schema() -> Value {
         });
         d["properties"]["emit_spread"] = json!({ "type": "number", "minimum": 0 });
         d["properties"]["foam"] = json!({ "type": "boolean" });
+        d["properties"]["contact_friction"] = json!({ "type": "number", "minimum": 0, "maximum": 1 });
         d["properties"]["surface_mesh"] = json!({ "type": "boolean" });
         d["properties"]["surface_resolution"] =
             json!({ "type": "integer", "minimum": 8, "maximum": 96 });

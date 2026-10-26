@@ -1183,6 +1183,9 @@ pub struct FluidDoc {
     /// 是否生成泡沫/飞沫（视觉白水），缺省 false = 完全不生成，旧场景逐位不变。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub foam: bool,
+    /// 流体-刚体接触摩擦系数 0~1，缺省 0 = 关闭。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_friction: Option<f32>,
     /// 是否把粒子提取成**连续自由表面**（Surface Nets），缺省 false = 抬高的平面。
     ///
     /// 打开后每帧按粒子重建网格；比平面慢，但能看到真正的液滴/水花轮廓。
@@ -4347,6 +4350,15 @@ impl SceneDoc {
                     format!("{p}.rest_density"),
                     "静止密度必须是有限正数（水 = 1000）",
                 ));
+            }
+            if let Some(mu) = f.contact_friction {
+                if !(mu.is_finite() && (0.0..=1.0).contains(&mu)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.contact_friction"),
+                        "接触摩擦必须在 0~1 之间",
+                    ));
+                }
             }
             if !(f.viscosity.is_finite() && (0.0..=1.0).contains(&f.viscosity)) {
                 cam_diags.push(Diagnostic::error_code(
@@ -9009,7 +9021,7 @@ mod tests {
                 { "center": [0, 2, 0], "size": [1, 1, 1] },
                 { "size": [2, 1, 1], "spacing": 0.2, "radius": 0.08,
                   "rest_density": 900, "viscosity": 0.1, "iterations": 6,
-                  "max_particles": 500 }
+                  "max_particles": 500, "contact_friction": 0.6 }
             ]
         }))
         .expect("fluids 要能解析");
@@ -9025,6 +9037,7 @@ mod tests {
         assert_eq!(again.fluids[1].spacing, 0.2);
         assert_eq!(again.fluids[1].radius, Some(0.08));
         assert_eq!(again.fluids[1].max_particles, 500);
+        assert_eq!(again.fluids[1].contact_friction, Some(0.6));
 
         for (fluid, path) in [
             (json!({"size": [0, 1, 1]}), "fluids[0].size"),
@@ -9056,6 +9069,10 @@ mod tests {
             (
                 json!({"size": [1, 1, 1], "max_particles": 0}),
                 "fluids[0].max_particles",
+            ),
+            (
+                json!({"size": [1, 1, 1], "contact_friction": 1.5}),
+                "fluids[0].contact_friction",
             ),
         ] {
             let doc = SceneDoc::from_value(json!({ "fluids": [fluid] })).expect("结构合法");

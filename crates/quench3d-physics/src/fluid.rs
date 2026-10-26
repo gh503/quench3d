@@ -9,6 +9,8 @@
 //!   `TriMesh` 逐三角形最近点；凸包用 GJK/EPA，圆锥用底面圆盘 + 侧面线段投影，
 //!   都是精确最近表面（见 [`crate::Shape::closest_surface`]）。
 //! * 没有表面张力、涡量约束、粘性应力张量；粘性用 XSPH 近似。
+//! * **接触摩擦**（`contact_friction`，缺省关）：粒子与刚体之间的切向库仑摩擦；
+//!   静置接触用重力法向支持力近似载荷。
 //! * **泡沫/飞沫是被动视觉粒子**（`FluidDesc.foam`，缺省关）：不参与 PBF 密度，
 //!   不与刚体碰撞；只从高速度粒子按确定顺序甩出，受寿命/重力/阻尼。
 
@@ -81,6 +83,11 @@ pub struct FluidDesc {
     pub foam_rate: f32,
     /// 泡沫上限，缺省 256。
     pub max_foam: usize,
+    /// 流体-刚体接触摩擦系数（0~1，缺省 0 = 关闭，旧场景逐位不变）。
+    ///
+    /// 只作用于粒子碰到动态/静态刚体时的**切向**相对速度；法向冲量仍按原逻辑
+    /// 反推。打开后水会拖着刚体走，也会被刚体表面拖慢。
+    pub contact_friction: f32,
 }
 
 impl Default for FluidDesc {
@@ -108,6 +115,7 @@ impl Default for FluidDesc {
             foam_speed: 3.0,
             foam_rate: 120.0,
             max_foam: 256,
+            contact_friction: 0.0,
         }
     }
 }
@@ -154,6 +162,8 @@ impl FluidDesc {
             && self.foam_rate.is_finite()
             && self.foam_rate >= 0.0
             && self.max_foam <= 4096
+            && self.contact_friction.is_finite()
+            && (0.0..=1.0).contains(&self.contact_friction)
     }
 
     /// 按晶格估算的粒子数（已按 `max_particles` 截断）。
@@ -696,18 +706,38 @@ impl Fluid {
             let Some(body) = slot.body.as_mut() else {
                 continue;
             };
-            if !body.is_dynamic() {
-                continue;
-            }
             let vb = body.velocity_at_point(c.point);
             let vn = (*v - vb).dot(c.normal);
-            if vn < 0.0 {
+            let dynamic = body.is_dynamic();
+            if dynamic && vn < 0.0 {
                 // 只反推 20% 的法向动量：粒子的"压力"已由浮力项承担，
                 // 全额反推会让成千上万颗粒子把刚体当鼓面敲（实测会把浮球砸进池底）。
                 let impulse = c.normal * (self.mass * vn * 0.2);
                 body.apply_impulse_at_point(impulse, c.point);
                 // 粒子也拿到反冲；否则水会"穿过"轻的刚体。
                 *v -= impulse / self.mass;
+            }
+            if self.desc.contact_friction > 0.0 {
+                // 切向摩擦：粒子相对刚体表面的切向速度，按库仑上限 μ·|Jn| 衰减。
+                // 粒子受 -vt 方向冲量，动态刚体受反作用 +vt 方向（因此会被水拖着走）。
+                // vn≈0 的静置接触没有"接近冲量"，用重力在法线方向的支持力近似
+                // 法向载荷，否则一池静水会完全没有摩擦。静态刚体不接收冲量。
+                let approach = (-self.mass * vn * 0.2).max(0.0);
+                let support = (-gravity.dot(c.normal)).max(0.0) * self.mass * dt;
+                let jn = approach.max(support);
+                let vrel = *v - vb;
+                let vt = vrel - c.normal * vrel.dot(c.normal);
+                let vt_len = vt.length();
+                if jn > 0.0 && vt_len > EPS && vt_len.is_finite() {
+                    let jt_mag = (vt_len * self.mass).min(self.desc.contact_friction * jn);
+                    if jt_mag > 0.0 {
+                        let jt = -vt * (jt_mag / vt_len);
+                        if dynamic {
+                            body.apply_impulse_at_point(-jt, c.point);
+                        }
+                        *v += jt / self.mass;
+                    }
+                }
             }
         }
         self.stats_contacts = contact_count;
@@ -1314,6 +1344,95 @@ mod tests {
             s.min_y
         );
         assert!(s.max_speed < 4.0, "max_speed={}", s.max_speed);
+    }
+
+    #[test]
+    fn contact_friction_slows_a_sliding_fluid_on_a_static_floor() {
+        let make = || FluidDesc {
+            center: vec3(0.0, 0.25, 0.0),
+            half_extents: vec3(0.2, 0.2, 0.2),
+            spacing: 0.1,
+            radius: 0.05,
+            initial_velocity: vec3(3.0, 0.0, 0.0),
+            max_particles: 64,
+            ..FluidDesc::default()
+        };
+        let run = |mu: f32| {
+            let mut world = PhysicsWorld::new();
+            world.set_fixed_dt(1.0 / 60.0);
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+            );
+            world.add_fluid(FluidDesc {
+                contact_friction: mu,
+                ..make()
+            });
+            for _ in 0..180 {
+                world.step(1.0 / 60.0);
+            }
+            let fluid = &world.fluids()[0];
+            let mean_x =
+                fluid.particles().iter().map(|p| p.x).sum::<f32>() / fluid.particles().len() as f32;
+            (mean_x, fluid.stats().max_speed)
+        };
+        let (off_x, _) = run(0.0);
+        let (on_x, _) = run(1.0);
+        assert!(
+            on_x < off_x - 0.05,
+            "摩擦应让水柱少滑一段：off={off_x}, on={on_x}"
+        );
+    }
+
+    #[test]
+    fn contact_friction_drags_a_dynamic_body_with_the_flow() {
+        let run = |mu: f32| {
+            let mut world = PhysicsWorld::new();
+            world.set_fixed_dt(1.0 / 60.0);
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).position(Vec3::ZERO),
+            );
+            let body = world.add_builder(
+                BodyBuilder::dynamic(Shape::Box {
+                    half_extents: vec3(0.3, 0.1, 0.3),
+                })
+                .position(vec3(0.0, 0.11, 0.0))
+                .density(500.0)
+                .friction(0.0)
+                .can_sleep(false),
+            );
+            world.add_fluid(FluidDesc {
+                center: vec3(-1.2, 0.8, 0.0),
+                half_extents: vec3(0.2, 0.2, 0.2),
+                spacing: 0.1,
+                radius: 0.05,
+                initial_velocity: vec3(4.0, 0.0, 0.0),
+                contact_friction: mu,
+                max_particles: 64,
+                ..FluidDesc::default()
+            });
+            for _ in 0..120 {
+                world.step(1.0 / 60.0);
+            }
+            let b = world.body(body).unwrap();
+            let x = b.transform().position.x;
+            let fluid_x = world.fluids()[0]
+                .particles()
+                .iter()
+                .map(|p| p.x)
+                .sum::<f32>()
+                / world.fluids()[0].particles().len() as f32;
+            (x, fluid_x)
+        };
+        let (off_body, off_fluid) = run(0.0);
+        let (on_body, on_fluid) = run(1.0);
+        assert!(
+            on_body > off_body + 0.005,
+            "水应把动态刚体往流向拖：off={off_body}, on={on_body}"
+        );
+        assert!(
+            off_fluid.is_finite() && on_fluid.is_finite(),
+            "摩擦不能把粒子速度变成 NaN"
+        );
     }
 
     #[test]
