@@ -271,6 +271,9 @@
     `record_and_replay_round_trip`（含损坏文件报错）。`replay --scene --at --render`
     可把回放某一时刻写回场景并出图，像素回归
     `replay_can_render_a_frame_from_a_recorded_clip`（0s 与 0.4s 的 PNG 必须不同）。
+    `movie --replay <Q3RP>` 可把整段回放渲染成视频（不推进物理，按录制步长写回
+    位姿）；回归 `movie_can_play_back_a_recorded_clip` 用重力为 0 的播放场景
+    证明首尾帧不同，并覆盖句柄对不上时的明确报错。
   - [x] 固定步长渲染插值：`PhysicsWorld::body_interpolated_transform` 保存上一
     子步位姿，`Engine::render_interpolation`（缺省关）按累加器 alpha 插值，
     `Scene::sync_from_physics_interpolated`；编辑器默认开。回归

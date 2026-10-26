@@ -184,6 +184,101 @@ fn replay_can_render_a_frame_from_a_recorded_clip() {
 }
 
 #[test]
+fn movie_can_play_back_a_recorded_clip() {
+    let dir = temp_dir("movie_replay");
+    let scene = dir.join("scene.json");
+    std::fs::write(
+        &scene,
+        r#"{
+  "format": "quench3d.scene", "version": 2, "name": "回放视频",
+  "ground": { "size": 20, "material": "floor" },
+  "materials": {
+    "floor": { "color": [0.5,0.5,0.5], "roughness": 0.9 },
+    "box": { "color": [0.9,0.3,0.15], "roughness": 0.4 }
+  },
+  "objects": [
+    { "name": "箱子", "shape": { "type": "box", "size": [0.8,0.8,0.8] },
+      "position": [0,4,0], "material": "box", "body": "dynamic" }
+  ],
+  "camera": { "position": [5,3,6], "look_at": [0,2,0], "fov_deg": 50 },
+  "lighting": { "preset": "studio", "shadows": false },
+  "simulate": { "steps": 5, "dt": 0.1 },
+  "render": { "width": 48, "height": 48, "msaa": 1, "output": "unused.png" }
+}"#,
+    )
+    .unwrap();
+    let clip = dir.join("clip.q3r");
+    let r = run(&["record", scene.to_str().unwrap(), clip.to_str().unwrap()]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    // 播放场景关掉重力：不应用回放时箱子不动，首尾帧会逐字节相同。
+    let playback = dir.join("playback.json");
+    // 显式写 gravity 到播放场景，避免继承录制场景的重力。
+    let text = std::fs::read_to_string(&scene).unwrap().replace(
+        "\"format\": \"quench3d.scene\"",
+        "\"format\": \"quench3d.scene\", \"gravity\": [0,0,0]",
+    );
+    std::fs::write(&playback, text).unwrap();
+    let frames = dir.join("frames");
+    let r = run(&[
+        "movie",
+        playback.to_str().unwrap(),
+        "--replay",
+        clip.to_str().unwrap(),
+        "--frames",
+        "3",
+        "--steps-per-frame",
+        "2",
+        "--frames-dir",
+        frames.to_str().unwrap(),
+        "--encoder",
+        "png",
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "stdout={}\nstderr={}", r.stdout, r.stderr);
+    let env = r.json();
+    assert_eq!(env["data"]["frames"], 3);
+    assert!(
+        env["data"]["replay_applied"].as_u64().unwrap_or(0) > 0,
+        "回放必须真的写回位姿：{}",
+        env["data"]
+    );
+    let first = std::fs::read(frames.join("frame_00000.png")).unwrap();
+    let last = std::fs::read(frames.join("frame_00002.png")).unwrap();
+    assert_ne!(first, last, "回放视频的首尾帧不应相同");
+
+    // 句柄对不上时必须明确报错，而不是静默播放第一帧。
+    let empty = dir.join("empty.json");
+    std::fs::write(
+        &empty,
+        r#"{
+  "format": "quench3d.scene", "version": 2, "name": "空场景",
+  "objects": [],
+  "camera": { "position": [5,3,6], "look_at": [0,2,0] },
+  "lighting": { "preset": "studio", "shadows": false },
+  "render": { "width": 32, "height": 32, "msaa": 1, "output": "unused.png" }
+}"#,
+    )
+    .unwrap();
+    let r = run(&[
+        "movie",
+        empty.to_str().unwrap(),
+        "--replay",
+        clip.to_str().unwrap(),
+        "--frames",
+        "1",
+        "--frames-dir",
+        dir.join("empty_frames").to_str().unwrap(),
+    ]);
+    assert_eq!(r.code, 2, "stdout={}\nstderr={}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("一个都不存在") || r.stderr.contains("一个都不存在"),
+        "stdout={}\nstderr={}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
 fn runtime_errors_carry_stable_machine_codes() {
     let dir = temp_dir("runtime_codes");
     let missing = dir.join("does-not-exist.json");

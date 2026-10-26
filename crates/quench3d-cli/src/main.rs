@@ -34,6 +34,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--camera",
     "--scene",
     "--at",
+    "--replay",
     "--golden",
     "--golden-tolerance",
     "--asset-path",
@@ -1707,6 +1708,7 @@ fn movie_options(
         height: doc.render.height,
         encoder,
         output,
+        replay: args.flag_str("--replay").map(PathBuf::from),
     })
 }
 
@@ -2397,6 +2399,7 @@ fn help_text() -> String {
   --render <路径>        simulate 时顺带渲染；replay 时渲染该时刻
   --scene <路径>         replay --render 用的场景文件
   --at <秒>              replay --render 的时间（缺省 0）
+  --replay <文件>        movie 用 Q3RP 回放代替物理步进（不推进物理）
   --bodies <n[,n...]>    bench 要测的刚体规模（缺省 100,500,1000）
   --layout <布局>        bench 布局：scatter（单层平铺）或 stack（逐层堆叠）
   --warmup <n>           bench 预热步数（缺省 30）/ movie 预热帧数（缺省 0）

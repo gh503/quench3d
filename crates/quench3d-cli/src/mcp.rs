@@ -290,6 +290,7 @@ impl McpServer {
                         }
                     });
                 let opts = runner::MovieOptions {
+                    replay: None,
                     frames,
                     fps,
                     frames_dir,

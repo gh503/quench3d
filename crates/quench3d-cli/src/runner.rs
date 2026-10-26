@@ -914,6 +914,8 @@ pub struct MovieOptions {
     pub no_clobber: bool,
     /// 只校验 + 跑物理，不渲染不写盘。
     pub dry_run: bool,
+    /// 用这段刚体位姿回放代替物理步进（`None` = 正常物理录制）。
+    pub replay: Option<std::path::PathBuf>,
 }
 
 /// 录制报告。
@@ -978,6 +980,9 @@ pub struct MovieReport {
     /// 是否为 `--dry-run`（真：没有渲染、没有写盘，`digest` 为空串）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub dry_run: bool,
+    /// 回放模式写回的刚体位姿总数（非回放为 0）。
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub replay_applied: u64,
     /// `--dry-run` 时"本来会写这些文件/目录"。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub would_write: Vec<String>,
@@ -1829,11 +1834,29 @@ impl Script {
 /// 最后只读采集探针**；三条路径（simulate / render / movie）由此得到同一套结果。
 struct ScriptedGame {
     script: Script,
+    /// 回放模式：存在时不再推进物理，只按录制步长写回位姿。
+    replay: Option<ReplayClip>,
+    replay_step: u64,
+    replay_applied: u64,
+    replay_error: Option<String>,
 }
 
 impl Game for ScriptedGame {
     fn fixed_update(&mut self, engine: &mut Engine, dt: f32) {
-        self.script.step(&mut engine.world, dt);
+        if let Some(clip) = &self.replay {
+            let time = self.replay_step as f32 * clip.fixed_dt;
+            let applied = clip.apply(&mut engine.world, time);
+            if applied == 0 {
+                self.replay_error = Some(
+                    "回放里的刚体句柄在当前场景中一个都不存在：请用录制时的同一场景".to_string(),
+                );
+            } else {
+                self.replay_applied += applied as u64;
+            }
+            self.replay_step += 1;
+        } else {
+            self.script.step(&mut engine.world, dt);
+        }
     }
 }
 
@@ -2550,6 +2573,10 @@ fn is_zero_f32(v: &f32) -> bool {
 }
 
 fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
@@ -3567,6 +3594,13 @@ pub fn run_record(doc: &SceneDoc, out: &Path) -> Result<RecordReport, RunError> 
         bytes: bytes.len(),
         steps,
     })
+}
+
+/// 读并解码回放文件。
+pub fn load_replay_clip(path: &Path) -> Result<ReplayClip, RunError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| RunError::io(format!("无法读回放 {}：{e}", path.display())))?;
+    ReplayClip::decode(&bytes).map_err(|e| RunError::io(format!("回放文件无效：{e}")))
 }
 
 /// 读取并校验回放文件，输出摘要（不需要 GPU）。
@@ -5970,6 +6004,23 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         substeps: _,
     } = build_world(doc)?;
 
+    let replay = match &opts.replay {
+        Some(path) => Some(load_replay_clip(path)?),
+        None => None,
+    };
+    let playback_dt = replay.as_ref().map_or(doc.simulate.dt, |c| c.fixed_dt);
+    let has_replay = replay.is_some();
+    if let Some(clip) = &replay {
+        let any = clip
+            .frames()
+            .iter()
+            .any(|f| f.poses.iter().any(|p| world.body(p.handle).is_some()));
+        if !any {
+            return Err(RunError::scene(
+                "回放里的刚体句柄在当前场景中一个都不存在：请用录制时的同一场景".to_string(),
+            ));
+        }
+    }
     let policy = OutputPolicy {
         no_clobber: opts.no_clobber,
         dry_run: opts.dry_run,
@@ -5996,7 +6047,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
 
     if policy.dry_run {
         // 只跑物理 + 采探针：不建 GPU、不建目录、不写帧也不写 trace。
-        let dt = doc.simulate.dt;
+        let dt = playback_dt;
         let params = SequenceParams {
             frames: opts.frames,
             steps_per_frame: opts.steps_per_frame,
@@ -6005,8 +6056,20 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         };
         let mut script = Script::new(doc, &world, &handles)?;
         script.begin(&world);
-        for _ in 0..params.total_steps() {
-            script.step(&mut world, dt);
+        if let Some(clip) = &replay {
+            for (replay_step, _) in (0..params.total_steps()).enumerate() {
+                let time = replay_step as f32 * clip.fixed_dt;
+                if clip.apply(&mut world, time) == 0 {
+                    return Err(RunError::scene(
+                        "回放里的刚体句柄在当前场景中一个都不存在：请用录制时的同一场景"
+                            .to_string(),
+                    ));
+                }
+            }
+        } else {
+            for _ in 0..params.total_steps() {
+                script.step(&mut world, dt);
+            }
         }
         let mut would_write = vec![output_path
             .as_ref()
@@ -6046,6 +6109,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
             notes,
             models,
             dry_run: true,
+            replay_applied: 0,
             would_write,
             elapsed_ms: started.elapsed().as_millis() as u64,
         });
@@ -6108,7 +6172,13 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
     // （不配 actions/probes 时就是一个裸的 `world.step`），所以缺省录制的像素逐位不变。
     let mut script = Script::new(doc, &world, &handles)?;
     script.begin(&world);
-    let mut game = ScriptedGame { script };
+    let mut game = ScriptedGame {
+        script,
+        replay,
+        replay_step: 0,
+        replay_applied: 0,
+        replay_error: None,
+    };
     render_sequence_with_game(
         opts.width,
         opts.height,
@@ -6163,6 +6233,9 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
     if let Some(e) = setup_error {
         return Err(e);
     }
+    if let Some(e) = &game.replay_error {
+        return Err(RunError::scene(e.clone()));
+    }
 
     // GIF/APNG 在收尾时才写结束标记，文件大小也只有那时才知道
     sink.finish()?;
@@ -6215,6 +6288,9 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
     } else {
         String::new()
     };
+    if has_replay {
+        notes.push("回放模式：不推进物理，按 Q3RP 的固定步长写回刚体位姿".to_string());
+    }
     notes.extend(animation_warnings.iter().cloned());
 
     Ok(MovieReport {
@@ -6230,7 +6306,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         fps: opts.fps,
         duration: params.duration(),
         steps_per_frame: opts.steps_per_frame,
-        dt: doc.simulate.dt,
+        dt: playback_dt,
         total_steps: params.total_steps(),
         warmup_frames: opts.warmup_frames,
         width: opts.width,
@@ -6247,6 +6323,7 @@ pub fn run_movie(doc: &SceneDoc, opts: &MovieOptions) -> Result<MovieReport, Run
         notes,
         models,
         dry_run: false,
+        replay_applied: game.replay_applied,
         would_write: Vec::new(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })

@@ -960,7 +960,8 @@ quench3d query scene.json --overlap "box:2,1,2@0,1,0~0,45,0" # 斜 45° 的探�
 
 **仿真视频（`movie`）**：逐帧推进物理并渲染。三条路：PNG 序列交给 `ffmpeg`、
 用**内置纯 Rust 编码器**直接出 GIF/APNG（不装任何外部工具），或 `--encoder mp4`
-让引擎调外部 `ffmpeg` 直接封装 MP4：
+让引擎调外部 `ffmpeg` 直接封装 MP4。加 `--replay <Q3RP>` 则**不推进物理**，
+按 `record` 录下的固定步长写回刚体位姿再渲染（句柄必须属于同一场景）：
 
 ```bash
 # 路线 A：PNG 序列 + ffmpeg（长视频、高压缩率）
@@ -982,6 +983,9 @@ quench3d render scene.json --out mine.png --no-clobber --json
 # 路线 B：内置编码器直接出可播放文件（README 演示、几十帧的短循环）
 quench3d movie scene.json --frames 60 --encoder gif  --out demo.gif   # 256 色
 quench3d movie scene.json --frames 60 --encoder apng --out demo.png   # 无损
+
+# 回放录制好的刚体位姿（不跑物理；只回放位姿，不含速度/流体/关节）
+quench3d movie scene.json --replay replay.q3r --frames 120 --frames-dir replay
 ```
 
 内置编码器是流式写入（不把整片缓存进内存），**换编码器不改变 `data.digest`**——

@@ -198,15 +198,17 @@ pub fn schema() -> Value {
                     { "name": "--width", "type": "u32", "required": false, "description": "覆盖宽度" },
                     { "name": "--height", "type": "u32", "required": false, "description": "覆盖高度" },
                     { "name": "--dt", "type": "f32", "required": false, "description": "覆盖 simulate.dt（物理步长）" },
+                    { "name": "--replay", "type": "path", "required": false, "description": "用 Q3RP 回放代替物理步进：按录制固定步长写回刚体位姿，不推进物理；句柄必须属于同一场景" },
                     { "name": "--dry-run", "type": "flag", "required": false, "description": "只校验 + 跑物理，不渲染、不建帧目录、不写 trace；报告里 digest 为空串并给出 would_write" },
                     { "name": "--no-clobber", "type": "flag", "required": false, "description": "单文件输出或帧目录已存在（非空）就报错，而不是覆盖/续录；要续录就别加这个开关" }
                 ],
-                "output": "{ frames_dir, encoder, output, trace, frames, skipped, fps, duration, steps_per_frame, dt, total_steps, warmup_frames, width, height, bytes, digest, objects, camera_position, probes[]?, sensors[]?, first_frame?, last_frame?, ffmpeg, notes, dry_run?, would_write[]?, elapsed_ms }",
+                "output": "{ frames_dir, encoder, output, trace, frames, skipped, fps, duration, steps_per_frame, dt, total_steps, warmup_frames, width, height, bytes, digest, objects, camera_position, probes[]?, sensors[]?, first_frame?, last_frame?, ffmpeg, notes, models[]?, dry_run?, replay_applied?, would_write[]?, elapsed_ms }",
                 "notes": "帧数与时长由物理步决定、与墙钟无关；同一场景两次录制 digest 相同（换编码器也不改变 digest）。--encoder png 时 ffmpeg 字段给出编码命令：ffmpeg -framerate N -i frames/frame_%05d.png -c:v libx264 -crf 18 -pix_fmt yuv420p movie.mp4；gif/apng/mp4 时该字段为空串，可直接播放；notes 里会提示格式限制（如 GIF 的 10 ms 延迟粒度）",
                 "examples": [
                     "quench3d movie scene.json --frames 120 --frames-dir frames --json",
                     "quench3d movie scene.json --frames 300 --steps-per-frame 1 --fps 30 --frames-dir slowmo",
-                    "quench3d movie scene.json --frames 60 --encoder gif --out demo.gif --json"
+                    "quench3d movie scene.json --frames 60 --encoder gif --out demo.gif --json",
+                    "quench3d movie scene.json --replay clip.q3r --frames 120 --frames-dir replay --json"
                 ]
             },
             {
