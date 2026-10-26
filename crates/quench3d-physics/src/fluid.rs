@@ -9,6 +9,8 @@
 //!   `TriMesh` 逐三角形最近点；凸包用 GJK/EPA，圆锥用底面圆盘 + 侧面线段投影，
 //!   都是精确最近表面（见 [`crate::Shape::closest_surface`]）。
 //! * 没有表面张力、涡量约束、粘性应力张量；粘性用 XSPH 近似。
+//! * **泡沫/飞沫是被动视觉粒子**（`FluidDesc.foam`，缺省关）：不参与 PBF 密度，
+//!   不与刚体碰撞；只从高速度粒子按确定顺序甩出，受寿命/重力/阻尼。
 
 use core::f32::consts::PI;
 use std::collections::HashMap;
@@ -68,6 +70,17 @@ pub struct FluidDesc {
     pub iterations: u32,
     /// 粒子上限（超过就按晶格顺序截断）。
     pub max_particles: usize,
+    /// 是否生成泡沫/飞沫（缺省 false；旧场景逐位不变）。
+    ///
+    /// 这是**视觉白水**，不是两相流：高速度粒子按确定顺序甩出被动泡沫粒子，
+    /// 泡沫受重力/阻尼/寿命影响，不参与 PBF 密度，也不会反过来推水。
+    pub foam: bool,
+    /// 起泡速度阈值（m/s），缺省 3.0。
+    pub foam_speed: f32,
+    /// 泡沫生成速率（颗/秒），缺省 120。
+    pub foam_rate: f32,
+    /// 泡沫上限，缺省 256。
+    pub max_foam: usize,
 }
 
 impl Default for FluidDesc {
@@ -91,6 +104,10 @@ impl Default for FluidDesc {
             drag: 6.0,
             iterations: 4,
             max_particles: 4000,
+            foam: false,
+            foam_speed: 3.0,
+            foam_rate: 120.0,
+            max_foam: 256,
         }
     }
 }
@@ -132,6 +149,11 @@ impl FluidDesc {
             && self.drag >= 0.0
             && (1..=8).contains(&self.iterations)
             && (1..=20_000).contains(&self.max_particles)
+            && self.foam_speed.is_finite()
+            && self.foam_speed >= 0.0
+            && self.foam_rate.is_finite()
+            && self.foam_rate >= 0.0
+            && self.max_foam <= 4096
     }
 
     /// 按晶格估算的粒子数（已按 `max_particles` 截断）。
@@ -164,6 +186,8 @@ pub struct FluidStats {
     pub max_y: f32,
     /// 本步与刚体的接触数（报告用，0 时序列化会省略）。
     pub contacts: usize,
+    /// 当前泡沫/飞沫粒子数（0 时报告省略）。
+    pub foam: usize,
 }
 
 /// 粒子与刚体的一个接触（求解最后一步记录，用于两-way 反冲）。
@@ -177,6 +201,28 @@ struct Contact {
     point: Vec3,
     /// 刚体在 `bodies` 里的下标。
     body: u32,
+}
+
+/// 泡沫/飞沫类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoamKind {
+    /// 飞沫：高速甩出，受完整重力。
+    Spray,
+    /// 泡沫：贴着水面，轻微上浮。
+    Foam,
+}
+
+/// 一颗被动泡沫/飞沫粒子（只用于渲染，不参与 PBF 求解）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FoamParticle {
+    /// 世界位置。
+    pub position: Vec3,
+    /// 世界速度。
+    pub velocity: Vec3,
+    /// 剩余寿命（秒）。
+    pub life: f32,
+    /// 类型。
+    pub kind: FoamKind,
 }
 
 /// 一个粒子流体。
@@ -212,6 +258,12 @@ pub struct Fluid {
     emit_accum: f32,
     /// 已经发射的粒子序号（用于确定性撒点）。
     emitted: u64,
+    /// 被动泡沫/飞沫（视觉白水）。
+    foam: Vec<FoamParticle>,
+    /// 泡沫生成不足一颗的累积量。
+    foam_accum: f32,
+    /// 已经生成的泡沫序号（确定性轮转起点）。
+    foam_emitted: u64,
 }
 
 impl Fluid {
@@ -240,6 +292,9 @@ impl Fluid {
             spawned: false,
             emit_accum: 0.0,
             emitted: 0,
+            foam: Vec::new(),
+            foam_accum: 0.0,
+            foam_emitted: 0,
         };
         fluid.spawn();
         Some(fluid)
@@ -258,6 +313,11 @@ impl Fluid {
     /// 粒子速度（只读）。
     pub fn velocities(&self) -> &[Vec3] {
         &self.velocities
+    }
+
+    /// 当前泡沫/飞沫粒子（只读；最多 `desc.max_foam` 颗）。
+    pub fn foam(&self) -> &[FoamParticle] {
+        &self.foam
     }
 
     /// 用当前粒子提取连续表面（Surface Nets）。
@@ -397,7 +457,10 @@ impl Fluid {
         self.emit(dt);
         let n = self.positions.len();
         if n == 0 {
-            self.stats = FluidStats::default();
+            // 水排空后泡沫还要继续飞/淡出，不能在这里把统计和泡沫一起清掉。
+            self.update_foam(gravity, dt);
+            self.recompute_stats();
+            self.revision = self.revision.wrapping_add(1);
             return;
         }
         let h = self.desc.smoothing_radius();
@@ -664,8 +727,96 @@ impl Fluid {
             self.positions.truncate(keep);
             self.velocities.truncate(keep);
         }
+        self.spawn_foam(dt);
+        self.update_foam(gravity, dt);
         self.recompute_stats();
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// 从高速粒子甩出被动泡沫/飞沫；顺序由 `foam_emitted` 轮转，确定性。
+    fn spawn_foam(&mut self, dt: f32) {
+        let d = &self.desc;
+        if !d.foam || d.foam_rate <= 0.0 || d.max_foam == 0 || !dt.is_finite() || dt <= 0.0 {
+            self.foam_accum = 0.0;
+            return;
+        }
+        if self.foam.len() >= d.max_foam {
+            self.foam_accum = 0.0;
+            return;
+        }
+        self.foam_accum += d.foam_rate * dt;
+        let budget = (self.foam_accum.floor() as usize).min(d.max_foam - self.foam.len());
+        if budget == 0 {
+            return;
+        }
+        let count = self.positions.len();
+        if count == 0 {
+            return;
+        }
+        let start = (self.foam_emitted as usize) % count;
+        let mut spawned = 0usize;
+        for k in 0..count {
+            if spawned >= budget {
+                break;
+            }
+            let i = (start + k) % count;
+            let speed = self.velocities[i].length();
+            if !speed.is_finite() || speed < d.foam_speed {
+                continue;
+            }
+            let mut v = self.velocities[i] * 0.35;
+            v.y += 0.6 + speed * 0.06;
+            if v.length() > MAX_SPEED {
+                v = v.clamp_length(MAX_SPEED);
+            }
+            let life = 0.9 + (i % 5) as f32 * 0.1;
+            let kind = if speed >= d.foam_speed * 2.0 {
+                FoamKind::Spray
+            } else {
+                FoamKind::Foam
+            };
+            self.foam.push(FoamParticle {
+                position: self.positions[i],
+                velocity: v,
+                life,
+                kind,
+            });
+            self.foam_emitted = self.foam_emitted.wrapping_add(1);
+            spawned += 1;
+        }
+        self.foam_accum -= spawned as f32;
+    }
+
+    /// 被动泡沫的寿命/重力/阻尼；不做碰撞，纯视觉白水。
+    fn update_foam(&mut self, gravity: Vec3, dt: f32) {
+        if self.foam.is_empty() || !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        let mut keep = 0usize;
+        for index in 0..self.foam.len() {
+            let mut f = self.foam[index];
+            f.life -= dt;
+            if f.life <= 0.0 {
+                continue;
+            }
+            let g = match f.kind {
+                FoamKind::Spray => gravity,
+                FoamKind::Foam => gravity * 0.2 + Vec3::Y * 0.8,
+            };
+            f.velocity = (f.velocity + g * dt) * (1.0 - 2.2 * dt).clamp(0.0, 1.0);
+            f.position += f.velocity * dt;
+            if let Some(y) = self.desc.drain_y {
+                if f.position.y < y {
+                    continue;
+                }
+            }
+            if !f.position.is_finite() || !f.velocity.is_finite() {
+                continue;
+            }
+            self.foam[keep] = f;
+            keep += 1;
+        }
+        self.foam.truncate(keep);
     }
 
     /// 用当前 `predicted` 位置重算密度与 lambda（每次 PBF 迭代前调用）。
@@ -717,7 +868,10 @@ impl Fluid {
     fn recompute_stats(&mut self) {
         let n = self.positions.len();
         if n == 0 {
-            self.stats = FluidStats::default();
+            self.stats = FluidStats {
+                foam: self.foam.len(),
+                ..FluidStats::default()
+            };
             return;
         }
         let mut max_speed = 0.0f32;
@@ -742,6 +896,7 @@ impl Fluid {
             min_y,
             max_y,
             contacts: self.stats_contacts,
+            foam: self.foam.len(),
         };
     }
 }
@@ -1159,6 +1314,83 @@ mod tests {
             s.min_y
         );
         assert!(s.max_speed < 4.0, "max_speed={}", s.max_speed);
+    }
+
+    #[test]
+    fn foam_spawns_from_a_fast_jet_and_expires_deterministically() {
+        let desc = FluidDesc {
+            center: vec3(0.0, 2.0, 0.0),
+            half_extents: vec3(0.2, 0.2, 0.2),
+            spacing: 0.1,
+            radius: 0.05,
+            initial_velocity: vec3(0.0, -12.0, 0.0),
+            drain_y: Some(-2.0),
+            foam: true,
+            foam_speed: 2.0,
+            foam_rate: 120.0,
+            max_foam: 64,
+            max_particles: 64,
+            ..FluidDesc::default()
+        };
+        let mut a = Fluid::new(desc.clone()).expect("参数合法");
+        let mut b = Fluid::new(desc).expect("参数合法");
+        for _ in 0..20 {
+            a.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+            b.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        }
+        assert!(!a.foam().is_empty(), "高速水流必须甩出泡沫");
+        assert!(a.foam().len() <= 64, "泡沫超过上限：{}", a.foam().len());
+        assert!(
+            a.foam()
+                .iter()
+                .all(|f| f.position.is_finite() && f.velocity.is_finite() && f.life > 0.0),
+            "泡沫位置/速度/寿命必须有限且为正"
+        );
+        assert_eq!(a.foam(), b.foam(), "泡沫生成/更新必须逐位确定");
+        let spawned = a.foam().len();
+        // 水从开放底排空后不再产生新泡沫；旧泡沫在约 1.5 秒内全部过期。
+        for _ in 0..240 {
+            a.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        }
+        assert!(
+            a.foam().is_empty(),
+            "水排空后泡沫应过期，仍有 {} 颗（曾生成 {spawned}）",
+            a.foam().len()
+        );
+    }
+
+    #[test]
+    fn foam_flag_does_not_change_the_particle_solver() {
+        let base = FluidDesc {
+            center: vec3(0.0, 2.0, 0.0),
+            half_extents: vec3(0.2, 0.2, 0.2),
+            spacing: 0.1,
+            radius: 0.05,
+            initial_velocity: vec3(3.0, -8.0, 0.0),
+            max_particles: 64,
+            ..FluidDesc::default()
+        };
+        let mut off = Fluid::new(base.clone()).expect("参数合法");
+        let mut on = Fluid::new(FluidDesc {
+            foam: true,
+            foam_speed: 1.0,
+            foam_rate: 120.0,
+            max_foam: 64,
+            ..base
+        })
+        .expect("参数合法");
+        for _ in 0..60 {
+            off.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+            on.step(&mut [], Vec3::NEG_Y * 9.81, 1.0 / 60.0);
+        }
+        assert!(!on.foam().is_empty());
+        assert_eq!(off.stats().foam, 0);
+        assert_eq!(off.particles(), on.particles(), "泡沫不能改变 PBF 粒子位置");
+        assert_eq!(
+            off.velocities(),
+            on.velocities(),
+            "泡沫不能改变 PBF 粒子速度"
+        );
     }
 
     #[test]

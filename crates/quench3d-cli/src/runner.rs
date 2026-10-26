@@ -128,6 +128,9 @@ pub struct FluidReport {
     /// 本步与刚体的接触数（0 时不出现，保持旧报告字节不变）。
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub contacts: usize,
+    /// 当前泡沫/飞沫数（0 时不出现，保持旧报告字节不变）。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub foam: usize,
 }
 
 /// 一个关节的运行时遥测（`simulate --json` 的 `joints[]`）。
@@ -2155,6 +2158,8 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             drag: f.drag,
             iterations: f.iterations,
             max_particles: f.max_particles,
+            foam: f.foam,
+            ..quench3d::physics::FluidDesc::default()
         };
         if world.add_fluid(desc).is_none() {
             let mut err = RunError::io(format!(
@@ -2745,6 +2750,7 @@ pub fn summarize(build: &mut WorldBuild, steps: u32, dt: f32) -> SimReport {
                     min_y: s.min_y,
                     max_y: s.max_y,
                     contacts: s.contacts,
+                    foam: s.foam,
                 }
             })
             .collect(),
@@ -4121,6 +4127,23 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
         engine
             .assets
             .material(&mut engine.renderer, &engine.gpu, "$fluid_particle", desc);
+    let foam_mesh = engine.assets.mesh(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$fluid_foam",
+        &MeshData::sphere(0.5, 6, 4),
+    );
+    let foam_material = engine.assets.material(
+        &mut engine.renderer,
+        &engine.gpu,
+        "$fluid_foam",
+        MaterialDesc {
+            base_color: Vec4::new(0.90, 0.95, 1.0, 1.0),
+            metallic: 0.0,
+            roughness: 0.55,
+            ..MaterialDesc::default()
+        },
+    );
     for (fi, fluid) in engine.world.fluids().iter().enumerate() {
         let spec = doc.fluids.get(fi);
         // 连续表面模式不再画每颗粒子的球：它们全被表面包住，画了只是多几万次绘制/阴影。
@@ -4141,6 +4164,24 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
                 },
                 &format!("流体{fi}.{pi}"),
             );
+        }
+        if let Some(spec) = spec {
+            if spec.foam {
+                let radius = spec.radius() * 0.6;
+                for k in 0..fluid.desc().max_foam {
+                    engine.scene.add_fluid_foam(
+                        foam_mesh,
+                        foam_material,
+                        quench3d::scene::FluidFoamSpec {
+                            fluid: fi,
+                            index: k,
+                            radius,
+                            position: Vec3::ZERO,
+                        },
+                        &format!("流体泡沫{fi}.{k}"),
+                    );
+                }
+            }
         }
         // 水面：半透明平面跟着最高粒子走。它不是折射/泡沫，只是让"水面"有个位置。
         if let Some(spec) = spec {
@@ -6177,6 +6218,21 @@ mod tests {
         assert_eq!(fluid.desc().emit_radius, 0.3);
         assert_eq!(fluid.desc().emit_velocity, vec3(0.0, 3.0, 0.0));
         assert_eq!(fluid.desc().emit_spread, 0.2);
+    }
+
+    #[test]
+    fn fluid_foam_is_wired_from_scene_doc() {
+        let doc =
+            SceneDoc::from_json(r#"{ "fluids": [ { "size": [0.3, 0.3, 0.3], "foam": true } ] }"#)
+                .unwrap();
+        let build = build_world(&doc).unwrap();
+        assert!(build.world.fluids()[0].desc().foam);
+        assert_eq!(build.world.fluids()[0].desc().max_foam, 256);
+
+        let plain =
+            SceneDoc::from_json(r#"{ "fluids": [ { "size": [0.3, 0.3, 0.3] } ] }"#).unwrap();
+        let build = build_world(&plain).unwrap();
+        assert!(!build.world.fluids()[0].desc().foam, "缺省不生成泡沫");
     }
 
     /// Z-up 资产必须先转成 Y-up，再套用户旋转；顺序反了物体会"躺"在错误方向。

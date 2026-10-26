@@ -1180,6 +1180,9 @@ pub struct FluidDoc {
     /// 粒子上限 1~20000，缺省 4000；超出按晶格顺序截断。
     #[serde(default = "default_fluid_max_particles")]
     pub max_particles: usize,
+    /// 是否生成泡沫/飞沫（视觉白水），缺省 false = 完全不生成，旧场景逐位不变。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub foam: bool,
     /// 是否把粒子提取成**连续自由表面**（Surface Nets），缺省 false = 抬高的平面。
     ///
     /// 打开后每帧按粒子重建网格；比平面慢，但能看到真正的液滴/水花轮廓。

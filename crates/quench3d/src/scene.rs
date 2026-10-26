@@ -83,6 +83,10 @@ pub struct SceneObject {
     /// 每帧把水面抬到该流体粒子的最高点；它只是一张半透明平面，不是真正的
     /// 自由表面网格/屏幕空间折射（M4 的边界）。
     pub fluid_surface: Option<FluidSurfaceVisual>,
+    /// 粒子流体的**泡沫/飞沫**可视绑定（`None` = 普通物体）。
+    ///
+    /// 每帧读 `Fluid::foam()` 的第 `index` 颗；数量不够时隐藏，不参与物理。
+    pub fluid_foam: Option<FluidFoamVisual>,
 }
 
 /// 添加粒子物体时的参数（避免 8 个位置参数）。
@@ -92,6 +96,19 @@ pub struct FluidParticleSpec {
     pub fluid: usize,
     /// 粒子下标。
     pub particle: usize,
+    /// 可视半径（米）。
+    pub radius: f32,
+    /// 初始位置。
+    pub position: Vec3,
+}
+
+/// 添加泡沫物体时的参数。
+#[derive(Clone, Copy, Debug)]
+pub struct FluidFoamSpec {
+    /// 流体下标。
+    pub fluid: usize,
+    /// 泡沫下标（与 `Fluid::foam()` 同序）。
+    pub index: usize,
     /// 可视半径（米）。
     pub radius: f32,
     /// 初始位置。
@@ -315,6 +332,17 @@ pub struct FluidParticleVisual {
     /// 粒子下标（与 `Fluid::particles()` 同序）。
     pub particle: usize,
     /// 可视半径（米）；物理半径可以更小，渲染时允许略微重叠。
+    pub radius: f32,
+}
+
+/// 一个泡沫/飞沫可视绑定：第 `fluid` 个流体的第 `index` 颗泡沫。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluidFoamVisual {
+    /// 流体下标。
+    pub fluid: usize,
+    /// 泡沫下标（与 `Fluid::foam()` 同序）。
+    pub index: usize,
+    /// 可视半径（米）。
     pub radius: f32,
 }
 
@@ -1307,6 +1335,7 @@ impl Scene {
             emissive_strength: 1.0,
             fluid_particle: None,
             fluid_surface: None,
+            fluid_foam: None,
         });
         index
     }
@@ -1613,6 +1642,29 @@ impl Scene {
             particle: spec.particle,
             radius,
         });
+        index
+    }
+
+    /// 添加一个泡沫/飞沫可视物体（不参与物理，由 `sync_from_physics` 跟随）。
+    ///
+    /// 初始隐藏；`Scene::sync_from_physics` 每帧按 `Fluid::foam()` 的数量显示/隐藏。
+    pub fn add_fluid_foam(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        spec: FluidFoamSpec,
+        name: &str,
+    ) -> usize {
+        let radius = spec.radius.max(1e-4);
+        let transform = Transform::new(spec.position, Quat::IDENTITY, Vec3::splat(radius * 2.0));
+        let index = self.add_named(mesh, material, transform, name);
+        self.objects[index].fluid_foam = Some(FluidFoamVisual {
+            fluid: spec.fluid,
+            index: spec.index,
+            radius,
+        });
+        self.objects[index].visible = false;
+        self.objects[index].cast_shadows = false;
         index
     }
 
@@ -2480,6 +2532,27 @@ impl Scene {
                 }
                 continue;
             }
+            if let Some(visual) = obj.fluid_foam {
+                let foam = world
+                    .fluids()
+                    .get(visual.fluid)
+                    .and_then(|f| f.foam().get(visual.index));
+                if let Some(f) = foam {
+                    obj.visible = true;
+                    obj.transform.position = f.position;
+                    obj.transform.rotation = Quat::IDENTITY;
+                    // 寿命末段缩小淡出；没有 alpha 物体材质，用缩放表达。
+                    let fade = (f.life / 1.2).clamp(0.25, 1.0);
+                    obj.transform.scale = Vec3::splat(visual.radius * 2.0 * fade);
+                    obj.color = match f.kind {
+                        quench3d_physics::FoamKind::Spray => Vec4::new(0.92, 0.96, 1.0, 1.0),
+                        quench3d_physics::FoamKind::Foam => Vec4::new(0.78, 0.88, 0.98, 1.0),
+                    };
+                } else {
+                    obj.visible = false;
+                }
+                continue;
+            }
             if let Some(visual) = obj.fluid_particle {
                 if let Some(fluid) = world.fluids().get(visual.fluid) {
                     if let Some(p) = fluid.particles().get(visual.particle) {
@@ -3174,6 +3247,56 @@ mod tests {
             .unwrap_or_else(|| panic!("尾物体应当还在，实际有 {}", scene.len()));
         assert!(tail_now < tail);
         assert_eq!(scene.len(), 2);
+    }
+
+    #[test]
+    fn foam_visual_follows_fluid_foam_and_hides_when_empty() {
+        use quench3d_physics::FluidDesc;
+
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.add_fluid(FluidDesc {
+            center: Vec3::new(0.0, 2.0, 0.0),
+            half_extents: Vec3::splat(0.2),
+            spacing: 0.1,
+            radius: 0.05,
+            initial_velocity: Vec3::new(0.0, -12.0, 0.0),
+            foam: true,
+            foam_speed: 2.0,
+            foam_rate: 120.0,
+            max_foam: 16,
+            max_particles: 32,
+            drain_y: Some(0.0),
+            ..FluidDesc::default()
+        });
+        for _ in 0..12 {
+            world.step(1.0 / 60.0);
+        }
+        let foam = world.fluids()[0].foam()[0];
+        let mut scene = Scene::new();
+        let index = scene.add_fluid_foam(
+            1u32,
+            1u32,
+            FluidFoamSpec {
+                fluid: 0,
+                index: 0,
+                radius: 0.03,
+                position: Vec3::ZERO,
+            },
+            "泡沫",
+        );
+        assert!(!scene.objects[index].visible, "初始应隐藏");
+        scene.sync_from_physics(&world);
+        assert!(scene.objects[index].visible, "有泡沫时应显示");
+        assert_eq!(scene.objects[index].transform.position, foam.position);
+        assert!(!scene.objects[index].cast_shadows);
+
+        // 泡沫耗尽后同一物体必须隐藏，而不是留在上一帧位置。
+        for _ in 0..300 {
+            world.step(1.0 / 60.0);
+        }
+        scene.sync_from_physics(&world);
+        assert!(!scene.objects[index].visible, "泡沫过期后应隐藏");
     }
 
     #[test]

@@ -71,6 +71,7 @@
       "drag": 3.5,
       "iterations": 4,
       "max_particles": 1400,
+      "foam": true,
       "surface_mesh": true,
       "surface_resolution": 40,
       "surface_tension": 0.35,
