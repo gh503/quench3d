@@ -1030,6 +1030,7 @@ impl Fluid {
             Vec3::Y
         };
         let accel = up * (9.81 * buoyancy);
+        let base_radius = self.desc.bubble_radius.max(1e-4);
         let surface = if !self.positions.is_empty() {
             let mut max_y = f32::NEG_INFINITY;
             for p in &self.positions {
@@ -1053,7 +1054,11 @@ impl Fluid {
                 b.radius = (b.radius * (1.0 + expansion * dt)).min(cap);
             }
             let prev = b.position;
-            b.velocity = (b.velocity + accel * dt) * (1.0 - drag * dt).clamp(0.0, 1.0);
+            // 气泡浮力 ∝ r³、阻力 ∝ r²，终端速度 ∝ √r；合并/膨胀后的大泡更快。
+            // 半径等于 `bubble_radius` 时因子逐位为 1，旧气泡路径不变。
+            let size_factor = (b.radius.max(0.0) / base_radius).sqrt().clamp(0.25, 4.0);
+            b.velocity =
+                (b.velocity + accel * (size_factor * dt)) * (1.0 - drag * dt).clamp(0.0, 1.0);
             b.velocity = b.velocity.clamp_length(10.0);
             b.position += b.velocity * dt;
             let (corrected, contact) =
@@ -1714,6 +1719,42 @@ mod tests {
         assert!(
             on_mean > off_mean * 1.005,
             "气体密度耦合应让液体在气泡周围膨胀：off {off_mean:.5}, on {on_mean:.5}"
+        );
+    }
+
+    #[test]
+    fn larger_bubbles_rise_faster() {
+        // 浮力 ∝ r³、阻力 ∝ r²，终端速度 ∝ √r；同一时刻大泡应升得更高。
+        let mut fluid = Fluid::new(box_desc()).unwrap();
+        fluid.positions.clear();
+        fluid.velocities.clear();
+        fluid.desc.bubble_buoyancy = 1.0;
+        fluid.desc.bubble_drag = 0.0;
+        fluid.add_bubble(Bubble {
+            position: Vec3::new(-0.2, 0.8, 0.0),
+            velocity: Vec3::ZERO,
+            radius: 0.03,
+            age: 0.0,
+            life: 10.0,
+        });
+        fluid.add_bubble(Bubble {
+            position: Vec3::new(0.2, 0.8, 0.0),
+            velocity: Vec3::ZERO,
+            radius: 0.12,
+            age: 0.0,
+            life: 10.0,
+        });
+        for _ in 0..10 {
+            fluid.update_bubbles(Vec3::new(0.0, -9.81, 0.0), 1.0 / 60.0, &[]);
+        }
+        assert_eq!(fluid.bubbles().len(), 2);
+        let mut ys: Vec<f32> = fluid.bubbles().iter().map(|b| b.position.y).collect();
+        ys.sort_by(f32::total_cmp);
+        assert!(
+            ys[1] > ys[0] + 1e-4,
+            "大泡应比小泡升得快：small={}, large={}",
+            ys[0],
+            ys[1]
         );
     }
 

@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+- **气泡上升速度随半径增大**：浮力按 r³、阻力按 r² 的终端速度近似为 ∝ √r；
+  合并/膨胀后的大泡升得更快，半径等于 `bubble_radius` 时因子为 1，旧路径不变。
+  回归 `larger_bubbles_rise_faster`。
+
 - **气泡进入 PBF 密度约束 / 修复 CLI 气泡接线**：新增
   `FluidDesc::bubble_density_coupling`（缺省 true）。气泡局部的气体体积分数
   把有效静止密度降为 `rho0 * (1 - gas)`，液体在气泡周围膨胀；关闭后退回原来的

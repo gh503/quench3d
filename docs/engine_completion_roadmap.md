@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**1012 通过 / 0 失败 / 5 ignored**
-- wasm：**13,873,698 字节**
+- 测试：**1013 通过 / 0 失败 / 5 ignored**
+- wasm：**13,873,789 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -152,13 +152,16 @@
   但不参与密度约束、不给刚体反作用力。回归
   `foam_does_not_fall_through_the_floor`（修复前 min_y = -2.40 m）。**不是**两相流/
   气泡求解器。
-- [x] 气泡/气相粒子（`fluids[].bubbles`，缺省关闭）：按 `bubble_rate` 生成、
+- [x] 气泡/气相粒子（`fluids[].bubbles`，缺省关闭；气泡上升速度随半径
+  ∝ √r，合并/膨胀后的大泡更快）：按 `bubble_rate` 生成、
   反向重力浮升、阻尼、与刚体/地面碰撞；每步把气泡体积内的液体粒子径向推开并给
   速度（气泡受反作用）；接触气泡按体积守恒合并（位置/速度按体积加权）；可选 `bubble_expansion > 0` 让半径随上升指数膨胀（上限
   4 倍）以近似减压；浮出液面会破裂并生成一颗被动泡沫（需 `foam=true`），
   寿命结束则消失。CLI 低模球可视、`simulate` 报告气泡数。回归两条：气泡不穿地板/数量上限，气泡上浮且确实排开液体（与关闭气泡的
   同一初始状态逐粒子比较；`bubble_expansion` 让半径从 0.03 涨到 >0.036；
-  两颗重叠气泡合并后气体体积变化 ≤2%）。
+  两颗重叠气泡合并后气体体积变化 ≤2%；`larger_bubbles_rise_faster` 断言大泡
+  在同一时间内升得更高——浮力按 r³、阻力按 r²，终端速度 ∝ √r，半径等于
+  `bubble_radius` 时因子逐位为 1）。
   [x] 气泡参与 PBF 密度约束（`bubble_density_coupling`，缺省 true，可关）：
   用核支持体积上的局部气体体积分数把有效静止密度降为 `rho0 * (1 - gas)`，
   气泡周围液体膨胀；回归 `gas_density_coupling_expands_liquid_around_a_bubble`
