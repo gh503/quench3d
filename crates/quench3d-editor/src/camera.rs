@@ -417,7 +417,9 @@ impl CameraFeed {
         }
         if self.show_points {
             if let Some(points) = &frame.points {
-                add_point_lines(lines, points);
+                let colors = Self::frame_projection(frame.as_ref())
+                    .and_then(|projection| sample_point_colors(points, &frame.rgb, &projection));
+                add_point_lines(lines, points, colors.as_deref());
             }
         }
         let pose = &frame.json.pose;
@@ -507,6 +509,7 @@ impl CameraFeed {
                 metallic: 0.0,
                 roughness: 0.7,
                 base_color_texture: Some(texture),
+                unlit: true,
                 ..MaterialDesc::default()
             },
         );
@@ -615,6 +618,9 @@ impl CameraFeed {
                     },
                     metallic: 0.0,
                     roughness: 0.7,
+                    // 有摄像头原图时直接显示原色；场景光照/阴影只适用于没有
+                    // 颜色时的蓝灰占位表面。
+                    unlit: colored > 0,
                     ..MaterialDesc::default()
                 },
             );
@@ -1282,11 +1288,53 @@ fn depth_to_points(json: &FeedJson, depth: &[u8]) -> Result<Vec<Vec3>, String> {
     )
 }
 
-/// 把点云画成小十字。深度反投影没有拓扑，点本身就是最小可读单元。
-fn add_point_lines(lines: &mut DebugLines, points: &[Vec3]) {
-    let color = quench3d_math::Vec4::new(0.3, 0.85, 1.0, 0.85);
-    let d = 0.006;
+/// 按摄像头画面给每个点云顶点取色；无内参/无 RGB/长度不符时返回 `None`，
+/// 调用方退回原来的青色十字。
+#[cfg(not(target_arch = "wasm32"))]
+fn sample_point_colors(
+    points: &[Vec3],
+    rgb: &[u8],
+    projection: &crate::reconstruct::CameraProjection,
+) -> Option<Vec<quench3d_math::Vec4>> {
+    if !projection.is_valid()
+        || rgb.len() != projection.width as usize * projection.height as usize * 3
+    {
+        return None;
+    }
+    let fallback = quench3d_math::Vec4::new(0.3, 0.85, 1.0, 0.85);
+    let mut out = Vec::with_capacity(points.len());
     for p in points {
+        let Some(uv) = projection.uv(*p) else {
+            out.push(fallback);
+            continue;
+        };
+        // `CameraProjection::uv` 返回的是纹素中心（已带 +0.5）；减 0.5 再取整
+        // 才能落回原像素，而不是偏到右/下一格。
+        let x = (uv.x * projection.width as f32 - 0.5)
+            .floor()
+            .clamp(0.0, projection.width.saturating_sub(1) as f32) as usize;
+        let y = (uv.y * projection.height as f32 - 0.5)
+            .floor()
+            .clamp(0.0, projection.height.saturating_sub(1) as f32) as usize;
+        let i = (y * projection.width as usize + x) * 3;
+        let r = quench3d::render::color::srgb_to_linear(rgb[i] as f32 / 255.0);
+        let g = quench3d::render::color::srgb_to_linear(rgb[i + 1] as f32 / 255.0);
+        let b = quench3d::render::color::srgb_to_linear(rgb[i + 2] as f32 / 255.0);
+        out.push(quench3d_math::Vec4::new(r, g, b, 0.95));
+    }
+    Some(out)
+}
+
+/// 把点云画成小十字。深度反投影没有拓扑，点本身就是最小可读单元。
+fn add_point_lines(
+    lines: &mut DebugLines,
+    points: &[Vec3],
+    colors: Option<&[quench3d_math::Vec4]>,
+) {
+    let fallback = quench3d_math::Vec4::new(0.3, 0.85, 1.0, 0.85);
+    let d = 0.006;
+    for (i, p) in points.iter().enumerate() {
+        let color = colors.and_then(|c| c.get(i).copied()).unwrap_or(fallback);
         lines.line(
             *p - Vec3::new(d, 0.0, 0.0),
             *p + Vec3::new(d, 0.0, 0.0),
@@ -1759,7 +1807,7 @@ impl CameraFeed {
     pub fn add_lines(&self, lines: &mut DebugLines) {
         if self.show_points {
             if let Some(points) = web_depth_points() {
-                add_point_lines(lines, &points);
+                add_point_lines(lines, &points, None);
             }
         }
         if self.show_surface {
@@ -2271,7 +2319,7 @@ mod tests {
     #[test]
     fn point_cloud_draws_three_cross_segments_per_point() {
         let mut lines = DebugLines::new();
-        add_point_lines(&mut lines, &[Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0)]);
+        add_point_lines(&mut lines, &[Vec3::ZERO, Vec3::new(1.0, 2.0, 3.0)], None);
         assert_eq!(lines.line_count(), 6);
     }
 
@@ -2435,7 +2483,34 @@ mod tests {
             "有 RGB + 内参时应把摄像头原图挂成基础色贴图"
         );
         assert_eq!(material.base_color, Vec4::new(1.0, 1.0, 1.0, 1.0));
+        assert!(material.unlit, "摄像头原图应无光照直出");
         assert!(feed.recon_texture.is_some());
         assert!(feed.recon_status.contains("彩色"), "{}", feed.recon_status);
+    }
+    #[test]
+    fn point_cloud_colors_sample_the_camera_image() {
+        let projection = crate::reconstruct::CameraProjection {
+            width: 8,
+            height: 8,
+            fx: 1.0,
+            fy: 1.0,
+            cx: 4.0,
+            cy: 4.0,
+            origin: Vec3::ZERO,
+            mirrored: false,
+        };
+        let mut rgb = vec![0u8; 8 * 8 * 3];
+        let red = (4 * 8 + 4) * 3;
+        rgb[red] = 255;
+        // 8x8、fx=fy=1、原点在相机：p=(0.5,-0.5,-1) 正对像素 (4,4)。
+        let points = [Vec3::new(0.5, -0.5, -1.0), Vec3::new(100.0, 0.0, -1.0)];
+        let colors = sample_point_colors(&points, &rgb, &projection).expect("应能取色");
+        assert_eq!(colors.len(), 2);
+        assert!(colors[0].x > 0.95 && colors[0].y < 0.01 && colors[0].z < 0.01);
+        assert!(
+            colors[1].x > 0.2 && colors[1].y > 0.7,
+            "画面外的点应退回青色"
+        );
+        assert!(sample_point_colors(&points, &[0; 3], &projection).is_none());
     }
 }

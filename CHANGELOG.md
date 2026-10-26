@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+- **摄像头重建无光照直出**：有摄像头 RGB 时重建材质 `unlit = true`，原图不再被
+  场景灯光/阴影二次调制；没有 RGB 的蓝灰占位表面仍走光照。GPU 回归
+  `reconstruction_uses_camera_rgb_as_a_base_color_texture` 增补 `unlit` 断言。
+
+- **摄像头点云按画面取色**：开启「显示点云」且同时有 `latest.rgb` + 内参时，
+  每个深度点按针孔投影采样原图颜色（sRGB→线性）；画面外/长度不符时退回原青色。
+  回归 `point_cloud_colors_sample_the_camera_image`（合成 8×8 图，红像素精确命中，
+  画面外点保持青色，RGB 长度不符返回 `None`）。纯显示层，物理/重建逐位不变。
+
 - **气泡过压耦合**：新增 `fluids[].bubble_pressure`（Pa，缺省 0），按
   `p = p0·(r_rest/r)³` 把气泡内压转成液体径向压力加速度 `a = p/(ρ·r)`，
   到气泡 `reach` 处衰减为零；缺省 0 时完全不执行，旧场景逐位不变。回归
