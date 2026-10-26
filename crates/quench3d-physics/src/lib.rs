@@ -34,6 +34,7 @@ mod narrowphase;
 mod parallel;
 mod query;
 mod query_index;
+mod replay;
 mod shape;
 #[cfg(test)]
 mod sim_tests;
@@ -57,6 +58,7 @@ pub use joints::*;
 pub use narrowphase::*;
 pub use query::*;
 pub use query_index::*;
+pub use replay::*;
 pub use shape::*;
 pub use small_vec::SmallVec;
 pub use solver::*;

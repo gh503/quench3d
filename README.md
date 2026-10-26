@@ -519,6 +519,15 @@ let body = world.add_builder(
 world.step(1.0 / 60.0);              // 定步长
 world.step_with_accumulator(dt);     // 引擎内部按 fixed_dt 拆分子步（最多 8 步）
 
+// 刚体位姿录制/回放：只存渲染位姿，二进制带 magic/版本/FNV 校验
+let mut clip = ReplayClip::new(world.fixed_dt());
+clip.record(&world);                 // 每固定步调一次
+world.step(1.0 / 60.0);
+clip.record(&world);
+let bytes = clip.encode();
+let loaded = ReplayClip::decode(&bytes)?;
+loaded.apply(&mut world, 0.05);      // 按时间插值写回位姿；播放时应暂停物理
+
 // 查询：最近一条射线 / 沿路所有命中 / 任意形状重叠 / 到某个刚体的最近距离
 if let Some(hit) = world.raycast(origin, dir, 100.0) {
     println!("命中 {:?} 于 {:?}，距离 {}", hit.handle, hit.point, hit.distance);

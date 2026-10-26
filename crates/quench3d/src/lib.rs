@@ -179,7 +179,8 @@ pub mod prelude {
     pub use quench3d_physics::{
         BallConeLimit, BodyBuilder, BodyHandle, BodyType, CharacterController, CombineRule,
         ContactPair, ContactPoint, HingeMotor, Joint, JointHandle, MassProperties, PhysicsEvent,
-        PhysicsEventKind, PhysicsWorld, RaycastHit, RigidBody, Shape, ShapePart,
+        PhysicsEventKind, PhysicsWorld, RaycastHit, ReplayClip, ReplayError, ReplayFrame,
+        ReplayPose, RigidBody, Shape, ShapePart,
     };
     pub use quench3d_render::{
         color, Camera, CameraInput, DebugLines, DirectionalLight, FlyCamera, FogParams, GpuContext,

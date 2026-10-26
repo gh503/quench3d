@@ -8,7 +8,7 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**1018 通过 / 0 失败 / 5 ignored**
+- 测试：**1022 通过 / 0 失败 / 5 ignored**
 - wasm：**13,879,807 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
@@ -261,6 +261,12 @@
   - [x] `Engine::time_scale`（0–4，缺省 1）：实时物理/动画/粒子/仿真时长按缩放，
     FPS 与相机手感不缩放；编辑器有拖动条与 0.25×/0.5×/1×/2× 菜单。回归
     `time_scale_scales_physics_and_engine_time_but_not_fps`。
+  - [x] 刚体位姿回放格式：`ReplayClip::record/encode/decode/sample/apply`，
+    二进制 magic `Q3RP` + 版本 1 + FNV-1a 校验；位置 lerp、旋转 slerp；
+    截断/magic/版本/校验和/非有限值都返回 `ReplayError`。回归
+    `replay_round_trips_and_samples_between_frames`、`encode_decode_preserves_frames_and_checksum`、
+    `corrupt_truncated_and_future_versions_are_rejected`、`empty_clip_encodes_and_decodes`。
+    边界：只录刚体位姿，不录速度/流体/关节；不是完整存档格式。
   - [x] 固定步长渲染插值：`PhysicsWorld::body_interpolated_transform` 保存上一
     子步位姿，`Engine::render_interpolation`（缺省关）按累加器 alpha 插值，
     `Scene::sync_from_physics_interpolated`；编辑器默认开。回归

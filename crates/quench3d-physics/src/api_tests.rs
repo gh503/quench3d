@@ -13,6 +13,35 @@ fn gravity_constant() {
 }
 
 #[test]
+fn replay_round_trips_and_samples_between_frames() {
+    let mut world = PhysicsWorld::new();
+    world.set_fixed_dt(0.1);
+    let handle = world.add_builder(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+            .position(Vec3::new(0.0, 10.0, 0.0))
+            .linear_velocity(Vec3::new(0.0, 10.0, 0.0))
+            .gravity_scale(0.0),
+    );
+    let mut clip = ReplayClip::new(world.fixed_dt());
+    clip.record(&world);
+    world.step(0.1);
+    clip.record(&world);
+    assert_eq!(clip.frames().len(), 2);
+
+    let bytes = clip.encode();
+    let decoded = ReplayClip::decode(&bytes).expect("合法回放");
+    assert_eq!(decoded.frames().len(), 2);
+    let mid = decoded.sample(0.05).expect("有帧");
+    let pose = mid.iter().find(|p| p.handle == handle).expect("小球位姿");
+    assert!((pose.transform.position.y - 10.5).abs() < 1e-5, "{pose:?}");
+
+    world.step(0.1);
+    assert!((world.body(handle).unwrap().position().y - 12.0).abs() < 1e-5);
+    assert_eq!(decoded.apply(&mut world, 0.0), 1);
+    assert!((world.body(handle).unwrap().position().y - 10.0).abs() < 1e-5);
+}
+
+#[test]
 fn shape_api() {
     // 全部 7 种形状。
     let shapes = [

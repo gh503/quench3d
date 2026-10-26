@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **刚体位姿回放**：新增 `ReplayClip`（`crates/quench3d-physics/src/replay.rs`）。
+  `record` 每固定步记录刚体位姿，二进制格式带 `Q3RP` magic、版本 1、FNV-1a 校验；
+  `sample` 按时间做位置 lerp / 旋转 slerp，`apply` 只写位姿不推进物理。截断/
+  magic/版本/校验和/非有限值都返回 `ReplayError`，不 panic。4 条回归覆盖编解码、
+  中间采样、损坏/截断/未来版本与空回放。边界：只录刚体位姿，不录速度/流体/关节。
+
 - **气泡尾流**：新增 `FluidDesc::bubble_wake`（0~2，缺省 0 = 关闭）。上浮气泡
   在半径 3r、横向 1.5r 的锥形尾流内给液体向上速度，并按小比例扣减气泡速度；
   回归 `rising_bubbles_drag_a_liquid_wake_upward`（开/关平均向上速度对照）。
