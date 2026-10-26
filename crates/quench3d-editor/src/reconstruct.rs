@@ -4,7 +4,8 @@
 //! * **体素表面**：每个点落进一个体素，只为朝向空气的六个面生成四边形，棱角分明；
 //! * **平滑表面**：复用流体的 Surface Nets 等值面提取，得到连续、带法线的表面。
 //!
-//! 纯 CPU、无第三方库；同样的点 + 体素尺寸逐位可复现。
+//! 纯 CPU、无第三方库；同样的点 + 体素尺寸逐位可复现。摄像头可选**时间累积**
+//! （[`PointCloudAccumulator`]）：最近若干帧按体素平均，补遮挡/降噪声。
 
 use std::collections::HashSet;
 
@@ -361,5 +362,189 @@ mod tests {
         let a = voxel_surface(&[Vec3::splat(0.01), Vec3::splat(0.02)], 0.1);
         assert_eq!(a.vertices.len(), 24);
         assert_eq!(a.indices.len(), 36);
+    }
+}
+
+/// 摄像头点云的**时间累积**：把最近若干帧的点按体素去重/平均，弥补单帧遮挡和噪声。
+///
+/// 纯 CPU、确定性：体素键用 `BTreeMap` 排序，`points()` 输出顺序固定；同一输入序列
+/// 逐位可复现。旧的单帧重建路径不受影响（开关缺省关）。
+#[derive(Clone, Debug)]
+pub struct PointCloudAccumulator {
+    voxel: f32,
+    max_cells: usize,
+    ttl_frames: u64,
+    cells: std::collections::BTreeMap<(i32, i32, i32), AccumCell>,
+    last_purge: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AccumCell {
+    sum: Vec3,
+    count: u32,
+    last_frame: u64,
+}
+
+impl PointCloudAccumulator {
+    /// 创建一个累积器。
+    ///
+    /// * `voxel`：去重体素边长（米），夹到 `1e-3..=0.5`；
+    /// * `max_cells`：最多保留多少个体素（至少 1）；
+    /// * `ttl_frames`：多少帧没再被观测就丢弃（0 = 只保留当前帧）。
+    pub fn new(voxel: f32, max_cells: usize, ttl_frames: u64) -> Self {
+        let voxel = if voxel.is_finite() {
+            voxel.clamp(1e-3, 0.5)
+        } else {
+            0.02
+        };
+        Self {
+            voxel,
+            max_cells: max_cells.max(1),
+            ttl_frames,
+            cells: std::collections::BTreeMap::new(),
+            last_purge: 0,
+        }
+    }
+
+    /// 合并一帧点云；返回实际插入/更新的体素数。
+    pub fn merge(&mut self, points: &[Vec3], frame: u64) -> usize {
+        if points.is_empty() {
+            return 0;
+        }
+        // 每 32 帧清一次过期体素；比每帧 retain 便宜，同时限制内存。
+        if frame > self.last_purge.saturating_add(32) {
+            self.cells
+                .retain(|_, c| frame.saturating_sub(c.last_frame) <= self.ttl_frames);
+            self.last_purge = frame;
+        }
+        // 满容量时先清过期体素：摄像头扫过新区域时，不能因为旧区域占满而永远进不来。
+        if self.cells.len() >= self.max_cells {
+            let cutoff = frame.saturating_sub(self.ttl_frames);
+            self.cells.retain(|_, c| c.last_frame >= cutoff);
+        }
+        let mut touched = 0usize;
+        for p in points {
+            if !p.is_finite() {
+                continue;
+            }
+            let key = (
+                (p.x / self.voxel).floor() as i32,
+                (p.y / self.voxel).floor() as i32,
+                (p.z / self.voxel).floor() as i32,
+            );
+            if let Some(cell) = self.cells.get_mut(&key) {
+                cell.sum += *p;
+                cell.count = cell.count.saturating_add(1);
+                cell.last_frame = frame;
+                touched += 1;
+            } else if self.cells.len() < self.max_cells {
+                self.cells.insert(
+                    key,
+                    AccumCell {
+                        sum: *p,
+                        count: 1,
+                        last_frame: frame,
+                    },
+                );
+                touched += 1;
+            }
+        }
+        self.last_purge = frame;
+        touched
+    }
+
+    /// 当前累积点（每个体素取平均；按体素键排序，确定性）。
+    pub fn points(&self) -> Vec<Vec3> {
+        self.cells
+            .values()
+            .map(|c| c.sum / c.count as f32)
+            .collect()
+    }
+
+    /// 当前体素数。
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// 是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// 清空。
+    pub fn clear(&mut self) {
+        self.cells.clear();
+        self.last_purge = 0;
+    }
+}
+
+#[cfg(test)]
+mod accumulator_tests {
+    use super::*;
+    use quench3d_math::vec3;
+
+    #[test]
+    fn accumulator_merges_equal_cells_and_orders_points() {
+        let mut a = PointCloudAccumulator::new(0.1, 16, 120);
+        assert_eq!(a.merge(&[vec3(0.01, 0.0, 0.0)], 0), 1);
+        assert_eq!(a.merge(&[vec3(0.02, 0.0, 0.0)], 1), 1);
+        assert_eq!(a.len(), 1, "同一体素应合并，而不是长两个点");
+        let p = a.points()[0];
+        assert!((p.x - 0.015).abs() < 1e-6, "{p:?}");
+        assert_eq!(a.merge(&[vec3(1.01, 0.0, 0.0)], 2), 1);
+        let pts = a.points();
+        assert_eq!(pts.len(), 2);
+        assert!(pts[0].x < pts[1].x, "点必须按体素键排序：{pts:?}");
+    }
+
+    #[test]
+    fn accumulated_cloud_reconstructs_both_sides_of_a_sweep() {
+        let mut acc = PointCloudAccumulator::new(0.05, 1024, 120);
+        acc.merge(&[vec3(-0.5, 0.0, 0.0)], 0);
+        acc.merge(&[vec3(0.5, 0.0, 0.0)], 1);
+        let mesh = voxel_surface(&acc.points(), 0.1);
+        assert!(!mesh.indices.is_empty());
+        let xs: Vec<f32> = mesh.vertices.iter().map(|v| v.position[0]).collect();
+        let lo = xs.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(lo < -0.45, "左侧点应进入网格：lo={lo}");
+        assert!(hi > 0.45, "右侧点应进入网格：hi={hi}");
+    }
+
+    #[test]
+    fn accumulator_caps_cells_ignores_non_finite_and_expires() {
+        let mut a = PointCloudAccumulator::new(0.1, 2, 4);
+        let n = a.merge(
+            &[
+                vec3(0.0, 0.0, 0.0),
+                vec3(1.0, 0.0, 0.0),
+                vec3(2.0, 0.0, 0.0),
+                Vec3::splat(f32::NAN),
+            ],
+            0,
+        );
+        assert_eq!(n, 2, "只应接受前两个体素，NaN 跳过");
+        assert_eq!(a.len(), 2, "不能超过 max_cells");
+        // 过了 TTL，旧体素被清掉；新点仍可进入。
+        assert_eq!(a.merge(&[vec3(3.0, 0.0, 0.0)], 100), 1);
+        assert_eq!(a.len(), 1, "过期体素应被保留策略清掉");
+        assert!(a.points()[0].x > 2.9);
+    }
+
+    #[test]
+    fn accumulator_is_deterministic_and_clearable() {
+        let frame = [
+            vec3(0.0, 0.0, 0.0),
+            vec3(0.5, 0.5, 0.5),
+            vec3(0.51, 0.49, 0.5),
+        ];
+        let mut a = PointCloudAccumulator::new(0.05, 100, 30);
+        let mut b = PointCloudAccumulator::new(0.05, 100, 30);
+        a.merge(&frame, 7);
+        b.merge(&frame, 7);
+        assert_eq!(a.points(), b.points());
+        a.clear();
+        assert!(a.is_empty());
+        assert_eq!(a.points(), Vec::<Vec3>::new());
     }
 }

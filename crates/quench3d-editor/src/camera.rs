@@ -33,6 +33,8 @@ use std::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::reconstruct::PointCloudAccumulator;
+#[cfg(not(target_arch = "wasm32"))]
 use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions};
 #[cfg(not(target_arch = "wasm32"))]
 use quench3d::Engine;
@@ -275,6 +277,14 @@ pub struct CameraFeed {
     recon_object: Option<usize>,
     /// 体素边长（米）。
     recon_voxel: f32,
+    /// 是否把最近若干帧点云按体素累积后再重建（缺省关，旧路径不变）。
+    recon_accumulate: bool,
+    /// 累积器（`recon_accumulate` 打开时才建）。
+    recon_accum: Option<PointCloudAccumulator>,
+    /// 累积器已经吸收到的摄像头帧号。
+    recon_accum_frame: u64,
+    /// 累积器建立时用的体素尺寸（改尺寸要重建累积器）。
+    recon_accum_voxel: f32,
     /// 最近一次生成的结果/错误，显示在窗口里。
     recon_status: String,
 }
@@ -317,6 +327,10 @@ impl CameraFeed {
             recon_mesh: None,
             recon_object: None,
             recon_voxel: 0.03,
+            recon_accumulate: false,
+            recon_accum: None,
+            recon_accum_frame: u64::MAX,
+            recon_accum_voxel: 0.0,
             recon_status: String::new(),
         }
     }
@@ -385,9 +399,38 @@ impl CameraFeed {
             self.recon_status = "没有摄像头帧".to_string();
             return;
         };
-        let Some(points) = frame.points.as_deref() else {
+        let Some(raw_points) = frame.points.as_deref() else {
             self.recon_status = "这一帧没有点云（需要深度模型 + --points）".to_string();
             return;
+        };
+        // 时间累积：同一体素取多帧平均，弥补单帧遮挡/噪声；缺省关时完全走旧路径。
+        let accumulated;
+        let points: &[Vec3] = if self.recon_accumulate {
+            if self.recon_accum.is_none() || self.recon_accum_voxel != self.recon_voxel {
+                self.recon_accum = Some(PointCloudAccumulator::new(
+                    self.recon_voxel * 0.5,
+                    250_000,
+                    90,
+                ));
+                self.recon_accum_voxel = self.recon_voxel;
+                self.recon_accum_frame = u64::MAX;
+            }
+            if let Some(acc) = self.recon_accum.as_mut() {
+                if self.recon_accum_frame != frame.json.frame {
+                    acc.merge(raw_points, frame.json.frame);
+                    self.recon_accum_frame = frame.json.frame;
+                }
+                accumulated = acc.points();
+            } else {
+                accumulated = Vec::new();
+            }
+            if accumulated.is_empty() {
+                self.recon_status = "累积点云为空".to_string();
+                return;
+            }
+            accumulated.as_slice()
+        } else {
+            raw_points
         };
         let object_ok = self
             .recon_object
@@ -682,6 +725,14 @@ impl CameraFeed {
             let enabled = frame.json.points.present && frame.points.is_some();
             ui.checkbox(&mut self.recon_smooth, "平滑表面")
                 .on_hover_text("Surface Nets 连续表面；关掉则是一个个扫描块");
+            if ui
+                .checkbox(&mut self.recon_accumulate, "时间累积")
+                .on_hover_text("把最近约 90 帧点云按体素平均；慢速移动时更完整，快速移动会有拖影")
+                .changed()
+            {
+                self.recon_accum = None;
+                self.recon_frame = u64::MAX;
+            }
             if ui
                 .add_enabled(enabled, egui::Button::new("生成/更新网格"))
                 .on_hover_text("把当前深度点云固化成体素表面；会作为一个可选中物体加到场景里")
