@@ -1193,6 +1193,7 @@ NaN 刚体  : 0
   "particle_collision": false, "bubbles": false,
   "bubble_rate": 20, "max_bubbles": 128, "bubble_radius": 0.03,
   "bubble_buoyancy": 1.8, "bubble_drag": 2.0, "bubble_expansion": 0,
+  "bubble_pressure": 0,
   "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
@@ -1223,7 +1224,9 @@ NaN 刚体  : 0
   长大并封顶到初始半径 4 倍，模拟上升减压；`bubble_compressibility > 0` 时按
   `pV≈const` 让深处气泡收缩，到浅处恢复；`bubble_max_radius > 0` 时超过上限的
   气泡按体积守恒破碎成多颗；`bubble_wake > 0` 时上浮气泡把上方液体向上拖成
-  尾流）。CLI 把气泡画成低模球，`simulate` 报告 `bubbles` 计数
+  尾流；`bubble_pressure > 0` 时按 `p0·(r_rest/r)³` 把过压转成液体径向加速度，
+  是气泡尺度耦合，不是独立气相动量方程）。CLI 把气泡画成低模球，`simulate`
+  报告 `bubbles` 计数
   （0 时省略）。局部气体体积分数还会折算进刚体浮力：气泡占据的体积不再排开液体，
   浮力密度乘以 `1 - gas_fraction`（上限 0.9），所以曝气的水托不住同样的重物。
   气泡默认也参与 PBF 密度约束（`bubble_density_coupling`，缺省 true）：局部气体

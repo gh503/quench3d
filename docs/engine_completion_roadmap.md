@@ -174,7 +174,13 @@
   `FluidDoc` 的 bubbles/bubble_rate/max_bubbles/半径/浮力/阻尼/膨胀/耦合现在
   真的接进 `FluidDesc`；回归 `scene_bubble_fields_are_actually_simulated`
   （修复前报告 bubbles 永远为 0）。
-  仍**不是**严格两相流：没有独立气相压力/相变/表面张力，`gas` 是体积分数近似；
+  [x] 气泡过压（`fluids[].bubble_pressure`，缺省 0）：按 `p = p0·(r_rest/r)³`
+  把内压转成液体径向压力加速度 `a = p/(ρ·r)`（边缘最大、到 `reach` 衰减），
+  `bubble_pressure=0` 时整段不执行、旧路径逐位不变；回归
+  `bubble_pressure_pushes_liquid_outward_without_the_old_path`（开/关对照，径向
+  速度总量更大、速度有限），CLI 回归 `scene_bubble_fields_are_actually_simulated`
+  接受该字段并保持有限速度。这是**气泡尺度压力耦合**，不是独立气相动量方程。
+  仍**不是**严格两相流：没有独立气相动量/相变/表面张力，`gas` 是体积分数近似；
   局部气体分数还会折算进刚体浮力（气泡占据体积不再排开液体，上限 0.9）。
   回归 `aerated_fluid_reduces_buoyancy_on_a_body`：一颗贴着表面的气泡让浮力降到
   约 0.70 倍。

@@ -913,6 +913,7 @@ pub fn json_schema() -> Value {
         d["properties"]["bubble_drag"] = json!({ "type": "number", "minimum": 0, "maximum": 50 });
         d["properties"]["bubble_expansion"] = json!({ "type": "number", "minimum": 0, "maximum": 10 });
         d["properties"]["bubble_compressibility"] = json!({ "type": "number", "minimum": 0, "maximum": 10 });
+        d["properties"]["bubble_pressure"] = json!({ "type": "number", "minimum": 0, "maximum": 1000000 });
         d["properties"]["bubble_max_radius"] = json!({ "type": "number", "minimum": 0, "maximum": 1 });
         d["properties"]["bubble_wake"] = json!({ "type": "number", "minimum": 0, "maximum": 2 });
         d["properties"]["bubble_density_coupling"] = json!({ "type": "boolean" });

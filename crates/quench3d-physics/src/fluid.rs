@@ -98,8 +98,9 @@ pub struct FluidDesc {
     ///
     /// 气泡是**轻质气相粒子**：受反向重力浮升、与刚体/地面碰撞、把液体粒子
     /// 从气泡体积里推开，到液面/寿命结束消失。它把局部气体体积分数耦合进 PBF
-    /// 密度约束（`bubble_density_coupling`），但还没有独立气相压力/相变，所以
-    /// **不是**严格的两相流；会排开液体并对液体做功。
+    /// 密度约束（`bubble_density_coupling`），并可选地施加气泡尺度的过压
+    /// （`bubble_pressure`）；但没有独立气相动量方程/相变，所以仍**不是**
+    /// 严格两相流；它会排开液体并对液体做功。
     pub bubbles: bool,
     /// 气泡生成速率（颗/秒），缺省 20。
     pub bubble_rate: f32,
@@ -125,6 +126,11 @@ pub struct FluidDesc {
     /// 静水压压缩系数（1/m，0 = 不压缩）。深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)`
     /// 收缩，近似 `pV = const`；缺省 0，旧路径逐位不变。
     pub bubble_compressibility: f32,
+    /// 气泡过压（Pa，缺省 0 = 关闭）。按 `p = p0·(r_rest/r)³` 把气泡内压转成
+    /// 对周围液体粒子的径向压力加速度 `a = p/(ρ·r)`，压力在气泡边缘最大、
+    /// 到 `reach` 处衰减为零。这是**气泡尺度的压力耦合**，不是独立气相动量方程，
+    /// 所以仍不等同于严格两相流；0 时完全不执行，旧场景逐位不变。
+    pub bubble_pressure: f32,
     /// 气泡是否参与 PBF 密度约束（缺省开；只在 `bubbles`/手动注入气泡时生效）。
     ///
     /// 开：气泡占据的局部体积把有效静止密度降为 `rho0 * (1 - gas)`，液体在
@@ -170,6 +176,7 @@ impl Default for FluidDesc {
             bubble_max_radius: 0.0,
             bubble_wake: 0.0,
             bubble_compressibility: 0.0,
+            bubble_pressure: 0.0,
             bubble_density_coupling: true,
         }
     }
@@ -219,6 +226,8 @@ impl FluidDesc {
             && self.max_foam <= 4096
             && self.contact_friction.is_finite()
             && (0.0..=1.0).contains(&self.contact_friction)
+            && self.bubble_pressure.is_finite()
+            && (0.0..=1_000_000.0).contains(&self.bubble_pressure)
     }
 
     /// 按晶格估算的粒子数（已按 `max_particles` 截断）。
@@ -1037,6 +1046,7 @@ impl Fluid {
         let drag = self.desc.bubble_drag.max(0.0);
         let expansion = self.desc.bubble_expansion.max(0.0);
         let wake = self.desc.bubble_wake.max(0.0);
+        let pressure = self.desc.bubble_pressure.max(0.0);
         let max_bubble_radius = self.desc.bubble_radius.max(0.005) * 4.0;
         let particle_radius = self.desc.radius.max(0.0);
         let foam_enabled = self.desc.foam;
@@ -1118,6 +1128,24 @@ impl Fluid {
                     self.positions[i] += n * push;
                     self.velocities[i] += n * (push / dt * 0.2);
                     b.position -= n * (push * 0.05);
+                }
+            }
+            // 气泡过压：把内压转成对液体的径向加速度。只加在液体上；气泡本身
+            // 的动量由上面的径向排开近似处理（真实气体质量太小，按动量守恒反推
+            // 会让气泡速度爆掉）。`pressure=0` 时整段不执行。
+            if pressure > 0.0 && !self.positions.is_empty() {
+                let radius = b.radius.max(0.005);
+                let over = (pressure * (b.rest_radius / radius).powi(3)).clamp(0.0, 1.0e7);
+                let accel = (over / (self.desc.rest_density.max(1.0) * radius)).min(1.0e4);
+                let reach = radius + particle_radius * 0.5;
+                for i in 0..self.positions.len() {
+                    let d = self.positions[i] - b.position;
+                    let dist = d.length();
+                    if dist >= reach || dist <= EPS {
+                        continue;
+                    }
+                    let falloff = 1.0 - dist / reach;
+                    self.velocities[i] += (d / dist) * (accel * falloff * dt);
                 }
             }
             // 尾流：气泡上方锥形区域内的液体被向上拖，气泡受到很小的反作用。
@@ -1777,6 +1805,48 @@ mod tests {
             (after - before).abs() <= before * 0.02,
             "合并必须近似守恒气体体积：before {before}, after {after}"
         );
+    }
+
+    #[test]
+    fn bubble_pressure_pushes_liquid_outward_without_the_old_path() {
+        fn run(pressure: f32) -> (f32, f32) {
+            let mut fluid = Fluid::new(box_desc()).unwrap();
+            fluid.desc.bubble_buoyancy = 0.0;
+            fluid.desc.bubble_drag = 0.0;
+            fluid.desc.viscosity = 0.0;
+            fluid.desc.bubble_pressure = pressure;
+            fluid.add_bubble(Bubble {
+                position: Vec3::new(0.0, 1.0, 0.0),
+                velocity: Vec3::ZERO,
+                radius: 0.18,
+                rest_radius: 0.18,
+                age: 0.0,
+                life: 10.0,
+            });
+            let mut bodies = [];
+            fluid.step(&mut bodies, Vec3::ZERO, 1.0 / 60.0);
+            let mut outward = 0.0f32;
+            let mut max_speed = 0.0f32;
+            for (p, v) in fluid.positions.iter().zip(fluid.velocities()) {
+                let d = *p - Vec3::new(0.0, 1.0, 0.0);
+                if d.length() <= 0.18 {
+                    outward += v.dot(d.normalize_or_zero());
+                }
+                max_speed = max_speed.max(v.length());
+            }
+            (outward, max_speed)
+        }
+        let (off, off_speed) = run(0.0);
+        let (on, on_speed) = run(1000.0);
+        assert!(
+            on > off + 0.01,
+            "过压应让气泡周围液体获得额外径向速度：关 {off}，开 {on}"
+        );
+        assert!(
+            on_speed.is_finite() && on_speed < 100.0,
+            "压力速度必须有限：{on_speed}"
+        );
+        assert!(off_speed.is_finite());
     }
 
     #[test]

@@ -660,7 +660,7 @@ fn scene_bubble_fields_are_actually_simulated() {
             { "center": [0, 1.2, 0], "size": [1, 1, 1],
               "spacing": 0.1, "radius": 0.05, "max_particles": 1200,
               "bubbles": true, "bubble_rate": 10, "max_bubbles": 4,
-              "bubble_buoyancy": 0, "bubble_drag": 0,
+              "bubble_buoyancy": 0, "bubble_drag": 0, "bubble_pressure": 5000,
               "emit_position": [0, 1.2, 0], "emit_radius": 0.02 }
           ],
           "simulate": { "steps": 60, "dt": 0.0166667 }
@@ -677,6 +677,8 @@ fn scene_bubble_fields_are_actually_simulated() {
         bubbles > 0,
         "场景里 bubbles=true 必须真的生成气泡，报告: {f}"
     );
+    let max_speed = f["max_speed"].as_f64().expect("流体 max_speed");
+    assert!(max_speed.is_finite(), "气泡过压不能把速度变成 NaN: {f}");
 }
 
 #[test]

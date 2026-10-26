@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **气泡过压耦合**：新增 `fluids[].bubble_pressure`（Pa，缺省 0），按
+  `p = p0·(r_rest/r)³` 把气泡内压转成液体径向压力加速度 `a = p/(ρ·r)`，
+  到气泡 `reach` 处衰减为零；缺省 0 时完全不执行，旧场景逐位不变。回归
+  `bubble_pressure_pushes_liquid_outward_without_the_old_path`（开/关对照，
+  径向速度总量更大且有限）；CLI 接受并校验 0~1e6 Pa。这是气泡尺度压力耦合，
+  仍不是独立气相动量/相变，文档不把它说成严格两相流。
+
 - **200 g 摩擦夹持标定**：新增 `modkit_arm_friction_grasp_200g.scene.json`，用
   预紧 ±0.025 m、手指 kp 12000 / kd 50 / 限力 20 N、接触摩擦 2.2，把 40 mm
   200 g 方块抬升 0.118 m、相对夹爪滑移 0.42 mm，且手指不撞限位、关节不断裂；
