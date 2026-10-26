@@ -8,6 +8,11 @@
 
 ## [Unreleased]
 
+- **气泡破碎**：新增 `FluidDesc::bubble_max_radius`（缺省 0 = 关闭）。超过上限的
+  气泡按体积守恒拆成多颗，沿固定圆环排开，受 `max_bubbles` 限制；放不下时保留
+  原气泡。回归 `large_bubbles_break_up_and_conserve_gas_volume`（体积变化 ≤2%）。
+  CLI 字段 `bubble_max_radius` 已接线并做 0~1 米校验。
+
 - **气泡静水压压缩**：新增 `FluidDesc::bubble_compressibility`（缺省 0）。
   深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)` 的等温 `pV≈const` 近似收缩，
   到浅处恢复；`bubble_expansion` 仍作用在表面半径上。回归

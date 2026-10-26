@@ -8,8 +8,8 @@
 ## 0. 当前基线（M0）
 
 - 门禁：`CARGO_NET_OFFLINE=true bash tools/gate.sh`
-- 测试：**1014 通过 / 0 失败 / 5 ignored**
-- wasm：**13,875,396 字节**
+- 测试：**1015 通过 / 0 失败 / 5 ignored**
+- wasm：**13,877,328 字节**
 - 已有：自研渲染（PBR/阴影/CSM/点光聚光阴影/后处理）、自研物理（岛并行/休眠/
   确定性/关节/复合形状/流体/水面/粒子）、CLI、MCP、桌面与 Web 编辑器、
   glTF/GLB/OBJ/STL、动画/蒙皮/morph/状态机/两骨 IK。
@@ -153,7 +153,7 @@
   `foam_does_not_fall_through_the_floor`（修复前 min_y = -2.40 m）。**不是**两相流/
   气泡求解器。
 - [x] 气泡/气相粒子（`fluids[].bubbles`，缺省关闭；气泡上升速度随半径
-  ∝ √r，合并/膨胀后的大泡更快；可选静水压压缩）：按 `bubble_rate` 生成、
+  ∝ √r，合并/膨胀后的大泡更快；可选静水压压缩与破碎）：按 `bubble_rate` 生成、
   反向重力浮升、阻尼、与刚体/地面碰撞；每步把气泡体积内的液体粒子径向推开并给
   速度（气泡受反作用）；接触气泡按体积守恒合并（位置/速度按体积加权）；可选 `bubble_expansion > 0` 让半径随上升指数膨胀（上限
   4 倍）以近似减压；浮出液面会破裂并生成一颗被动泡沫（需 `foam=true`），
@@ -162,7 +162,9 @@
   两颗重叠气泡合并后气体体积变化 ≤2%；`bubble_compressibility > 0` 时按
   `r = r_surface/(1+k·depth)^(1/3)` 的等温 `pV≈const` 近似压缩深处气泡，
   `deeper_bubbles_are_compressed_by_hydrostatic_pressure` 断言深处半径更小，
-  k=0 直接走旧路径。`larger_bubbles_rise_faster` 断言大泡
+  k=0 直接走旧路径。`bubble_max_radius > 0` 时超过上限的气泡按体积守恒拆成
+  多颗（固定圆环排布，受 `max_bubbles` 限制）；`large_bubbles_break_up_and_conserve_gas_volume`
+  断言破碎后总量变化 ≤2%；缺省 0，旧路径逐位不变。`larger_bubbles_rise_faster` 断言大泡
   在同一时间内升得更高——浮力按 r³、阻力按 r²，终端速度 ∝ √r，半径等于
   `bubble_radius` 时因子逐位为 1）。
   [x] 气泡参与 PBF 密度约束（`bubble_density_coupling`，缺省 true，可关）：

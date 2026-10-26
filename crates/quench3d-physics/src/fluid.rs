@@ -116,6 +116,9 @@ pub struct FluidDesc {
     /// 这是简化压力模型：没有真正解气泡内压/表面张力，只让气泡在上升时按指数
     /// 长大（体积分数随之增大）；半径封顶到初始值的 4 倍。
     pub bubble_expansion: f32,
+    /// 气泡破碎半径上限（米，0 = 关闭）。大于它的气泡按体积守恒拆成多颗；
+    /// 受 `max_bubbles` 限制，放不下时保留原气泡。缺省 0，旧路径逐位不变。
+    pub bubble_max_radius: f32,
     /// 静水压压缩系数（1/m，0 = 不压缩）。深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)`
     /// 收缩，近似 `pV = const`；缺省 0，旧路径逐位不变。
     pub bubble_compressibility: f32,
@@ -161,6 +164,7 @@ impl Default for FluidDesc {
             bubble_buoyancy: 1.8,
             bubble_drag: 2.0,
             bubble_expansion: 0.0,
+            bubble_max_radius: 0.0,
             bubble_compressibility: 0.0,
             bubble_density_coupling: true,
         }
@@ -1139,6 +1143,49 @@ impl Fluid {
         }
         self.bubbles.truncate(keep);
         self.coalesce_bubbles();
+        self.split_large_bubbles();
+    }
+
+    /// 气泡直径超过 `bubble_max_radius` 时按体积守恒拆成多颗。
+    ///
+    /// 只在 `bubble_max_radius > 0` 时执行； daughters 沿一个固定圆环均匀排开，
+    /// 避免下一步立刻又合并。`max_bubbles` 放不下时保留原气泡，不悄悄丢气体。
+    fn split_large_bubbles(&mut self) {
+        let max_radius = self.desc.bubble_max_radius.max(0.0);
+        if max_radius <= 0.0 || self.bubbles.is_empty() {
+            return;
+        }
+        let cap = self.desc.max_bubbles.max(self.bubbles.len());
+        let mut out = Vec::with_capacity(self.bubbles.len());
+        for b in self.bubbles.iter().copied() {
+            if b.radius <= max_radius || out.len() >= cap {
+                out.push(b);
+                continue;
+            }
+            let ratio = (b.radius / max_radius).max(1.0);
+            let needed = (ratio.powi(3).ceil() as usize).max(2);
+            let room = cap.saturating_sub(out.len());
+            if needed > room || room < 2 {
+                // 放不下：保留原气泡，下一帧/腾出空间后再拆。
+                out.push(b);
+                continue;
+            }
+            let daughter = (b.radius.powi(3) / needed as f32).cbrt();
+            let rest = (b.rest_radius.powi(3) / needed as f32).cbrt();
+            for k in 0..needed {
+                let angle = std::f32::consts::TAU * k as f32 / needed as f32;
+                let offset = Vec3::new(angle.cos(), 0.0, angle.sin()) * (daughter * 1.2);
+                out.push(Bubble {
+                    position: b.position + offset,
+                    velocity: b.velocity,
+                    radius: daughter,
+                    rest_radius: rest,
+                    age: b.age,
+                    life: b.life,
+                });
+            }
+        }
+        self.bubbles = out;
     }
 
     /// 两颗气泡接触时合并：位置/速度按体积加权，半径按体积守恒
@@ -1834,6 +1881,45 @@ mod tests {
         assert!(
             deep < shallow * 0.95,
             "深处气泡应被压缩得更小：deep={deep:.5}, shallow={shallow:.5}"
+        );
+    }
+
+    #[test]
+    fn large_bubbles_break_up_and_conserve_gas_volume() {
+        let mut fluid = Fluid::new(box_desc()).unwrap();
+        fluid.positions.clear();
+        fluid.velocities.clear();
+        fluid.desc.bubble_max_radius = 0.2;
+        fluid.desc.bubble_buoyancy = 0.0;
+        fluid.desc.bubble_drag = 0.0;
+        fluid.add_bubble(Bubble {
+            position: Vec3::new(0.0, 1.0, 0.0),
+            velocity: Vec3::ZERO,
+            radius: 0.4,
+            rest_radius: 0.4,
+            age: 0.0,
+            life: 10.0,
+        });
+        let before = 4.0 / 3.0 * std::f32::consts::PI * 0.4f32.powi(3);
+        fluid.update_bubbles(Vec3::ZERO, 1.0 / 60.0, &[]);
+        assert!(
+            fluid.bubbles().len() >= 2,
+            "半径 0.4 m 的气泡在 max=0.2 时必须破碎，实际 {} 颗",
+            fluid.bubbles().len()
+        );
+        assert!(
+            fluid.bubbles().iter().all(|b| b.radius <= 0.21),
+            "破碎后每颗都不应超过上限：{:?}",
+            fluid.bubbles().iter().map(|b| b.radius).collect::<Vec<_>>()
+        );
+        let after: f32 = fluid
+            .bubbles()
+            .iter()
+            .map(|b| 4.0 / 3.0 * std::f32::consts::PI * b.radius.powi(3))
+            .sum();
+        assert!(
+            (after - before).abs() <= before * 0.02,
+            "破碎必须守恒气体体积：before={before:.5}, after={after:.5}"
         );
     }
 
