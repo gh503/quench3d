@@ -213,6 +213,21 @@ mod tests {
     }
 
     #[test]
+    fn remove_water_removes_by_index_and_shifts_later_entries() {
+        let mut world = PhysicsWorld::new();
+        let mut first = WaterVolume::new(Vec2::new(1.0, 0.0), Vec2::new(2.0, 2.0), 0.0);
+        first.flow = Vec2::new(1.0, 0.0);
+        let second = WaterVolume::new(Vec2::new(2.0, 0.0), Vec2::new(2.0, 2.0), 0.0);
+        assert_eq!(world.add_water(first), Some(0));
+        assert_eq!(world.add_water(second), Some(1));
+        let removed = world.remove_water(0).expect("第一块应被删除");
+        assert_eq!(removed.flow, Vec2::new(1.0, 0.0));
+        assert_eq!(world.waters().len(), 1);
+        assert_eq!(world.waters()[0].center, Vec2::new(2.0, 0.0));
+        assert!(world.remove_water(9).is_none());
+    }
+
+    #[test]
     fn set_water_validates_and_replaces_by_index() {
         let mut world = PhysicsWorld::new();
         let water = WaterVolume::new(Vec2::new(0.0, 0.0), Vec2::new(2.0, 2.0), 0.0);

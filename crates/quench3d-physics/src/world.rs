@@ -731,6 +731,14 @@ impl PhysicsWorld {
         true
     }
 
+    /// 删除第 `index` 块水域并返回它；索引越界返回 `None`。
+    pub fn remove_water(&mut self, index: usize) -> Option<WaterVolume> {
+        if index >= self.waters.len() {
+            return None;
+        }
+        Some(self.waters.remove(index))
+    }
+
     /// 清空所有水域，并把刚体上的浸没占比归零。
     pub fn clear_waters(&mut self) {
         if self.waters.is_empty() {
