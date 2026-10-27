@@ -14,6 +14,30 @@ use quench3d_cli::scene_doc::{
 };
 use quench3d_physics::WaterVolume;
 
+/// 从运行时水域生成一条场景文档；新增水域/底稿没有对应条目时用它补全。
+pub(crate) fn water_doc_from_volume(water: &WaterVolume) -> WaterDoc {
+    WaterDoc {
+        center: Some([water.center.x, water.center.y]),
+        size: [water.half_size.x * 2.0, water.half_size.y * 2.0],
+        level: water.level,
+        density: water.density,
+        drag: water.drag,
+        flow: Some([water.flow.x, water.flow.y]),
+    }
+}
+
+/// 让场景底稿的 `waters` 与运行时水域数量对齐。
+///
+/// 编辑器新增/删除水域会同时改两边；但如果底稿原本是空的（空白场景里先加
+/// 水），长度会不一致，必须从运行时世界补出完整条目，否则存盘把新水域丢掉。
+/// 数量一致时不动底稿，避免把老的写法（省略 `center`/`flow`）改成显式值。
+pub(crate) fn sync_water_docs(out: &mut Vec<WaterDoc>, waters: &[WaterVolume]) {
+    if out.len() == waters.len() {
+        return;
+    }
+    *out = waters.iter().map(water_doc_from_volume).collect();
+}
+
 /// 把一块运行时水域写回场景文档的同名字段（编辑器调参后存盘用）。
 ///
 /// `size` 在文档里是**全尺寸**，`WaterVolume` 里是半尺寸；`flow` 显式写
@@ -333,6 +357,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             refraction: Some(water.refraction),
         });
     }
+    sync_water_docs(&mut out.waters, engine.world.waters());
 
     // 场景物体下标 → 导出后 `objects` 里的下标（父子关系要靠它对上）。
     let mut exported: Vec<(usize, usize)> = Vec::new();
@@ -1372,6 +1397,31 @@ pub fn roundtrip_probe() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_scene_doc_gets_world_waters_on_save() {
+        let water = WaterVolume::new(Vec2::new(1.0, 2.0), Vec2::new(3.0, 4.0), -0.5);
+        let mut docs = Vec::new();
+        sync_water_docs(&mut docs, &[water]);
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].center, Some([1.0, 2.0]));
+        assert_eq!(docs[0].size, [6.0, 8.0]);
+        assert_eq!(docs[0].level, -0.5);
+        assert_eq!(docs[0].flow, Some([0.0, 0.0]));
+
+        // 数量一致时不动底稿：老场景省略的字段不会被改写。
+        let mut existing = vec![WaterDoc {
+            center: None,
+            size: [1.0, 1.0],
+            level: 0.0,
+            density: 1000.0,
+            drag: 6.0,
+            flow: None,
+        }];
+        sync_water_docs(&mut existing, &[water]);
+        assert_eq!(existing[0].center, None);
+        assert_eq!(existing[0].flow, None);
+    }
 
     #[test]
     fn water_edit_writes_flow_and_size_into_scene_doc() {

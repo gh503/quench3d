@@ -8,6 +8,7 @@ use crate::doc::{BodyKind, Doc, Primitive};
 use crate::gizmo::{Gizmo, Mode as GizmoMode, Pivot as GizmoPivot, Space as GizmoSpace};
 use egui::{RichText, Ui};
 use quench3d::prelude::*;
+use quench3d_physics::WaterVolume;
 
 /// 视口每帧回填的信息。
 #[derive(Clone, Copy, Debug)]
@@ -1656,18 +1657,50 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
 /// 这里不提供"新增/删除水域"：那还要同时改底稿、物理体和场景树；本面板只
 /// 负责已有水域的调参，避免出现"预览里有、存盘后没有"的半截编辑。
 fn water_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
-    let waters = engine.world.waters().to_vec();
-    if waters.is_empty() {
-        return;
-    }
+    let mut waters = engine.world.waters().to_vec();
     egui::CollapsingHeader::new("水域物理")
         .default_open(false)
         .show(ui, |ui| {
+            let added = ui
+                .button("添加水域")
+                .on_hover_text("在原点添加一块 10×10 m、水面高度 0 的静水")
+                .clicked()
+                && engine
+                    .world
+                    .add_water(WaterVolume::new(Vec2::ZERO, Vec2::new(5.0, 5.0), 0.0))
+                    .is_some();
+            if added {
+                if let Some(base) = doc.base_doc_mut() {
+                    base.waters.push(quench3d_cli::scene_doc::WaterDoc {
+                        center: Some([0.0, 0.0]),
+                        size: [10.0, 10.0],
+                        level: 0.0,
+                        density: 1000.0,
+                        drag: 6.0,
+                        flow: Some([0.0, 0.0]),
+                    });
+                }
+                waters = engine.world.waters().to_vec();
+            }
+            if waters.is_empty() {
+                ui.label("当前场景没有水域；添加后才会出现浮力/水面。");
+                return;
+            }
+            let mut remove = None;
             for (index, current) in waters.iter().enumerate() {
                 let mut water = *current;
                 let mut changed = false;
                 ui.push_id(("water-physics", index), |ui| {
-                    ui.label(RichText::new(format!("水域 {index}")).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("水域 {index}")).strong());
+                        if ui
+                            .button("删除")
+                            .on_hover_text("删除这块水域（同时从场景底稿移除）")
+                            .clicked()
+                        {
+                            remove = Some(index);
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label("水流 X");
                         changed |= ui
@@ -1761,6 +1794,14 @@ fn water_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         if let Some(w) = base.waters.get_mut(index) {
                             crate::scene_io::write_water_fields(&water, w);
                         }
+                    }
+                }
+            }
+            if let Some(index) = remove {
+                engine.world.remove_water(index);
+                if let Some(base) = doc.base_doc_mut() {
+                    if index < base.waters.len() {
+                        base.waters.remove(index);
                     }
                 }
             }
