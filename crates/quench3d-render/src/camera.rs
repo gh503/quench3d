@@ -135,6 +135,8 @@ impl Camera {
             || !viewport.y.is_finite()
             || viewport.x <= 0.0
             || viewport.y <= 0.0
+            || !screen.x.is_finite()
+            || !screen.y.is_finite()
         {
             return self.ndc_ray(Vec2::ZERO);
         }
@@ -549,6 +551,29 @@ mod tests {
             assert!(
                 (ray.dir - Vec3::NEG_Z).length() < 1e-4,
                 "invalid viewport {viewport:?} should use the center ray, got {:?}",
+                ray.dir
+            );
+        }
+    }
+
+    #[test]
+    fn screen_ray_nonfinite_screen_stays_finite_and_predictable() {
+        let c = Camera::perspective(1.0);
+        let viewport = Vec2::new(1280.0, 720.0);
+        for screen in [
+            Vec2::new(f32::NAN, 360.0),
+            Vec2::new(640.0, f32::NAN),
+            Vec2::new(f32::INFINITY, 360.0),
+            Vec2::new(640.0, f32::NEG_INFINITY),
+        ] {
+            let ray = c.screen_ray(screen, viewport);
+            assert!(
+                ray.origin.is_finite() && ray.dir.is_finite(),
+                "nonfinite screen {screen:?} produced nonfinite ray {ray:?}"
+            );
+            assert!(
+                (ray.dir - Vec3::NEG_Z).length() < 1e-4,
+                "nonfinite screen {screen:?} should use the center ray, got {:?}",
                 ray.dir
             );
         }
