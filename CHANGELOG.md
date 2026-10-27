@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **FK 句柄代数校验**：FK 构图复用常规求解器的存活/代数校验，删除关节端点并
+  复用槽位后，旧关节不再驱动新刚体。回归
+  `kinematic_fk_ignores_joints_with_reused_body_slots` 修复前将替身体移动到 x=2，
+  覆盖删除根端与子端两种情况。另补反向铰链/滑块的正负目标与限位回归，原实现
+  已通过该对照，不修改其符号逻辑。默认物理模式与有效句柄路径不变。
+  完整门禁 1072 项通过、0 失败；wasm 14,010,826 字节，Brotli 3,088,264 字节。
+
 - **FK 运动学底座定根**：静态根之后优先选择运动学根，避免动态连杆先创建时
   FK 反向旋转宿主控制的底座。回归
   `kinematic_fk_uses_kinematic_roots_independent_of_insertion_order` 修复前底座

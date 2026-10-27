@@ -3332,9 +3332,10 @@ impl PhysicsWorld {
             let Some(target) = target else {
                 continue;
             };
-            let ia = a.index as usize;
-            let ib = b.index as usize;
-            if ia >= count || ib >= count || ia == ib {
+            let (Some(ia), Some(ib)) = (self.body_index(a), self.body_index(b)) else {
+                continue;
+            };
+            if ia == ib {
                 continue;
             }
             let index = raws.len();
@@ -4836,6 +4837,114 @@ mod tests {
             "后代必须随子树整体旋转：{got:?} vs {expected:?}"
         );
     }
+    #[test]
+    fn kinematic_fk_ignores_joints_with_reused_body_slots() {
+        for remove_root in [false, true] {
+            let mut w = PhysicsWorld::new();
+            w.set_gravity(Vec3::ZERO);
+            w.set_collisions_enabled(false);
+            w.set_kinematic_fk(true);
+            let shape = Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            };
+            let root = w.add_body(BodyBuilder::r#static(shape.clone()).build());
+            let child = w.add_body(BodyBuilder::dynamic(shape.clone()).build());
+            let joint = w.add_joint(Joint::Slider {
+                a: root,
+                b: child,
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::ZERO,
+                local_axis_a: Vec3::X,
+                local_axis_b: Vec3::X,
+                limits: None,
+                motor: Some(crate::joints::HingeMotor {
+                    target_angle: Some(2.0),
+                    max_impulse: 0.0,
+                    target_velocity: 0.0,
+                    stiffness: 0.0,
+                    damping: 0.0,
+                    kp: 0.0,
+                    kd: 0.0,
+                    max_torque: 0.0,
+                }),
+            });
+            let removed = if remove_root { root } else { child };
+            w.remove_body(removed).expect("live endpoint");
+            let replacement = w.add_body(if remove_root {
+                BodyBuilder::r#static(shape).build()
+            } else {
+                BodyBuilder::dynamic(shape).build()
+            });
+            assert_eq!(replacement.index, removed.index);
+            assert_ne!(replacement.generation, removed.generation);
+            assert!(w.joint_telemetry(joint, 1.0 / 60.0).is_none());
+            w.step_substeps(1.0 / 60.0, 1);
+            let dynamic = if remove_root { child } else { replacement };
+            let position = w.body(dynamic).unwrap().position();
+            assert!(position.length() < 1e-6,
+                "stale joint must not move a body: remove_root={remove_root}, position={position:?}");
+        }
+    }
+
+    #[test]
+    fn kinematic_fk_reversed_endpoints_preserve_target_sign_and_limits() {
+        for slider in [true, false] {
+            for (target, limits, expected) in [
+                (0.7, None, 0.7),
+                (-0.7, None, -0.7),
+                (0.7, Some((-0.2, 0.4)), 0.4),
+                (-0.7, Some((-0.2, 0.4)), -0.2),
+            ] {
+                let mut w = PhysicsWorld::new();
+                w.set_gravity(Vec3::ZERO);
+                w.set_collisions_enabled(false);
+                w.set_kinematic_fk(true);
+                let shape = Shape::Box {
+                    half_extents: Vec3::splat(0.1),
+                };
+                let root = w.add_body(BodyBuilder::r#static(shape.clone()).build());
+                let child = w.add_body(BodyBuilder::dynamic(shape).build());
+                let motor = Some(crate::joints::HingeMotor {
+                    target_angle: Some(target),
+                    max_impulse: 0.0,
+                    target_velocity: 0.0,
+                    stiffness: 0.0,
+                    damping: 0.0,
+                    kp: 0.0,
+                    kd: 0.0,
+                    max_torque: 0.0,
+                });
+                let joint = w.add_joint(if slider {
+                    Joint::Slider {
+                        a: child,
+                        b: root,
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: Vec3::ZERO,
+                        local_axis_a: Vec3::X,
+                        local_axis_b: Vec3::X,
+                        limits,
+                        motor,
+                    }
+                } else {
+                    Joint::Hinge {
+                        a: child,
+                        b: root,
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: Vec3::ZERO,
+                        local_axis_a: Vec3::X,
+                        local_axis_b: Vec3::X,
+                        limits,
+                        motor,
+                    }
+                });
+                w.step_substeps(1.0 / 60.0, 1);
+                let coordinate = w.joint_telemetry(joint, 1.0 / 60.0).unwrap().coordinate;
+                assert!((coordinate - expected).abs() < 2e-3,
+                    "slider={slider}, target={target}, limits={limits:?}: coordinate={coordinate}, expected={expected}");
+            }
+        }
+    }
+
     #[test]
     fn kinematic_fk_slides_a_slider_subtree_to_the_target() {
         let mut w = PhysicsWorld::new();

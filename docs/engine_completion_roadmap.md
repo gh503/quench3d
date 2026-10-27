@@ -323,6 +323,13 @@
   `kinematic_fk_moves_the_whole_descendant_subtree` 与 CLI
   `fk_mode_reaches_the_joint_target_in_one_step`。支持 hinge/slider；滑块回归
   `kinematic_fk_slides_a_slider_subtree_to_the_target`。
+  - 固定附件随祖先传播、运动学底座优先定根、累计不足固定步不改位姿；分别由
+    `kinematic_fk_carries_fixed_attachments`、
+    `kinematic_fk_uses_kinematic_roots_independent_of_insertion_order`、
+    `kinematic_fk_waits_for_an_accumulated_physics_step` 覆盖。
+  - 旧端点槽位复用时跳过失效关节（`kinematic_fk_ignores_joints_with_reused_body_slots`）；
+    反向铰链/滑块正负目标和限位由 `kinematic_fk_reversed_endpoints_preserve_target_sign_and_limits` 覆盖。
+  - 仍缺球窝/距离关节传播与多底座闭环冲突处理；不代表任意机械机构完整 FK。
 - [ ] TGS/SIMD 求解器。
 - [x] 深堆 2000 体实时（目标 <16 ms/步，本机量化）：本机 release 60 步
   **14.7~15.3 ms/步**；显式 `deep_stack_2000_perf` 断言 <16 ms（优化前 17.04、
