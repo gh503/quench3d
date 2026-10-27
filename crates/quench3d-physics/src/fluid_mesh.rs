@@ -57,12 +57,14 @@ pub fn extract_surface(
         return FluidSurfaceMesh::default();
     }
     let mut bounds = Aabb::EMPTY;
+    let mut finite_count = 0;
     for p in particles {
         if p.is_finite() {
             bounds.expand_point(*p);
+            finite_count += 1;
         }
     }
-    if !bounds.is_valid() {
+    if finite_count < 4 || !bounds.is_valid() {
         return FluidSurfaceMesh::default();
     }
     let margin = radius * 2.0;
@@ -372,6 +374,40 @@ mod tests {
             two.positions.len()
         );
         assert!(two.triangle_count() > 100);
+    }
+
+    #[test]
+    fn nonfinite_particles_do_not_turn_an_insufficient_cloud_into_a_surface() {
+        let valid = [Vec3::ZERO, Vec3::X * 0.05, Vec3::Y * 0.05];
+        assert!(extract_surface(&valid, 0.12, 24, 0.45).is_empty());
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut points = valid.to_vec();
+            points.push(Vec3::new(invalid, 0.0, 0.0));
+            assert!(extract_surface(&points, 0.12, 24, 0.45).is_empty());
+        }
+    }
+
+    #[test]
+    fn nonfinite_particles_preserve_valid_surface_bits() {
+        let points = blob(Vec3::ZERO);
+        let expected = extract_surface(&points, 0.12, 24, 0.45);
+        assert!(!expected.is_empty());
+        let bits = |vectors: &[Vec3]| {
+            vectors
+                .iter()
+                .map(|v| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()])
+                .collect::<Vec<_>>()
+        };
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut mixed = points.clone();
+            mixed.insert(0, Vec3::new(invalid, 0.0, 0.0));
+            mixed.push(Vec3::new(0.0, invalid, 0.0));
+            mixed.insert(mixed.len() / 2, Vec3::new(0.0, 0.0, invalid));
+            let actual = extract_surface(&mixed, 0.12, 24, 0.45);
+            assert_eq!(bits(&actual.positions), bits(&expected.positions));
+            assert_eq!(bits(&actual.normals), bits(&expected.normals));
+            assert_eq!(actual.indices, expected.indices);
+        }
     }
 
     #[test]
