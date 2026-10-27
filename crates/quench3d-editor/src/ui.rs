@@ -194,7 +194,7 @@ fn top_bar(
                 transform_menu(ui, engine, doc, gizmo);
                 playback_menu(ui, engine, doc);
                 view_menu(ui, engine, doc, gizmo, camera);
-                render_menu(ui, engine);
+                render_menu(ui, engine, doc);
                 layout_menu(ui, doc);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("？").on_hover_text("快捷键与操作说明").clicked() {
@@ -741,7 +741,7 @@ fn view_menu(
     });
 }
 
-fn render_menu(ui: &mut Ui, engine: &mut Engine) {
+fn render_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     ui.menu_button("渲染", |ui| {
         ui.set_min_width(280.0);
         ui.horizontal(|ui| {
@@ -893,6 +893,7 @@ fn render_menu(ui: &mut Ui, engine: &mut Engine) {
             });
         });
         ui.separator();
+        water_physics_section(ui, engine, doc);
         water_section(ui, engine);
     });
 }
@@ -1647,6 +1648,123 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
             *changed = true;
         }
     });
+}
+
+/// 场景里每块水域的物理参数。编辑立即写回 `PhysicsWorld`，同时把同一份
+/// 数值写回场景底稿的 `waters[i]`，这样下一次存盘不会把水流/密度丢掉。
+///
+/// 这里不提供"新增/删除水域"：那还要同时改底稿、物理体和场景树；本面板只
+/// 负责已有水域的调参，避免出现"预览里有、存盘后没有"的半截编辑。
+fn water_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    let waters = engine.world.waters().to_vec();
+    if waters.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new("水域物理")
+        .default_open(false)
+        .show(ui, |ui| {
+            for (index, current) in waters.iter().enumerate() {
+                let mut water = *current;
+                let mut changed = false;
+                ui.push_id(("water-physics", index), |ui| {
+                    ui.label(RichText::new(format!("水域 {index}")).strong());
+                    ui.horizontal(|ui| {
+                        ui.label("水流 X");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.flow.x)
+                                    .speed(0.05)
+                                    .range(-100.0..=100.0)
+                                    .suffix(" m/s"),
+                            )
+                            .changed();
+                        ui.label("Z");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.flow.y)
+                                    .speed(0.05)
+                                    .range(-100.0..=100.0)
+                                    .suffix(" m/s"),
+                            )
+                            .changed();
+                    })
+                    .response
+                    .on_hover_text("水流通过浸没阻尼把刚体拖向该速度；0 = 静水");
+                    ui.horizontal(|ui| {
+                        ui.label("水面 Y");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.level)
+                                    .speed(0.05)
+                                    .range(-10_000.0..=10_000.0)
+                                    .suffix(" m"),
+                            )
+                            .changed();
+                        ui.label("密度");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.density)
+                                    .speed(10.0)
+                                    .range(1.0..=20_000.0)
+                                    .suffix(" kg/m³"),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("中心 X");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.center.x)
+                                    .speed(0.1)
+                                    .range(-10_000.0..=10_000.0),
+                            )
+                            .changed();
+                        ui.label("Z");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.center.y)
+                                    .speed(0.1)
+                                    .range(-10_000.0..=10_000.0),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("半尺寸 X");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.half_size.x)
+                                    .speed(0.1)
+                                    .range(0.05..=10_000.0)
+                                    .suffix(" m"),
+                            )
+                            .changed();
+                        ui.label("Z");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut water.half_size.y)
+                                    .speed(0.1)
+                                    .range(0.05..=10_000.0)
+                                    .suffix(" m"),
+                            )
+                            .changed();
+                    });
+                    ui.add(
+                        egui::DragValue::new(&mut water.drag)
+                            .speed(0.1)
+                            .range(0.0..=100.0)
+                            .prefix("浸没阻尼 "),
+                    )
+                    .on_hover_text("只对浸没部分生效；0 = 无阻尼");
+                });
+                if changed && engine.world.set_water(index, water) {
+                    if let Some(base) = doc.base_doc_mut() {
+                        if let Some(w) = base.waters.get_mut(index) {
+                            crate::scene_io::write_water_fields(&water, w);
+                        }
+                    }
+                }
+            }
+        });
 }
 
 /// 屏幕空间水的全局外观（与场景文件顶层 `water` 同一份字段）。

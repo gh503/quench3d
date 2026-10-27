@@ -10,8 +10,22 @@ use quench3d::prelude::*;
 use quench3d_cli::runner;
 use quench3d_cli::scene_doc::{
     BodyKind as DocBodyKind, CameraDoc, MaterialDoc, ObjectDoc, SceneDoc, ShapeDoc, ShapeKind,
-    WaterStyleDoc, FORMAT, VERSION,
+    WaterDoc, WaterStyleDoc, FORMAT, VERSION,
 };
+use quench3d_physics::WaterVolume;
+
+/// 把一块运行时水域写回场景文档的同名字段（编辑器调参后存盘用）。
+///
+/// `size` 在文档里是**全尺寸**，`WaterVolume` 里是半尺寸；`flow` 显式写
+/// `Some([0,0])` 而不是省略，这样"用户把它调回静水"也能存下来。
+pub(crate) fn write_water_fields(water: &WaterVolume, doc: &mut WaterDoc) {
+    doc.center = Some([water.center.x, water.center.y]);
+    doc.size = [water.half_size.x * 2.0, water.half_size.y * 2.0];
+    doc.level = water.level;
+    doc.density = water.density;
+    doc.drag = water.drag;
+    doc.flow = Some([water.flow.x, water.flow.y]);
+}
 
 /// 导出结果。
 pub struct SavedScene {
@@ -1358,6 +1372,29 @@ pub fn roundtrip_probe() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn water_edit_writes_flow_and_size_into_scene_doc() {
+        let mut water = WaterVolume::new(Vec2::new(1.5, -2.0), Vec2::new(3.0, 4.0), -0.25);
+        water.flow = Vec2::new(1.25, -0.5);
+        water.density = 1025.0;
+        water.drag = 2.5;
+        let mut doc = WaterDoc {
+            center: None,
+            size: [1.0, 1.0],
+            level: 0.0,
+            density: 1000.0,
+            drag: 6.0,
+            flow: None,
+        };
+        write_water_fields(&water, &mut doc);
+        assert_eq!(doc.center, Some([1.5, -2.0]));
+        assert_eq!(doc.size, [6.0, 8.0]);
+        assert_eq!(doc.level, -0.25);
+        assert_eq!(doc.density, 1025.0);
+        assert_eq!(doc.drag, 2.5);
+        assert_eq!(doc.flow, Some([1.25, -0.5]));
+    }
 
     /// 引擎形状 → 场景文档形状：每种图元都要能**原样反推**（存盘不丢形状）。
     ///
