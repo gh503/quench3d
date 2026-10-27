@@ -4385,12 +4385,16 @@ impl SceneDoc {
                     ));
                 }
             }
-            if !f.size.iter().all(|v| v.is_finite() && *v > 0.0) {
+            if !f
+                .size
+                .iter()
+                .all(|v| v.is_finite() && *v > 0.0 && *v * 0.5 > 0.0)
+            {
                 cam_diags.push(
                     Diagnostic::error_code(
                         ErrorCode::OutOfRange,
                         format!("{p}.size"),
-                        "流体发射体尺寸必须是有限正数",
+                        "流体发射体尺寸及转换后的半尺寸必须是有限正数",
                     )
                     .with_hint("例如 `\"size\": [2, 2, 2]`；只写 0 或负数等于没有粒子"),
                 );
@@ -9329,6 +9333,38 @@ mod tests {
                 diags.iter().any(|d| d.path == path),
                 "要报 {path}: {diags:?}"
             );
+        }
+    }
+
+    #[test]
+    fn fluid_half_size_underflow_matches_engine() {
+        let tiny = f32::from_bits(1);
+        for axis in 0..3 {
+            for bits in [1, 2] {
+                let mut doc = SceneDoc::from_value(json!({"fluids": [{
+                    "size": [1, 1, 1], "spacing": 0.1, "radius": 0.05,
+                    "max_particles": 8
+                }]}))
+                .unwrap();
+                // Assign exact subnormal bits without relying on JSON conversion.
+                doc.fluids[0].size = [f32::from_bits(2); 3];
+                doc.fluids[0].size[axis] = f32::from_bits(bits);
+                doc.fluids[0].spacing = tiny;
+                doc.fluids[0].radius = Some(tiny);
+                let valid = bits == 2;
+                let diagnostics = doc.validate();
+                assert_eq!(crate::runner::build_world(&doc).is_ok(), valid);
+                assert_eq!(
+                    diagnostics
+                        .iter()
+                        .any(|d| d.path == "fluids[0].size" && d.code == ErrorCode::OutOfRange),
+                    !valid,
+                    "axis={axis}, bits={bits}: {diagnostics:?}"
+                );
+                if valid {
+                    assert!(!diagnostics.iter().any(|d| d.severity == Severity::Error));
+                }
+            }
         }
     }
 
