@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+- **纯 FK 回放（`physics.mode:"fk"`）**：与 `drive` 一样无重力/无接触，但每步
+  先沿关节图从静态根 BFS 定向，把铰链子树直接旋到马达目标角（限位仍夹），
+  没有 PD 收敛。回归
+  `kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately`
+  （一步到 +90°，关节遥测同角）、
+  `kinematic_fk_moves_the_whole_descendant_subtree`（孙体随子树整体旋转）与 CLI
+  `fk_mode_reaches_the_joint_target_in_one_step`（机械臂 35° 一步到位）。
+  只处理 `hinge`；`ball/slider/fixed` 仍走原求解器，目标速度斜坡仍由
+  `joint_target speed_deg_s` 控制。`normal`/`drive` 缺省路径逐位不变。
+
 - **粒子局部流场拖曳（`fluids[].flow_coupling`）**：用刚体 AABB 内 PBF 粒子的
   平均速度作为局部流速，按 1/s 耦合把浸没刚体的 XZ 速度拖向它；周围没有粒子时
   完全跳过（不会退化成零速阻尼），0 时旧路径逐位不变。回归
@@ -43,7 +53,7 @@
 
 - **发行包 Brotli**：`tools/package_release.sh` 现在为包内 wasm 生成
   `quench3d_web_bg.wasm.br`（Brotli quality 11）；`tools/check_package.sh` 解压后
-  与 wasm 逐字节比较，并验证确实变小。本机 13,975,756 → 3,080,572 字节（22.0%）。
+  与 wasm 逐字节比较，并验证确实变小。本机 13,983,657 → 3,082,663 字节（22.0%）。
   压缩只在打包目录内做，不写回 `web/pkg`；静态服务器仍需配置
   `Content-Encoding: br`。仍没有 wasm-opt/文件名哈希/签名/安装器。
 

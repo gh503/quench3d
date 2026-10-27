@@ -298,7 +298,7 @@ python3 -m http.server 8000 --directory web
 （自检探针要用）、egui 与内嵌的中文子集字体。
 比物理示例包（5.4 MB）大了一倍，多出来的主要就是 egui 这一套 + 字体 + 模型解析。
 真要压体积：`tools/package_release.sh` 已为 wasm 生成 Brotli `.br`（本机
-13,975,756 → 3,080,572 字节），静态服务器对 `Accept-Encoding: br` 返回 `.br` 即可；
+13,983,657 → 3,082,663 字节），静态服务器对 `Accept-Encoding: br` 返回 `.br` 即可；
 还能加 `wasm-opt -Oz`、把自检探针从发布包里去掉，或者只保留必需特性。
 浏览器里 `Esc` 退出、`Tab` 切换相机、`F3`~`F8` 与 `F11` 是调试开关、`T` 循环色调映射、`K` 3D 光标、`O` 自动 LOD，和桌面端完全一致。
 
@@ -1116,8 +1116,8 @@ NaN 刚体  : 0
                 "shadow_quality": { "strength": 0.85, "radius": 28, "bias": 0.75 },
                 "sky_colors": { "zenith": [0.22, 0.42, 0.78], "horizon": [0.62, 0.74, 0.88] },
                 "bloom": { "intensity": 0.6, "threshold": 1.0 } },
-  "physics": { "friction_combine": "min", "restitution_combine": "max",
-               "static_friction_speed": 0.02 },
+  "physics": { "mode": "normal", "friction_combine": "min",
+               "restitution_combine": "max", "static_friction_speed": 0.02 },
   "simulate": { "steps": 180, "dt": 0.0166667 },
   "render": { "output": "scene.png", "width": 960, "height": 600, "msaa": 4 }
 }
@@ -1126,6 +1126,8 @@ NaN 刚体  : 0
 单位：长度**米**、时间**秒**、质量由密度×体积推导、角度用**度**（字段名以 `_deg` 结尾）；
 `shape.size` 是**边长不是半长**；材质颜色是 0~1 的 **sRGB** 分量。
 完整字段表用 `quench3d schema --json` 读（`data.scene` 就是语法本身）。
+`physics.mode` 可选 `normal`（缺省）、`drive`（无重力/接触，PD 关节回放）或
+`fk`（同 drive，但铰链子树每步直接旋到目标角，无 PD 收敛；只支持 hinge）。
 
 几处容易踩的语义（都有校验/警告兜着）：
 

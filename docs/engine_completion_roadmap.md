@@ -312,6 +312,10 @@
   沿轴/横轴滑动距离回归、CLI 校验/接线）。
 - [x] 0.2 mm 径向间隙（`radial_clearance`，米；fixed/ball/hinge 点约束，
   0.2 m / 0.2 mm 回归，预测式速度上限防一步穿透）。
+- [x] 纯 FK 回放（`physics.mode:"fk"`）：无重力/接触，铰链子树每步直接旋到
+  目标角，无 PD 收敛；回归 `kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately`、
+  `kinematic_fk_moves_the_whole_descendant_subtree` 与 CLI
+  `fk_mode_reaches_the_joint_target_in_one_step`。只支持 hinge。
 - [ ] TGS/SIMD 求解器。
 - [x] 深堆 2000 体实时（目标 <16 ms/步，本机量化）：本机 release 60 步
   **14.7~15.3 ms/步**；显式 `deep_stack_2000_perf` 断言 <16 ms（优化前 17.04、
@@ -376,7 +380,7 @@
 
 - [ ] 三平台 + wasm CI 每次提交真跑；真 GPU WebGPU 路径验收。
 - [ ] `wasm-opt`/文件名哈希/签名；预编译发行。
-  - [x] 发行包内 Brotli `.br`（quality 11；13,975,756 → 3,080,572 字节），门禁解压
+  - [x] 发行包内 Brotli `.br`（quality 11；13,983,657 → 3,082,663 字节），门禁解压
     后与 wasm 逐字节比较；静态服务器仍需配置 `Content-Encoding: br`。
   - [ ] `wasm-opt`、文件名哈希、签名/安装器。
   - [x] 本地可复现发行包（`tools/package_release.sh` + 门禁里的
