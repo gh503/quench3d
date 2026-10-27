@@ -152,6 +152,8 @@ impl TriGrid {
 enum FkKind {
     Hinge,
     Slider,
+    /// 仅传播祖先的刚性变换，不施加独立目标。
+    Fixed,
 }
 
 /// 构建纯 FK 树时的一条原始关节（A/B 尚未按根定向）。
@@ -264,6 +266,10 @@ fn fk_apply(
             continue;
         }
         let current = match edge.kind {
+            FkKind::Fixed => {
+                fk_apply(world, child, children, edges);
+                continue;
+            }
             FkKind::Hinge => hinge_angle(
                 edge.axis_parent,
                 edge.axis_child,
@@ -292,6 +298,7 @@ fn fk_apply(
         }
         if delta.abs() > 1e-7 {
             match edge.kind {
+                FkKind::Fixed => {}
                 FkKind::Hinge => {
                     let pivot = parent_body.transform.position
                         + parent_body.transform.rotation.mul_vec3(edge.anchor_parent);
@@ -3263,6 +3270,23 @@ impl PhysicsWorld {
         for handle in self.joint_handles() {
             let (kind, a, b, anchor_a, anchor_b, axis_a, axis_b, limits, target) =
                 match self.joint(handle) {
+                    Some(Joint::Fixed {
+                        a,
+                        b,
+                        local_anchor_a,
+                        local_anchor_b,
+                        ..
+                    }) => (
+                        FkKind::Fixed,
+                        *a,
+                        *b,
+                        *local_anchor_a,
+                        *local_anchor_b,
+                        Vec3::ZERO,
+                        Vec3::ZERO,
+                        None,
+                        Some(0.0),
+                    ),
                     Some(Joint::Hinge {
                         a,
                         b,
@@ -4496,6 +4520,97 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn kinematic_fk_carries_fixed_attachments() {
+        for slider in [false, true] {
+            for reverse in [false, true] {
+                let mut w = PhysicsWorld::new();
+                w.set_gravity(Vec3::ZERO);
+                w.set_collisions_enabled(false);
+                w.set_kinematic_fk(true);
+                let root = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.1 }).build());
+                let child = w.add_body(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                        .position(Vec3::X)
+                        .build(),
+                );
+                let payload = w.add_body(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                        .position(Vec3::X * 2.0)
+                        .build(),
+                );
+                let motor = Some(crate::joints::HingeMotor::servo(
+                    if slider {
+                        2.0
+                    } else {
+                        std::f32::consts::FRAC_PI_2
+                    },
+                    10.0,
+                ));
+                w.add_joint(if slider {
+                    Joint::Slider {
+                        a: root,
+                        b: child,
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: Vec3::ZERO,
+                        local_axis_a: Vec3::X,
+                        local_axis_b: Vec3::X,
+                        limits: None,
+                        motor,
+                    }
+                } else {
+                    Joint::Hinge {
+                        a: root,
+                        b: child,
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: -Vec3::X,
+                        local_axis_a: Vec3::Y,
+                        local_axis_b: Vec3::Y,
+                        limits: None,
+                        motor,
+                    }
+                });
+                w.add_joint(Joint::Fixed {
+                    a: if reverse { payload } else { child },
+                    b: if reverse { child } else { payload },
+                    local_anchor_a: if reverse { Vec3::ZERO } else { Vec3::X },
+                    local_anchor_b: if reverse { Vec3::X } else { Vec3::ZERO },
+                    local_frame_a: Quat::IDENTITY,
+                    local_frame_b: Quat::IDENTITY,
+                });
+                let q = if slider {
+                    Quat::IDENTITY
+                } else {
+                    Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                };
+                let expected = if slider {
+                    Vec3::X * 3.0
+                } else {
+                    q.mul_vec3(Vec3::X * 2.0)
+                };
+                w.apply_kinematic_targets();
+                for integrated in [false, true] {
+                    if integrated {
+                        w.step_substeps(1.0 / 60.0, 1);
+                    }
+                    let body = w.body(payload).unwrap();
+                    assert!(
+                        (body.position() - expected).length() < 1e-4,
+                        "slider={slider} reverse={reverse} integrated={integrated}: {:?}",
+                        body.position()
+                    );
+                    assert!(
+                        (body.rotation().mul_vec3(Vec3::X) - q.mul_vec3(Vec3::X)).length() < 1e-4
+                    );
+                    let anchor = w.body(child).unwrap().transform.transform_point(Vec3::X);
+                    assert!((anchor - body.position()).length() < 1e-4);
+                    assert!(body.linear_velocity.length() < 1e-4);
+                    assert!(body.angular_velocity.length() < 1e-4);
+                }
+            }
+        }
+    }
+
     #[test]
     fn kinematic_fk_waits_for_an_accumulated_physics_step() {
         let mut w = PhysicsWorld::new();
