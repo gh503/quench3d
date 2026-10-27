@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- **无效 viewport 的屏幕投影保持可用**：`Camera::world_to_screen` 在宽高为零、负数或非有限值时返回 `None`，有效 viewport 的投影路径保持不变。权威回归 `target/tmp/round104-camera-red-valid.log` 先在零宽 viewport 上错误返回 `Some(Vec2 { x: 0.0, y: 484.70764 })` 并以退出码 101 失败，`round104-camera-green-valid.log` 修复后 1 项通过；render crate 全量测试主库 112 项与全部集成目标通过，末尾退出码 0。
+
 - **无效 viewport 的相机射线保持有限**：`Camera::screen_ray` 在宽高为零、负数或非有限值时返回可预测的 NDC 中心射线；有效 viewport 的计算路径保持不变。回归先在零宽 viewport 上产生 `inf/NaN` 射线并以退出码 101 失败，修复后 focused camera 测试通过；render crate 全量测试 111 个单元、48 个集成/示例目标通过，1 个 GPU 性能测试按设计忽略。
 
 - **FK 有锥限位球窝传递祖先变换**：有 `cone_limit` 的球窝也不再切断上游铰链或滑块的传播，保持当前相对姿态并携带后代。FK 阶段不选择自由转角、不投影锥限位；公开步进随后仍由动力学求解器处理。回归先实测负载停在 `(2,0,0)` 而应约为 `(0,0,-2)`，修复后直接 FK 与公开步进均验证传播。物理 295 项单元、4 项集成、1 项文档测试通过，完整独立门禁 1104 项测试零失败（GPU 开启）、退出码 0；wasm 14,017,004 B、Brotli 3,090,778 B，浏览器纯物理 0.8719 ms/步仅记录本次测量。

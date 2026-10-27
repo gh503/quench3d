@@ -147,6 +147,13 @@ impl Camera {
 
     /// 世界点投影到屏幕像素坐标；在相机背后返回 `None`。
     pub fn world_to_screen(&self, world: Vec3, viewport: Vec2) -> Option<Vec2> {
+        if !viewport.x.is_finite()
+            || !viewport.y.is_finite()
+            || viewport.x <= 0.0
+            || viewport.y <= 0.0
+        {
+            return None;
+        }
         let clip = self.view_projection() * world.extend(1.0);
         if clip.w <= 1e-6 {
             return None;
@@ -501,6 +508,26 @@ mod tests {
         // 射线应穿过原点附近的该点方向
         let to_p = (p - ray.origin).normalize_or_zero();
         assert!(to_p.dot(ray.dir) > 0.999, "射线未对准目标");
+    }
+
+    #[test]
+    fn world_to_screen_rejects_invalid_viewports() {
+        let c = Camera::perspective(1.0);
+        let world = Vec3::ZERO;
+        for viewport in [
+            Vec2::new(0.0, 720.0),
+            Vec2::new(1280.0, 0.0),
+            Vec2::new(-1280.0, 720.0),
+            Vec2::new(1280.0, -720.0),
+            Vec2::new(f32::NAN, 720.0),
+            Vec2::new(1280.0, f32::INFINITY),
+        ] {
+            assert_eq!(
+                c.world_to_screen(world, viewport),
+                None,
+                "invalid viewport {viewport:?} must not produce screen coordinates"
+            );
+        }
     }
 
     #[test]
