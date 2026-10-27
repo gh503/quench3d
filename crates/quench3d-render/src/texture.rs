@@ -40,6 +40,166 @@ impl std::fmt::Display for ImageError {
 
 impl std::error::Error for ImageError {}
 
+/// KTX2 容器标识（`«KTX 20»\r\n\x1a\n`）。
+const KTX2_ID: [u8; 12] = [
+    0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 0x0d, 0x0a, 0x1a, 0x0a,
+];
+
+fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        bytes.get(offset..offset + 8)?.try_into().ok()?,
+    ))
+}
+
+fn ktx2_error(message: impl Into<String>) -> ImageError {
+    ImageError::Decode(format!("KTX2: {}", message.into()))
+}
+
+/// 解码 KTX2 的 level 0。当前支持未压缩 RGBA8 与 BC1（CPU 解成 RGBA8）；
+/// BasisLZ/UASTC/BC7 等仍是未支持的压缩格式。
+fn decode_ktx2(bytes: &[u8]) -> Result<ImageData, ImageError> {
+    if bytes.len() < 12 + 68 + 24 || !bytes.starts_with(&KTX2_ID) {
+        return Err(ktx2_error("文件头不完整"));
+    }
+    let vk_format = u32_at(bytes, 12).ok_or_else(|| ktx2_error("缺少 vkFormat"))?;
+    let width = u32_at(bytes, 20).ok_or_else(|| ktx2_error("缺少宽度"))?;
+    let height = u32_at(bytes, 24).ok_or_else(|| ktx2_error("缺少高度"))?;
+    let depth = u32_at(bytes, 28).unwrap_or(0);
+    let layers = u32_at(bytes, 32).unwrap_or(0);
+    let faces = u32_at(bytes, 36).unwrap_or(1);
+    let levels = u32_at(bytes, 40).unwrap_or(1).max(1);
+    let supercompression = u32_at(bytes, 44).unwrap_or(0);
+    if width == 0 || height == 0 {
+        return Err(ktx2_error("宽高不能为 0"));
+    }
+    if depth > 1 || layers > 1 || faces != 1 {
+        return Err(ktx2_error("只支持 2D、单层、单面的 level 0"));
+    }
+    if supercompression != 0 {
+        return Err(ktx2_error("不支持 BasisLZ/超压缩，请用未压缩或 BC1"));
+    }
+    if levels == 0 {
+        return Err(ktx2_error("levelCount 非法"));
+    }
+    let offset = u64_at(bytes, 80).ok_or_else(|| ktx2_error("缺少 level 索引"))?;
+    let length = u64_at(bytes, 88).ok_or_else(|| ktx2_error("缺少 level 长度"))?;
+    let offset = usize::try_from(offset).map_err(|_| ktx2_error("level 偏移溢出"))?;
+    let length = usize::try_from(length).map_err(|_| ktx2_error("level 长度溢出"))?;
+    let payload = bytes
+        .get(
+            offset
+                ..offset
+                    .checked_add(length)
+                    .ok_or_else(|| ktx2_error("level 长度溢出"))?,
+        )
+        .ok_or_else(|| ktx2_error("level 数据越界"))?;
+
+    match vk_format {
+        // VK_FORMAT_R8G8B8A8_UNORM / SRGB
+        37 | 43 => {
+            let pixels = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or_else(|| ktx2_error("像素数溢出"))?;
+            let rgba = payload
+                .get(..pixels)
+                .ok_or_else(|| ktx2_error("RGBA8 level 数据不足"))?
+                .to_vec();
+            Ok(ImageData {
+                width,
+                height,
+                rgba,
+            })
+        }
+        // VK_FORMAT_BC1_RGB/RGBA_UNORM/SRGB_BLOCK
+        131..=134 => {
+            let rgba = decode_bc1(payload, width, height, vk_format >= 133)?;
+            Ok(ImageData {
+                width,
+                height,
+                rgba,
+            })
+        }
+        other => Err(ktx2_error(format!(
+            "暂不支持 VkFormat {other}（仅 RGBA8 与 BC1；BasisU 仍未支持）"
+        ))),
+    }
+}
+
+/// 把 BC1 块解成 RGBA8。`rgba` 为真时启用 BC1 的 1-bit alpha 模式。
+fn decode_bc1(payload: &[u8], width: u32, height: u32, rgba: bool) -> Result<Vec<u8>, ImageError> {
+    let blocks_x = (width as usize).div_ceil(4);
+    let blocks_y = (height as usize).div_ceil(4);
+    let needed = blocks_x
+        .checked_mul(blocks_y)
+        .and_then(|n| n.checked_mul(8))
+        .ok_or_else(|| ktx2_error("BC1 数据量溢出"))?;
+    if payload.len() < needed {
+        return Err(ktx2_error("BC1 level 数据不足"));
+    }
+    let mut out = vec![0u8; width as usize * height as usize * 4];
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let block = &payload[(by * blocks_x + bx) * 8..][..8];
+            let c0 = u16::from_le_bytes([block[0], block[1]]);
+            let c1 = u16::from_le_bytes([block[2], block[3]]);
+            let color = |c: u16| -> [u8; 4] {
+                let r = ((c >> 11) & 0x1f) as u32 * 255 / 31;
+                let g = ((c >> 5) & 0x3f) as u32 * 255 / 63;
+                let b = (c & 0x1f) as u32 * 255 / 31;
+                [r as u8, g as u8, b as u8, 255]
+            };
+            let a = color(c0);
+            let b = color(c1);
+            let mut palette = [[0u8; 4]; 4];
+            palette[0] = a;
+            palette[1] = b;
+            if c0 > c1 {
+                palette[2] = [
+                    ((2 * a[0] as u32 + b[0] as u32) / 3) as u8,
+                    ((2 * a[1] as u32 + b[1] as u32) / 3) as u8,
+                    ((2 * a[2] as u32 + b[2] as u32) / 3) as u8,
+                    255,
+                ];
+                palette[3] = [
+                    ((a[0] as u32 + 2 * b[0] as u32) / 3) as u8,
+                    ((a[1] as u32 + 2 * b[1] as u32) / 3) as u8,
+                    ((a[2] as u32 + 2 * b[2] as u32) / 3) as u8,
+                    255,
+                ];
+            } else {
+                palette[2] = [
+                    ((a[0] as u32 + b[0] as u32) / 2) as u8,
+                    ((a[1] as u32 + b[1] as u32) / 2) as u8,
+                    ((a[2] as u32 + b[2] as u32) / 2) as u8,
+                    255,
+                ];
+                palette[3] = [0, 0, 0, if rgba { 0 } else { 255 }];
+            }
+            let bits = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+            for py in 0..4 {
+                for px in 0..4 {
+                    let x = bx * 4 + px;
+                    let y = by * 4 + py;
+                    if x >= width as usize || y >= height as usize {
+                        continue;
+                    }
+                    let index = ((bits >> (2 * (py * 4 + px))) & 0x3) as usize;
+                    let dst = (y * width as usize + x) * 4;
+                    out[dst..dst + 4].copy_from_slice(&palette[index]);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl ImageData {
     /// 由 RGBA8 数据构造（校验长度）。
     /// 编码为 PNG 字节流（Web 与桌面端都可用，便于下载或写盘）。
@@ -89,6 +249,9 @@ impl ImageData {
 
     /// 从 PNG/JPEG 字节解码。
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, ImageError> {
+        if bytes.starts_with(&KTX2_ID) {
+            return decode_ktx2(bytes);
+        }
         let img = image::load_from_memory(bytes).map_err(|e| ImageError::Decode(e.to_string()))?;
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
@@ -507,6 +670,68 @@ mod tests {
         for (w, h, d) in &chain {
             assert_eq!(d.len(), (*w as usize) * (*h as usize) * 4);
         }
+    }
+
+    fn ktx2_header(vk_format: u32, width: u32, height: u32, payload: &[u8]) -> Vec<u8> {
+        const ID: [u8; 12] = [
+            0xab, b'K', b'T', b'X', b' ', b'2', b'0', 0xbb, 0x0d, 0x0a, 0x1a, 0x0a,
+        ];
+        let mut out = Vec::new();
+        out.extend_from_slice(&ID);
+        for v in [
+            vk_format, 1, // typeSize
+            width, height, 0, // depth
+            0, // layers
+            1, // faces
+            1, // levels
+            0, // supercompression
+            0, 0, // dfd
+            0, 0, // kvd
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&0u64.to_le_bytes()); // sgd offset
+        out.extend_from_slice(&0u64.to_le_bytes()); // sgd length
+        let header_len = (out.len() + 24) as u64; // level index + one level
+        out.extend_from_slice(&header_len.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn ktx2_uncompressed_rgba8_is_decoded() {
+        let pixels = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128,
+        ];
+        let bytes = ktx2_header(37, 2, 2, &pixels);
+        let img = ImageData::from_encoded(&bytes).expect("KTX2 RGBA8");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(img.rgba, pixels);
+    }
+
+    #[test]
+    fn ktx2_bc1_block_is_decoded() {
+        // 4x4 BC1：color0 = 红色 0xF800，color1 = 0，索引全 0。
+        let block = [0x00, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let bytes = ktx2_header(131, 4, 4, &block);
+        let img = ImageData::from_encoded(&bytes).expect("KTX2 BC1");
+        assert_eq!((img.width, img.height), (4, 4));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
+        assert_eq!(img.rgba.len(), 4 * 4 * 4);
+        for i in (0..img.rgba.len()).step_by(4) {
+            assert_eq!(&img.rgba[i..i + 4], &[255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn ktx2_rejects_truncated_and_unknown_formats() {
+        let bytes = ktx2_header(37, 2, 2, &[0; 16]);
+        assert!(ImageData::from_encoded(&bytes[..40]).is_err());
+        let bytes = ktx2_header(999, 2, 2, &[0; 16]);
+        let err = ImageData::from_encoded(&bytes).expect_err("未知 VkFormat 要报错");
+        assert!(format!("{err}").contains("KTX2"));
     }
 
     #[test]

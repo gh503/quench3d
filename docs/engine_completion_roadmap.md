@@ -96,13 +96,16 @@
   - 未做：真实 GPU 60 fps 实测、GPU 侧透明/阴影剔除、遮挡剔除。
 - [ ] 遮挡剔除 / 自动 LOD / 多视口。
 - [ ] 压缩纹理（KTX2/Basis）与浮点纹理；EXR/HDR 读写。
+  - [x] KTX2 容器导入：未压缩 RGBA8 + BC1（CPU 解成 RGBA8，level 0）。
+  - [ ] BasisLZ/UASTC/BC7、GPU 块压缩上传、完整 mip/face/layer。
   - 已做：`FloatImage`（线性 RGBA f32）读写 Radiance `.hdr` 与 OpenEXR
     （scanline、HALF/FLOAT/UINT、NONE/RLE 解压；写盘 HALF 无压缩）。HDR 用
     平铺 RGBE 编码；EXR 的 RLE 含预测器逆变换与奇偶字节反交错。`EnvironmentMap`
     现在也能读 `.exr` 并导出 `.hdr`/`.exr`。
   - 已做：`Rgba16Float` 浮点贴图上传（`Renderer::add_texture_float`，盒式 mip），
     GPU e2e 验证线性亮度 4.0 的贴图不会被 8 位路径截断。
-  - 未做：KTX2/Basis 压缩纹理、块压缩格式、PIZ/ZIP/tiled EXR。
+  - 部分完成 KTX2（RGBA8/BC1 CPU 解码）；BasisLZ/UASTC/BC7、GPU 块压缩、
+    PIZ/ZIP/tiled EXR 未做。
 - [ ] FBX/USD 至少一条导入链；材质节点图或等价的自定义着色器层。
 - [x] 透明排序/OIT、投影贴花、多盏投影阴影、线性雾距离。
   - 已做：线性雾 `FogParams::with_linear(start, end)` / 场景 `lighting.fog.mode = "linear"`

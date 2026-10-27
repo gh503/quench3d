@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **KTX2 纹理导入（RGBA8 / BC1）**：`ImageData::from_encoded`/`from_file` 自动识别
+  KTX2 容器，支持未压缩 RGBA8（VkFormat 37/43）和 BC1（131..134，CPU 解成 RGBA8）；
+  材质/贴图路径无需改调用。回归 `ktx2_uncompressed_rgba8_is_decoded`、
+  `ktx2_bc1_block_is_decoded`、`ktx2_rejects_truncated_and_unknown_formats`。
+  边界：只读 level 0、2D 单层单面；BasisLZ/UASTC/BC7 等仍未支持，也没有 GPU
+  块压缩上传，仍是 CPU 解成 RGBA8。
+
 - **三角网精确 CCD 加速**：三角网目标先预计算局部三角形 AABB；静态/纯平移
   目标走无旋转快路径，AABB 间隙本身作为距离下界直接推进，只有 AABB 贴上时才
   跑 GJK。20k 三角形薄墙球体测试 release 下 **35.6 → 14.5~15.4 ms**（仍有
