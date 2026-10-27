@@ -1303,12 +1303,20 @@ impl PhysicsWorld {
             }
             _ => return false,
         };
-        if let Some(body) = self.bodies.get_mut(ha.index as usize) {
+        if let Some(body) = self
+            .bodies
+            .get_mut(ha.index as usize)
+            .filter(|slot| slot.generation == ha.generation)
+        {
             if let Some(body) = body.body.as_mut() {
                 body.wake_up();
             }
         }
-        if let Some(body) = self.bodies.get_mut(hb.index as usize) {
+        if let Some(body) = self
+            .bodies
+            .get_mut(hb.index as usize)
+            .filter(|slot| slot.generation == hb.generation)
+        {
             if let Some(body) = body.body.as_mut() {
                 body.wake_up();
             }
@@ -2188,10 +2196,9 @@ impl PhysicsWorld {
             let driven = slot.joint.as_ref().is_some_and(|j| j.drives_bodies());
             if driven {
                 let (ha, hb) = slot.joint.as_ref().unwrap().bodies();
-                for h in [ha, hb] {
-                    if let Some(flag) = actuated.get_mut(h.index as usize) {
-                        *flag = true;
-                    }
+                if let (Some(a), Some(b)) = (self.body_index(ha), self.body_index(hb)) {
+                    actuated[a] = true;
+                    actuated[b] = true;
                 }
             }
         }
@@ -4076,6 +4083,132 @@ mod tests {
 
     fn sphere(r: f32) -> Shape {
         Shape::Sphere { radius: r }
+    }
+
+    fn driven_joint(kind: &str, a: BodyHandle, b: BodyHandle) -> Joint {
+        let motor = Some(crate::joints::HingeMotor::pd(0.25, 12.0, 1.0, 10.0));
+        match kind {
+            "hinge" => Joint::Hinge {
+                a,
+                b,
+                local_anchor_a: Vec3::X,
+                local_anchor_b: -Vec3::X,
+                local_axis_a: Vec3::Y,
+                local_axis_b: Vec3::Y,
+                limits: None,
+                motor,
+            },
+            "slider" => Joint::Slider {
+                a,
+                b,
+                local_anchor_a: Vec3::X,
+                local_anchor_b: -Vec3::X,
+                local_axis_a: Vec3::X,
+                local_axis_b: Vec3::X,
+                limits: None,
+                motor,
+            },
+            "fixed" => Joint::Fixed {
+                a,
+                b,
+                local_anchor_a: Vec3::X,
+                local_anchor_b: -Vec3::X,
+                local_frame_a: Quat::from_axis_angle(Vec3::Y, 0.25),
+                local_frame_b: Quat::IDENTITY,
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn sleeping_joint_world(kind: &str) -> (PhysicsWorld, BodyHandle, BodyHandle, JointHandle) {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let a = w.add_builder(BodyBuilder::dynamic(sphere(0.1)));
+        let b = w.add_builder(BodyBuilder::dynamic(sphere(0.1)).position(Vec3::X * 2.0));
+        let joint = w.add_joint(driven_joint(kind, a, b));
+        w.body_mut(a).unwrap().sleep();
+        w.body_mut(b).unwrap().sleep();
+        (w, a, b, joint)
+    }
+
+    #[test]
+    fn stale_joint_target_does_not_wake_reused_endpoints() {
+        for kind in ["hinge", "slider"] {
+            for replace_a in [true, false] {
+                for target in [-0.5, 0.5] {
+                    let (mut w, a, b, joint) = sleeping_joint_world(kind);
+                    let (old, survivor) = if replace_a { (a, b) } else { (b, a) };
+                    let removed = w.remove_body(old).unwrap();
+                    let replacement = w.add_body(removed);
+                    assert_eq!(replacement.index, old.index);
+                    assert_ne!(replacement.generation, old.generation);
+                    assert!(w.joint(joint).is_some());
+                    w.body_mut(survivor).unwrap().sleep();
+                    w.body_mut(replacement).unwrap().sleep();
+                    assert!(w.set_joint_target(joint, target));
+                    assert_eq!(w.joint_target(joint), Some(target));
+                    assert!(!w.body(survivor).unwrap().is_sleeping());
+                    assert!(
+                        w.body(replacement).unwrap().is_sleeping(),
+                        "{kind}, replace A={replace_a}, target={target}: stale endpoint woke replacement"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_joint_target_wakes_both_endpoints() {
+        for kind in ["hinge", "slider"] {
+            for target in [-0.5, 0.5] {
+                let (mut w, a, b, joint) = sleeping_joint_world(kind);
+                assert!(w.set_joint_target(joint, target));
+                assert_eq!(w.joint_target(joint), Some(target));
+                for h in [a, b] {
+                    assert!(!w.body(h).unwrap().is_sleeping(), "{kind}, {target}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stale_driven_joint_does_not_wake_survivor_or_replacement() {
+        for kind in ["hinge", "slider", "fixed"] {
+            for remove_a in [true, false] {
+                for reuse in [false, true] {
+                    let (mut w, a, b, joint) = sleeping_joint_world(kind);
+                    let (old, survivor) = if remove_a { (a, b) } else { (b, a) };
+                    let removed = w.remove_body(old).unwrap();
+                    let replacement = reuse.then(|| w.add_body(removed));
+                    if let Some(h) = replacement {
+                        assert_eq!(h.index, old.index);
+                        assert_ne!(h.generation, old.generation);
+                        w.body_mut(h).unwrap().sleep();
+                    }
+                    assert!(w.joint(joint).is_some());
+                    w.body_mut(survivor).unwrap().sleep();
+                    w.step(1.0 / 60.0);
+                    assert!(w.contacts().is_empty());
+                    for h in Some(survivor).into_iter().chain(replacement) {
+                        assert!(
+                            w.body(h).unwrap().is_sleeping(),
+                            "{kind}, remove A={remove_a}, reuse={reuse}: stale joint woke {h:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_driven_joint_wakes_both_endpoints() {
+        for kind in ["hinge", "slider", "fixed"] {
+            let (mut w, a, b, _) = sleeping_joint_world(kind);
+            w.step(1.0 / 60.0);
+            assert!(w.contacts().is_empty());
+            for h in [a, b] {
+                assert!(!w.body(h).unwrap().is_sleeping(), "{kind}");
+            }
+        }
     }
 
     fn dense_stack() -> PhysicsWorld {

@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+- **失效关节不再污染唤醒与睡眠**：更新目标只唤醒句柄代数匹配的存活端点；
+  步末仅为两端都有效的驱动关节禁止睡眠。旧关节目标仍可更新并返回成功，
+  不会唤醒复用槽位的替身体；端点删除后，幸存端也不再被失效驱动强制唤醒。
+  回归 `stale_joint_target_does_not_wake_reused_endpoints` 与
+  `stale_driven_joint_does_not_wake_survivor_or_replacement` 修复前均失败，修复后
+  覆盖 A/B、复用/不复用、铰链/滑块/参考姿态固定关节；有效关节唤醒对照保持通过。
+  完整门禁 1078 项通过、0 失败，黄金摘要与逐位回归通过；wasm 14,011,158 字节，
+  Brotli 3,089,870 字节。
+
 - **失效关节不再屏蔽替身碰撞**：常规碰撞过滤在槽位匹配后校验关节两端句柄代数，
   防止删除端点并复用槽位后，旧 `collide_connected=false` 关节继续禁用新刚体碰撞。
   回归 `stale_joint_does_not_filter_reused_body_a/b` 均先复现应有 1 个接触却得到 0；
