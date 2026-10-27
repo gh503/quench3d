@@ -1568,6 +1568,53 @@ fn ccd_catches_a_sphere_grazing_a_box_corner() {
 }
 
 #[test]
+#[ignore]
+fn precise_ccd_trimesh_20k_perf() {
+    // 20k 个三角形：逐三角形 GJK 的路径会在这里暴露 O(T) 成本。
+    let n = 100usize;
+    let mut vertices = Vec::with_capacity((n + 1) * (n + 1));
+    for j in 0..=n {
+        for i in 0..=n {
+            let y = -5.0 + 10.0 * i as f32 / n as f32;
+            let z = -5.0 + 10.0 * j as f32 / n as f32;
+            vertices.push(vec3(0.0, y, z));
+        }
+    }
+    let mut indices = Vec::with_capacity(n * n * 6);
+    for j in 0..n {
+        for i in 0..n {
+            let a = (j * (n + 1) + i) as u32;
+            let b = a + 1;
+            let c = a + (n + 1) as u32;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
+    let dt = 0.05;
+    let mut world = PhysicsWorld::new();
+    world.set_gravity(Vec3::ZERO);
+    world.set_fixed_dt(dt);
+    world.add_builder(BodyBuilder::r#static(Shape::TriMesh { vertices, indices }));
+    let body = world.add_builder(
+        BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+            .position(vec3(0.6, 0.0, 0.0))
+            .linear_velocity(vec3(-12.0, 0.0, 0.0))
+            .ccd(true)
+            .ccd_precise(true),
+    );
+    let start = std::time::Instant::now();
+    world.step(dt);
+    let elapsed = start.elapsed().as_secs_f32() * 1000.0;
+    let x = world.body(body).unwrap().position().x;
+    println!("precise CCD 20k triangles: {elapsed:.3} ms, x={x:.3}");
+    assert!(x > -0.12, "球不能穿过 20k 三角形薄墙，x={x:.3}");
+    assert!(
+        elapsed < 20.0,
+        "20k 三角形精确 CCD 超过一帧预算：{elapsed:.3} ms"
+    );
+}
+
+#[test]
 fn precise_ccd_stops_a_rotating_hull_spike_on_a_trimesh_wall() {
     // 和半空间回归同一构造，但目标是两片三角形组成的薄墙：长刺仍放在采样
     // 间隙（index 1），旧采样路径看不到它，精确路径要逐三角形看到。

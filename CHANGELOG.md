@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+- **三角网精确 CCD 加速**：三角网目标先预计算局部三角形 AABB；静态/纯平移
+  目标走无旋转快路径，AABB 间隙本身作为距离下界直接推进，只有 AABB 贴上时才
+  跑 GJK。20k 三角形薄墙球体测试 release 下 **35.6 → 14.5~15.4 ms**（仍有
+  64 次迭代上限，20k 三角形基准断言 <20 ms）；小场景回归的旋转凸包/三角网
+  截停角度保持 1.672 rad。默认路径不变，仅影响 `ccd_precise`。
+
 - **本地发行打包**：新增 `tools/package_release.sh`，把 CLI/编辑器 release 二进制、
   `web/pkg`、README/CHANGELOG/LICENSE、`manifest.json`（版本/提交/大小/哈希）与
   `SHA256SUMS` 打进一个目录；`--skip-build` 复用已有二进制，`--dry-run` 只打印计划。

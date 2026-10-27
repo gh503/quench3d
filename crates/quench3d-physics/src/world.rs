@@ -29,6 +29,15 @@ use crate::broadphase::{Broadphase, Proxy};
 /// 2000 体深堆从约 16.7 降到 14.7~15.3 ms/步。代价是角速度末位可能差 1 ulp，
 /// 因此不把它设为无条件路径，也不改小场景的默认行为。
 const PRECOMPUTE_CONTACT_RESPONSE_MIN: usize = 2048;
+
+/// 两个 AABB 的间隙距离：相交为 0，否则是欧氏下界。三角网精确 CCD 用它
+/// 做保守预筛，避免对每个三角形都跑 GJK。
+fn aabb_gap(a: &Aabb, b: &Aabb) -> f32 {
+    let dx = (a.min.x - b.max.x).max(b.min.x - a.max.x).max(0.0);
+    let dy = (a.min.y - b.max.y).max(b.min.y - a.max.y).max(0.0);
+    let dz = (a.min.z - b.max.z).max(b.min.z - a.max.z).max(0.0);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
 use crate::contact::{ContactManifold, ContactPair, ContactPoint};
 use crate::fluid::{self, Fluid, FluidDesc, FluidStats};
 use crate::gjk;
@@ -2363,6 +2372,27 @@ impl PhysicsWorld {
                     scale: body.transform.scale,
                 }
             };
+            // 三角网局部 AABB 只算一次；每个时间点只做刚体变换 + 间隙比较。
+            let tri_bounds = if let Shape::TriMesh { vertices, indices } = &b.shape {
+                let mut out = Vec::with_capacity(indices.len() / 3);
+                for tri in indices.chunks(3) {
+                    if tri.len() < 3 {
+                        continue;
+                    }
+                    let (Some(v0), Some(v1), Some(v2)) = (
+                        vertices.get(tri[0] as usize),
+                        vertices.get(tri[1] as usize),
+                        vertices.get(tri[2] as usize),
+                    ) else {
+                        out.push(Aabb::EMPTY);
+                        continue;
+                    };
+                    out.push(Aabb::from_points(&[*v0, *v1, *v2]));
+                }
+                Some(out)
+            } else {
+                None
+            };
             let mut t = 0.0f32;
             for _ in 0..64 {
                 let ta = tf(a, t);
@@ -2394,33 +2424,95 @@ impl PhysicsWorld {
                     }
                     continue;
                 }
-                // 三角网：逐三角形取凸体到三角形的最短距离，再用同一个
-                // 1-Lipschitz 上界推进。薄墙/单个三角面片都能被看到。
-                if let Shape::TriMesh { vertices, indices } = &b.shape {
+                // 三角网：先用 AABB 间隙找到最近的候选三角形，取得真实距离后
+                // 只对间隙小于它的三角形跑 GJK。薄墙/大网格都不再逐三角形全扫。
+                if let (Shape::TriMesh { vertices, indices }, Some(bounds)) =
+                    (&b.shape, tri_bounds.as_ref())
+                {
                     let sa = gjk::Support::new(&a.shape, &ta);
-                    let mut min_distance = f32::INFINITY;
-                    let mut touched = false;
-                    for tri in indices.chunks(3) {
-                        if tri.len() < 3 {
+                    let a_world = a.shape.local_aabb().transformed(&ta.matrix());
+                    let triangle = |k: usize| -> Option<[Vec3; 3]> {
+                        let tri = indices.get(k * 3..k * 3 + 3)?;
+                        let v0 = vertices.get(tri[0] as usize)?;
+                        let v1 = vertices.get(tri[1] as usize)?;
+                        let v2 = vertices.get(tri[2] as usize)?;
+                        Some([
+                            tb.position + tb.rotation.mul_vec3(*v0),
+                            tb.position + tb.rotation.mul_vec3(*v1),
+                            tb.position + tb.rotation.mul_vec3(*v2),
+                        ])
+                    };
+                    // 把局部 AABB 按当前刚体位姿变成世界 AABB（保守：先取绝对值）。
+                    // 静态/纯平移三角网走无旋转快路径；大多数地面/墙都是这种。
+                    let identity = tb.rotation == Quat::IDENTITY && tb.scale == Vec3::ONE;
+                    let world_bounds = |local: &Aabb| -> Aabb {
+                        if identity {
+                            return Aabb::new(local.min + tb.position, local.max + tb.position);
+                        }
+                        let center = tb.position + tb.rotation.mul_vec3(local.center() * tb.scale);
+                        let half = local.half_extents() * tb.scale;
+                        let ext = (tb.rotation.mul_vec3(Vec3::new(half.x, 0.0, 0.0))).abs()
+                            + (tb.rotation.mul_vec3(Vec3::new(0.0, half.y, 0.0))).abs()
+                            + (tb.rotation.mul_vec3(Vec3::new(0.0, 0.0, half.z))).abs();
+                        Aabb::new(center - ext, center + ext)
+                    };
+                    let mut nearest = None;
+                    let mut nearest_gap = f32::INFINITY;
+                    for (k, local) in bounds.iter().enumerate() {
+                        if !local.is_valid() {
                             continue;
                         }
-                        let (Some(v0), Some(v1), Some(v2)) = (
-                            vertices.get(tri[0] as usize),
-                            vertices.get(tri[1] as usize),
-                            vertices.get(tri[2] as usize),
-                        ) else {
-                            continue;
-                        };
-                        let p0 = tb.position + tb.rotation.mul_vec3(*v0);
-                        let p1 = tb.position + tb.rotation.mul_vec3(*v1);
-                        let p2 = tb.position + tb.rotation.mul_vec3(*v2);
-                        let st = gjk::Support::triangle([p0, p1, p2]);
-                        let hit = gjk::gjk(&sa, &st);
-                        if hit.intersect || hit.distance <= 1e-4 {
-                            touched = true;
+                        let gap = aabb_gap(&a_world, &world_bounds(local));
+                        if gap < nearest_gap {
+                            nearest_gap = gap;
+                            nearest = Some(k);
+                        }
+                    }
+                    // AABB 间隙本身是三角形距离的下界。间隙还没归零时，
+                    // 直接按它推进，完全不必跑 GJK；只有 AABB 已贴上才需要
+                    // 精确距离/接触判定。
+                    if nearest_gap > 1e-4 {
+                        let advance = nearest_gap / step;
+                        if !(advance.is_finite() && advance > 1e-6) {
                             break;
                         }
-                        min_distance = min_distance.min(hit.distance);
+                        t += advance;
+                        if t >= 1.0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    let mut min_distance = f32::INFINITY;
+                    let mut touched = false;
+                    if let Some(k) = nearest {
+                        if let Some(points) = triangle(k) {
+                            let hit = gjk::gjk(&sa, &gjk::Support::triangle(points));
+                            if hit.intersect || hit.distance <= 1e-4 {
+                                touched = true;
+                            } else {
+                                min_distance = hit.distance;
+                            }
+                        }
+                    }
+                    if !touched {
+                        for (k, local) in bounds.iter().enumerate() {
+                            if !local.is_valid() {
+                                continue;
+                            }
+                            let gap = aabb_gap(&a_world, &world_bounds(local));
+                            if gap >= min_distance {
+                                continue;
+                            }
+                            let Some(points) = triangle(k) else {
+                                continue;
+                            };
+                            let hit = gjk::gjk(&sa, &gjk::Support::triangle(points));
+                            if hit.intersect || hit.distance <= 1e-4 {
+                                touched = true;
+                                break;
+                            }
+                            min_distance = min_distance.min(hit.distance);
+                        }
                     }
                     if touched {
                         if t > 1e-5 && best.is_none_or(|cur| t < cur) {
