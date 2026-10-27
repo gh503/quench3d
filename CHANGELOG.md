@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+- **无效气泡半径不再清空局部有效气量**：`gas_volume_near` 跳过非有限半径的注入气泡，保留同区域有效气泡的体积贡献；有限半径计算顺序不变。回归先通过公开 `add_bubble` 注入正常气泡，再注入无限半径，实际查询从正体积变为零（`target/tmp/round107-fluid-red.log`，退出码 101）；修复后 NaN/正负无穷半径均不改变有效体积的位模式，focused 和物理 crate 全量测试退出码 0。独立完整门禁 1108 项测试零失败（GPU 开启）、退出码 0；wasm 14,017,719 B、Brotli 3,090,221 B，Web/浏览器检查通过，纯物理 1.3714 ms/步仅记录本次测量。
+
 - **非有限屏幕坐标的相机射线保持有限**：`Camera::screen_ray` 在屏幕坐标包含 `NaN` 或无穷值时返回可预测的 NDC 中心射线，有限屏幕坐标路径保持不变。权威回归 `target/tmp/round105-camera-red.log` 先产生全 `NaN` 射线并以退出码 1 失败，`round105-camera-green.log` 修复后 focused 测试通过；render crate 全量测试 113 项及全部集成目标通过，1 个 GPU 性能测试按设计忽略。独立完整门禁 1107 项测试零失败（GPU 开启）、退出码 0；wasm 14,017,709 B、Brotli 3,090,421 B，浏览器纯物理 0.9162 ms/步仅记录本次测量。
 
 - **无效 viewport 的屏幕投影保持可用**：`Camera::world_to_screen` 在宽高为零、负数或非有限值时返回 `None`，有效 viewport 的投影路径保持不变。权威回归 `target/tmp/round104-camera-red-valid.log` 先在零宽 viewport 上错误返回 `Some(Vec2 { x: 0.0, y: 484.70764 })` 并以退出码 101 失败，`round104-camera-green-valid.log` 修复后 1 项通过；render crate 全量测试主库 112 项与全部集成目标通过，末尾退出码 0。

@@ -706,7 +706,7 @@ impl Fluid {
         let mut volume = 0.0f32;
         for b in &self.bubbles {
             let r = b.radius.max(0.0);
-            if r <= 0.0 || !b.position.is_finite() {
+            if r <= 0.0 || !b.radius.is_finite() || !b.position.is_finite() {
                 continue;
             }
             // 气泡被液体推到刚体表面时中心正好在 `aabb + r` 上（浮点会差一点），
@@ -1883,6 +1883,27 @@ mod tests {
     use crate::body::BodyBuilder;
     use crate::shape::Shape;
     use crate::world::PhysicsWorld;
+
+    #[test]
+    fn gas_volume_ignores_nonfinite_radius_without_losing_valid_bubbles() {
+        let mut fluid = Fluid::new(FluidDesc::default()).unwrap();
+        let bubble = Bubble {
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            radius: 0.1,
+            rest_radius: 0.1,
+            age: 0.0,
+            life: 10.0,
+        };
+        let bounds = Aabb::new(-Vec3::ONE, Vec3::ONE);
+        fluid.add_bubble(bubble);
+        let expected = fluid.gas_volume_near(bounds);
+        assert!(expected > 0.0 && expected.is_finite());
+        for radius in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            fluid.add_bubble(Bubble { radius, ..bubble });
+            assert_eq!(fluid.gas_volume_near(bounds).to_bits(), expected.to_bits());
+        }
+    }
 
     #[test]
     fn foam_emission_discards_budget_when_it_fills_capacity() {
