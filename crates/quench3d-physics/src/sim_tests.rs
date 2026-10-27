@@ -1610,8 +1610,8 @@ fn precise_ccd_trimesh_20k_perf() {
     println!("precise CCD 20k triangles: {elapsed:.3} ms, x={x:.3}");
     assert!(x > -0.12, "球不能穿过 20k 三角形薄墙，x={x:.3}");
     assert!(
-        elapsed < 20.0,
-        "20k 三角形精确 CCD 超过一帧预算：{elapsed:.3} ms"
+        elapsed < 5.0,
+        "20k 三角形精确 CCD 超过 5 ms：{elapsed:.3} ms"
     );
 }
 

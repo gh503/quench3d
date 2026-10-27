@@ -265,9 +265,13 @@
     （300+ 点凸包的刺在采样间隙，旧路径转 2.5 rad 穿地，精确路径 1.7 rad 截住）。
     三角网用逐三角形 GJK + 同一上界推进：回归
     `precise_ccd_stops_a_rotating_hull_spike_on_a_trimesh_wall`（采样间隙长刺穿墙）。
-    先做局部三角形 AABB + 静态无旋转快路径，AABB 间隙作为距离下界；20k 三角形
-    基准 `precise_ccd_trimesh_20k_perf` 从 35.6 ms 降到 14.5~15.4 ms（断言 <20 ms）。
-    大网格仍是 O(三角形数) 扫描，没有 BVH；是显式高成本路径。
+    先做局部三角形 AABB + 静态无旋转快路径，AABB 间隙作为距离下界；再加
+    局部均匀网格（三角形 AABB 中心入格、查询按最大三角形半径膨胀）、球-三角形
+    解析最近点，并在精确球 TOI 已找到后跳过 9 条旧射线。20k 三角形基准
+    `precise_ccd_trimesh_20k_perf` 从 35.6 ms 降到 **1.3~1.5 ms**（断言 <5 ms）；
+    查询候选完整性由 `tri_grid_candidates_cover_every_overlapping_triangle` 与
+    暴力扫描逐三角形对照。网格只在 ≥256 三角形时构建；仍是显式 `ccd_precise`
+    高成本路径，没有跨帧缓存/BVH。
   - [x] 盒子 8 条角射线（旋转盒的角撞矮墙）；球/胶囊中心射线与分组回归。
   - [x] 盒子旋转扫掠：8 角点这一步走出的线段取最早 TOI，线/角速度同乘 t；
     0.2 rad 级旋转盒对照（无 CCD 继续转过接触角）回归。

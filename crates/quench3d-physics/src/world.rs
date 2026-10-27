@@ -22,22 +22,6 @@ use quench3d_math::*;
 use crate::body::{BodyHandle, BodyType, RigidBody};
 use crate::broadphase::{Broadphase, Proxy};
 
-/// 接触点达到这个数才启用「预算角速度响应」的求解快速路径。
-///
-/// 小场景（包括所有黄金摘要回归）继续逐次做叉积/3x3 乘法，结果与历史**逐位相同**；
-/// 大场景把 `inv_i_world(r × dir)` 预乘一次，速度/位置/松弛迭代只乘标量，本机
-/// 2000 体深堆从约 16.7 降到 14.7~15.3 ms/步。代价是角速度末位可能差 1 ulp，
-/// 因此不把它设为无条件路径，也不改小场景的默认行为。
-const PRECOMPUTE_CONTACT_RESPONSE_MIN: usize = 2048;
-
-/// 两个 AABB 的间隙距离：相交为 0，否则是欧氏下界。三角网精确 CCD 用它
-/// 做保守预筛，避免对每个三角形都跑 GJK。
-fn aabb_gap(a: &Aabb, b: &Aabb) -> f32 {
-    let dx = (a.min.x - b.max.x).max(b.min.x - a.max.x).max(0.0);
-    let dy = (a.min.y - b.max.y).max(b.min.y - a.max.y).max(0.0);
-    let dz = (a.min.z - b.max.z).max(b.min.z - a.max.z).max(0.0);
-    (dx * dx + dy * dy + dz * dz).sqrt()
-}
 use crate::contact::{ContactManifold, ContactPair, ContactPoint};
 use crate::fluid::{self, Fluid, FluidDesc, FluidStats};
 use crate::gjk;
@@ -52,6 +36,125 @@ use crate::query::{self, QueryFilter, ShapeDistance};
 use crate::shape::Shape;
 use crate::solver::{self, BodyView, ContactCache, ContactSolver, ManifoldEntry, SolverConfig};
 use crate::water::{self, WaterVolume};
+
+/// 接触点达到这个数才启用「预算角速度响应」的求解快速路径。
+///
+/// 小场景（包括所有黄金摘要回归）继续逐次做叉积/3x3 乘法，结果与历史**逐位相同**；
+/// 大场景把 `inv_i_world(r × dir)` 预乘一次，速度/位置/松弛迭代只乘标量，本机
+/// 2000 体深堆从约 16.7 降到 14.7~15.3 ms/步。代价是角速度末位可能差 1 ulp，
+/// 因此不把它设为无条件路径，也不改小场景的默认行为。
+const PRECOMPUTE_CONTACT_RESPONSE_MIN: usize = 2048;
+
+/// 三角网局部 AABB 的均匀网格。三角形按**中心**放入唯一格子，查询时把刚体
+/// AABB 按最大三角形半径膨胀——只要三角形 AABB 真的碰到刚体 AABB，它的中心
+/// 一定落在膨胀后的查询范围内，所以不会漏检。大网格精确 CCD 不再全扫。
+struct TriGrid {
+    min: Vec3,
+    cell: f32,
+    dims: [usize; 3],
+    heads: Vec<i32>,
+    next: Vec<i32>,
+    max_radius: f32,
+}
+
+impl TriGrid {
+    fn build(bounds: &[Aabb]) -> Option<Self> {
+        if bounds.len() < 256 {
+            return None;
+        }
+        let mut min = Vec3::INFINITY;
+        let mut max = Vec3::NEG_INFINITY;
+        let mut max_radius = 0.0f32;
+        for b in bounds {
+            if !b.is_valid() {
+                continue;
+            }
+            min = Vec3::new(min.x.min(b.min.x), min.y.min(b.min.y), min.z.min(b.min.z));
+            max = Vec3::new(max.x.max(b.max.x), max.y.max(b.max.y), max.z.max(b.max.z));
+            max_radius = max_radius.max(b.half_extents().length());
+        }
+        let extent = max - min;
+        let cell = extent.max_element() / 127.0;
+        if !(cell.is_finite() && cell > 1e-9) {
+            return None;
+        }
+        let dim = |v: f32| ((v / cell).floor() as usize + 1).clamp(1, 128);
+        let dims = [dim(extent.x), dim(extent.y), dim(extent.z)];
+        let count = dims[0]
+            .checked_mul(dims[1])
+            .and_then(|n| n.checked_mul(dims[2]))?;
+        let mut heads = vec![-1i32; count];
+        let mut next = vec![-1i32; bounds.len()];
+        for (k, b) in bounds.iter().enumerate() {
+            if !b.is_valid() {
+                continue;
+            }
+            let c = b.center() - min;
+            let ix = ((c.x / cell).floor() as isize).clamp(0, dims[0] as isize - 1) as usize;
+            let iy = ((c.y / cell).floor() as isize).clamp(0, dims[1] as isize - 1) as usize;
+            let iz = ((c.z / cell).floor() as isize).clamp(0, dims[2] as isize - 1) as usize;
+            let index = ix + dims[0] * (iy + dims[1] * iz);
+            next[k] = heads[index];
+            heads[index] = k as i32;
+        }
+        Some(Self {
+            min,
+            cell,
+            dims,
+            heads,
+            next,
+            max_radius,
+        })
+    }
+
+    fn candidates(&self, aabb: &Aabb, out: &mut Vec<u32>) {
+        out.clear();
+        if !aabb.is_valid() {
+            return;
+        }
+        let r = self.max_radius;
+        let cell = self.cell;
+        let ix0 = ((aabb.min.x - r - self.min.x) / cell)
+            .floor()
+            .clamp(0.0, (self.dims[0] - 1) as f32) as usize;
+        let iy0 = ((aabb.min.y - r - self.min.y) / cell)
+            .floor()
+            .clamp(0.0, (self.dims[1] - 1) as f32) as usize;
+        let iz0 = ((aabb.min.z - r - self.min.z) / cell)
+            .floor()
+            .clamp(0.0, (self.dims[2] - 1) as f32) as usize;
+        let ix1 = ((aabb.max.x + r - self.min.x) / cell)
+            .floor()
+            .clamp(0.0, (self.dims[0] - 1) as f32) as usize;
+        let iy1 = ((aabb.max.y + r - self.min.y) / cell)
+            .floor()
+            .clamp(0.0, (self.dims[1] - 1) as f32) as usize;
+        let iz1 = ((aabb.max.z + r - self.min.z) / cell)
+            .floor()
+            .clamp(0.0, (self.dims[2] - 1) as f32) as usize;
+        for iz in iz0..=iz1 {
+            for iy in iy0..=iy1 {
+                let row = self.dims[0] * (iy + self.dims[1] * iz);
+                for ix in ix0..=ix1 {
+                    let mut k = self.heads[row + ix];
+                    while k >= 0 {
+                        out.push(k as u32);
+                        k = self.next[k as usize];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 两个 AABB 的间隙距离：相交为 0，否则是欧氏下界。三角网精确 CCD 用它
+/// 做保守预筛，避免对每个三角形都跑 GJK。
+fn aabb_gap(a: &Aabb, b: &Aabb) -> f32 {
+    let dx = (a.min.x - b.max.x).max(b.min.x - a.max.x).max(0.0);
+    let dy = (a.min.y - b.max.y).max(b.min.y - a.max.y).max(0.0);
+    let dz = (a.min.z - b.max.z).max(b.min.z - a.max.z).max(0.0);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
 
 /// 默认固定步长（1/60 秒）。
 pub const DEFAULT_FIXED_DT: f32 = 1.0 / 60.0;
@@ -2417,6 +2520,8 @@ impl PhysicsWorld {
             } else {
                 None
             };
+            let tri_grid = tri_bounds.as_ref().and_then(|b| TriGrid::build(b));
+            let mut candidates: Vec<u32> = Vec::new();
             let mut t = 0.0f32;
             for _ in 0..64 {
                 let ta = tf(a, t);
@@ -2466,6 +2571,22 @@ impl PhysicsWorld {
                             tb.position + tb.rotation.mul_vec3(*v2),
                         ])
                     };
+                    // 球-三角形有解析最近点；不要为退化三角形跑 GJK/EPA。
+                    let sphere = if let Shape::Sphere { radius } = a.shape {
+                        Some((ta.position, radius.abs()))
+                    } else {
+                        None
+                    };
+                    let test_triangle = |pts: [Vec3; 3]| -> (bool, f32) {
+                        if let Some((center, radius)) = sphere {
+                            let d = gjk::point_triangle_distance(center, pts[0], pts[1], pts[2])
+                                - radius;
+                            (d <= 1e-4, d.max(0.0))
+                        } else {
+                            let hit = gjk::gjk(&sa, &gjk::Support::triangle(pts));
+                            (hit.intersect || hit.distance <= 1e-4, hit.distance)
+                        }
+                    };
                     // 把局部 AABB 按当前刚体位姿变成世界 AABB（保守：先取绝对值）。
                     // 静态/纯平移三角网走无旋转快路径；大多数地面/墙都是这种。
                     let identity = tb.rotation == Quat::IDENTITY && tb.scale == Vec3::ONE;
@@ -2480,9 +2601,45 @@ impl PhysicsWorld {
                             + (tb.rotation.mul_vec3(Vec3::new(0.0, 0.0, half.z))).abs();
                         Aabb::new(center - ext, center + ext)
                     };
+                    // 查询 AABB 在三角网局部空间的版本；有网格时只取局部邻域。
+                    candidates.clear();
+                    if let Some(grid) = tri_grid.as_ref() {
+                        let inv = tb.rotation.inverse();
+                        let mut local_aabb = Aabb::EMPTY;
+                        for corner in 0..8 {
+                            let p = Vec3::new(
+                                if corner & 1 == 0 {
+                                    a_world.min.x
+                                } else {
+                                    a_world.max.x
+                                },
+                                if corner & 2 == 0 {
+                                    a_world.min.y
+                                } else {
+                                    a_world.max.y
+                                },
+                                if corner & 4 == 0 {
+                                    a_world.min.z
+                                } else {
+                                    a_world.max.z
+                                },
+                            );
+                            let q = inv.mul_vec3(p - tb.position);
+                            local_aabb.expand_point(Vec3::new(
+                                q.x / tb.scale.x,
+                                q.y / tb.scale.y,
+                                q.z / tb.scale.z,
+                            ));
+                        }
+                        grid.candidates(&local_aabb, &mut candidates);
+                    } else {
+                        candidates.extend(0..bounds.len() as u32);
+                    }
                     let mut nearest = None;
                     let mut nearest_gap = f32::INFINITY;
-                    for (k, local) in bounds.iter().enumerate() {
+                    for &k in candidates.iter() {
+                        let k = k as usize;
+                        let local = &bounds[k];
                         if !local.is_valid() {
                             continue;
                         }
@@ -2510,16 +2667,18 @@ impl PhysicsWorld {
                     let mut touched = false;
                     if let Some(k) = nearest {
                         if let Some(points) = triangle(k) {
-                            let hit = gjk::gjk(&sa, &gjk::Support::triangle(points));
-                            if hit.intersect || hit.distance <= 1e-4 {
+                            let (hit, distance) = test_triangle(points);
+                            if hit {
                                 touched = true;
                             } else {
-                                min_distance = hit.distance;
+                                min_distance = distance;
                             }
                         }
                     }
                     if !touched {
-                        for (k, local) in bounds.iter().enumerate() {
+                        for &k in candidates.iter() {
+                            let k = k as usize;
+                            let local = &bounds[k];
                             if !local.is_valid() {
                                 continue;
                             }
@@ -2530,12 +2689,12 @@ impl PhysicsWorld {
                             let Some(points) = triangle(k) else {
                                 continue;
                             };
-                            let hit = gjk::gjk(&sa, &gjk::Support::triangle(points));
-                            if hit.intersect || hit.distance <= 1e-4 {
+                            let (hit, distance) = test_triangle(points);
+                            if hit {
                                 touched = true;
                                 break;
                             }
-                            min_distance = min_distance.min(hit.distance);
+                            min_distance = min_distance.min(distance);
                         }
                     }
                     if touched {
@@ -2918,6 +3077,12 @@ impl PhysicsWorld {
             } else {
                 None
             };
+            // 球-三角网的精确 TOI 已经解析；不要把同一面墙再用中心射线/8 角射线
+            // 扫 9 遍。只对球启用，凸包/盒仍保留旧路径的更早结果做兜底。
+            if let (Some(t), Shape::Sphere { .. }) = (precise_t, &b.shape) {
+                updates.push((i, b.linear_velocity * t, Some(b.angular_velocity * t)));
+                continue;
+            }
             let self_handle = BodyHandle::new(i as u32, slot.generation);
             let groups = b.groups;
             let filter = |handle: BodyHandle| -> bool {
@@ -3941,5 +4106,40 @@ mod tests {
         assert_eq!(w.body(a), Some(&first_a), "恢复后的轨迹必须逐位可重复");
         assert_eq!(w.body(b), Some(&first_b));
         assert_eq!(w.step_count, first_steps);
+    }
+    #[test]
+    fn tri_grid_candidates_cover_every_overlapping_triangle() {
+        let mut bounds = Vec::new();
+        for i in 0..400 {
+            let x = (i % 20) as f32 * 0.37 - 3.5;
+            let y = ((i / 20) % 20) as f32 * 0.29 - 2.8;
+            let z = (i / 400) as f32 * 0.5;
+            let half = Vec3::new(
+                0.03 + (i % 7) as f32 * 0.02,
+                0.02 + (i % 5) as f32 * 0.03,
+                0.04 + (i % 3) as f32 * 0.01,
+            );
+            let c = Vec3::new(x, y, z);
+            bounds.push(Aabb::new(c - half, c + half));
+        }
+        let grid = TriGrid::build(&bounds).expect("400 个三角形应建立网格");
+        for q in [
+            Aabb::new(Vec3::splat(-0.2), Vec3::splat(0.2)),
+            Aabb::new(Vec3::new(-3.0, -2.0, -0.1), Vec3::new(-2.0, -1.0, 0.2)),
+            Aabb::new(Vec3::new(2.0, 1.5, -1.0), Vec3::new(3.5, 2.5, 1.0)),
+        ] {
+            let mut out = Vec::new();
+            grid.candidates(&q, &mut out);
+            out.sort_unstable();
+            out.dedup();
+            for (k, b) in bounds.iter().enumerate() {
+                if b.intersects(&q) {
+                    assert!(
+                        out.binary_search(&(k as u32)).is_ok(),
+                        "网格漏掉与查询 AABB 相交的三角形 {k}: {b:?} vs {q:?}"
+                    );
+                }
+            }
+        }
     }
 }
