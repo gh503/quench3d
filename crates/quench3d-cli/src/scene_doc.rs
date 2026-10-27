@@ -4415,11 +4415,11 @@ impl SceneDoc {
                     format!("{p}.spacing"),
                     "粒子间距必须是有限正数",
                 ));
-            } else if f.spacing > f.size.iter().copied().fold(f32::INFINITY, f32::min) * 2.0 {
+            } else if f.spacing > f.size.iter().copied().fold(f32::INFINITY, f32::min) {
                 cam_diags.push(Diagnostic::error_code(
                     ErrorCode::OutOfRange,
                     format!("{p}.spacing"),
-                    "粒子间距不能大于发射体最小边长（否则一颗粒子都放不下）",
+                    "粒子间距不能大于发射体最小边长（与流体引擎的间距约束一致）",
                 ));
             }
             let r = f.radius();
@@ -9329,6 +9329,37 @@ mod tests {
                 diags.iter().any(|d| d.path == path),
                 "要报 {path}: {diags:?}"
             );
+        }
+    }
+
+    #[test]
+    fn fluid_spacing_matches_engine_minimum_size_limit() {
+        for size in [
+            [1.0, 1.0, 1.0],
+            [1.0, 2.0, 3.0],
+            [3.0, 1.0, 2.0],
+            [2.0, 3.0, 1.0],
+        ] {
+            for spacing in [1.5, 1.0, 0.5] {
+                let doc = SceneDoc::from_value(json!({"fluids": [{
+                    "size": size, "spacing": spacing, "radius": 0.1, "max_particles": 8
+                }]}))
+                .unwrap();
+                let valid = spacing <= 1.0;
+                let diagnostics = doc.validate();
+                assert_eq!(
+                    diagnostics
+                        .iter()
+                        .any(|d| d.path == "fluids[0].spacing" && d.code == ErrorCode::OutOfRange),
+                    !valid,
+                    "size={size:?}, spacing={spacing}: {diagnostics:?}"
+                );
+                assert_eq!(
+                    crate::runner::build_world(&doc).is_ok(),
+                    valid,
+                    "runner mismatch for size={size:?}, spacing={spacing}"
+                );
+            }
         }
     }
 
