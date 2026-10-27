@@ -321,7 +321,8 @@ const m = getBodyTransform("link2"); // 列主序 16 个 f32，可直接喂 WebG
 * robot-modkit 上游没有提交 `cad/out/` 或官方装配矩阵；当前 STL 对位按官方尺寸推导，逐孔/逐螺柱的 CAD 装配仍需上游导出已装配资产后才能替换。
 * 浏览器 wgpu 渲染下的 60 fps 实测（wasm/Node 的 1000 步 1.106 s 已测；1000 刚体的 wasm 规模没测）。
 * 真实夹持已验证 20 g 与 100 g、40 mm 方块、friction 2.0；200 g 同套参数只抬起 0.098 m，更重物体仍需重新标定预紧/增益。
-* 纯 FK/kinematic 整链（当前 drive 仍走 PD；`body:"kinematic"` 只作用于单刚体）。
+* 纯 FK/kinematic 整链已支持 `hinge/slider`（`physics.mode:"fk"`，每步直接到目标，
+  无 PD）；但 `drive` 模式仍走 PD，`body:"kinematic"` 仍只作用于单刚体。
 * MCP `simulate_steps` 已由 `quench3d_simulate.steps` 覆盖；`joint_target` 与 `query_contact` 已加。
 * 关节径向间隙已**可选**建模（`radial_clearance`，缺省 0 = 理想）；现有 M1 fixture
   没有打开它，所以默认演示仍是理想铰链。按 120 mm 连杆估算，0.2 mm 间隙对应末端约

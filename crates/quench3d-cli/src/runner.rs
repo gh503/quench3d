@@ -2106,6 +2106,150 @@ pub fn joint_frame_quat(deg: Option<[f32; 3]>) -> Quat {
     euler_quat(deg)
 }
 
+/// 给两个刚体生成一个铰链文档：锚点取两个刚体原点的世界中点，转轴取 A 的局部 +Y。
+///
+/// 锚点分别换算到各自刚体的局部坐标；B 的局部轴是同一个世界轴在 B 旋转下的逆，
+/// 所以两端刚体朝向不同也不会在求解第一帧被扭回去。返回的文档没有马达/限位。
+/// 编辑器的新建铰链走这里，避免在编辑器里另写一份关节装配。
+pub fn new_hinge_doc(name: String, a: String, b: String, ta: Transform, tb: Transform) -> JointDoc {
+    let pivot = (ta.position + tb.position) * 0.5;
+    let anchor_a = ta.rotation.inverse().mul_vec3(pivot - ta.position);
+    let anchor_b = tb.rotation.inverse().mul_vec3(pivot - tb.position);
+    let world_axis = ta.rotation.mul_vec3(Vec3::Y);
+    let axis_a = ta.rotation.inverse().mul_vec3(world_axis);
+    let axis_b = tb.rotation.inverse().mul_vec3(world_axis);
+    JointDoc {
+        name: Some(name),
+        kind: JointKind::Hinge,
+        a,
+        b,
+        axis: None,
+        axis_a: Some(arr(axis_a)),
+        axis_b: Some(arr(axis_b)),
+        frame_a: None,
+        frame_b: None,
+        anchor_a: Some(arr(anchor_a)),
+        anchor_b: Some(arr(anchor_b)),
+        limits: None,
+        rest_length: None,
+        stiffness: None,
+        damping: None,
+        radial_clearance: None,
+        motor_velocity: None,
+        motor_max_impulse: None,
+        motor_target_deg: None,
+        motor_target_m: None,
+        motor_stiffness: None,
+        motor_damping: None,
+        motor_kp: None,
+        motor_kd: None,
+        motor_max_torque: None,
+        cone_limit: None,
+        break_force: None,
+        break_torque: None,
+        collide_connected: None,
+    }
+}
+
+/// 按 [`new_hinge_doc`] 生成的字段把铰链装进运行时世界。
+///
+/// 只接受 `hinge` 文档；锚点/轴缺省时用原点/局部 +Y。返回是否装成功。
+pub fn add_hinge_joint(
+    world: &mut PhysicsWorld,
+    a: BodyHandle,
+    b: BodyHandle,
+    doc: &JointDoc,
+) -> bool {
+    if doc.kind != JointKind::Hinge {
+        return false;
+    }
+    if a == b || world.body(a).is_none() || world.body(b).is_none() {
+        return false;
+    }
+    install_joint_doc(world, a, b, doc).is_ok()
+}
+
+/// 场景装载与编辑器共用的关节装配，字段换算和运行时属性只有这一份实现。
+fn install_joint_doc(
+    world: &mut PhysicsWorld,
+    a: BodyHandle,
+    b: BodyHandle,
+    j: &JointDoc,
+) -> Result<JointHandle, RunError> {
+    // 局部轴按端取：`axis_a`/`axis_b` 不写就回落到 `axis`（再缺省 [0,1,0]）= 老行为，
+    // 所以老场景逐位不变；写了就按端用各自刚体的局部轴。
+    let axis = j.axis.unwrap_or([0.0, 1.0, 0.0]);
+    let axis_a = v3(j.axis_a.unwrap_or(axis)).normalize_or_zero();
+    let axis_b = v3(j.axis_b.unwrap_or(axis)).normalize_or_zero();
+    let anchor_a = v3(j.anchor_a.unwrap_or([0.0, 0.0, 0.0]));
+    let anchor_b = v3(j.anchor_b.unwrap_or([0.0, 0.0, 0.0]));
+    let joint = match j.kind {
+        JointKind::Fixed => Joint::Fixed {
+            a,
+            b,
+            local_anchor_a: anchor_a,
+            local_anchor_b: anchor_b,
+            // 参考姿态：不写 = 单位四元数 = **老行为**（锁定创建时的相对姿态）；
+            // 只要有一端不是单位旋转，求解器就把两端扭到参考姿态重合。
+            local_frame_a: joint_frame_quat(j.frame_a),
+            local_frame_b: joint_frame_quat(j.frame_b),
+        },
+        JointKind::Ball => Joint::Ball {
+            a,
+            b,
+            local_anchor_a: anchor_a,
+            local_anchor_b: anchor_b,
+            cone_limit: j.cone_limit.as_ref().map(|c| BallConeLimit {
+                // 注意 `rad(v)` 是"用弧度构造"，**不做换算**：度要显式 `to_radians()`。
+                half_angle: c.half_angle_deg.to_radians(),
+                local_axis_a: v3(c.axis_a.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
+                local_axis_b: v3(c.axis_b.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
+            }),
+        },
+        JointKind::Hinge => Joint::Hinge {
+            a,
+            b,
+            local_anchor_a: anchor_a,
+            local_anchor_b: anchor_b,
+            local_axis_a: axis_a,
+            local_axis_b: axis_b,
+            limits: j.limits.map(|l| (l[0], l[1])),
+            motor: build_hinge_motor(j)?,
+        },
+        JointKind::Distance => Joint::Distance {
+            a,
+            b,
+            local_anchor_a: anchor_a,
+            local_anchor_b: anchor_b,
+            rest_length: j.rest_length.unwrap_or(1.0),
+            stiffness: j.stiffness.unwrap_or(20.0),
+            damping: j.damping.unwrap_or(1.0),
+        },
+        JointKind::Slider => Joint::Slider {
+            a,
+            b,
+            local_anchor_a: anchor_a,
+            local_anchor_b: anchor_b,
+            local_axis_a: axis_a,
+            local_axis_b: axis_b,
+            limits: j.limits.map(|l| (l[0], l[1])),
+            motor: build_slider_motor(j)?,
+        },
+    };
+    let handle = world.add_joint(joint);
+    if let Some(clearance) = j.radial_clearance {
+        world.set_joint_radial_clearance(handle, clearance);
+    }
+    if j.break_force.is_some() || j.break_torque.is_some() {
+        world.set_joint_break(handle, j.break_force, j.break_torque);
+    }
+    // 缺省不碰（Bullet / PhysX 一致）；显式 `true` 才让关节两端互相碰撞。
+    if j.collide_connected.unwrap_or(false) {
+        world.set_joint_collide_connected(handle, true);
+    }
+    Ok(handle)
+}
+
 /// `include` 合并：把碎片场景并成一份自包含文档。
 ///
 /// 这是给"直接调 runner API"的调用点兜底用的（CLI 的 `load_scene` 已经合并过一次）。
@@ -2420,70 +2564,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         let b = *handles
             .get(&j.b)
             .ok_or_else(|| RunError::scene(format!("joints[{i}].b 找不到刚体 {}", j.b)))?;
-        // 局部轴按端取：`axis_a`/`axis_b` 不写就回落到 `axis`（再缺省 [0,1,0]）= 老行为，
-        // 所以老场景逐位不变；写了就按端用各自刚体的局部轴。
-        let axis = j.axis.unwrap_or([0.0, 1.0, 0.0]);
-        let axis_a = v3(j.axis_a.unwrap_or(axis)).normalize_or_zero();
-        let axis_b = v3(j.axis_b.unwrap_or(axis)).normalize_or_zero();
-        let anchor_a = v3(j.anchor_a.unwrap_or([0.0, 0.0, 0.0]));
-        let anchor_b = v3(j.anchor_b.unwrap_or([0.0, 0.0, 0.0]));
-        let joint = match j.kind {
-            JointKind::Fixed => Joint::Fixed {
-                a,
-                b,
-                local_anchor_a: anchor_a,
-                local_anchor_b: anchor_b,
-                // 参考姿态：不写 = 单位四元数 = **老行为**（锁定创建时的相对姿态）；
-                // 只要有一端不是单位旋转，求解器就把两端扭到参考姿态重合。
-                local_frame_a: joint_frame_quat(j.frame_a),
-                local_frame_b: joint_frame_quat(j.frame_b),
-            },
-            JointKind::Ball => Joint::Ball {
-                a,
-                b,
-                local_anchor_a: anchor_a,
-                local_anchor_b: anchor_b,
-                cone_limit: j.cone_limit.as_ref().map(|c| BallConeLimit {
-                    // 注意 `rad(v)` 是"用弧度构造"，**不做换算**：度要显式 `to_radians()`。
-                    half_angle: c.half_angle_deg.to_radians(),
-                    local_axis_a: v3(c.axis_a.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
-                    local_axis_b: v3(c.axis_b.unwrap_or([0.0, 1.0, 0.0])).normalize_or_zero(),
-                }),
-            },
-            JointKind::Hinge => Joint::Hinge {
-                a,
-                b,
-                local_anchor_a: anchor_a,
-                local_anchor_b: anchor_b,
-                local_axis_a: axis_a,
-                local_axis_b: axis_b,
-                limits: j.limits.map(|l| (l[0], l[1])),
-                motor: build_hinge_motor(j)?,
-            },
-            JointKind::Distance => Joint::Distance {
-                a,
-                b,
-                local_anchor_a: anchor_a,
-                local_anchor_b: anchor_b,
-                rest_length: j.rest_length.unwrap_or(1.0),
-                stiffness: j.stiffness.unwrap_or(20.0),
-                damping: j.damping.unwrap_or(1.0),
-            },
-            JointKind::Slider => Joint::Slider {
-                a,
-                b,
-                local_anchor_a: anchor_a,
-                local_anchor_b: anchor_b,
-                local_axis_a: axis_a,
-                local_axis_b: axis_b,
-                limits: j.limits.map(|l| (l[0], l[1])),
-                motor: build_slider_motor(j)?,
-            },
-        };
-        let handle = world.add_joint(joint);
-        if let Some(clearance) = j.radial_clearance {
-            world.set_joint_radial_clearance(handle, clearance);
-        }
+        let handle = install_joint_doc(&mut world, a, b, j)?;
         joint_entries.push(JointRuntime {
             name,
             handle,
@@ -2491,13 +2572,6 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             target_deg: j.motor_target_deg,
             limits: j.limits.map(|l| (l[0], l[1])),
         });
-        if j.break_force.is_some() || j.break_torque.is_some() {
-            world.set_joint_break(handle, j.break_force, j.break_torque);
-        }
-        // 缺省不碰（Bullet / PhysX 一致）；显式 `true` 才让关节两端互相碰撞。
-        if j.collide_connected.unwrap_or(false) {
-            world.set_joint_collide_connected(handle, true);
-        }
     }
 
     Ok(WorldBuild {
@@ -6952,5 +7026,106 @@ mod tests {
         assert_eq!(w.color, [0.1, 0.3, 0.5]);
         assert_eq!(w.strength, 1.0, "没写的字段用缺省");
         assert_eq!(w.clarity, 1.0);
+    }
+    #[test]
+    fn runtime_hinge_creation_preserves_document_motor_and_limits() {
+        let scene: SceneDoc = serde_json::from_value(serde_json::json!({
+            "format": "quench3d.scene", "version": 1,
+            "objects": [
+                {"name": "a", "shape": {"type": "box"}, "body": "static"},
+                {"name": "b", "shape": {"type": "box"}, "body": "dynamic"}
+            ]
+        }))
+        .unwrap();
+        let mut build = build_world(&scene).unwrap();
+        let mut doc = new_hinge_doc(
+            "j".into(),
+            "a".into(),
+            "b".into(),
+            Transform::IDENTITY,
+            Transform::IDENTITY,
+        );
+        doc.limits = Some([-0.5, 0.5]);
+        doc.motor_target_deg = Some(20.0);
+        assert!(add_hinge_joint(
+            &mut build.world,
+            build.handles["a"],
+            build.handles["b"],
+            &doc
+        ));
+        let h = build.world.joint_handles()[0];
+        let tel = build.world.joint_telemetry(h, 1.0 / 60.0).unwrap();
+        assert_eq!(tel.limits, Some((-0.5, 0.5)));
+        assert_eq!(tel.target, Some(20.0f32.to_radians()));
+    }
+
+    #[test]
+    fn new_hinge_anchors_meet_at_the_world_midpoint_and_share_an_axis() {
+        let ta = Transform::new(
+            Vec3::new(1.0, 2.0, 0.0),
+            Quat::from_rotation_y(0.7),
+            Vec3::ONE,
+        );
+        let tb = Transform::new(
+            Vec3::new(3.0, 0.0, 1.0),
+            Quat::from_rotation_z(-0.4),
+            Vec3::ONE,
+        );
+        let doc = new_hinge_doc("j".into(), "a".into(), "b".into(), ta, tb);
+        let pivot = (ta.position + tb.position) * 0.5;
+        let aa = Vec3::from_array(doc.anchor_a.unwrap());
+        let ab = Vec3::from_array(doc.anchor_b.unwrap());
+        let pa = ta.position + ta.rotation.mul_vec3(aa);
+        let pb = tb.position + tb.rotation.mul_vec3(ab);
+        assert!((pa - pivot).length() < 1e-5, "A 锚点应在中点: {pa:?}");
+        assert!((pb - pivot).length() < 1e-5, "B 锚点应在中点: {pb:?}");
+        let axis_a = ta.rotation.mul_vec3(Vec3::from_array(doc.axis_a.unwrap()));
+        let axis_b = tb.rotation.mul_vec3(Vec3::from_array(doc.axis_b.unwrap()));
+        assert!((axis_a - axis_b).length() < 1e-5);
+        assert!((axis_a - ta.rotation.mul_vec3(Vec3::Y)).length() < 1e-5);
+    }
+
+    #[test]
+    fn generated_hinge_keeps_both_anchors_together_in_the_world() {
+        let mut world = PhysicsWorld::new();
+        let ta = Transform::new(
+            Vec3::new(1.0, 2.0, 0.0),
+            Quat::from_rotation_y(0.7),
+            Vec3::ONE,
+        );
+        let tb = Transform::new(
+            Vec3::new(3.0, 0.0, 1.0),
+            Quat::from_rotation_z(-0.4),
+            Vec3::ONE,
+        );
+        let ha = world.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.2),
+            })
+            .position(ta.position)
+            .rotation(ta.rotation)
+            .build(),
+        );
+        let hb = world.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.2),
+            })
+            .position(tb.position)
+            .rotation(tb.rotation)
+            .build(),
+        );
+        let doc = new_hinge_doc("j".into(), "a".into(), "b".into(), ta, tb);
+        let anchor_a = Vec3::from_array(doc.anchor_a.unwrap());
+        let anchor_b = Vec3::from_array(doc.anchor_b.unwrap());
+        assert!(add_hinge_joint(&mut world, ha, hb, &doc));
+        for _ in 0..60 {
+            world.step(1.0 / 60.0);
+        }
+        let pa = world.body(ha).unwrap().transform.transform_point(anchor_a);
+        let pb = world.body(hb).unwrap().transform.transform_point(anchor_b);
+        assert!(
+            (pa - pb).length() < 0.02,
+            "铰链两端锚点应保持在一起: {pa:?} vs {pb:?}"
+        );
     }
 }

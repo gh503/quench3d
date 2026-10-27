@@ -306,9 +306,12 @@
     旋转平面/旋转球仍按静态姿态；三角网精确路径是逐三角形 O(T)，大网格需空间索引。
 - [ ] 流形跨帧复用；三角网↔三角网、平面↔平面接触。
 - [ ] 关节并行求解；多体/articulation。
-  - 已做：编辑器「物理关节」面板（改伺服目标写回底稿、删除关节）；回归
-    `joint_target_writeback_uses_degrees_for_hinges_and_meters_for_sliders`。
-  - 仍缺：关节/锚点/轴 gizmo 编辑、无马达关节加马达、6DOF/万向节。
+  - 已做：编辑器「物理关节」面板（改伺服目标写回底稿、删除关节）；可从两个
+    选中刚体建无马达铰链（锚点取世界中点，两端轴换算到各自局部空间）；回归
+    `joint_target_writeback_uses_degrees_for_hinges_and_meters_for_sliders`、
+    `new_hinge_anchors_meet_at_the_world_midpoint_and_share_an_axis`、
+    `generated_hinge_keeps_both_anchors_together_in_the_world`。
+  - 仍缺：关节/锚点/轴 gizmo 编辑、给已有无马达关节加马达、6DOF/万向节。
 - [x] 滚动摩擦（`rolling_friction`，缺省关闭，球体回归测试）。
 - [x] 圆形摩擦锥（`physics.friction_cone`，缺省关闭，斜向滑动单测）。
 - [x] 各向异性摩擦（`friction_anisotropy` + `friction_axis`，缺省关闭；
@@ -318,7 +321,8 @@
 - [x] 纯 FK 回放（`physics.mode:"fk"`）：无重力/接触，铰链子树每步直接旋到
   目标角，无 PD 收敛；回归 `kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately`、
   `kinematic_fk_moves_the_whole_descendant_subtree` 与 CLI
-  `fk_mode_reaches_the_joint_target_in_one_step`。只支持 hinge。
+  `fk_mode_reaches_the_joint_target_in_one_step`。支持 hinge/slider；滑块回归
+  `kinematic_fk_slides_a_slider_subtree_to_the_target`。
 - [ ] TGS/SIMD 求解器。
 - [x] 深堆 2000 体实时（目标 <16 ms/步，本机量化）：本机 release 60 步
   **14.7~15.3 ms/步**；显式 `deep_stack_2000_perf` 断言 <16 ms（优化前 17.04、
@@ -383,7 +387,7 @@
 
 - [ ] 三平台 + wasm CI 每次提交真跑；真 GPU WebGPU 路径验收。
 - [ ] `wasm-opt`/文件名哈希/签名；预编译发行。
-  - [x] 发行包内 Brotli `.br`（quality 11；13,995,474 → 3,086,148 字节），门禁解压
+  - [x] 发行包内 Brotli `.br`（quality 11；14,010,301 → 3,087,644 字节），门禁解压
     后与 wasm 逐字节比较；静态服务器仍需配置 `Content-Encoding: br`。
   - [ ] `wasm-opt`、文件名哈希、签名/安装器。
   - [x] 本地可复现发行包（`tools/package_release.sh` + 门禁里的

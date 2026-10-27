@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+- **编辑器从两个选中刚体创建铰链**：锚点取两个刚体原点的世界中点并换算到各自
+  局部坐标，转轴取 A 的局部 +Y 并在 B 上写成同一世界轴；没有马达/限位，先装上
+  再回场景文件加 `motor_*`。回归
+  `new_hinge_anchors_meet_at_the_world_midpoint_and_share_an_axis` 与
+  `generated_hinge_keeps_both_anchors_together_in_the_world`（60 步后两锚点距离
+  <0.02 m）。编辑器与场景重载使用同一个关节装配函数；回归
+  `runtime_hinge_creation_preserves_document_motor_and_limits` 已观察到限位丢失的失败，
+  修复后同时检查限位和马达目标。边界：按钮只建无马达铰链；需两个不同具名刚体
+  和场景底稿；槽位存在空洞时禁止新增，需重开场景恢复顺序对应。
+
 - **编辑器物理关节面板**：列出运行时关节（名字/类型/当前坐标/限位/马达力矩），
   铰链与滑块可直接改伺服目标；改目标写回场景底稿的 `motor_target_deg` /
   `motor_target_m`，删除关节同时移除底稿条目。回归
@@ -67,7 +77,7 @@
 
 - **发行包 Brotli**：`tools/package_release.sh` 现在为包内 wasm 生成
   `quench3d_web_bg.wasm.br`（Brotli quality 11）；`tools/check_package.sh` 解压后
-  与 wasm 逐字节比较，并验证确实变小。本机 13,995,474 → 3,086,148 字节（22.0%）。
+  与 wasm 逐字节比较，并验证确实变小。本机 14,010,301 → 3,087,644 字节（22.0%）。
   压缩只在打包目录内做，不写回 `web/pkg`；静态服务器仍需配置
   `Content-Encoding: br`。仍没有 wasm-opt/文件名哈希/签名/安装器。
 

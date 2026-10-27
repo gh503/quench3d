@@ -1669,6 +1669,73 @@ fn joint_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     egui::CollapsingHeader::new("物理关节")
         .default_open(false)
         .show(ui, |ui| {
+            let selection = doc.selection();
+            let pair = if selection.len() == 2 {
+                let a = engine.scene.objects.get(selection[0]);
+                let b = engine.scene.objects.get(selection[1]);
+                match (a, b) {
+                    (Some(a), Some(b)) => match (a.body, b.body) {
+                        (Some(ha), Some(hb)) => Some((
+                            ha,
+                            engine.world.body(ha).map(|body| body.transform),
+                            a.name.clone(),
+                            hb,
+                            engine.world.body(hb).map(|body| body.transform),
+                            b.name.clone(),
+                        )),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            // 底稿按顺序对应运行时槽位；有空洞时新增会复用旧槽，不能直接追加底稿。
+            let aligned = doc.base_doc().is_some_and(|base| {
+                base.joints.len() == handles.len()
+                    && handles
+                        .iter()
+                        .enumerate()
+                        .all(|(i, h)| h.index as usize == i)
+            });
+            let can_add = aligned
+                && pair.as_ref().is_some_and(|(ha, ta, na, hb, tb, nb)| {
+                    ha != hb && na != nb && ta.is_some() && tb.is_some()
+                });
+            let add = ui
+                .add_enabled(
+                    can_add,
+                    egui::Button::new("用选中的两个刚体添加铰链（无马达）"),
+                )
+                .on_disabled_hover_text(
+                    "需选中两个不同的具名刚体，并有场景底稿；删除或断裂关节后请重新打开场景再新增",
+                )
+                .clicked();
+            if add {
+                if let Some((ha, Some(ta), na, hb, Some(tb), nb)) = pair {
+                    let base = doc.base_doc();
+                    let mut index = 0;
+                    let name = loop {
+                        let candidate = format!("joint{index}");
+                        let used = base.is_some_and(|base| {
+                            base.joints
+                                .iter()
+                                .any(|joint| joint.name.as_deref() == Some(candidate.as_str()))
+                        });
+                        if !used {
+                            break candidate;
+                        }
+                        index += 1;
+                    };
+                    let joint = quench3d_cli::runner::new_hinge_doc(name, na, nb, ta, tb);
+                    if quench3d_cli::runner::add_hinge_joint(&mut engine.world, ha, hb, &joint) {
+                        if let Some(base) = doc.base_doc_mut() {
+                            base.joints.push(joint);
+                            doc.record_edit(engine);
+                        }
+                    }
+                }
+            }
             if handles.is_empty() {
                 ui.label("当前场景没有关节。");
                 return;
