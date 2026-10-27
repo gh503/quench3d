@@ -3313,7 +3313,7 @@ impl PhysicsWorld {
                         local_axis_a,
                         local_axis_b,
                         limits,
-                        motor: Some(motor),
+                        motor,
                     }) => (
                         FkKind::Hinge,
                         *a,
@@ -3323,7 +3323,7 @@ impl PhysicsWorld {
                         *local_axis_a,
                         *local_axis_b,
                         *limits,
-                        motor.target_angle,
+                        motor.as_ref().and_then(|motor| motor.target_angle),
                     ),
                     Some(Joint::Slider {
                         a,
@@ -3333,7 +3333,7 @@ impl PhysicsWorld {
                         local_axis_a,
                         local_axis_b,
                         limits,
-                        motor: Some(motor),
+                        motor,
                     }) => (
                         FkKind::Slider,
                         *a,
@@ -3343,13 +3343,13 @@ impl PhysicsWorld {
                         *local_axis_a,
                         *local_axis_b,
                         *limits,
-                        motor.target_angle,
+                        motor.as_ref().and_then(|motor| motor.target_angle),
                     ),
                     _ => continue,
                 };
-            let Some(target) = target else {
-                continue;
-            };
+            // Without a position target, carry the current relative pose only.
+            // Velocity motors and passive limits are not solved in pure FK.
+            let (kind, target) = target.map_or((FkKind::Fixed, 0.0), |target| (kind, target));
             let (Some(ia), Some(ib)) = (self.body_index(a), self.body_index(b)) else {
                 continue;
             };
@@ -4759,6 +4759,176 @@ mod tests {
                 "FK must preserve the prescribed base pose: root_first={root_first}"
             );
             assert!((w.body(child).unwrap().position() - Vec3::NEG_Z).length() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn kinematic_fk_carries_passive_hinge_and_slider_attachments() {
+        for passive_slider in [false, true] {
+            for velocity_motor in [false, true] {
+                for slider in [false, true] {
+                    for reverse in [false, true] {
+                        for integrated in [false, true] {
+                            let mut w = PhysicsWorld::new();
+                            w.set_gravity(Vec3::ZERO);
+                            w.set_collisions_enabled(false);
+                            w.set_kinematic_fk(true);
+                            let root = w.add_body(
+                                BodyBuilder::r#static(Shape::Sphere { radius: 0.1 }).build(),
+                            );
+                            let child = w.add_body(
+                                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                                    .position(Vec3::X)
+                                    .build(),
+                            );
+                            let relative = if integrated && passive_slider {
+                                Quat::IDENTITY
+                            } else {
+                                Quat::from_rotation_x(0.37)
+                            };
+                            let payload = w.add_body(
+                                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                                    .position(Vec3::X * 2.0)
+                                    .rotation(relative)
+                                    .build(),
+                            );
+                            let motor = Some(crate::joints::HingeMotor::servo(
+                                if slider {
+                                    2.0
+                                } else {
+                                    std::f32::consts::FRAC_PI_2
+                                },
+                                10.0,
+                            ));
+                            w.add_joint(if slider {
+                                Joint::Slider {
+                                    a: root,
+                                    b: child,
+                                    local_anchor_a: Vec3::ZERO,
+                                    local_anchor_b: Vec3::ZERO,
+                                    local_axis_a: Vec3::X,
+                                    local_axis_b: Vec3::X,
+                                    limits: None,
+                                    motor,
+                                }
+                            } else {
+                                Joint::Hinge {
+                                    a: root,
+                                    b: child,
+                                    local_anchor_a: Vec3::ZERO,
+                                    local_anchor_b: -Vec3::X,
+                                    local_axis_a: Vec3::Y,
+                                    local_axis_b: Vec3::Y,
+                                    limits: None,
+                                    motor,
+                                }
+                            });
+                            let passive_motor = velocity_motor.then(|| {
+                                crate::joints::HingeMotor::velocity(
+                                    if integrated { 0.0 } else { 3.0 },
+                                    10.0,
+                                )
+                            });
+                            let a = if reverse { payload } else { child };
+                            let b = if reverse { child } else { payload };
+                            let local_anchor_a = if reverse { Vec3::ZERO } else { Vec3::X };
+                            let local_anchor_b = if reverse { Vec3::X } else { Vec3::ZERO };
+                            w.add_joint(if passive_slider {
+                                Joint::Slider {
+                                    a,
+                                    b,
+                                    local_anchor_a,
+                                    local_anchor_b,
+                                    local_axis_a: Vec3::X,
+                                    local_axis_b: Vec3::X,
+                                    limits: if integrated { None } else { Some((0.0, 0.0)) },
+                                    motor: passive_motor,
+                                }
+                            } else {
+                                Joint::Hinge {
+                                    a,
+                                    b,
+                                    local_anchor_a,
+                                    local_anchor_b,
+                                    local_axis_a: Vec3::X,
+                                    local_axis_b: Vec3::X,
+                                    limits: if integrated { None } else { Some((0.0, 0.0)) },
+                                    motor: passive_motor,
+                                }
+                            });
+                            let tip_start = Vec3::X * 2.0 + relative.mul_vec3(Vec3::Z);
+                            let tip = w.add_body(
+                                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                                    .position(tip_start)
+                                    .rotation(relative)
+                                    .build(),
+                            );
+                            w.add_joint(Joint::Fixed {
+                                a: payload,
+                                b: tip,
+                                local_anchor_a: Vec3::Z,
+                                local_anchor_b: Vec3::ZERO,
+                                local_frame_a: Quat::IDENTITY,
+                                local_frame_b: Quat::IDENTITY,
+                            });
+                            let q = if slider {
+                                Quat::IDENTITY
+                            } else {
+                                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                            };
+                            let expected = if slider {
+                                Vec3::X * 3.0
+                            } else {
+                                q.mul_vec3(Vec3::X * 2.0)
+                            };
+                            // Public stepping also runs dynamics: use consistent constraints and
+                            // zero motor speed there; FK-only checks retain deliberately mismatched limits.
+                            if integrated {
+                                w.step(1.0 / 60.0);
+                            } else {
+                                w.apply_kinematic_targets();
+                            }
+                            let body = w.body(payload).unwrap();
+                            assert!(
+                        (body.position() - expected).length() < 1e-4,
+                        "passive_slider={passive_slider} velocity_motor={velocity_motor} slider={slider} reverse={reverse} integrated={integrated}: {:?}",
+                        body.position()
+                    );
+                            assert!(
+                                (body.rotation().mul_vec3(Vec3::X)
+                                    - (q * relative).mul_vec3(Vec3::X))
+                                .length()
+                                    < 1e-4
+                            );
+                            let anchor = w.body(child).unwrap().transform.transform_point(Vec3::X);
+                            assert!((anchor - body.position()).length() < 1e-4);
+                            let tip_body = w.body(tip).unwrap();
+                            let tip_expected = if slider {
+                                tip_start + Vec3::X
+                            } else {
+                                q.mul_vec3(tip_start)
+                            };
+                            assert!((tip_body.position() - tip_expected).length() < 1e-4);
+                            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                                assert!(
+                                    (body.rotation().mul_vec3(axis)
+                                        - (q * relative).mul_vec3(axis))
+                                    .length()
+                                        < 1e-4
+                                );
+                                assert!(
+                                    (tip_body.rotation().mul_vec3(axis)
+                                        - (q * relative).mul_vec3(axis))
+                                    .length()
+                                        < 1e-4
+                                );
+                            }
+                            assert!(body.linear_velocity.length() < 1e-4);
+                            assert!(body.angular_velocity.length() < 1e-4);
+                        }
+                    }
+                }
+            }
         }
     }
 
