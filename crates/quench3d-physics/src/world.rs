@@ -147,9 +147,17 @@ impl TriGrid {
     }
 }
 
-/// 构建纯 FK 树时的一条原始铰链（A/B 尚未按根定向）。
+/// 纯 FK 支持的关节类型。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FkKind {
+    Hinge,
+    Slider,
+}
+
+/// 构建纯 FK 树时的一条原始关节（A/B 尚未按根定向）。
 #[derive(Clone, Copy)]
 struct FkRaw {
+    kind: FkKind,
     a: usize,
     anchor_a: Vec3,
     anchor_b: Vec3,
@@ -162,7 +170,9 @@ struct FkRaw {
 /// 纯 FK 模式下的一条铰链边（已经定向为 parent → child）。
 #[derive(Clone, Copy)]
 struct FkEdge {
+    kind: FkKind,
     anchor_parent: Vec3,
+    anchor_child: Vec3,
     axis_parent: Vec3,
     axis_child: Vec3,
     target: f32,
@@ -198,7 +208,32 @@ fn fk_rotate_subtree(
     }
 }
 
-/// 对 FK 树做一次先序驱动：先把 child 子树旋到目标角，再处理 child 的后代。
+/// 把 `root` 及其所有后代整体平移 `offset`；纯 FK 不产生速度。
+fn fk_translate_subtree(
+    world: &mut PhysicsWorld,
+    root: usize,
+    offset: Vec3,
+    children: &[Vec<usize>],
+) {
+    let mut stack = vec![root];
+    while let Some(index) = stack.pop() {
+        if let Some(body) = world
+            .bodies
+            .get_mut(index)
+            .and_then(|slot| slot.body.as_mut())
+        {
+            if body.body_type != BodyType::Static {
+                body.transform.position += offset;
+                body.linear_velocity = Vec3::ZERO;
+                body.angular_velocity = Vec3::ZERO;
+                body.wake_up();
+            }
+        }
+        stack.extend(children[index].iter().copied());
+    }
+}
+
+/// 对 FK 树做一次先序驱动：先驱动 child 子树到目标，再处理 child 的后代。
 fn fk_apply(
     world: &mut PhysicsWorld,
     parent: usize,
@@ -228,27 +263,45 @@ fn fk_apply(
             fk_apply(world, child, children, edges);
             continue;
         }
-        let current = hinge_angle(
-            edge.axis_parent,
-            edge.axis_child,
-            &BodyView::from_body(parent_body),
-            &BodyView::from_body(child_body),
-            axis_world,
-        );
+        let current = match edge.kind {
+            FkKind::Hinge => hinge_angle(
+                edge.axis_parent,
+                edge.axis_child,
+                &BodyView::from_body(parent_body),
+                &BodyView::from_body(child_body),
+                axis_world,
+            ),
+            FkKind::Slider => {
+                let wa = parent_body.transform.position
+                    + parent_body.transform.rotation.mul_vec3(edge.anchor_parent);
+                let wb = child_body.transform.position
+                    + child_body.transform.rotation.mul_vec3(edge.anchor_child);
+                (wb - wa).dot(axis_world)
+            }
+        };
         let target = if let Some((lo, hi)) = edge.limits {
             edge.target.clamp(lo.min(hi), lo.max(hi))
         } else {
             edge.target
         };
         let mut delta = edge.sign * target - current;
-        // 目标/当前跨 ±π 时走短弧，避免为了 1° 转 359°。
-        delta =
-            (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        if edge.kind == FkKind::Hinge {
+            // 目标/当前跨 ±π 时走短弧，避免为了 1° 转 359°。
+            delta = (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+        }
         if delta.abs() > 1e-7 {
-            let pivot = parent_body.transform.position
-                + parent_body.transform.rotation.mul_vec3(edge.anchor_parent);
-            let dq = Quat::from_axis_angle(axis_world, delta);
-            fk_rotate_subtree(world, child, pivot, dq, children);
+            match edge.kind {
+                FkKind::Hinge => {
+                    let pivot = parent_body.transform.position
+                        + parent_body.transform.rotation.mul_vec3(edge.anchor_parent);
+                    let dq = Quat::from_axis_angle(axis_world, delta);
+                    fk_rotate_subtree(world, child, pivot, dq, children);
+                }
+                FkKind::Slider => {
+                    fk_translate_subtree(world, child, axis_world * delta, children);
+                }
+            }
         }
         fk_apply(world, child, children, edges);
     }
@@ -792,7 +845,7 @@ impl PhysicsWorld {
         self.collisions_enabled
     }
 
-    /// 纯 FK 模式：每步开始时把铰链子树直接旋到马达目标角。
+    /// 纯 FK 模式：每步开始时把铰链子树直接旋到目标角、滑块子树直接平移到目标位移。
     ///
     /// 它不替代重力/接触开关；调用方通常同时 `set_gravity(ZERO)` 与
     /// `set_collisions_enabled(false)`（`physics.mode:"fk"` 就是这样接的）。
@@ -3194,7 +3247,7 @@ impl PhysicsWorld {
     /// 下一子步窄相会正常生成接触，冲量由求解器给（恢复系数、摩擦都照旧生效）。
     /// 代价是**每个开了 CCD 的刚体每子步一次射线查询**，与它的速度无关。
     /// 边界：中心射线 + 形状极端点旋转扫掠；极端点之间仍可能漏，"极快 + 极薄"仍可能漏——见文档。
-    /// 纯 FK：把每条带马达目标的铰链子树旋到目标角。
+    /// 纯 FK：把每条带马达目标的铰链子树旋到目标角、滑块子树平移到目标位移。
     ///
     /// 先从静态根沿关节图 BFS 定向（铰链两端谁离根近谁是 parent），再按树的
     /// 先序处理；旋转子树而不是只转 child，保证后续铰链的锚点/轴跟着移动。
@@ -3206,20 +3259,51 @@ impl PhysicsWorld {
         let mut raws: Vec<FkRaw> = Vec::new();
         let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); count];
         for handle in self.joint_handles() {
-            let Some(Joint::Hinge {
-                a,
-                b,
-                local_anchor_a,
-                local_anchor_b,
-                local_axis_a,
-                local_axis_b,
-                limits,
-                motor: Some(motor),
-            }) = self.joint(handle)
-            else {
-                continue;
-            };
-            let Some(target) = motor.target_angle else {
+            let (kind, a, b, anchor_a, anchor_b, axis_a, axis_b, limits, target) =
+                match self.joint(handle) {
+                    Some(Joint::Hinge {
+                        a,
+                        b,
+                        local_anchor_a,
+                        local_anchor_b,
+                        local_axis_a,
+                        local_axis_b,
+                        limits,
+                        motor: Some(motor),
+                    }) => (
+                        FkKind::Hinge,
+                        *a,
+                        *b,
+                        *local_anchor_a,
+                        *local_anchor_b,
+                        *local_axis_a,
+                        *local_axis_b,
+                        *limits,
+                        motor.target_angle,
+                    ),
+                    Some(Joint::Slider {
+                        a,
+                        b,
+                        local_anchor_a,
+                        local_anchor_b,
+                        local_axis_a,
+                        local_axis_b,
+                        limits,
+                        motor: Some(motor),
+                    }) => (
+                        FkKind::Slider,
+                        *a,
+                        *b,
+                        *local_anchor_a,
+                        *local_anchor_b,
+                        *local_axis_a,
+                        *local_axis_b,
+                        *limits,
+                        motor.target_angle,
+                    ),
+                    _ => continue,
+                };
+            let Some(target) = target else {
                 continue;
             };
             let ia = a.index as usize;
@@ -3229,13 +3313,14 @@ impl PhysicsWorld {
             }
             let index = raws.len();
             raws.push(FkRaw {
+                kind,
                 a: ia,
-                anchor_a: *local_anchor_a,
-                anchor_b: *local_anchor_b,
-                axis_a: *local_axis_a,
-                axis_b: *local_axis_b,
+                anchor_a,
+                anchor_b,
+                axis_a,
+                axis_b,
                 target,
-                limits: *limits,
+                limits,
             });
             adj[ia].push((index, ib));
             adj[ib].push((index, ia));
@@ -3275,13 +3360,16 @@ impl PhysicsWorld {
                     }
                     visited[child] = true;
                     let raw = raws[edge_index];
-                    let (anchor_parent, axis_parent, axis_child, sign) = if raw.a == parent {
-                        (raw.anchor_a, raw.axis_a, raw.axis_b, 1.0f32)
-                    } else {
-                        (raw.anchor_b, raw.axis_b, raw.axis_a, -1.0f32)
-                    };
+                    let (anchor_parent, anchor_child, axis_parent, axis_child, sign) =
+                        if raw.a == parent {
+                            (raw.anchor_a, raw.anchor_b, raw.axis_a, raw.axis_b, 1.0f32)
+                        } else {
+                            (raw.anchor_b, raw.anchor_a, raw.axis_b, raw.axis_a, -1.0f32)
+                        };
                     edges[child] = Some(FkEdge {
+                        kind: raw.kind,
                         anchor_parent,
+                        anchor_child,
                         axis_parent,
                         axis_child,
                         target: raw.target,
@@ -4531,6 +4619,61 @@ mod tests {
         assert!(
             (got - expected).length() < 2e-3,
             "后代必须随子树整体旋转：{got:?} vs {expected:?}"
+        );
+    }
+    #[test]
+    fn kinematic_fk_slides_a_slider_subtree_to_the_target() {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.set_collisions_enabled(false);
+        w.set_kinematic_fk(true);
+        let root = w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .position(Vec3::ZERO)
+            .build(),
+        );
+        let child = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .position(Vec3::X)
+            .build(),
+        );
+        let motor = crate::joints::HingeMotor {
+            target_velocity: 0.0,
+            max_impulse: 10.0,
+            target_angle: Some(2.0),
+            stiffness: 8.0,
+            damping: 1.0,
+            kp: 0.0,
+            kd: 0.0,
+            max_torque: 0.0,
+        };
+        let joint = w.add_joint(Joint::Slider {
+            a: root,
+            b: child,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: Vec3::ZERO,
+            local_axis_a: Vec3::X,
+            local_axis_b: Vec3::X,
+            limits: None,
+            motor: Some(motor),
+        });
+        w.step_substeps(1.0 / 60.0, 1);
+        let got = w.body(child).expect("child").position();
+        assert!(
+            (got.x - 2.0).abs() < 2e-3,
+            "纯 FK 滑块应把子体沿 +X 移到 2.0，实际 {got:?}"
+        );
+        let coordinate = w
+            .joint_telemetry(joint, 1.0 / 60.0)
+            .expect("joint telemetry")
+            .coordinate;
+        assert!(
+            (coordinate - 2.0).abs() < 2e-3,
+            "滑块坐标应到 2.0，实际 {coordinate}"
         );
     }
 }
