@@ -1293,7 +1293,12 @@ impl Fluid {
             for p in &self.positions {
                 max_y = max_y.max(p.y);
             }
-            (max_y + self.desc.radius * 0.5).max(self.desc.center.y)
+            if self.desc.initial_positions.is_some() {
+                // Explicit world-space particles need not surround the lattice center.
+                max_y + self.desc.radius * 0.5
+            } else {
+                (max_y + self.desc.radius * 0.5).max(self.desc.center.y)
+            }
         } else {
             self.desc.center.y + self.desc.half_extents.y
         };
@@ -2219,6 +2224,53 @@ mod tests {
             max_radius > 0.03 * 1.2,
             "气泡应随上升膨胀：最大半径 {max_radius}（初始 0.03）"
         );
+    }
+
+    #[test]
+    fn custom_particle_surface_controls_bubble_bursting() {
+        for custom in [false, true] {
+            for center_y in [0.0, 10.0] {
+                for foam in [false, true] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    world
+                        .add_fluid(FluidDesc {
+                            center: vec3(0.0, center_y, 0.0),
+                            initial_positions: custom.then(|| vec![Vec3::ZERO]),
+                            max_particles: 8,
+                            foam,
+                            foam_rate: 0.0,
+                            bubble_buoyancy: 0.0,
+                            bubble_drag: 0.0,
+                            bubble_expansion: 0.0,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    // Give both paths identical liquid geometry; only custom initialization
+                    // opts out of the legacy center-height floor.
+                    world.fluids_mut()[0].positions = vec![Vec3::ZERO];
+                    world.fluids_mut()[0].velocities = vec![Vec3::ZERO];
+                    world.fluids_mut()[0].add_bubble(Bubble {
+                        position: vec3(0.0, 0.2, 0.0),
+                        velocity: Vec3::ZERO,
+                        radius: 0.05,
+                        rest_radius: 0.05,
+                        age: 0.0,
+                        life: 2.0,
+                    });
+                    world.step(1.0 / 60.0);
+                    let fluid = &world.fluids()[0];
+                    let burst = custom || center_y == 0.0;
+                    assert_eq!(
+                        fluid.bubbles().len(),
+                        usize::from(!burst),
+                        "custom={custom}, center_y={center_y}, foam={foam}"
+                    );
+                    assert_eq!(fluid.foam().len(), usize::from(burst && foam));
+                    assert_eq!(fluid.stats().bubbles, usize::from(!burst));
+                    assert_eq!(fluid.stats().foam, usize::from(burst && foam));
+                }
+            }
+        }
     }
 
     #[test]
