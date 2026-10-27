@@ -147,6 +147,113 @@ impl TriGrid {
     }
 }
 
+/// 构建纯 FK 树时的一条原始铰链（A/B 尚未按根定向）。
+#[derive(Clone, Copy)]
+struct FkRaw {
+    a: usize,
+    anchor_a: Vec3,
+    anchor_b: Vec3,
+    axis_a: Vec3,
+    axis_b: Vec3,
+    target: f32,
+    limits: Option<(f32, f32)>,
+}
+
+/// 纯 FK 模式下的一条铰链边（已经定向为 parent → child）。
+#[derive(Clone, Copy)]
+struct FkEdge {
+    anchor_parent: Vec3,
+    axis_parent: Vec3,
+    axis_child: Vec3,
+    target: f32,
+    limits: Option<(f32, f32)>,
+    /// parent 是原关节的 A 端时为 +1，B 端时为 -1（目标角取反）。
+    sign: f32,
+}
+
+/// 把 `root` 及其所有后代整体绕 `pivot` 旋转 `dq`；纯 FK 不产生速度。
+fn fk_rotate_subtree(
+    world: &mut PhysicsWorld,
+    root: usize,
+    pivot: Vec3,
+    dq: Quat,
+    children: &[Vec<usize>],
+) {
+    let mut stack = vec![root];
+    while let Some(index) = stack.pop() {
+        if let Some(body) = world
+            .bodies
+            .get_mut(index)
+            .and_then(|slot| slot.body.as_mut())
+        {
+            if body.body_type != BodyType::Static {
+                body.transform.position = pivot + dq.mul_vec3(body.transform.position - pivot);
+                body.transform.rotation = (dq * body.transform.rotation).normalize_or_identity();
+                body.linear_velocity = Vec3::ZERO;
+                body.angular_velocity = Vec3::ZERO;
+                body.wake_up();
+            }
+        }
+        stack.extend(children[index].iter().copied());
+    }
+}
+
+/// 对 FK 树做一次先序驱动：先把 child 子树旋到目标角，再处理 child 的后代。
+fn fk_apply(
+    world: &mut PhysicsWorld,
+    parent: usize,
+    children: &[Vec<usize>],
+    edges: &[Option<FkEdge>],
+) {
+    for &child in &children[parent] {
+        let Some(edge) = edges[child] else {
+            continue;
+        };
+        let Some(parent_body) = world.bodies[parent].body.as_ref() else {
+            continue;
+        };
+        let Some(child_body) = world.bodies[child].body.as_ref() else {
+            continue;
+        };
+        if child_body.body_type == BodyType::Static {
+            fk_apply(world, child, children, edges);
+            continue;
+        }
+        let axis_world = parent_body
+            .transform
+            .rotation
+            .mul_vec3(edge.axis_parent)
+            .normalize_or_zero();
+        if axis_world.length_squared() < 0.5 {
+            fk_apply(world, child, children, edges);
+            continue;
+        }
+        let current = hinge_angle(
+            edge.axis_parent,
+            edge.axis_child,
+            &BodyView::from_body(parent_body),
+            &BodyView::from_body(child_body),
+            axis_world,
+        );
+        let target = if let Some((lo, hi)) = edge.limits {
+            edge.target.clamp(lo.min(hi), lo.max(hi))
+        } else {
+            edge.target
+        };
+        let mut delta = edge.sign * target - current;
+        // 目标/当前跨 ±π 时走短弧，避免为了 1° 转 359°。
+        delta =
+            (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        if delta.abs() > 1e-7 {
+            let pivot = parent_body.transform.position
+                + parent_body.transform.rotation.mul_vec3(edge.anchor_parent);
+            let dq = Quat::from_axis_angle(axis_world, delta);
+            fk_rotate_subtree(world, child, pivot, dq, children);
+        }
+        fk_apply(world, child, children, edges);
+    }
+}
+
 /// 两个 AABB 的间隙距离：相交为 0，否则是欧氏下界。三角网精确 CCD 用它
 /// 做保守预筛，避免对每个三角形都跑 GJK。
 fn aabb_gap(a: &Aabb, b: &Aabb) -> f32 {
@@ -422,6 +529,8 @@ pub struct PhysicsWorld {
     gravity: Vec3,
     /// 是否生成接触约束（`false` = drive/运动学回放：不跑宽相/窄相/接触求解）。
     collisions_enabled: bool,
+    /// 纯 FK：每步先把铰链子树直接旋到目标角（关节求解器仍会跑，但误差为零）。
+    kinematic_fk: bool,
     /// 水域（浮力环境）：不写就是空，行为与没有这一节时逐位相同。
     waters: Vec<WaterVolume>,
     /// 粒子流体（CPU PBF）：不写就是空，没有 `fluids` 时物理行为逐位不变。
@@ -608,6 +717,7 @@ impl PhysicsWorld {
             joint_free: Vec::new(),
             gravity,
             collisions_enabled: true,
+            kinematic_fk: false,
             waters: Vec::new(),
             fluids: Vec::new(),
             fixed_dt: DEFAULT_FIXED_DT,
@@ -680,6 +790,20 @@ impl PhysicsWorld {
     /// 接触生成是否开启。
     pub fn collisions_enabled(&self) -> bool {
         self.collisions_enabled
+    }
+
+    /// 纯 FK 模式：每步开始时把铰链子树直接旋到马达目标角。
+    ///
+    /// 它不替代重力/接触开关；调用方通常同时 `set_gravity(ZERO)` 与
+    /// `set_collisions_enabled(false)`（`physics.mode:"fk"` 就是这样接的）。
+    /// 关闭时行为与旧版本逐位相同。
+    pub fn set_kinematic_fk(&mut self, enabled: bool) {
+        self.kinematic_fk = enabled;
+    }
+
+    /// 纯 FK 是否开启。
+    pub fn kinematic_fk(&self) -> bool {
+        self.kinematic_fk
     }
 
     /// 固定步长。
@@ -1476,6 +1600,9 @@ impl PhysicsWorld {
         if !(self.fixed_dt.is_finite() && self.fixed_dt > 0.0) {
             self.fixed_dt = DEFAULT_FIXED_DT;
         }
+        if self.kinematic_fk {
+            self.apply_kinematic_targets();
+        }
         self.accumulator += dt;
         // 子步会改变变换：查询索引到此为止必须重建
         self.version = self.version.wrapping_add(1);
@@ -1506,6 +1633,9 @@ impl PhysicsWorld {
             return 0;
         }
         let n = substeps.max(1) as usize;
+        if self.kinematic_fk {
+            self.apply_kinematic_targets();
+        }
         let h = dt.min(MAX_FRAME_DT) / n as f32;
         self.version = self.version.wrapping_add(1);
         for _ in 0..n {
@@ -3064,6 +3194,117 @@ impl PhysicsWorld {
     /// 下一子步窄相会正常生成接触，冲量由求解器给（恢复系数、摩擦都照旧生效）。
     /// 代价是**每个开了 CCD 的刚体每子步一次射线查询**，与它的速度无关。
     /// 边界：中心射线 + 形状极端点旋转扫掠；极端点之间仍可能漏，"极快 + 极薄"仍可能漏——见文档。
+    /// 纯 FK：把每条带马达目标的铰链子树旋到目标角。
+    ///
+    /// 先从静态根沿关节图 BFS 定向（铰链两端谁离根近谁是 parent），再按树的
+    /// 先序处理；旋转子树而不是只转 child，保证后续铰链的锚点/轴跟着移动。
+    fn apply_kinematic_targets(&mut self) {
+        let count = self.bodies.len();
+        if count == 0 {
+            return;
+        }
+        let mut raws: Vec<FkRaw> = Vec::new();
+        let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); count];
+        for handle in self.joint_handles() {
+            let Some(Joint::Hinge {
+                a,
+                b,
+                local_anchor_a,
+                local_anchor_b,
+                local_axis_a,
+                local_axis_b,
+                limits,
+                motor: Some(motor),
+            }) = self.joint(handle)
+            else {
+                continue;
+            };
+            let Some(target) = motor.target_angle else {
+                continue;
+            };
+            let ia = a.index as usize;
+            let ib = b.index as usize;
+            if ia >= count || ib >= count || ia == ib {
+                continue;
+            }
+            let index = raws.len();
+            raws.push(FkRaw {
+                a: ia,
+                anchor_a: *local_anchor_a,
+                anchor_b: *local_anchor_b,
+                axis_a: *local_axis_a,
+                axis_b: *local_axis_b,
+                target,
+                limits: *limits,
+            });
+            adj[ia].push((index, ib));
+            adj[ib].push((index, ia));
+        }
+        if raws.is_empty() {
+            return;
+        }
+        let is_static = |world: &PhysicsWorld, i: usize| {
+            world
+                .bodies
+                .get(i)
+                .and_then(|slot| slot.body.as_ref())
+                .is_some_and(|body| body.body_type == BodyType::Static)
+        };
+        let mut roots = Vec::new();
+        for i in 0..count {
+            if is_static(self, i) {
+                roots.push(i);
+            }
+        }
+        if roots.is_empty() {
+            roots.extend((0..count).find(|&i| self.bodies[i].body.is_some()));
+        }
+        let mut visited = vec![false; count];
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); count];
+        let mut edges: Vec<Option<FkEdge>> = vec![None; count];
+        for root in roots.into_iter().chain(0..count) {
+            if visited[root] || self.bodies[root].body.is_none() {
+                continue;
+            }
+            visited[root] = true;
+            let mut stack = vec![root];
+            while let Some(parent) = stack.pop() {
+                for &(edge_index, child) in &adj[parent] {
+                    if visited[child] {
+                        continue;
+                    }
+                    visited[child] = true;
+                    let raw = raws[edge_index];
+                    let (anchor_parent, axis_parent, axis_child, sign) = if raw.a == parent {
+                        (raw.anchor_a, raw.axis_a, raw.axis_b, 1.0f32)
+                    } else {
+                        (raw.anchor_b, raw.axis_b, raw.axis_a, -1.0f32)
+                    };
+                    edges[child] = Some(FkEdge {
+                        anchor_parent,
+                        axis_parent,
+                        axis_child,
+                        target: raw.target,
+                        limits: raw.limits,
+                        sign,
+                    });
+                    children[parent].push(child);
+                    stack.push(child);
+                }
+            }
+        }
+        for root in 0..count {
+            if self.is_fk_root(root, &edges) {
+                fk_apply(self, root, &children, &edges);
+            }
+        }
+    }
+
+    /// 该槽位是否是 FK 树的根（没有任何边把它当 child）。
+    fn is_fk_root(&self, index: usize, edges: &[Option<FkEdge>]) -> bool {
+        self.bodies[index].body.is_some() && edges[index].is_none()
+    }
+
     fn apply_ccd(&mut self, dt: f32) {
         if dt <= 0.0 {
             return;
@@ -4164,5 +4405,132 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately() {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.set_collisions_enabled(false);
+        w.set_kinematic_fk(true);
+        let root = w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .position(Vec3::ZERO)
+            .build(),
+        );
+        let child = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .position(Vec3::X)
+            .build(),
+        );
+        let motor = crate::joints::HingeMotor {
+            target_velocity: 0.0,
+            max_impulse: 10.0,
+            target_angle: Some(std::f32::consts::FRAC_PI_2),
+            stiffness: 8.0,
+            damping: 1.0,
+            kp: 0.0,
+            kd: 0.0,
+            max_torque: 0.0,
+        };
+        let joint = w.add_joint(Joint::Hinge {
+            a: root,
+            b: child,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: -Vec3::X,
+            local_axis_a: Vec3::Y,
+            local_axis_b: Vec3::Y,
+            limits: None,
+            motor: Some(motor),
+        });
+        w.step_substeps(1.0 / 60.0, 1);
+        let expected =
+            Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2).mul_vec3(Vec3::X);
+        let got = w.body(child).expect("child").position();
+        assert!(
+            (got - expected).length() < 2e-3,
+            "纯 FK 一步应直接到 +90°：{got:?} vs {expected:?}"
+        );
+        let angle = w
+            .joint_telemetry(joint, 1.0 / 60.0)
+            .expect("joint telemetry")
+            .coordinate;
+        assert!(
+            (angle - std::f32::consts::FRAC_PI_2).abs() < 2e-3,
+            "关节角应直接到 +90°，实际 {angle}"
+        );
+    }
+    #[test]
+    fn kinematic_fk_moves_the_whole_descendant_subtree() {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.set_collisions_enabled(false);
+        w.set_kinematic_fk(true);
+        let root = w.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .position(Vec3::ZERO)
+            .build(),
+        );
+        let child = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .position(Vec3::X)
+            .build(),
+        );
+        let grandchild = w.add_body(
+            BodyBuilder::dynamic(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            })
+            .position(Vec3::X * 2.0)
+            .build(),
+        );
+        let motor = crate::joints::HingeMotor {
+            target_velocity: 0.0,
+            max_impulse: 10.0,
+            target_angle: Some(std::f32::consts::FRAC_PI_2),
+            stiffness: 8.0,
+            damping: 1.0,
+            kp: 0.0,
+            kd: 0.0,
+            max_torque: 0.0,
+        };
+        w.add_joint(Joint::Hinge {
+            a: root,
+            b: child,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: -Vec3::X,
+            local_axis_a: Vec3::Y,
+            local_axis_b: Vec3::Y,
+            limits: None,
+            motor: Some(motor),
+        });
+        let hold = crate::joints::HingeMotor {
+            target_angle: Some(0.0),
+            ..motor
+        };
+        w.add_joint(Joint::Hinge {
+            a: child,
+            b: grandchild,
+            local_anchor_a: Vec3::X,
+            local_anchor_b: Vec3::ZERO,
+            local_axis_a: Vec3::Y,
+            local_axis_b: Vec3::Y,
+            limits: None,
+            motor: Some(hold),
+        });
+        w.step_substeps(1.0 / 60.0, 1);
+        let expected =
+            Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2).mul_vec3(Vec3::X * 2.0);
+        let got = w.body(grandchild).expect("grandchild").position();
+        assert!(
+            (got - expected).length() < 2e-3,
+            "后代必须随子树整体旋转：{got:?} vs {expected:?}"
+        );
     }
 }
