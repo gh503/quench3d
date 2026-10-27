@@ -1244,6 +1244,10 @@ impl Fluid {
             spawned += 1;
         }
         self.foam_accum -= spawned as f32;
+        if self.foam.len() >= d.max_foam {
+            // Match the already-full path: capacity cannot bank emission for later.
+            self.foam_accum = 0.0;
+        }
     }
 
     /// 连续生成气泡：按 `bubble_rate` 累积，位置用黄金角/确定轮转撒在发射盘内。
@@ -1879,6 +1883,76 @@ mod tests {
     use crate::body::BodyBuilder;
     use crate::shape::Shape;
     use crate::world::PhysicsWorld;
+
+    #[test]
+    fn foam_emission_discards_budget_when_it_fills_capacity() {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        world
+            .add_fluid(FluidDesc {
+                foam: true,
+                foam_rate: 7.0,
+                foam_speed: 0.0,
+                max_foam: 2,
+                max_particles: 8,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+        let fluid = &mut world.fluids_mut()[0];
+        fluid.spawn_foam(0.5); // 3.5 due; two fit. Full capacity discards all remaining budget.
+        assert_eq!(fluid.foam.len(), 2);
+        fluid.foam.clear(); // Controlled release before the public fixed step.
+        world.step(1.0 / 60.0);
+        assert_eq!(
+            world.fluids()[0].foam().len(),
+            0,
+            "released capacity must not replay foam budget discarded while full"
+        );
+    }
+
+    #[test]
+    fn foam_capacity_reset_preserves_uncapped_and_ineligible_behavior() {
+        let desc = FluidDesc {
+            foam: true,
+            foam_rate: 7.0,
+            foam_speed: 1.0,
+            initial_velocity: Vec3::X * 2.0,
+            max_particles: 8,
+            ..FluidDesc::default()
+        };
+        for cap in [0, 2, 8] {
+            let mut fluid = Fluid::new(FluidDesc {
+                max_foam: cap,
+                ..desc.clone()
+            })
+            .unwrap();
+            fluid.spawn_foam(2.5); // Enough budget and eligible particles to fill every cap.
+            assert_eq!(fluid.foam.len(), cap);
+            assert_eq!(fluid.foam_accum.to_bits(), 0.0f32.to_bits());
+            fluid.spawn_foam(0.5); // Already-full path has identical reset semantics.
+            assert_eq!(fluid.foam_accum.to_bits(), 0.0f32.to_bits());
+            fluid.foam.clear();
+            fluid.spawn_foam(0.125); // 0.875 new budget must not replay the discarded fraction.
+            assert!(fluid.foam.is_empty());
+        }
+        let mut fluid = Fluid::new(desc).unwrap();
+        fluid.velocities.fill(Vec3::ZERO);
+        fluid.spawn_foam(0.5); // No eligible candidates retain the pre-existing budget semantics.
+        assert!(fluid.foam.is_empty());
+        assert_eq!(fluid.foam_accum, 3.5);
+        fluid.velocities.fill(Vec3::X * 2.0);
+        fluid.spawn_foam(0.125); // 4.375 total: emit four in the original candidate order.
+        assert_eq!(fluid.foam.len(), 4);
+        assert_eq!(fluid.foam_accum, 0.375);
+        for (i, foam) in fluid.foam.iter().enumerate() {
+            assert_eq!(foam.position, fluid.positions[i]);
+            assert_eq!(foam.velocity, Vec3::new(2.0 * 0.35, 0.6 + 2.0 * 0.06, 0.0));
+            assert_eq!(foam.life, 0.9 + (i % 5) as f32 * 0.1);
+        }
+        fluid.positions.clear();
+        fluid.velocities.clear();
+        fluid.spawn_foam(0.5);
+        assert_eq!(fluid.foam_accum, 3.875); // Empty candidates also keep their existing semantics.
+    }
 
     #[test]
     fn bubble_emission_discards_capped_whole_budget() {
