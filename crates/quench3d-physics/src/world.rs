@@ -1456,7 +1456,9 @@ impl PhysicsWorld {
                 && slot.joint.as_ref().is_some_and(|j| {
                     let (ha, hb) = j.bodies();
                     let (x, y) = (ha.index as usize, hb.index as usize);
-                    (x == ia && y == ib) || (x == ib && y == ia)
+                    ((x == ia && y == ib) || (x == ib && y == ia))
+                        && self.body_index(ha).is_some()
+                        && self.body_index(hb).is_some()
                 })
         })
     }
@@ -4116,6 +4118,53 @@ mod tests {
             out.push(b.is_sleeping() as u32);
         }
         out
+    }
+
+    fn reused_joint_body_contacts(replace_a: bool) {
+        let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let a = w.add_builder(BodyBuilder::r#static(sphere(0.5)));
+        let b = w.add_builder(BodyBuilder::dynamic(sphere(0.5)).position(Vec3::new(0.2, 0.0, 0.0)));
+        let joint = w.add_joint(Joint::Ball {
+            a,
+            b,
+            local_anchor_a: Vec3::new(0.2, 0.0, 0.0),
+            local_anchor_b: Vec3::ZERO,
+            cone_limit: None,
+        });
+        assert_eq!(w.joint_collide_connected(joint), Some(false));
+        w.step(1.0 / 60.0);
+        assert!(w.contacts().is_empty(), "live joint must block contact");
+
+        let old = if replace_a { a } else { b };
+        let body = w.remove_body(old).unwrap();
+        let replacement = w.add_body(body);
+        assert_eq!(old.index, replacement.index);
+        assert_ne!(old.generation, replacement.generation);
+        assert!(w.joint(joint).is_some(), "stale joint remains allocated");
+        w.step(1.0 / 60.0);
+        assert_eq!(
+            w.contacts().len(),
+            1,
+            "stale joint must not block contact after reusing endpoint {}",
+            if replace_a { "A" } else { "B" }
+        );
+        let contact = &w.contacts()[0];
+        let other = if replace_a { b } else { a };
+        assert!(
+            (contact.a == replacement && contact.b == other)
+                || (contact.b == replacement && contact.a == other),
+            "contact must reference the current body generation"
+        );
+    }
+
+    #[test]
+    fn stale_joint_does_not_filter_reused_body_a() {
+        reused_joint_body_contacts(true);
+    }
+
+    #[test]
+    fn stale_joint_does_not_filter_reused_body_b() {
+        reused_joint_body_contacts(false);
     }
 
     #[test]
