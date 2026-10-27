@@ -329,7 +329,11 @@
     `kinematic_fk_waits_for_an_accumulated_physics_step` 覆盖。
   - 旧端点槽位复用时跳过失效关节（`kinematic_fk_ignores_joints_with_reused_body_slots`）；
     反向铰链/滑块正负目标和限位由 `kinematic_fk_reversed_endpoints_preserve_target_sign_and_limits` 覆盖。
-  - 仍缺球窝/距离关节传播与多底座闭环冲突处理；不代表任意机械机构完整 FK。
+  - 无锥限位球窝（`cone_limit: None`）可传递祖先铰链/滑块的刚性变换，并携带后代，
+    保持当前相对姿态；回归 `kinematic_fk_carries_free_ball_attachments` 检查正反端点、
+    非单位相对旋转、锚点及固定后代，并分别从初始状态验证直接驱动和公开步进。
+    不选择球窝自由转角、不修正初始锚点误差；有锥限位球窝、距离关节传播与多底座
+    闭环冲突处理仍缺失，不代表任意机械机构完整 FK。
 - [ ] TGS/SIMD 求解器。
 - [x] 深堆 2000 体实时（目标 <16 ms/步，本机量化）：本机 release 60 步
   **14.7~15.3 ms/步**；显式 `deep_stack_2000_perf` 断言 <16 ms（优化前 17.04、
