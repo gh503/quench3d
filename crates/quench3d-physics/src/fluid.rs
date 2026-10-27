@@ -751,7 +751,7 @@ impl Fluid {
             n(d.half_extents.y),
             n(d.half_extents.z),
         );
-        let mut positions = Vec::with_capacity(nx * ny * nz);
+        let mut positions = Vec::with_capacity(d.estimated_particles());
         'outer: for iz in 0..nz {
             for iy in 0..ny {
                 for ix in 0..nx {
@@ -1901,6 +1901,79 @@ mod tests {
         let mut hash_neighbors = vec![Vec::new(); points.len()];
         build_neighbors_hash(&points, h, h2, &mut hash_neighbors);
         assert_eq!(grid_neighbors, hash_neighbors);
+    }
+
+    #[test]
+    fn fluid_spawn_capacity_respects_particle_limit() {
+        let d = FluidDesc {
+            half_extents: Vec3::splat(0.5),
+            spacing: 0.1,
+            radius: 0.05,
+            max_particles: 8,
+            ..FluidDesc::default()
+        };
+        let fluid = Fluid::new(d).unwrap();
+        assert_eq!(fluid.positions.len(), 8);
+        assert_eq!(fluid.positions.capacity(), 8);
+    }
+
+    #[test]
+    fn fluid_capped_spawn_matches_original_lattice_bits() {
+        for limit in [8, 137, 2000] {
+            let d = FluidDesc {
+                center: Vec3::new(0.25, 2.0, -0.75),
+                half_extents: Vec3::splat(0.5),
+                spacing: 0.1,
+                radius: 0.05,
+                initial_velocity: Vec3::new(-0.0, 0.25, -1.5),
+                max_particles: limit,
+                ..FluidDesc::default()
+            };
+            let fluid = Fluid::new(d.clone()).unwrap();
+            let mut expected = Vec::new();
+            for iz in 0..11 {
+                for iy in 0..11 {
+                    for ix in 0..11 {
+                        expected.push(
+                            d.center - d.half_extents
+                                + Vec3::new(
+                                    ix as f32 * d.spacing,
+                                    iy as f32 * d.spacing,
+                                    iz as f32 * d.spacing,
+                                ),
+                        );
+                    }
+                }
+            }
+            expected.truncate(limit);
+            let bits = |v: &Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+            assert_eq!(
+                fluid.positions.iter().map(bits).collect::<Vec<_>>(),
+                expected.iter().map(bits).collect::<Vec<_>>()
+            );
+            assert!(fluid
+                .velocities
+                .iter()
+                .all(|v| bits(v) == bits(&d.initial_velocity)));
+            assert_eq!(fluid.positions.capacity(), expected.len());
+        }
+    }
+
+    #[test]
+    fn fluid_extreme_lattice_dimensions_allocate_only_the_limit() {
+        let d = FluidDesc {
+            half_extents: Vec3::splat(1.0e20),
+            spacing: 0.1,
+            radius: 0.05,
+            max_particles: 8,
+            ..FluidDesc::default()
+        };
+        assert!(d.is_valid());
+        assert_eq!(d.estimated_particles(), 8);
+        let fluid = Fluid::new(d).unwrap();
+        assert_eq!(fluid.positions.len(), 8);
+        assert_eq!(fluid.positions.capacity(), 8);
+        assert!(fluid.positions.iter().all(|p| p.is_finite()));
     }
 
     #[test]
