@@ -1653,10 +1653,12 @@ impl PhysicsWorld {
         if !(self.fixed_dt.is_finite() && self.fixed_dt > 0.0) {
             self.fixed_dt = DEFAULT_FIXED_DT;
         }
-        if self.kinematic_fk {
+        self.accumulator += dt;
+        // FK 改位姿也属于物理推进：没有完整固定步时只累加时间。
+        // 保持每次外层调用最多应用一次目标，与批量子步入口一致。
+        if self.kinematic_fk && self.accumulator >= self.fixed_dt {
             self.apply_kinematic_targets();
         }
-        self.accumulator += dt;
         // 子步会改变变换：查询索引到此为止必须重建
         self.version = self.version.wrapping_add(1);
         let mut steps = 0usize;
@@ -4494,6 +4496,54 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn kinematic_fk_waits_for_an_accumulated_physics_step() {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.set_collisions_enabled(false);
+        w.set_kinematic_fk(true);
+        let root = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.1 }).build());
+        let child = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::X)
+                .build(),
+        );
+        w.add_joint(Joint::Hinge {
+            a: root,
+            b: child,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: -Vec3::X,
+            local_axis_a: Vec3::Y,
+            local_axis_b: Vec3::Y,
+            limits: None,
+            motor: Some(crate::joints::HingeMotor::servo(
+                std::f32::consts::FRAC_PI_2,
+                10.0,
+            )),
+        });
+        let before = w.body(child).unwrap().transform;
+        let quarter = w.fixed_dt * 0.25;
+        for dt in [
+            0.0,
+            -1.0,
+            f32::NAN,
+            f32::INFINITY,
+            quarter,
+            quarter,
+            quarter,
+        ] {
+            assert_eq!(w.step_with_accumulator(dt), 0);
+            assert_eq!(
+                w.body(child).unwrap().transform,
+                before,
+                "zero substeps must not apply FK: dt={dt}"
+            );
+        }
+        assert_eq!(w.step_with_accumulator(quarter), 1);
+        let expected = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2).mul_vec3(Vec3::X);
+        assert!((w.body(child).unwrap().position() - expected).length() < 2e-3);
+    }
+
     #[test]
     fn kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately() {
         let mut w = PhysicsWorld::new();
