@@ -111,28 +111,28 @@ pub struct FluidDesc {
     /// （`bubble_pressure`）；但没有独立气相动量方程/相变，所以仍**不是**
     /// 严格两相流；它会排开液体并对液体做功。
     pub bubbles: bool,
-    /// 气泡生成速率（颗/秒），缺省 20。
+    /// 气泡生成速率（0~5000 颗/秒），缺省 20。
     pub bubble_rate: f32,
-    /// 气泡上限，缺省 128。
+    /// 气泡上限（0~4096），缺省 128。
     pub max_bubbles: usize,
-    /// 气泡半径（米），缺省 0.03。
+    /// 气泡半径（(0, 0.5] 米），缺省 0.03。
     pub bubble_radius: f32,
-    /// 浮升加速度相对重力的倍数，缺省 1.8。
+    /// 浮升加速度相对重力的倍数（0~10），缺省 1.8。
     pub bubble_buoyancy: f32,
-    /// 气泡阻尼（1/s），缺省 2.0。
+    /// 气泡阻尼（0~50，1/s），缺省 2.0。
     pub bubble_drag: f32,
-    /// 气泡半径随上升膨胀的速率（1/s），缺省 0 = 不膨胀。
+    /// 气泡半径随上升膨胀的速率（0~10，1/s），缺省 0 = 不膨胀。
     ///
     /// 这是简化压力模型：没有真正解气泡内压/表面张力，只让气泡在上升时按指数
     /// 长大（体积分数随之增大）；半径封顶到初始值的 4 倍。
     pub bubble_expansion: f32,
-    /// 气泡破碎半径上限（米，0 = 关闭）。大于它的气泡按体积守恒拆成多颗；
+    /// 气泡破碎半径上限（0~1 米，0 = 关闭）。大于它的气泡按体积守恒拆成多颗；
     /// 受 `max_bubbles` 限制，放不下时保留原气泡。缺省 0，旧路径逐位不变。
     pub bubble_max_radius: f32,
     /// 气泡尾流强度（0~2，缺省 0 = 关闭）：上浮气泡把上方液体向上拖，
     /// 形成羽流；关闭时完全走旧路径。
     pub bubble_wake: f32,
-    /// 静水压压缩系数（1/m，0 = 不压缩）。深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)`
+    /// 静水压压缩系数（0~10，1/m，0 = 不压缩）。深处气泡按 `r = r_surface / (1 + k·depth)^(1/3)`
     /// 收缩，近似 `pV = const`；缺省 0，旧路径逐位不变。
     pub bubble_compressibility: f32,
     /// 气泡过压（Pa，缺省 0 = 关闭）。按 `p = p0·(r_rest/r)³` 把气泡内压转成
@@ -253,6 +253,24 @@ impl FluidDesc {
             && self.max_foam <= 4096
             && self.contact_friction.is_finite()
             && (0.0..=1.0).contains(&self.contact_friction)
+            && self.bubble_rate.is_finite()
+            && (0.0..=5000.0).contains(&self.bubble_rate)
+            && self.max_bubbles <= 4096
+            && self.bubble_radius.is_finite()
+            && self.bubble_radius > 0.0
+            && self.bubble_radius <= 0.5
+            && self.bubble_buoyancy.is_finite()
+            && (0.0..=10.0).contains(&self.bubble_buoyancy)
+            && self.bubble_drag.is_finite()
+            && (0.0..=50.0).contains(&self.bubble_drag)
+            && self.bubble_expansion.is_finite()
+            && (0.0..=10.0).contains(&self.bubble_expansion)
+            && self.bubble_compressibility.is_finite()
+            && (0.0..=10.0).contains(&self.bubble_compressibility)
+            && self.bubble_max_radius.is_finite()
+            && (0.0..=1.0).contains(&self.bubble_max_radius)
+            && self.bubble_wake.is_finite()
+            && (0.0..=2.0).contains(&self.bubble_wake)
             && self.bubble_pressure.is_finite()
             && (0.0..=1_000_000.0).contains(&self.bubble_pressure)
             && self.bubble_momentum_coupling.is_finite()
@@ -1863,6 +1881,68 @@ mod tests {
     use crate::body::BodyBuilder;
     use crate::shape::Shape;
     use crate::world::PhysicsWorld;
+
+    #[test]
+    fn bubble_parameters_are_validated_by_public_fluid_creation() {
+        for field in 0..8 {
+            let upper = [0.5, 5000.0, 10.0, 50.0, 10.0, 10.0, 1.0, 2.0][field];
+            for enabled in [false, true] {
+                for value in [
+                    f32::NAN,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    -1.0,
+                    upper + 1.0,
+                    0.0,
+                    f32::MIN_POSITIVE,
+                    upper,
+                ] {
+                    let mut desc = FluidDesc {
+                        bubbles: enabled,
+                        max_bubbles: 8,
+                        max_particles: 8,
+                        ..FluidDesc::default()
+                    };
+                    match field {
+                        0 => desc.bubble_radius = value,
+                        1 => desc.bubble_rate = value,
+                        2 => desc.bubble_buoyancy = value,
+                        3 => desc.bubble_drag = value,
+                        4 => desc.bubble_expansion = value,
+                        5 => desc.bubble_compressibility = value,
+                        6 => desc.bubble_max_radius = value,
+                        7 => desc.bubble_wake = value,
+                        _ => unreachable!(),
+                    }
+                    let valid = value.is_finite()
+                        && value >= 0.0
+                        && value <= upper
+                        && (field != 0 || value > 0.0);
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    assert_eq!(
+                        world.add_fluid(desc).is_some(),
+                        valid,
+                        "field={field}, value={value}, enabled={enabled}"
+                    );
+                    assert_eq!(world.fluids().len(), usize::from(valid));
+                }
+            }
+        }
+        for cap in [0, 8, 4096, 4097, usize::MAX] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            // Creation only: no emission or cap-sized allocation is requested.
+            assert_eq!(
+                world
+                    .add_fluid(FluidDesc {
+                        max_bubbles: cap,
+                        max_particles: 8,
+                        ..FluidDesc::default()
+                    })
+                    .is_some(),
+                cap <= 4096
+            );
+        }
+    }
 
     #[test]
     fn custom_initial_positions_preserve_world_order_and_velocity() {
