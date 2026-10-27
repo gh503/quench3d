@@ -3279,7 +3279,7 @@ impl PhysicsWorld {
         for handle in self.joint_handles() {
             let (kind, a, b, anchor_a, anchor_b, axis_a, axis_b, limits, target) =
                 match self.joint(handle) {
-                    // Free ball and distance joints carry the current relative pose through
+                    // Ball and distance joints carry the current relative pose through
                     // ancestor motion; FK does not choose free rotations, project distance,
                     // or solve cone limits. The subsequent dynamics solver is unchanged.
                     Some(Joint::Ball {
@@ -3287,7 +3287,7 @@ impl PhysicsWorld {
                         b,
                         local_anchor_a,
                         local_anchor_b,
-                        cone_limit: None,
+                        ..
                     })
                     | Some(Joint::Fixed {
                         a,
@@ -5071,6 +5071,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn kinematic_fk_carries_cone_limited_ball_attachments() {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        w.set_collisions_enabled(false);
+        w.set_kinematic_fk(true);
+        let root = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.1 }).build());
+        let child = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::X)
+                .build(),
+        );
+        let payload = w.add_body(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::X * 2.0)
+                .build(),
+        );
+        w.add_joint(Joint::Hinge {
+            a: root,
+            b: child,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: -Vec3::X,
+            local_axis_a: Vec3::Y,
+            local_axis_b: Vec3::Y,
+            limits: None,
+            motor: Some(crate::joints::HingeMotor::servo(
+                std::f32::consts::FRAC_PI_2,
+                10.0,
+            )),
+        });
+        w.add_joint(Joint::Ball {
+            a: child,
+            b: payload,
+            local_anchor_a: Vec3::X,
+            local_anchor_b: Vec3::ZERO,
+            cone_limit: Some(crate::joints::BallConeLimit {
+                half_angle: std::f32::consts::FRAC_PI_2,
+                local_axis_a: Vec3::Y,
+                local_axis_b: Vec3::Y,
+            }),
+        });
+        let initial = w.snapshot();
+        w.apply_kinematic_targets();
+        assert!(
+            (w.body(payload).unwrap().position() - Vec3::new(0.0, 0.0, -2.0)).length() < 1e-4,
+            "cone-limited ball should carry the ancestor transform: {:?}",
+            w.body(payload).unwrap().position()
+        );
+        w.restore(initial);
+        w.step(1.0 / 60.0);
+        assert!(
+            (w.body(payload).unwrap().position() - Vec3::new(0.0, 0.0, -2.0)).length() < 1e-2,
+            "public FK step should carry the ancestor transform: {:?}",
+            w.body(payload).unwrap().position()
+        );
     }
 
     #[test]
