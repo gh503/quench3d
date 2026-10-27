@@ -390,7 +390,7 @@ pub fn scene_grammar() -> Value {
             "name": "场景名（可选）",
             "gravity": "[x, y, z]，缺省 [0, -9.81, 0]",
             "physics": {
-                "mode": ["normal（缺省：重力 + 接触 + 关节）", "drive（运动学回放：无重力、无宽相/窄相/接触，只解关节；用于逐帧确定性预览）"],
+                "mode": ["normal（缺省：重力 + 接触 + 关节）", "drive（运动学回放：无重力、无宽相/窄相/接触，只解关节；用于逐帧确定性预览）", "fk（纯 FK：同 drive，但铰链子树每步直接旋到目标角，无 PD 收敛）"],
                 "substeps": "每个 simulate 步内部再切几个等长子步（1~32，缺省 1 = 历史行为）；子步长 = simulate.dt/substeps",
                 "solver_iterations": "速度迭代次数（1~64，缺省 10）",
                 "position_iterations": "位置修正迭代次数（0~32，缺省 4）",

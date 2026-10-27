@@ -8538,6 +8538,39 @@ fn drive_mode_replays_joint_targets_without_contacts_deterministically() {
     assert!((shoulder["angle_deg"].as_f64().unwrap() - 35.0).abs() < 0.01);
 }
 
+/// `physics.mode:"fk"` 是纯 FK：没有 PD 收敛，一步就到目标角。用与 drive 相同的
+/// 机械臂场景，把步数改成 1；如果仍走 PD，35° 目标不可能一步到位。
+#[test]
+fn fk_mode_reaches_the_joint_target_in_one_step() {
+    let raw = std::fs::read_to_string("tests/fixtures/modkit_arm_drive.scene.json").unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    doc["physics"]["mode"] = serde_json::json!("fk");
+    doc["simulate"]["steps"] = serde_json::json!(1);
+    // 一个步长内走完速度斜坡，目标在同一帧直接写入，FK 才该一步到位。
+    doc["actions"][0]["speed_deg_s"] = serde_json::json!(3000.0);
+    let dir = temp_dir("fk_one_step");
+    let path = dir.join("arm_fk.json");
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+    let out = run(&["simulate", path.to_str().unwrap(), "--json"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let data = &out.json()["data"];
+    assert_eq!(data["drive"], true);
+    assert_eq!(data["gravity"], serde_json::json!([0.0, 0.0, 0.0]));
+    assert_eq!(data["contacts"], 0);
+    let shoulder = data["joints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["name"] == "shoulder")
+        .unwrap();
+    let angle = shoulder["angle_deg"].as_f64().unwrap();
+    assert!(
+        (angle - 35.0).abs() < 0.01,
+        "纯 FK 一步应到 35°，实际 {angle}°"
+    );
+}
+
 /// P1-1 整机：用 robot-modkit 的真实 STL 拼出 M1，渲染器要把 5 个外观网格挂到
 /// 对应刚体上（三角形数远大于图元），且 `simulate` 结果与去掉 visual 的同一场景
 /// 逐位相同。没有 GPU 的机器只校验装载/模拟，渲染失败按环境跳过。

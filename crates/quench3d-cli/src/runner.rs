@@ -2141,9 +2141,17 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
     }
     // `drive`：运动学回放。重力归零、关闭接触生成，关节/PD 仍解 —— 用于 60 fps
     // 预览与逐帧截图，避免地面/夹爪接触把回放结果带偏。
-    if doc.physics.mode == Some(crate::scene_doc::PhysicsModeDoc::Drive) {
-        world.set_gravity(Vec3::ZERO);
-        world.set_collisions_enabled(false);
+    match doc.physics.mode {
+        Some(crate::scene_doc::PhysicsModeDoc::Drive) => {
+            world.set_gravity(Vec3::ZERO);
+            world.set_collisions_enabled(false);
+        }
+        Some(crate::scene_doc::PhysicsModeDoc::Fk) => {
+            world.set_gravity(Vec3::ZERO);
+            world.set_collisions_enabled(false);
+            world.set_kinematic_fk(true);
+        }
+        _ => {}
     }
     // 水域（浮力环境）：先装进物理世界，后续所有步进路径（simulate/render/movie/编辑器）
     // 都自动生效。参数不可用的水域在校验阶段已经报错，这里再挡一次而不是静默忽略。

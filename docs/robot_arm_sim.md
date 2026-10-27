@@ -274,6 +274,12 @@ link_bar 100 mm）推导并与关节轴对位；立柱本轮已从横躺修正�
 * `--trace 名字` 的每个采样新增 `rotation: [x,y,z,w]`，用于逐帧截图/视频；老字段不变。
 * 测试 `drive_mode_replays_joint_targets_without_contacts_deterministically` 跑两遍，`states` 和 301 个采样（含四元数）**逐位相同**。
 * 这不是“纯运动学 FK”：关节仍由 PD 求解，所以有收敛过程；但它不跑重力/接触，满足“回放不受地面/夹爪接触影响”。`body:"kinematic"` 仍只作用于单个刚体，没有单独的“整链 kinematic”模式。
+* **纯 FK**：`physics.mode:"fk"` 把重力归零、关闭接触，并在每个 `step_substeps`
+  前把铰链子树直接旋到马达目标角；没有 PD 收敛，限位仍会夹住。回归
+  `kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately`（一步到
+  +90°）与 CLI `fk_mode_reaches_the_joint_target_in_one_step`（同一机械臂场景
+  一步到 35°）。边界：只处理 `hinge`；`ball/slider/fixed` 仍走原求解器，
+  目标速度斜坡仍由 CLI 的 `joint_target speed_deg_s` 控制。
 
 ## 10. P1-3：wasm 关节 API
 
