@@ -80,6 +80,7 @@ impl WaterVolume {
             && self.density > 0.0
             && self.drag.is_finite()
             && self.drag >= 0.0
+            && self.flow.is_finite()
     }
 }
 
@@ -209,6 +210,34 @@ mod tests {
         assert!(!w.contains(vec3(0.0, 0.51, 0.0)));
         assert!(!w.contains(vec3(2.1, 0.0, 0.0)));
         assert!(!w.contains(vec3(0.0, 0.0, 1.1)));
+    }
+
+    #[test]
+    fn set_water_validates_and_replaces_by_index() {
+        let mut world = PhysicsWorld::new();
+        let water = WaterVolume::new(Vec2::new(0.0, 0.0), Vec2::new(2.0, 2.0), 0.0);
+        assert_eq!(world.add_water(water), Some(0));
+        let mut flow = water;
+        flow.flow = Vec2::new(1.25, -0.5);
+        assert!(world.set_water(0, flow));
+        assert_eq!(world.waters()[0].flow, Vec2::new(1.25, -0.5));
+
+        let mut bad = flow;
+        bad.drag = -1.0;
+        assert!(!world.set_water(0, bad), "负阻尼必须被拒绝");
+        assert_eq!(world.waters()[0].flow, Vec2::new(1.25, -0.5));
+        assert!(!world.set_water(9, flow), "越界必须返回 false");
+    }
+
+    #[test]
+    fn nan_water_current_is_rejected() {
+        let mut water = WaterVolume::new(Vec2::ZERO, Vec2::new(4.0, 4.0), 0.0);
+        assert!(water.is_valid());
+        water.flow = Vec2::new(f32::NAN, 0.0);
+        assert!(!water.is_valid(), "NaN 水流必须被 is_valid 拦下");
+        let mut world = PhysicsWorld::new();
+        assert!(world.add_water(water).is_none());
+        assert_eq!(world.waters().len(), 0);
     }
 
     #[test]

@@ -716,6 +716,21 @@ impl PhysicsWorld {
         Some(self.waters.len() - 1)
     }
 
+    /// 替换第 `index` 块水域；索引越界或参数不可用时返回 `false` 且不改动。
+    ///
+    /// 编辑器改水流/密度时走这里，而不是暴露 `&mut [WaterVolume]`：非法值
+    /// （NaN、负阻尼、NaN 水流）不能绕过 `add_water` 的同一道校验。
+    pub fn set_water(&mut self, index: usize, water: WaterVolume) -> bool {
+        if !water.is_valid() {
+            return false;
+        }
+        let Some(slot) = self.waters.get_mut(index) else {
+            return false;
+        };
+        *slot = water;
+        true
+    }
+
     /// 清空所有水域，并把刚体上的浸没占比归零。
     pub fn clear_waters(&mut self) {
         if self.waters.is_empty() {
