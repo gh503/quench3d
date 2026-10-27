@@ -705,6 +705,8 @@ fn view_menu(
                 ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
                 ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
             });
+        ui.checkbox(&mut engine.camera_collision, "相机防穿墙")
+            .on_hover_text("轨道相机被几何挡住时自动拉近；不改缩放距离，移开后恢复");
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button("重置视角")

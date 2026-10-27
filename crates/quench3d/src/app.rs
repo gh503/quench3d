@@ -116,6 +116,36 @@ impl Default for DebugOptions {
 /// 查询探针的最远距离（米）。
 pub const QUERY_PROBE_MAX: f32 = 500.0;
 
+/// 轨道相机防穿墙：从焦点向眼睛打射线，命中几何就把相机拉到命中点前 `margin` 米。
+///
+/// 相机的朝向仍指向焦点；只缩短距离，不改 [`OrbitCamera`] 的 `distance`，
+/// 因此松开遮挡后视角会回到用户设定的距离，而不是永久缩近。
+pub fn orbit_camera_avoiding_geometry(
+    orbit: &OrbitCamera,
+    world: &PhysicsWorld,
+    aspect: f32,
+    margin: f32,
+) -> Camera {
+    let mut camera = orbit.camera(aspect);
+    let dir = orbit.direction();
+    let distance = camera.position.distance(orbit.focus);
+    let margin = if margin.is_finite() {
+        margin.clamp(0.01, 2.0)
+    } else {
+        0.2
+    };
+    if distance <= margin * 2.0 || dir.length_squared() < 0.5 {
+        return camera;
+    }
+    let start = orbit.focus + dir * (margin * 0.5);
+    let max_distance = distance - margin;
+    if let Some(hit) = world.raycast(start, dir, max_distance) {
+        let clamped = (hit.distance - margin * 0.5).max(margin);
+        camera.position = orbit.focus + dir * clamped;
+    }
+    camera
+}
+
 /// 把关节可视化转成调试线段（纯函数，便于测试）。
 /// 灯光 gizmo：点光画影响半径球，聚光画外锥体与轴向。
 ///
@@ -241,6 +271,14 @@ pub struct Engine {
     /// 打开后固定物理步长与显示帧率不一致导致的周期性顿挫会平滑掉；只影响渲染，
     /// 不写回物理。编辑器默认打开，`render_sequence` 的离屏路径不读它。
     pub render_interpolation: bool,
+    /// 轨道相机是否做防穿墙（默认 `false`，旧路径逐位不变）。
+    ///
+    /// 开时从 `orbit.focus` 到眼睛打一条射线，命中几何就把相机拉到命中点前
+    /// `camera_collision_margin` 米；不改 `orbit.distance`，所以鼠标缩放/旋转手感
+    /// 不受影响。飞行相机不处理（第一人称穿墙是预期行为）。
+    pub camera_collision: bool,
+    /// 防穿墙时相机与命中面之间保留的距离（米）。
+    pub camera_collision_margin: f32,
     /// 是否由引擎自动把输入映射到相机（默认 `true`）。
     ///
     /// 编辑器这类应用要自己决定「这一下拖动是转相机还是拖物体」时，把它设成
@@ -283,6 +321,8 @@ impl Engine {
             time_scale: 1.0,
             should_exit: false,
             render_interpolation: false,
+            camera_collision: false,
+            camera_collision_margin: 0.2,
             auto_camera: true,
             audio: crate::audio::AudioMixer::new(48_000),
             stats: RenderStats::default(),
@@ -305,7 +345,19 @@ impl Engine {
     pub fn camera(&self) -> Camera {
         let aspect = self.gpu.aspect();
         match self.camera_mode {
-            CameraMode::Orbit => self.orbit.camera(aspect),
+            CameraMode::Orbit => {
+                let camera = self.orbit.camera(aspect);
+                if self.camera_collision {
+                    orbit_camera_avoiding_geometry(
+                        &self.orbit,
+                        &self.world,
+                        aspect,
+                        self.camera_collision_margin,
+                    )
+                } else {
+                    camera
+                }
+            }
             CameraMode::Fly => self.fly.camera(aspect),
         }
     }
@@ -1692,6 +1744,40 @@ pub fn render_sequence_with_game<G: Game>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 相机防穿墙：墙在焦点和眼睛之间时把相机拉到墙前；关掉时保持原距离。
+    #[test]
+    fn orbit_camera_collision_pulls_in_front_of_a_wall() {
+        use quench3d_physics::{BodyBuilder, Shape};
+        let mut world = PhysicsWorld::new();
+        world.add_body(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::new(2.0, 2.0, 0.2),
+            })
+            .position(Vec3::new(0.0, 0.0, 4.0))
+            .build(),
+        );
+        let orbit = OrbitCamera {
+            focus: Vec3::ZERO,
+            distance: 10.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            ..OrbitCamera::default()
+        };
+        let plain = orbit.camera(1.0);
+        assert!((plain.position.z - 10.0).abs() < 1e-4);
+        let pulled = orbit_camera_avoiding_geometry(&orbit, &world, 1.0, 0.2);
+        assert!(
+            pulled.position.z < 4.0 && pulled.position.z > 3.0,
+            "相机应被拉到墙前（z≈3.8），实际 {}",
+            pulled.position.z
+        );
+        // 没有墙时逐位等于原相机。
+        let empty = PhysicsWorld::new();
+        let unchanged = orbit_camera_avoiding_geometry(&orbit, &empty, 1.0, 0.2);
+        assert_eq!(unchanged.position, plain.position);
+        assert_eq!(unchanged.rotation, plain.rotation);
+    }
 
     /// 查询探针：相机中心看什么就查到什么（F7 依赖它）。
     #[test]

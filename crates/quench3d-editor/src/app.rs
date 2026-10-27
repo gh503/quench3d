@@ -352,6 +352,7 @@ impl Inner {
         engine.auto_camera = false;
         // 显示器刷新与固定物理步长不同步；编辑器默认插值，避免相机静止时物体顿挫。
         engine.render_interpolation = true;
+        engine.camera_collision = true;
         engine.paused = true;
 
         let mut doc = Doc::new();
