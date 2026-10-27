@@ -1254,7 +1254,6 @@ impl Fluid {
         }
         self.bubble_accum += d.bubble_rate * dt;
         let radius = d.bubble_radius.max(0.005);
-        let mut spawned = 0usize;
         while self.bubble_accum >= 1.0 && self.bubbles.len() < d.max_bubbles {
             let k = self.bubble_emitted;
             let angle = k as f32 * 2.399_963_2;
@@ -1272,10 +1271,9 @@ impl Fluid {
             });
             self.bubble_emitted = self.bubble_emitted.wrapping_add(1);
             self.bubble_accum -= 1.0;
-            spawned += 1;
         }
-        if spawned == 0 && self.bubble_accum > 1.0 {
-            // 上限已满：丢掉这一颗的累积，避免上限放开时一次爆出一大串。
+        if self.bubbles.len() >= d.max_bubbles && self.bubble_accum >= 1.0 {
+            // 上限已满：丢掉未能发射的整数预算，保留分数相位，避免释放容量后补发。
             self.bubble_accum = self.bubble_accum.fract();
         }
     }
@@ -1881,6 +1879,77 @@ mod tests {
     use crate::body::BodyBuilder;
     use crate::shape::Shape;
     use crate::world::PhysicsWorld;
+
+    #[test]
+    fn bubble_emission_discards_capped_whole_budget() {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        world
+            .add_fluid(FluidDesc {
+                bubbles: true,
+                bubble_rate: 7.0,
+                max_bubbles: 2,
+                max_particles: 8,
+                bubble_buoyancy: 0.0,
+                bubble_drag: 0.0,
+                emit_position: vec3(0.0, -2.0, 0.0),
+                ..FluidDesc::default()
+            })
+            .unwrap();
+        let fluid = &mut world.fluids_mut()[0];
+        fluid.emit_bubbles(0.5); // 3.5 due, only two fit: retain fractional phase, not debt.
+        assert_eq!(fluid.bubbles.len(), 2);
+        fluid.bubbles.clear(); // Controlled capacity release before a public fixed step.
+        world.step(1.0 / 60.0);
+        assert_eq!(
+            world.fluids()[0].bubbles().len(),
+            0,
+            "released capacity must not replay the discarded whole emission budget"
+        );
+    }
+
+    #[test]
+    fn capped_bubble_emission_preserves_fractional_phase() {
+        for cap in [0, 2, 8] {
+            let mut fluid = Fluid::new(FluidDesc {
+                bubbles: true,
+                bubble_rate: 7.0,
+                max_bubbles: cap,
+                max_particles: 8,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+            fluid.emit_bubbles(0.5);
+            assert_eq!(fluid.bubbles.len(), cap.min(3));
+            assert_eq!(
+                fluid.bubble_accum.to_bits(),
+                if cap == 0 { 0.0f32 } else { 0.5f32 }.to_bits()
+            );
+            if cap == 2 {
+                fluid.emit_bubbles(0.5); // Exactly four due while full, including fractional carry.
+                assert_eq!(fluid.bubble_accum.to_bits(), 0.0f32.to_bits());
+                fluid.bubble_accum = 1.0;
+                fluid.emit_bubbles(f32::MIN_POSITIVE); // Exact-one debt must also be discarded.
+                assert_eq!(fluid.bubble_accum.to_bits(), 0.0f32.to_bits());
+                fluid.bubbles.clear();
+                fluid.emit_bubbles(0.125);
+                assert!(fluid.bubbles.is_empty());
+                assert_eq!(fluid.bubble_accum.to_bits(), 0.875f32.to_bits());
+                fluid.emit_bubbles(0.125);
+                assert_eq!(fluid.bubbles.len(), 1);
+                assert_eq!(fluid.bubble_accum.to_bits(), 0.75f32.to_bits());
+            } else if cap == 8 {
+                let before = fluid.bubbles.clone();
+                fluid.emit_bubbles(0.125);
+                assert_eq!(fluid.bubbles.len(), 4);
+                assert_eq!(fluid.bubbles[..3], before);
+                assert_eq!(fluid.bubble_accum.to_bits(), 0.375f32.to_bits());
+                assert_eq!(
+                    fluid.bubbles[3].velocity,
+                    fluid.desc.emit_velocity + Vec3::Y * 0.5
+                );
+            }
+        }
+    }
 
     #[test]
     fn bubble_parameters_are_validated_by_public_fluid_creation() {
