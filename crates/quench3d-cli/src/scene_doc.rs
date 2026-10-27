@@ -1087,6 +1087,9 @@ pub struct WaterDoc {
     /// 浸没部分的线性阻尼（1/s），缺省 6；0 = 无阻尼。
     #[serde(default = "default_water_drag")]
     pub drag: f32,
+    /// XZ 水流速度 `[x, z]`（m/s），缺省 `[0, 0]` = 静水。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<[f32; 2]>,
 }
 
 fn default_water_density() -> f32 {
@@ -9162,7 +9165,7 @@ mod tests {
     fn waters_parse_validate_and_roundtrip() {
         let doc = SceneDoc::from_value(json!({
             "waters": [
-                { "center": [1, 2], "size": [8, 6], "level": 0.4 },
+                { "center": [1, 2], "size": [8, 6], "level": 0.4, "flow": [1.5, -0.5] },
                 { "size": [4, 4], "level": 0.0, "density": 800, "drag": 0.0 }
             ]
         }))
@@ -9176,6 +9179,7 @@ mod tests {
         assert_eq!(again.waters[0].center, Some([1.0, 2.0]));
         assert_eq!(again.waters[0].size, [8.0, 6.0]);
         assert_eq!(again.waters[0].level, 0.4);
+        assert_eq!(again.waters[0].flow, Some([1.5, -0.5]));
         assert_eq!(again.waters[1].density, 800.0);
         assert_eq!(again.waters[1].drag, 0.0);
 

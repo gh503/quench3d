@@ -1417,6 +1417,8 @@ impl PhysicsWorld {
             let mut force = Vec3::ZERO;
             let mut moment = Vec3::ZERO;
             let mut drag = 0.0f32;
+            let mut flow = Vec2::ZERO;
+            let mut flow_drag = 0.0f32;
             for w in waters {
                 let s = water::submerged_in(b, w);
                 if !s.is_submerged() {
@@ -1427,6 +1429,10 @@ impl PhysicsWorld {
                 force -= gravity * (w.density * s.volume);
                 moment += s.centroid * s.volume;
                 drag = drag.max(w.drag);
+                if w.flow.length_squared() > 0.0 && w.drag > flow_drag {
+                    flow = w.flow;
+                    flow_drag = w.drag;
+                }
             }
             b.submerged = if total > 0.0 {
                 (volume / total).clamp(0.0, 1.0)
@@ -1440,7 +1446,15 @@ impl PhysicsWorld {
             // 不该每一步都把刚体唤醒——否则漂浮物永远睡不着。睡眠体上面已经跳过，
             // 醒着的体照常积分。
             b.add_force_at_point(force, moment / volume);
-            if drag > 0.0 {
+            if flow_drag > 0.0 {
+                // 水流：把浸没部分的速度拖向局部流速（只作用于 XZ；垂直速度走原阻尼）。
+                let target = Vec3::new(flow.x, 0.0, flow.y);
+                let f = 1.0 / (1.0 + flow_drag * b.submerged * dt);
+                b.linear_velocity.x = target.x + (b.linear_velocity.x - target.x) * f;
+                b.linear_velocity.z = target.z + (b.linear_velocity.z - target.z) * f;
+                b.linear_velocity.y *= f;
+                b.angular_velocity *= f;
+            } else if drag > 0.0 {
                 // 简化线性阻尼（只对浸没部分生效）；不是粘性应力。
                 let f = 1.0 / (1.0 + drag * b.submerged * dt);
                 b.linear_velocity *= f;
@@ -1501,6 +1515,7 @@ impl PhysicsWorld {
                     level,
                     density: desc.rest_density,
                     drag: desc.drag,
+                    flow: Vec2::ZERO,
                 };
                 let s = water::submerged_in(b, &w);
                 if !s.is_submerged() {

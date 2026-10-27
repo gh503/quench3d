@@ -829,11 +829,16 @@ pub fn json_schema() -> Value {
         def(&["size", "material", "y", "friction", "restitution"]),
     );
     defs.insert("water".into(), {
-        let mut d = def(&["center", "size", "level", "density", "drag"]);
+        let mut d = def(&["center", "size", "level", "density", "drag", "flow"]);
         d["description"] = json!(
             "一块水域（浮力环境）：y <= level 且在 XZ 范围内的刚体按排开体积受浮力；不是流体求解器"
         );
         d["required"] = json!(["size", "level"]);
+        d["properties"]["flow"] = json!({
+            "type": "array", "items": { "type": "number" },
+            "minItems": 2, "maxItems": 2,
+            "description": "XZ 水流速度（m/s），缺省 [0,0] = 静水；把浸没刚体拖向该速度"
+        });
         d
     });
     defs.insert("waterStyle".into(), {

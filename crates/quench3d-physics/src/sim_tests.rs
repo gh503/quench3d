@@ -12,6 +12,7 @@ use crate::narrowphase::collide_shapes;
 use crate::query::ray_shape;
 use crate::query::QueryFilter;
 use crate::shape::Shape;
+use crate::water::WaterVolume;
 use crate::world::PhysicsWorld;
 
 /// 一帧固定步长（与默认 `fixed_dt` 完全一致，因此每次调用恰好推进一个子步）。
@@ -3825,6 +3826,42 @@ fn slider_pd_drives_to_target_displacement() {
         tele.coordinate
     );
     assert_all_finite(&w, "滑块伺服");
+}
+
+#[test]
+fn water_current_drags_a_submerged_body_along_the_flow() {
+    let make_world = |flow: Vec2| {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        let body =
+            w.add_builder(BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 }).position(Vec3::ZERO));
+        w.add_water(WaterVolume {
+            center: Vec2::ZERO,
+            half_size: Vec2::splat(4.0),
+            level: 1.0,
+            density: 1000.0,
+            drag: 6.0,
+            flow,
+        })
+        .expect("水域参数合法");
+        w.step(DT);
+        let b = w.body(body).unwrap();
+        b.linear_velocity()
+    };
+    let still = make_world(Vec2::ZERO);
+    assert!(
+        still.x.abs() < 1e-6,
+        "无流速时不应凭空给刚体水平速度：{still:?}"
+    );
+    let current = make_world(Vec2::new(1.5, 0.0));
+    assert!(
+        current.x > 0.05,
+        "1.5 m/s 的水流应把浸没刚体沿 +X 拖动：{current:?}"
+    );
+    assert!(
+        current.y.abs() < 1e-6,
+        "水平水流不应产生垂直速度：{current:?}"
+    );
 }
 
 /// 2000 体深堆性能基准（默认跳过；显式 `--ignored` 才跑）。

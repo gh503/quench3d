@@ -152,6 +152,11 @@
 - [x] 流体对凸包/圆锥碰撞：凸包 GJK/EPA、圆锥底面圆盘 + 侧面线段投影，
   都是精确最近表面（不再按 AABB 近似）；四面体与圆锥 AABB 对照回归。
 - [x] 流体表面张力/涡量约束（0~5，缺省关闭）；示例 240 步最高点 11.4 m → 1.65 m。
+- [x] 解析水域水流（`waters[].flow`，XZ m/s，缺省 0）：浸没刚体被拖向流速，
+  垂直速度仍走原阻尼；0 时旧路径逐位不变。回归
+  `water_current_drags_a_submerged_body_along_the_flow`（静水无水平速度；1.5 m/s
+  水流把球拖向 +X 且无垂直速度）与 CLI `waters_parse_validate_and_roundtrip`。
+  这不是 PBF 粒子流场/波浪。
 - [x] 流体初始速度 + 开放排水面（`velocity` / `drain_y`，缺省不变）。
 - [x] 流体连续发射器（`emit_*`，黄金角确定撒点、上限/排空/CLI 接线）。
 - [x] 流体泡沫/飞沫（`fluids[].foam`，缺省关闭）：高速度粒子甩出被动白水，

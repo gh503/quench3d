@@ -2155,6 +2155,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             level: w.level,
             density: w.density,
             drag: w.drag,
+            flow: Vec2::new(w.flow.map_or(0.0, |f| f[0]), w.flow.map_or(0.0, |f| f[1])),
         };
         if world.add_water(water).is_none() {
             let mut err = RunError::io(format!("waters[{i}] 的参数不可用（尺寸/密度/阻尼非法）"));

@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **解析水域水流（`waters[].flow`）**：`flow: [x, z]`（m/s，缺省 `[0, 0]`）让浸没
+  刚体被水流拖向局部流速；垂直速度仍走原阻尼。未写 `flow` 或写 `[0,0]` 时完全走旧
+  阻尼路径，旧场景逐位不变。回归
+  `water_current_drags_a_submerged_body_along_the_flow`（静水不产生水平速度；
+  1.5 m/s 水流把球拖向 +X，且不产生垂直速度）与 CLI
+  `waters_parse_validate_and_roundtrip`（flow 往返）。仍不是 PBF 粒子流场。
+
 - **KTX2 纹理导入（RGBA8 / BC1）**：`ImageData::from_encoded`/`from_file` 自动识别
   KTX2 容器，支持未压缩 RGBA8（VkFormat 37/43）和 BC1（131..134，CPU 解成 RGBA8）；
   材质/贴图路径无需改调用。回归 `ktx2_uncompressed_rgba8_is_decoded`、

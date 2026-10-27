@@ -42,6 +42,10 @@ pub struct WaterVolume {
     pub density: f32,
     /// 线性阻尼系数（1/s），只对浸没部分生效。0 = 无阻尼。
     pub drag: f32,
+    /// XZ 平面水流速度（m/s）。0 = 静水，旧场景行为逐位不变。
+    ///
+    /// 水流通过浸没阻尼把刚体拖向该速度；它改的是刚体速度，不是粒子流场。
+    pub flow: Vec2,
 }
 
 impl WaterVolume {
@@ -53,6 +57,7 @@ impl WaterVolume {
             level,
             density: 1000.0,
             drag: 6.0,
+            flow: Vec2::ZERO,
         }
     }
 
