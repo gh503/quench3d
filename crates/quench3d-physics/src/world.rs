@@ -3279,8 +3279,9 @@ impl PhysicsWorld {
         for handle in self.joint_handles() {
             let (kind, a, b, anchor_a, anchor_b, axis_a, axis_b, limits, target) =
                 match self.joint(handle) {
-                    // Free ball joints carry the current relative pose through ancestor
-                    // motion; FK does not choose their free rotation or solve cone limits.
+                    // Free ball and distance joints carry the current relative pose through
+                    // ancestor motion; FK does not choose free rotations, project distance,
+                    // or solve cone limits. The subsequent dynamics solver is unchanged.
                     Some(Joint::Ball {
                         a,
                         b,
@@ -3289,6 +3290,13 @@ impl PhysicsWorld {
                         cone_limit: None,
                     })
                     | Some(Joint::Fixed {
+                        a,
+                        b,
+                        local_anchor_a,
+                        local_anchor_b,
+                        ..
+                    })
+                    | Some(Joint::Distance {
                         a,
                         b,
                         local_anchor_a,
@@ -4927,6 +4935,139 @@ mod tests {
                             assert!(body.angular_velocity.length() < 1e-4);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kinematic_fk_carries_distance_attachments() {
+        for slider in [false, true] {
+            for reverse in [false, true] {
+                let mut w = PhysicsWorld::new();
+                w.set_gravity(Vec3::ZERO);
+                w.set_collisions_enabled(false);
+                w.set_kinematic_fk(true);
+                let root = w.add_body(BodyBuilder::r#static(Shape::Sphere { radius: 0.1 }).build());
+                let child = w.add_body(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                        .position(Vec3::X)
+                        .build(),
+                );
+                let relative = Quat::from_rotation_x(0.37);
+                let payload = w.add_body(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                        .position(Vec3::X * 2.0)
+                        .rotation(relative)
+                        .build(),
+                );
+                let motor = Some(crate::joints::HingeMotor::servo(
+                    if slider {
+                        2.0
+                    } else {
+                        std::f32::consts::FRAC_PI_2
+                    },
+                    10.0,
+                ));
+                w.add_joint(if slider {
+                    Joint::Slider {
+                        a: root,
+                        b: child,
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: Vec3::ZERO,
+                        local_axis_a: Vec3::X,
+                        local_axis_b: Vec3::X,
+                        limits: None,
+                        motor,
+                    }
+                } else {
+                    Joint::Hinge {
+                        a: root,
+                        b: child,
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: -Vec3::X,
+                        local_axis_a: Vec3::Y,
+                        local_axis_b: Vec3::Y,
+                        limits: None,
+                        motor,
+                    }
+                });
+                w.add_joint(Joint::Distance {
+                    a: if reverse { payload } else { child },
+                    b: if reverse { child } else { payload },
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    rest_length: 1.0,
+                    stiffness: 0.0,
+                    damping: 0.0,
+                });
+                let tip_start = Vec3::X * 2.0 + relative.mul_vec3(Vec3::Z);
+                let tip = w.add_body(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                        .position(tip_start)
+                        .rotation(relative)
+                        .build(),
+                );
+                w.add_joint(Joint::Fixed {
+                    a: payload,
+                    b: tip,
+                    local_anchor_a: Vec3::Z,
+                    local_anchor_b: Vec3::ZERO,
+                    local_frame_a: Quat::IDENTITY,
+                    local_frame_b: Quat::IDENTITY,
+                });
+                let q = if slider {
+                    Quat::IDENTITY
+                } else {
+                    Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                };
+                let expected = if slider {
+                    Vec3::X * 3.0
+                } else {
+                    q.mul_vec3(Vec3::X * 2.0)
+                };
+                let initial = w.snapshot();
+                for integrated in [false, true] {
+                    w.restore(initial.clone());
+                    if integrated {
+                        w.step(1.0 / 60.0);
+                    } else {
+                        w.apply_kinematic_targets();
+                    }
+                    let body = w.body(payload).unwrap();
+                    assert!(
+                        (body.position() - expected).length() < 1e-4,
+                        "slider={slider} reverse={reverse} integrated={integrated}: {:?}",
+                        body.position()
+                    );
+                    assert!(
+                        (body.rotation().mul_vec3(Vec3::X) - (q * relative).mul_vec3(Vec3::X))
+                            .length()
+                            < 1e-4
+                    );
+                    let anchor = w.body(child).unwrap().position();
+                    assert!(((anchor - body.position()).length() - 1.0).abs() < 1e-4);
+                    let tip_body = w.body(tip).unwrap();
+                    let tip_expected = if slider {
+                        tip_start + Vec3::X
+                    } else {
+                        q.mul_vec3(tip_start)
+                    };
+                    assert!((tip_body.position() - tip_expected).length() < 1e-4);
+                    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                        assert!(
+                            (body.rotation().mul_vec3(axis) - (q * relative).mul_vec3(axis))
+                                .length()
+                                < 1e-4
+                        );
+                        assert!(
+                            (tip_body.rotation().mul_vec3(axis) - (q * relative).mul_vec3(axis))
+                                .length()
+                                < 1e-4
+                        );
+                    }
+                    assert!(body.linear_velocity.length() < 1e-4);
+                    assert!(body.angular_velocity.length() < 1e-4);
                 }
             }
         }
