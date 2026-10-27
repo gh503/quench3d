@@ -1425,7 +1425,7 @@ impl Fluid {
         self.split_large_bubbles();
     }
 
-    /// 气泡直径超过 `bubble_max_radius` 时按体积守恒拆成多颗。
+    /// 气泡半径超过 `bubble_max_radius` 时按体积守恒拆成多颗。
     ///
     /// 只在 `bubble_max_radius > 0` 时执行； daughters 沿一个固定圆环均匀排开，
     /// 避免下一步立刻又合并。`max_bubbles` 放不下时保留原气泡，不悄悄丢气体。
@@ -1436,14 +1436,16 @@ impl Fluid {
         }
         let cap = self.desc.max_bubbles.max(self.bubbles.len());
         let mut out = Vec::with_capacity(self.bubbles.len());
-        for b in self.bubbles.iter().copied() {
+        for (index, b) in self.bubbles.iter().copied().enumerate() {
             if b.radius <= max_radius || out.len() >= cap {
                 out.push(b);
                 continue;
             }
             let ratio = (b.radius / max_radius).max(1.0);
             let needed = (ratio.powi(3).ceil() as usize).max(2);
-            let room = cap.saturating_sub(out.len());
+            // 为尚未处理的原气泡各保留一个位置，拆分不能挤占它们的容量。
+            let remaining = self.bubbles.len() - index - 1;
+            let room = cap.saturating_sub(out.len() + remaining);
             if needed > room || room < 2 {
                 // 放不下：保留原气泡，下一帧/腾出空间后再拆。
                 out.push(b);
@@ -2569,6 +2571,74 @@ mod tests {
             deep < shallow * 0.95,
             "深处气泡应被压缩得更小：deep={deep:.5}, shallow={shallow:.5}"
         );
+    }
+
+    #[test]
+    fn bubble_splitting_reserves_capacity_for_remaining_bubbles() {
+        for cap in [8, 9] {
+            for reverse in [false, true] {
+                for enabled in [false, true] {
+                    let mut fluid = Fluid::new(box_desc()).unwrap();
+                    fluid.desc.max_bubbles = cap;
+                    fluid.desc.bubble_max_radius = if enabled { 0.2 } else { 0.0 };
+                    let large = Bubble {
+                        position: Vec3::new(-2.0, 1.0, 0.0),
+                        velocity: Vec3::new(0.25, 0.0, -0.5),
+                        radius: 0.4,
+                        rest_radius: 0.3,
+                        age: 0.25,
+                        life: 10.0,
+                    };
+                    let small = Bubble {
+                        position: Vec3::new(2.0, 1.0, 0.0),
+                        velocity: Vec3::new(-0.5, 0.0, 0.25),
+                        radius: 0.1,
+                        rest_radius: 0.08,
+                        ..large
+                    };
+                    let original = if reverse {
+                        vec![small, large]
+                    } else {
+                        vec![large, small]
+                    };
+                    fluid.bubbles = original.clone();
+                    fluid.split_large_bubbles();
+                    let split = enabled && cap == 9;
+                    assert_eq!(
+                        fluid.bubbles.len(),
+                        if split { 9 } else { 2 },
+                        "cap={cap}, reverse={reverse}, enabled={enabled}"
+                    );
+                    let volume = |bs: &[Bubble], rest: bool| -> f32 {
+                        bs.iter()
+                            .map(|b| if rest { b.rest_radius } else { b.radius }.powi(3))
+                            .sum()
+                    };
+                    for rest in [false, true] {
+                        let before = volume(&original, rest);
+                        assert!((volume(&fluid.bubbles, rest) - before).abs() < before * 1e-5);
+                    }
+                    let momentum = |bs: &[Bubble]| {
+                        bs.iter()
+                            .fold(Vec3::ZERO, |sum, b| sum + b.velocity * b.radius.powi(3))
+                    };
+                    assert!((momentum(&fluid.bubbles) - momentum(&original)).length() < 1e-7);
+                    for b in &fluid.bubbles {
+                        let source = if b.position.x < 0.0 { large } else { small };
+                        assert_eq!(b.velocity, source.velocity);
+                        assert_eq!(b.age.to_bits(), source.age.to_bits());
+                        assert_eq!(b.life.to_bits(), source.life.to_bits());
+                    }
+                    if !split {
+                        for (a, b) in fluid.bubbles.iter().zip(&original) {
+                            assert_eq!(a.position, b.position);
+                            assert_eq!(a.radius.to_bits(), b.radius.to_bits());
+                            assert_eq!(a.rest_radius.to_bits(), b.rest_radius.to_bits());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
