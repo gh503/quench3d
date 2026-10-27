@@ -201,6 +201,8 @@ impl FluidDesc {
         let he = self.half_extents;
         self.center.is_finite()
             && he.is_finite()
+            && (self.center - he).is_finite()
+            && (self.center + he).is_finite()
             && he.x > 0.0
             && he.y > 0.0
             && he.z > 0.0
@@ -1985,6 +1987,47 @@ mod tests {
         assert_eq!(a.particles(), b.particles());
         assert_eq!(a.particles().len(), 343);
         assert!(a.particles().iter().all(|p| p.y > 0.0));
+    }
+
+    #[test]
+    fn fluid_bounds_overflow_is_rejected() {
+        for sign in [-1.0, 1.0] {
+            for axis in 0..3 {
+                let mut center = [0.0; 3];
+                center[axis] = sign * f32::MAX;
+                let d = FluidDesc {
+                    center: Vec3::new(center[0], center[1], center[2]),
+                    half_extents: Vec3::splat(f32::MAX * 0.5),
+                    max_particles: 8,
+                    ..FluidDesc::default()
+                };
+                let fluid = Fluid::new(d);
+                assert!(
+                    fluid.is_none(),
+                    "axis={axis}, sign={sign}: accepted bounds overflow; finite particles={}",
+                    fluid
+                        .as_ref()
+                        .is_none_or(|f| f.particles().iter().all(|p| p.is_finite()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fluid_representable_boundary_remains_valid() {
+        for sign in [-1.0, 1.0] {
+            let d = FluidDesc {
+                center: Vec3::splat(sign * f32::MAX * 0.5),
+                half_extents: Vec3::splat(f32::MAX * 0.25),
+                max_particles: 8,
+                ..FluidDesc::default()
+            };
+            assert!(d.is_valid());
+            let fluid = Fluid::new(d).unwrap();
+            assert_eq!(fluid.particles().len(), 8);
+            assert!(fluid.particles().iter().all(|p| p.is_finite()));
+        }
+        assert!(FluidDesc::default().is_valid());
     }
 
     #[test]

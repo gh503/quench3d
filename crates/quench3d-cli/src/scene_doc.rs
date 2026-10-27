@@ -4395,6 +4395,20 @@ impl SceneDoc {
                     .with_hint("例如 `\"size\": [2, 2, 2]`；只写 0 或负数等于没有粒子"),
                 );
             }
+            let center = f.center.unwrap_or([0.0; 3]);
+            if center.iter().all(|v| v.is_finite())
+                && f.size.iter().all(|v| v.is_finite() && *v > 0.0)
+                && (0..3).any(|axis| {
+                    let half = f.size[axis] * 0.5;
+                    !(center[axis] - half).is_finite() || !(center[axis] + half).is_finite()
+                })
+            {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.size"),
+                    "流体中心加减半尺寸必须是有限数（包围盒超出可表示范围）",
+                ));
+            }
             if !(f.spacing.is_finite() && f.spacing > 0.0) {
                 cam_diags.push(Diagnostic::error_code(
                     ErrorCode::OutOfRange,
@@ -9315,6 +9329,33 @@ mod tests {
                 diags.iter().any(|d| d.path == path),
                 "要报 {path}: {diags:?}"
             );
+        }
+    }
+
+    #[test]
+    fn fluid_bounds_overflow_is_rejected() {
+        for sign in [-1.0, 1.0] {
+            for axis in 0..3 {
+                let mut center = [0.0; 3];
+                center[axis] = sign * f32::MAX;
+                let size = [f32::MAX; 3];
+                let doc = SceneDoc::from_value(json!({"fluids": [{
+                    "center": center, "size": size, "max_particles": 8
+                }]}))
+                .unwrap();
+                assert!(
+                    doc.validate().iter().any(|d| d.path == "fluids[0].size"),
+                    "axis={axis}, sign={sign}: overflowing bounds accepted"
+                );
+            }
+            let center = [sign * f32::MAX * 0.5; 3];
+            let size = [f32::MAX * 0.5; 3];
+            let doc = SceneDoc::from_value(json!({"fluids": [{
+                "center": center,
+                "size": size, "max_particles": 8
+            }]}))
+            .unwrap();
+            assert!(!SceneDoc::has_errors(&doc.validate()));
         }
     }
 
