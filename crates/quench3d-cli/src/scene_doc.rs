@@ -1137,6 +1137,10 @@ pub struct WaterStyleDoc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FluidDoc {
+    /// 可选的初始粒子世界坐标；非空、有限且数量不超过 max_particles。
+    /// 按输入顺序保留，不加 center；省略/null 使用原晶格。size 仍必填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_positions: Option<Vec<[f32; 3]>>,
     /// 发射体中心 `[x, y, z]`，缺省 `[0, 0, 0]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub center: Option<[f32; 3]>,
@@ -1351,6 +1355,9 @@ impl FluidDoc {
 
     /// 按晶格估算的粒子数（**不**按 `max_particles` 截断）。
     pub fn raw_particles(&self) -> usize {
+        if let Some(points) = &self.initial_positions {
+            return points.len();
+        }
         let n = |size: f32| {
             if !(size.is_finite() && self.spacing.is_finite() && self.spacing > 0.0) {
                 return 0;
@@ -4376,6 +4383,18 @@ impl SceneDoc {
         // 粒子流体：参数非法会让"加不进去/晶格爆炸"，必须当场报；粒子上限截断只警告。
         for (i, f) in self.fluids.iter().enumerate() {
             let p = format!("fluids[{i}]");
+            if let Some(points) = &f.initial_positions {
+                if points.is_empty()
+                    || points.len() > f.max_particles
+                    || !points.iter().flatten().all(|v| v.is_finite())
+                {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.initial_positions"),
+                        "初始粒子坐标必须非空、全部有限且数量不超过 max_particles（不截断）",
+                    ));
+                }
+            }
             if let Some(c) = &f.center {
                 if !c.iter().all(|v| v.is_finite()) {
                     cam_diags.push(Diagnostic::error_code(
@@ -4662,7 +4681,7 @@ impl SceneDoc {
                 ));
             } else {
                 let raw = f.raw_particles();
-                if raw > f.max_particles {
+                if f.initial_positions.is_none() && raw > f.max_particles {
                     cam_diags.push(
                         Diagnostic::warn(
                             format!("{p}.max_particles"),
@@ -9237,6 +9256,80 @@ mod tests {
                 "要报 {path}: {diags:?}"
             );
         }
+    }
+
+    #[test]
+    fn fluid_custom_initial_positions_roundtrip_and_build() {
+        let value = json!({"fluids": [{
+            "size": [1, 1, 1], "center": [10, 10, 10],
+            "spacing": 0.1, "max_particles": 3,
+            "velocity": [0.25, 0, 0],
+            "initial_positions": [[0, 2, 0], [1, 2, 0], [0, 3, 0]]
+        }]});
+        let doc =
+            SceneDoc::from_value(value).expect("custom world-space particle positions must parse");
+        assert!(!doc.validate().iter().any(|d| d.severity == Severity::Error));
+        let encoded = serde_json::to_value(&doc).unwrap();
+        assert_eq!(
+            encoded["fluids"][0]["initial_positions"],
+            json!([[0.0, 2.0, 0.0], [1.0, 2.0, 0.0], [0.0, 3.0, 0.0]])
+        );
+        assert_eq!(doc.fluids[0].raw_particles(), 3);
+        assert_eq!(doc.fluids[0].estimated_particles(), 3);
+        let mut built = crate::runner::build_world(&doc).unwrap();
+        let points = [
+            quench3d::prelude::Vec3::new(0.0, 2.0, 0.0),
+            quench3d::prelude::Vec3::new(1.0, 2.0, 0.0),
+            quench3d::prelude::Vec3::new(0.0, 3.0, 0.0),
+        ];
+        let velocity = quench3d::prelude::Vec3::new(0.25, 0.0, 0.0);
+        assert_eq!(built.world.fluids()[0].particles(), &points);
+        assert_eq!(built.world.fluids()[0].velocities(), &[velocity; 3]);
+        built.world.step(1.0 / 60.0);
+        for (got, initial) in built.world.fluids()[0].particles().iter().zip(points) {
+            assert!(got.is_finite());
+            assert!((got.x - (initial.x + velocity.x / 60.0)).abs() < 1e-6);
+            assert!(got.y < initial.y);
+        }
+    }
+
+    #[test]
+    fn fluid_custom_initial_positions_invalid_inputs_are_rejected() {
+        for points in [json!([]), json!([[0, 0, 0], [1, 0, 0], [2, 0, 0]])] {
+            let doc = SceneDoc::from_value(json!({"fluids": [{"size": [1, 1, 1], "max_particles": 2, "initial_positions": points}]})).unwrap();
+            assert!(doc.validate().iter().any(
+                |d| d.path == "fluids[0].initial_positions" && d.code == ErrorCode::OutOfRange
+            ));
+            assert!(crate::runner::build_world(&doc).is_err());
+        }
+        let mut doc = SceneDoc::from_value(
+            json!({"fluids": [{"size": [1, 1, 1], "initial_positions": [[0, 0, 0]]}]}),
+        )
+        .unwrap();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            doc.fluids[0].initial_positions = Some(vec![[0.0, bad, 0.0]]);
+            assert!(doc.validate().iter().any(
+                |d| d.path == "fluids[0].initial_positions" && d.code == ErrorCode::OutOfRange
+            ));
+            assert!(crate::runner::build_world(&doc).is_err());
+        }
+        let missing =
+            SceneDoc::from_value(json!({"fluids": [{"size": [1, 1, 1], "max_particles": 8}]}))
+                .unwrap();
+        let null = SceneDoc::from_value(
+            json!({"fluids": [{"size": [1, 1, 1], "max_particles": 8, "initial_positions": null}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&missing).unwrap(),
+            serde_json::to_value(&null).unwrap()
+        );
+        let a = crate::runner::build_world(&missing).unwrap();
+        let b = crate::runner::build_world(&null).unwrap();
+        assert_eq!(
+            a.world.fluids()[0].particles(),
+            b.world.fluids()[0].particles()
+        );
     }
 
     #[test]

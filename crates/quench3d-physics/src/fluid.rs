@@ -35,6 +35,10 @@ pub struct FluidDesc {
     pub center: Vec3,
     /// 发射体半尺寸（米）。
     pub half_extents: Vec3,
+    /// 可选的初始粒子世界坐标，按输入顺序保留，不应用 center 偏移。
+    /// 必须非空、全部有限且不超过 max_particles；None 使用原长方体晶格。
+    /// spacing 仍决定核半径和粒子质量，其他参数约束保持不变。
+    pub initial_positions: Option<Vec<Vec3>>,
     /// 粒子初始间距（米）。
     pub spacing: f32,
     /// 粒子碰撞半径（米）；缺省是 `spacing * 0.5`。
@@ -155,6 +159,7 @@ impl Default for FluidDesc {
         Self {
             center: Vec3::ZERO,
             half_extents: Vec3::splat(1.0),
+            initial_positions: None,
             spacing: 0.1,
             radius: 0.05,
             rest_density: 1000.0,
@@ -200,6 +205,11 @@ impl FluidDesc {
     pub fn is_valid(&self) -> bool {
         let he = self.half_extents;
         self.center.is_finite()
+            && self.initial_positions.as_ref().is_none_or(|points| {
+                !points.is_empty()
+                    && points.len() <= self.max_particles
+                    && points.iter().all(|p| p.is_finite())
+            })
             && he.is_finite()
             && (self.center - he).is_finite()
             && (self.center + he).is_finite()
@@ -251,6 +261,9 @@ impl FluidDesc {
 
     /// 按晶格估算的粒子数（已按 `max_particles` 截断）。
     pub fn estimated_particles(&self) -> usize {
+        if let Some(points) = &self.initial_positions {
+            return points.len();
+        }
         let n = |half: f32| ((half * 2.0 / self.spacing).floor() as usize).saturating_add(1);
         n(self.half_extents.x)
             .saturating_mul(n(self.half_extents.y))
@@ -744,32 +757,37 @@ impl Fluid {
         }
     }
 
-    /// 按参数里的长方体晶格发射粒子（确定性：固定下标顺序 + 固定方向）。
+    /// 按世界坐标点集或长方体晶格初始化粒子（确定性：保留固定输入/晶格顺序）。
     fn spawn(&mut self) {
         let d = &self.desc;
-        let n = |half: f32| ((half * 2.0 / d.spacing).floor() as usize).saturating_add(1);
-        let (nx, ny, nz) = (
-            n(d.half_extents.x),
-            n(d.half_extents.y),
-            n(d.half_extents.z),
-        );
-        let mut positions = Vec::with_capacity(d.estimated_particles());
-        'outer: for iz in 0..nz {
-            for iy in 0..ny {
-                for ix in 0..nx {
-                    if positions.len() >= d.max_particles {
-                        break 'outer;
+        let positions = if let Some(points) = &d.initial_positions {
+            points.clone()
+        } else {
+            let n = |half: f32| ((half * 2.0 / d.spacing).floor() as usize).saturating_add(1);
+            let (nx, ny, nz) = (
+                n(d.half_extents.x),
+                n(d.half_extents.y),
+                n(d.half_extents.z),
+            );
+            let mut positions = Vec::with_capacity(d.estimated_particles());
+            'outer: for iz in 0..nz {
+                for iy in 0..ny {
+                    for ix in 0..nx {
+                        if positions.len() >= d.max_particles {
+                            break 'outer;
+                        }
+                        let p = d.center - d.half_extents
+                            + Vec3::new(
+                                ix as f32 * d.spacing,
+                                iy as f32 * d.spacing,
+                                iz as f32 * d.spacing,
+                            );
+                        positions.push(p);
                     }
-                    let p = d.center - d.half_extents
-                        + Vec3::new(
-                            ix as f32 * d.spacing,
-                            iy as f32 * d.spacing,
-                            iz as f32 * d.spacing,
-                        );
-                    positions.push(p);
                 }
             }
-        }
+            positions
+        };
         self.positions = positions;
         self.velocities = vec![d.initial_velocity; self.positions.len()];
         self.mass = calibrated_mass(d);
@@ -1840,6 +1858,53 @@ mod tests {
     use crate::body::BodyBuilder;
     use crate::shape::Shape;
     use crate::world::PhysicsWorld;
+
+    #[test]
+    fn custom_initial_positions_preserve_world_order_and_velocity() {
+        let points = vec![
+            vec3(2.0, 1.0, 0.0),
+            vec3(0.0, 2.0, 0.0),
+            vec3(-1.0, 1.0, 0.0),
+        ];
+        let velocity = vec3(0.25, 0.0, 0.0);
+        let desc = FluidDesc {
+            center: Vec3::splat(10.0),
+            initial_positions: Some(points.clone()),
+            initial_velocity: velocity,
+            max_particles: points.len(),
+            ..FluidDesc::default()
+        };
+        assert_eq!(desc.estimated_particles(), points.len());
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        assert!(world.add_fluid(desc).is_some());
+        assert_eq!(world.fluids()[0].particles(), &points);
+        assert_eq!(world.fluids()[0].velocities(), &[velocity; 3]);
+        world.step(1.0 / 60.0);
+        for (actual, start) in world.fluids()[0].particles().iter().zip(points) {
+            assert!((*actual - (start + velocity / 60.0)).length() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn custom_initial_positions_reject_empty_nonfinite_and_over_capacity() {
+        let mut cases = vec![vec![], vec![Vec3::ZERO; 3]];
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for axis in 0..3 {
+                let mut point = Vec3::ZERO;
+                point[axis] = bad;
+                cases.push(vec![point]);
+            }
+        }
+        for points in cases {
+            let desc = FluidDesc {
+                initial_positions: Some(points),
+                max_particles: 2,
+                ..FluidDesc::default()
+            };
+            assert!(!desc.is_valid());
+            assert!(PhysicsWorld::default().add_fluid(desc).is_none());
+        }
+    }
 
     fn box_desc() -> FluidDesc {
         FluidDesc {

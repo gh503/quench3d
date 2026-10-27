@@ -856,6 +856,7 @@ pub fn json_schema() -> Value {
     });
     defs.insert("fluid".into(), {
         let mut d = def(&[
+            "initial_positions",
             "center",
             "size",
             "spacing",
@@ -897,6 +898,11 @@ pub fn json_schema() -> Value {
         d["properties"]["velocity"] = json!({
             "type": "array", "items": { "type": "number" },
             "minItems": 3, "maxItems": 3
+        });
+        d["properties"]["initial_positions"] = json!({
+            "type": ["array", "null"], "minItems": 1, "maxItems": 20000,
+            "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+            "description": "按顺序保留的初始粒子世界坐标，不加 center；数量不得超过 max_particles（运行时校验，不截断）。省略/null 使用晶格；size 仍必填。"
         });
         d["properties"]["drain_y"] = json!({ "type": "number" });
         d["properties"]["emit_rate"] = json!({ "type": "number", "minimum": 0 });

@@ -2320,6 +2320,10 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         let c = f.center.unwrap_or([0.0, 0.0, 0.0]);
         let desc = quench3d::physics::FluidDesc {
             center: v3(c),
+            initial_positions: f
+                .initial_positions
+                .as_ref()
+                .map(|points| points.iter().copied().map(v3).collect()),
             half_extents: Vec3::new(f.size[0] * 0.5, f.size[1] * 0.5, f.size[2] * 0.5),
             spacing: f.spacing,
             radius: f.radius(),

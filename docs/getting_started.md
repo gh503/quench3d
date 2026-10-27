@@ -6,6 +6,28 @@
 
 ---
 
+## 自定义流体初始点集
+
+场景 JSON 的 `fluids[].initial_positions` 可直接指定按顺序保留的**世界坐标**，
+替代长方体晶格。坐标不加 `center` 偏移，也不要求在 `size` 范围内：
+
+```json
+{"fluids": [{
+  "size": [1, 1, 1], "spacing": 0.1, "max_particles": 3,
+  "initial_positions": [[0, 2, 0], [1, 2, 0], [0, 3, 0]],
+  "velocity": [0.25, 0, 0]
+}]}
+```
+
+点集必须非空、所有坐标有限、数量不超过 `max_particles`；非法点集报错，**不截断**。
+省略或写 `null` 仍使用原晶格（包括原有上限截断规则）。`size` 仍必填，
+`center`、`size`、`spacing` 等原参数约束仍适用；`spacing` 继续决定核半径和粒子质量，
+不是根据离散点距离自动估算。所有初始粒子沿用统一 `velocity`，之后正常参与步进、
+碰撞、排水与连续发射。这是离散粒子初始化入口，**不是网格内部采样或自动容器填充**；
+上例为稀疏 L 形三点，用于说明坐标与顺序，不代表连续液体的高质量采样。
+Rust API 对应 `FluidDesc::initial_positions: Option<Vec<Vec3>>`；省略时用
+`..FluidDesc::default()`。
+
 ## 1. 心智模型：一帧里发生了什么
 
 ```
