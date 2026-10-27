@@ -205,6 +205,11 @@
 - [x] 粒子间最小分离（`fluids[].particle_collision`，缺省关闭）：每步 PBF 位置
   迭代后把距离小于直径的邻居沿连线推开（各半），再投影刚体边界；0 时旧路径逐位
   不变。回归：两颗几乎重合粒子在开关下分离到直径外。
+- [x] 粒子局部流场拖曳（`fluids[].flow_coupling`，1/s，缺省 0）：取刚体 AABB 内
+  粒子平均速度，把浸没刚体 XZ 速度拖向它；AABB 内无粒子时跳过，0 时旧路径逐位
+  不变。回归 `flowing_particles_drag_a_body_toward_the_local_flow`、
+  `flow_velocity_requires_particles_inside_the_box` 与 CLI 往返/校验。
+  这是局部速度耦合，不是逐点无滑移边界/两相流。
 - [x] 流体-刚体切向接触摩擦（`fluids[].contact_friction`，0~1，缺省关闭）：
   库仑上限 μ·|Jn|；静置接触用重力法向支持力近似载荷，动态刚体受反作用。
   滑动水柱减速、动态刚体被拖走回归；0 时旧路径逐位不变。

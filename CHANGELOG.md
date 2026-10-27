@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+- **粒子局部流场拖曳（`fluids[].flow_coupling`）**：用刚体 AABB 内 PBF 粒子的
+  平均速度作为局部流速，按 1/s 耦合把浸没刚体的 XZ 速度拖向它；周围没有粒子时
+  完全跳过（不会退化成零速阻尼），0 时旧路径逐位不变。回归
+  `flowing_particles_drag_a_body_toward_the_local_flow`（开/关同一初始状态，
+  耦合后 +X 速度更大）、`flow_velocity_requires_particles_inside_the_box`
+  （AABB 内无粒子返回 None）与 CLI fluid 往返/校验。仍是局部速度耦合，不是
+  逐点无滑移边界或两相流。
+
 - **解析水域水流（`waters[].flow`）**：`flow: [x, z]`（m/s，缺省 `[0, 0]`）让浸没
   刚体被水流拖向局部流速；垂直速度仍走原阻尼。未写 `flow` 或写 `[0,0]` 时完全走旧
   阻尼路径，旧场景逐位不变。回归

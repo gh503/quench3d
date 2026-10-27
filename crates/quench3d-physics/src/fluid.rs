@@ -52,6 +52,11 @@ pub struct FluidDesc {
     pub vorticity: f32,
     /// 浸没刚体的线性阻尼（1/s），只对浮力部分生效；0 = 无阻尼。
     pub drag: f32,
+    /// 粒子流对刚体的速度耦合（1/s，缺省 0 = 关闭，旧路径逐位不变）。
+    ///
+    /// 用刚体 AABB 内粒子的平均速度作为局部流速，把浸没部分的速度拖向它；
+    /// 这是**局部流场拖曳**，不是粒子对刚体的逐点无滑移边界，也不是两相流。
+    pub flow_coupling: f32,
     /// 初始速度（米/秒），缺省 0；给水柱一个喷射方向。
     pub initial_velocity: Vec3,
     /// 排水面高度：粒子 y 低于它就被移除（`None` = 不排水）。
@@ -164,6 +169,7 @@ impl Default for FluidDesc {
             emit_velocity: Vec3::ZERO,
             emit_spread: 0.0,
             drag: 6.0,
+            flow_coupling: 0.0,
             iterations: 4,
             max_particles: 4000,
             foam: false,
@@ -224,6 +230,8 @@ impl FluidDesc {
             && self.emit_spread >= 0.0
             && self.drag.is_finite()
             && self.drag >= 0.0
+            && self.flow_coupling.is_finite()
+            && self.flow_coupling >= 0.0
             && (1..=8).contains(&self.iterations)
             && (1..=20_000).contains(&self.max_particles)
             && self.foam_speed.is_finite()
@@ -618,6 +626,26 @@ impl Fluid {
     /// 粒子速度（只读）。
     pub fn velocities(&self) -> &[Vec3] {
         &self.velocities
+    }
+
+    /// 与 `aabb` 相交粒子的平均速度（局部流场，m/s）。
+    ///
+    /// 没有粒子时返回 `None`（不能把"没有流体"误当成零流速阻尼）；非有限速度
+    /// 被跳过。平均是**粒子数加权**，不是体积加权。
+    pub fn flow_velocity_near(&self, aabb: Aabb) -> Option<Vec3> {
+        let mut sum = Vec3::ZERO;
+        let mut n = 0u32;
+        for (p, v) in self.positions.iter().zip(self.velocities.iter()) {
+            if aabb.contains_point(*p) && v.is_finite() {
+                sum += *v;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            None
+        } else {
+            Some(sum / n as f32)
+        }
     }
 
     /// 当前泡沫/飞沫粒子（只读；最多 `desc.max_foam` 颗）。
@@ -2359,6 +2387,22 @@ mod tests {
         assert!(
             on_vy > off_vy + 1e-4,
             "上浮气泡应向上拖动尾流：off={off_vy:.6}, on={on_vy:.6}"
+        );
+    }
+
+    #[test]
+    fn flow_velocity_requires_particles_inside_the_box() {
+        let fluid = Fluid::new(box_desc()).unwrap();
+        assert!(
+            fluid
+                .flow_velocity_near(Aabb::new(Vec3::splat(100.0), Vec3::splat(101.0)))
+                .is_none(),
+            "没有粒子时不能返回零流速（否则会变成额外阻尼）"
+        );
+        let whole = Aabb::new(-Vec3::splat(10.0), Vec3::splat(10.0));
+        assert!(
+            fluid.flow_velocity_near(whole).is_some(),
+            "初始粒子在盒内，应能取到平均速度"
         );
     }
 

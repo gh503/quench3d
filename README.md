@@ -1204,7 +1204,8 @@ NaN 刚体  : 0
   "viscosity": 0.05, "surface_tension": 0, "vorticity": 0,
   "velocity": [0,0,0], "drain_y": -2.0,
   "emit_rate": 0, "emit_position": [0,1,0], "emit_radius": 0.1,
-  "emit_velocity": [0,1,0], "emit_spread": 0.0, "drag": 6, "iterations": 4,
+  "emit_velocity": [0,1,0], "emit_spread": 0.0, "drag": 6,
+  "flow_coupling": 0, "iterations": 4,
   "max_particles": 4000, "foam": false, "contact_friction": 0,
   "particle_collision": false, "bubbles": false,
   "bubble_rate": 20, "max_bubbles": 128, "bubble_radius": 0.03,
@@ -1213,6 +1214,9 @@ NaN 刚体  : 0
   "surface_mesh": false, "surface_resolution": 32 }`。粒子从长方体里
   按晶格发射，被静态/动态刚体推开，自身用密度约束 + XSPH 粘性求解；粒子撞到动态刚体时
   反推冲量，粒子自由表面还给刚体**浮力 + 阻尼**（双向）。
+  `flow_coupling`（1/s，缺省 0）把浸没刚体的 XZ 速度拖向刚体 AABB 内粒子的
+  平均速度；周围没有粒子时完全跳过。它是**局部流场速度耦合**，不是逐点无滑移
+  边界，也不是严格两相流。
   粒子质量按晶格静止密度校准（不是随便取 1），所以静止时密度比≈1；`simulate` 报告
   `fluids[]` 的 `particles` / `avg_density_ratio` / `max_speed` / `y` 范围。
   `surface_tension`（0~5）把表面粒子往邻居重心拉，减少"摊成薄膜"；`vorticity`

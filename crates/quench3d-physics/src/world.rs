@@ -1539,6 +1539,15 @@ impl PhysicsWorld {
                     b.linear_velocity *= f;
                     b.angular_velocity *= f;
                 }
+                if desc.flow_coupling > 0.0 {
+                    // 局部粒子流拖曳：只改 XZ，垂直速度留在原浮力/阻尼路径。
+                    // 刚体周围没有粒子时完全跳过（否则会变成额外的零速阻尼）。
+                    if let Some(flow) = fluid.flow_velocity_near(aabb) {
+                        let f = 1.0 / (1.0 + desc.flow_coupling * ratio * dt);
+                        b.linear_velocity.x = flow.x + (b.linear_velocity.x - flow.x) * f;
+                        b.linear_velocity.z = flow.z + (b.linear_velocity.z - flow.z) * f;
+                    }
+                }
             }
         }
         self.fluids = fluids;

@@ -2183,6 +2183,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             emit_velocity: v3(f.emit_velocity.unwrap_or([0.0, 0.0, 0.0])),
             emit_spread: f.emit_spread.unwrap_or(0.0),
             drag: f.drag,
+            flow_coupling: f.flow_coupling.unwrap_or(0.0),
             iterations: f.iterations,
             max_particles: f.max_particles,
             foam: f.foam,

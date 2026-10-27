@@ -1178,6 +1178,9 @@ pub struct FluidDoc {
     /// 浸没刚体的线性阻尼（1/s），缺省 6；0 = 无阻尼。
     #[serde(default = "default_fluid_drag")]
     pub drag: f32,
+    /// 粒子局部流场对刚体的速度耦合（1/s），缺省 0 = 关闭。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_coupling: Option<f32>,
     /// 密度约束迭代次数 1~8，缺省 4。
     #[serde(default = "default_fluid_iterations")]
     pub iterations: u32,
@@ -4420,6 +4423,15 @@ impl SceneDoc {
                         ErrorCode::OutOfRange,
                         format!("{p}.contact_friction"),
                         "接触摩擦必须在 0~1 之间",
+                    ));
+                }
+            }
+            if let Some(v) = f.flow_coupling {
+                if !(v.is_finite() && (0.0..=100.0).contains(&v)) {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::OutOfRange,
+                        format!("{p}.flow_coupling"),
+                        "粒子流耦合必须在 0~100 /s 之间",
                     ));
                 }
             }
@@ -9211,6 +9223,7 @@ mod tests {
                 { "size": [2, 1, 1], "spacing": 0.2, "radius": 0.08,
                   "rest_density": 900, "viscosity": 0.1, "iterations": 6,
                   "max_particles": 500, "contact_friction": 0.6,
+                  "flow_coupling": 4.5,
                   "particle_collision": true, "bubbles": true,
                   "bubble_rate": 40.0, "max_bubbles": 12,
                   "bubble_radius": 0.04, "bubble_buoyancy": 2.0,
@@ -9234,6 +9247,7 @@ mod tests {
         assert_eq!(again.fluids[1].radius, Some(0.08));
         assert_eq!(again.fluids[1].max_particles, 500);
         assert_eq!(again.fluids[1].contact_friction, Some(0.6));
+        assert_eq!(again.fluids[1].flow_coupling, Some(4.5));
         assert!(again.fluids[1].particle_collision);
         assert!(again.fluids[1].bubbles);
         assert_eq!(again.fluids[1].bubble_rate, Some(40.0));

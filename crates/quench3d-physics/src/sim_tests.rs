@@ -3829,6 +3829,36 @@ fn slider_pd_drives_to_target_displacement() {
 }
 
 #[test]
+fn flowing_particles_drag_a_body_toward_the_local_flow() {
+    use crate::fluid::FluidDesc;
+    let run = |flow_coupling: f32| {
+        let mut w = PhysicsWorld::new();
+        w.set_gravity(Vec3::ZERO);
+        let body =
+            w.add_builder(BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 }).position(Vec3::ZERO));
+        w.add_fluid(FluidDesc {
+            center: Vec3::ZERO,
+            half_extents: Vec3::splat(0.5),
+            spacing: 0.1,
+            radius: 0.05,
+            initial_velocity: Vec3::X * 2.0,
+            flow_coupling,
+            max_particles: 1000,
+            ..FluidDesc::default()
+        })
+        .expect("流体参数合法");
+        w.step(DT);
+        w.body(body).unwrap().linear_velocity()
+    };
+    let uncoupled = run(0.0);
+    let coupled = run(8.0);
+    assert!(
+        coupled.x > uncoupled.x + 0.02,
+        "8/s 的粒子流耦合应让刚体多获得 +X 速度：uncoupled={uncoupled:?}, coupled={coupled:?}"
+    );
+}
+
+#[test]
 fn water_current_drags_a_submerged_body_along_the_flow() {
     let make_world = |flow: Vec2| {
         let mut w = PhysicsWorld::new();

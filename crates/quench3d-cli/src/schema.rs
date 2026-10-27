@@ -863,6 +863,7 @@ pub fn json_schema() -> Value {
             "rest_density",
             "viscosity",
             "drag",
+            "flow_coupling",
             "iterations",
             "max_particles",
             "surface_tension",
@@ -912,6 +913,10 @@ pub fn json_schema() -> Value {
         d["properties"]["foam"] = json!({ "type": "boolean" });
         d["properties"]["particle_collision"] = json!({ "type": "boolean" });
         d["properties"]["contact_friction"] = json!({ "type": "number", "minimum": 0, "maximum": 1 });
+        d["properties"]["flow_coupling"] = json!({
+            "type": "number", "minimum": 0, "maximum": 100,
+            "description": "粒子局部流场速度耦合（1/s），缺省 0 = 关闭；把浸没刚体 XZ 速度拖向 AABB 内粒子平均速度"
+        });
         d["properties"]["bubbles"] = json!({ "type": "boolean" });
         d["properties"]["bubble_rate"] = json!({ "type": "number", "minimum": 0, "maximum": 5000 });
         d["properties"]["max_bubbles"] = json!({ "type": "integer", "minimum": 0, "maximum": 4096 });
