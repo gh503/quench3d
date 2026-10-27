@@ -3367,6 +3367,14 @@ impl PhysicsWorld {
                 roots.push(i);
             }
         }
+        // 运动学底座由宿主指定姿态；不能因槽位排在动态连杆之后而被反向驱动。
+        // 静态根仍保持原先优先级与顺序。
+        roots.extend((0..count).filter(|&i| {
+            self.bodies[i]
+                .body
+                .as_ref()
+                .is_some_and(|body| body.body_type == BodyType::Kinematic)
+        }));
         if roots.is_empty() {
             roots.extend((0..count).find(|&i| self.bodies[i].body.is_some()));
         }
@@ -4520,6 +4528,48 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn kinematic_fk_uses_kinematic_roots_independent_of_insertion_order() {
+        for root_first in [false, true] {
+            let mut w = PhysicsWorld::new();
+            w.set_gravity(Vec3::ZERO);
+            w.set_collisions_enabled(false);
+            w.set_kinematic_fk(true);
+            let base = BodyBuilder::kinematic(Shape::Sphere { radius: 0.1 }).build();
+            let link = BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .position(Vec3::X)
+                .build();
+            let (root, child) = if root_first {
+                let root = w.add_body(base);
+                (root, w.add_body(link))
+            } else {
+                let child = w.add_body(link);
+                (w.add_body(base), child)
+            };
+            w.add_joint(Joint::Hinge {
+                a: root,
+                b: child,
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: -Vec3::X,
+                local_axis_a: Vec3::Y,
+                local_axis_b: Vec3::Y,
+                limits: None,
+                motor: Some(crate::joints::HingeMotor::servo(
+                    std::f32::consts::FRAC_PI_2,
+                    10.0,
+                )),
+            });
+            let before = w.body(root).unwrap().transform;
+            w.step_substeps(1.0 / 60.0, 1);
+            assert_eq!(
+                w.body(root).unwrap().transform,
+                before,
+                "FK must preserve the prescribed base pose: root_first={root_first}"
+            );
+            assert!((w.body(child).unwrap().position() - Vec3::NEG_Z).length() < 1e-4);
+        }
+    }
+
     #[test]
     fn kinematic_fk_carries_fixed_attachments() {
         for slider in [false, true] {
