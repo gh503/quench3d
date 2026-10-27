@@ -1136,11 +1136,17 @@ impl Fluid {
                 if self.positions[i].y >= y {
                     self.positions[keep] = self.positions[i];
                     self.velocities[keep] = self.velocities[i];
+                    self.densities[keep] = self.densities[i];
+                    if !self.gas_fractions.is_empty() {
+                        self.gas_fractions[keep] = self.gas_fractions[i];
+                    }
                     keep += 1;
                 }
             }
             self.positions.truncate(keep);
             self.velocities.truncate(keep);
+            self.densities.truncate(keep);
+            self.gas_fractions.truncate(keep);
         }
         self.spawn_foam(dt);
         let foam_radius = (self.desc.radius * 0.5).max(0.005);
@@ -2301,6 +2307,88 @@ mod tests {
             on_liquid <= off_liquid,
             "开反冲后液体动量不应增加：关 {off_liquid}，开 {on_liquid}"
         );
+    }
+
+    #[test]
+    fn drain_compacts_particle_gas_and_density_samples() {
+        for coupling in [true, false] {
+            let mut reference = Fluid::new(FluidDesc {
+                max_particles: 8,
+                viscosity: 0.0,
+                bubble_density_coupling: coupling,
+                bubble_buoyancy: 0.0,
+                bubble_drag: 0.0,
+                ..box_desc()
+            })
+            .unwrap();
+            reference.positions = vec![
+                vec3(0.0, -1.0, 0.0),
+                vec3(0.0, 1.0, 0.0),
+                vec3(0.05, 1.0, 0.0),
+            ];
+            reference.velocities = vec![Vec3::ZERO; 3];
+            reference.add_bubble(Bubble {
+                position: vec3(0.0, -1.0, 0.0),
+                velocity: Vec3::ZERO,
+                radius: 0.05,
+                rest_radius: 0.05,
+                age: 0.0,
+                life: 10.0,
+            });
+            for drain_y in [0.0, 10.0] {
+                let mut full = reference.clone();
+                let mut drained = reference.clone();
+                drained.desc.drain_y = Some(drain_y);
+                full.step(&mut [], Vec3::ZERO, 1.0 / 60.0);
+                drained.step(&mut [], Vec3::ZERO, 1.0 / 60.0);
+                let survivors: Vec<_> = full
+                    .positions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.y >= drain_y)
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(
+                    drained.positions,
+                    survivors
+                        .iter()
+                        .map(|&i| full.positions[i])
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    drained.velocities,
+                    survivors
+                        .iter()
+                        .map(|&i| full.velocities[i])
+                        .collect::<Vec<_>>()
+                );
+                let expected_gas: Vec<_> = if coupling {
+                    survivors.iter().map(|&i| full.gas_fractions[i]).collect()
+                } else {
+                    vec![]
+                };
+                assert_eq!(
+                    drained.gas_fractions(),
+                    expected_gas,
+                    "coupling={coupling}, drain_y={drain_y}"
+                );
+                let expected_density = if survivors.is_empty() {
+                    0.0
+                } else {
+                    survivors
+                        .iter()
+                        .map(|&i| full.densities[i] / full.desc.rest_density)
+                        .sum::<f32>()
+                        / survivors.len() as f32
+                };
+                assert_eq!(
+                    drained.stats().avg_density_ratio.to_bits(),
+                    expected_density.to_bits(),
+                    "survivor density stats"
+                );
+                assert_eq!(drained.stats().particles, survivors.len());
+            }
+        }
     }
 
     #[test]
