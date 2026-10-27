@@ -842,8 +842,8 @@ impl Fluid {
                 if !dist.is_finite() || dist >= min_dist {
                     continue;
                 }
-                // 完全重合时给一个确定性的分离方向（X），避免 0/0。
-                let dir = if dist > 1e-6 { delta / dist } else { Vec3::X };
+                // 非零距离保留连线方向；完全重合或长度下溢时用确定性 X，避免 0/0。
+                let dir = if dist > 0.0 { delta / dist } else { Vec3::X };
                 let push = (min_dist - dist) * 0.5;
                 predicted[i] += dir * push;
                 predicted[j] -= dir * push;
@@ -2818,6 +2818,67 @@ mod tests {
             s.min_y
         );
         assert!(s.max_speed < 4.0, "max_speed={}", s.max_speed);
+    }
+
+    #[test]
+    fn particle_collision_separates_nearly_coincident_pairs_in_their_direction() {
+        for delta in [
+            Vec3::ZERO,
+            vec3(-5e-7, 0.0, 0.0),
+            vec3(5e-7, 0.0, 0.0),
+            vec3(0.0, 5e-7, 0.0),
+            vec3(0.0, -5e-7, 0.0),
+            vec3(0.0, 0.0, 5e-7),
+            vec3(0.0, 0.0, -5e-7),
+        ] {
+            for collision in [false, true] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                world
+                    .add_fluid(FluidDesc {
+                        half_extents: Vec3::splat(0.2),
+                        spacing: 0.1,
+                        radius: 0.05,
+                        iterations: 1,
+                        max_particles: 8,
+                        viscosity: 0.0,
+                        particle_collision: collision,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                let fluid = &mut world.fluids_mut()[0];
+                fluid.positions = vec![delta, Vec3::ZERO];
+                fluid.velocities = vec![Vec3::ZERO; 2];
+                world.step(1.0 / 60.0);
+                let positions = world.fluids()[0].particles();
+                let actual = positions[0] - positions[1];
+                if collision {
+                    // 2e-8 is several ULPs at 0.1, but far below the 5e-7 gap.
+                    assert!(
+                        actual.length() >= 0.1 - 2e-8,
+                        "delta={delta:?}: separation={}",
+                        actual.length()
+                    );
+                    if delta != Vec3::ZERO {
+                        assert!(
+                            actual.dot(delta) > 0.0,
+                            "separation reversed: {delta:?} -> {actual:?}"
+                        );
+                        assert!(actual.cross(delta / delta.length()).length() < 2e-8);
+                    }
+                } else {
+                    for (got, expected) in positions.iter().zip([delta, Vec3::ZERO]) {
+                        assert_eq!(
+                            [got.x.to_bits(), got.y.to_bits(), got.z.to_bits()],
+                            [
+                                expected.x.to_bits(),
+                                expected.y.to_bits(),
+                                expected.z.to_bits()
+                            ]
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
