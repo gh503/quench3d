@@ -267,6 +267,13 @@ pub(crate) struct ContactCache {
     scratch: Vec<((u32, u32), u32, CachedImpulse)>,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static CACHE_REFERENCE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    pub(crate) static CACHE_FAST_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CACHE_PAIR_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl ContactCache {
     /// 清空（保留已分配的容量）。
     pub fn clear(&mut self) {
@@ -278,6 +285,48 @@ impl ContactCache {
 
     /// 用当前这一步的接触重建缓存（缓冲复用，稳态零分配）。
     pub fn rebuild(&mut self, contacts: &[SolverContact]) {
+        #[cfg(test)]
+        if CACHE_REFERENCE.get() == 1 || CACHE_REFERENCE.get() == 3 {
+            self.rebuild_unsorted(contacts);
+            return;
+        }
+        // A sorted input already has exactly the stable (pair, sequence) order.
+        // Avoid sorting/copying the large scratch tuples on this common path.
+        if !contacts
+            .windows(2)
+            .all(|w| (w[0].a as u32, w[0].b as u32) <= (w[1].a as u32, w[1].b as u32))
+        {
+            self.rebuild_unsorted(contacts);
+            return;
+        }
+        self.keys.clear();
+        self.ranges.clear();
+        self.impulses.clear();
+        self.scratch.clear();
+        self.impulses.reserve(contacts.len());
+        for c in contacts {
+            let key = (c.a as u32, c.b as u32);
+            if self.keys.last() != Some(&key) {
+                let start = self.impulses.len() as u32;
+                self.keys.push(key);
+                self.ranges.push((start, start));
+            }
+            self.impulses.push(CachedImpulse {
+                local_a: c.local_a,
+                local_b: c.local_b,
+                normal: c.normal_impulse,
+                tangent: c.tangent_impulse,
+                feature_id: c.feature_id,
+            });
+            self.ranges.last_mut().unwrap().1 = self.impulses.len() as u32;
+        }
+        #[cfg(test)]
+        if !contacts.is_empty() {
+            CACHE_FAST_REBUILDS.set(CACHE_FAST_REBUILDS.get() + 1);
+        }
+    }
+
+    fn rebuild_unsorted(&mut self, contacts: &[SolverContact]) {
         self.keys.clear();
         self.ranges.clear();
         self.impulses.clear();
@@ -331,6 +380,37 @@ impl ContactCache {
         self.impulses.len()
     }
 
+    /// Select within an already located pair, retaining feature and tie order.
+    fn lookup_in_list(
+        list: &[CachedImpulse],
+        local_a: Vec3,
+        local_b: Vec3,
+        feature_id: u32,
+        tol: f32,
+    ) -> Option<CachedImpulse> {
+        // 首选**特征 ID 精确匹配**：与点顺序、微小位移无关，不需要容差。
+        // 这也是"持久流形"的关键——没有它，滑动中的物体会把冲量沿用到相邻特征点上。
+        if feature_id != 0 {
+            for c in list {
+                if c.feature_id == feature_id {
+                    return Some(*c);
+                }
+            }
+        }
+        let mut best: Option<(f32, CachedImpulse)> = None;
+        for c in list {
+            // 两端锚点都要接近，避免把不同特征点的冲量错误沿用。
+            let d = (c.local_a - local_a).length_squared() + (c.local_b - local_b).length_squared();
+            if d > tol * tol {
+                continue;
+            }
+            if best.is_none() || d < best.unwrap().0 {
+                best = Some((d, *c));
+            }
+        }
+        best.map(|(_, c)| c)
+    }
+    #[cfg(test)]
     /// 查询与给定本地锚点最接近的缓存冲量。
     fn lookup(
         &self,
@@ -415,7 +495,7 @@ pub(crate) struct SolverContact {
     pub normal_impulse: f32,
     /// 累积切向冲量。
     pub tangent_impulse: [f32; 2],
-    /// 接触特征 ID（热启动按它对账，见 [`ContactCache::lookup`]）。
+    /// 接触特征 ID（热启动按它对账，见 [`ContactCache::lookup_in_list`]）。
     pub feature_id: u32,
     /// 伪冲量（位置修正）。
     pub pseudo_impulse: f32,
@@ -483,6 +563,215 @@ impl ContactSolver {
     // 配置/步长）。塞进一个结构体只会把调用点都改一遍、把借用关系搞复杂，换不来可读性。
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
+        &mut self,
+        views: &[BodyView],
+        materials: &[ContactMaterial],
+        pre_velocities: &[(Vec3, Vec3)],
+        manifolds: &[ManifoldEntry],
+        cache: &ContactCache,
+        cfg: &SolverConfig,
+        dt: f32,
+        precompute: bool,
+    ) {
+        #[cfg(test)]
+        if CACHE_REFERENCE.get() == 1 || CACHE_REFERENCE.get() == 2 {
+            self.prepare_reference(
+                views,
+                materials,
+                pre_velocities,
+                manifolds,
+                cache,
+                cfg,
+                dt,
+                precompute,
+            );
+            return;
+        }
+        #[cfg(test)]
+        let mut pair_searches = 0;
+        self.contacts.clear();
+        for m in manifolds {
+            let (a, b) = (m.a, m.b);
+            let ma = match materials.get(a) {
+                Some(x) => *x,
+                None => continue,
+            };
+            let mb = match materials.get(b) {
+                Some(x) => *x,
+                None => continue,
+            };
+            let va = views[a];
+            let vb = views[b];
+            // 合成规则怎么定（**先显式、后缺省**，与 Unity 的 per-collider
+            // combine + 工程缺省同一套思路）：
+            // 1. 只有一端显式指定 → 用它（"我只在冰面上写 min" 能生效）；
+            // 2. 两端都指定且相同 → 就是它；
+            // 3. 两端都指定但不同 → 用 **A**（`ContactPair` 的 A 是 slot 序号小的
+            //    那个，宽相输出按序号有序，所以结果与线程数/遍历顺序无关）；
+            // 4. 两端都没指定 → 世界的缺省规则。
+            let friction_rule = resolve_rule(
+                ma.friction_combine,
+                mb.friction_combine,
+                cfg.friction_combine,
+            );
+            let restitution_rule = resolve_rule(
+                ma.restitution_combine,
+                mb.restitution_combine,
+                cfg.restitution_combine,
+            );
+            let friction_dynamic = friction_rule.combine(ma.dynamic_friction, mb.dynamic_friction);
+            let friction_static = friction_rule.combine(ma.static_friction, mb.static_friction);
+            let rolling_friction = ma.rolling_friction.max(mb.rolling_friction);
+            let restitution = restitution_rule.combine(ma.restitution, mb.restitution);
+            // Lazy: do not search when warm starting is disabled or all points are invalid.
+            let mut cached_pair = None;
+            for cp in &m.points {
+                let (position, normal, penetration) = (cp.position, cp.normal, cp.penetration);
+                if !position.is_finite() || !normal.is_finite() || !penetration.is_finite() {
+                    continue;
+                }
+                let n = normal.normalize_or_zero();
+                if n.length_squared() < 0.5 {
+                    continue;
+                }
+                let ra = position - va.com;
+                let rb = position - vb.com;
+                let k_normal = va.k_axis(ra, n) + vb.k_axis(rb, n);
+                if !k_normal.is_finite() || k_normal <= 1e-12 {
+                    continue;
+                }
+                let (t1, t2) = n.any_orthonormal_pair();
+                let k1 = va.k_axis(ra, t1) + vb.k_axis(rb, t1);
+                let k2 = va.k_axis(ra, t2) + vb.k_axis(rb, t2);
+                // 单位冲量产生的角速度变化只与接触几何有关，准备阶段算一次，
+                // 10 次速度迭代里直接乘标量，省掉每次的叉积 + 3x3 乘法。
+                let (normal_arm, tangent_arm) = if precompute {
+                    let arm = |v: &BodyView, r: Vec3, dir: Vec3| {
+                        if v.inv_m > 0.0 {
+                            v.inv_i_world(r.cross(dir))
+                        } else {
+                            Vec3::ZERO
+                        }
+                    };
+                    (
+                        [arm(&va, ra, n), arm(&vb, rb, n)],
+                        [
+                            [arm(&va, ra, t1), arm(&vb, rb, t1)],
+                            [arm(&va, ra, t2), arm(&vb, rb, t2)],
+                        ],
+                    )
+                } else {
+                    ([Vec3::ZERO; 2], [[Vec3::ZERO; 2]; 2])
+                };
+                // 恢复：用求解前的相对法向速度。
+                let vrel = vb.velocity_at(rb) - va.velocity_at(ra);
+                let vn = vrel.dot(n);
+                let restitution_bias = if vn < -cfg.restitution_threshold {
+                    -restitution * vn
+                } else {
+                    0.0
+                };
+                // 接触余量：穿透量为负 = 两点还差 `-penetration` 米才贴上，
+                // 这一步允许以 `separation/dt` 的速度继续逼近；否则物体在余量
+                // 距离上就被法向约束顶住（"悬空"）。
+                // 只在**用户显式开了接触余量**时才改速度目标：缺省 0 时必须与历史
+                // 逐位相同（窄相本来就会给少量负穿透，这里若不加这道门会把它们
+                // 也当成"分离的余量接触"，结果整体漂移——digest 测试当场抓出来）。
+                let speculative_bias = if cfg.speculative_margin > 0.0 && penetration < 0.0 {
+                    (penetration / dt).min(0.0)
+                } else {
+                    0.0
+                };
+                let local_a = va.rot.inverse().mul_vec3(position - va.pos);
+                let local_b = vb.rot.inverse().mul_vec3(position - vb.pos);
+                // 与宽相/窄相用同一个哈希，缓存键才对得上
+                let feature_id = crate::contact::feature_id_from_local(local_a, local_b);
+                // 静摩擦 vs 动摩擦：看**施力之前**的切向相对速度（`pre_velocities`）。
+                //
+                // 两个"必须"：
+                // * 必须用施力前的速度：静止的箱子被推的那一步，施力后速度已经是
+                //   Δt × 加速度（1/60 秒 × 5 m/s² ≈ 0.08 m/s），按它判定会永远走
+                //   动摩擦，"静摩擦"这一项就形同虚设；
+                // * 必须在准备阶段定一次：如果每次速度迭代重新判断，摩擦锥上界会在
+                //   迭代中跳变，收敛会变差，而且结果依赖迭代次数。
+                let vt = {
+                    let (la, wa) = pre_velocities.get(a).copied().unwrap_or_default();
+                    let (lb, wb) = pre_velocities.get(b).copied().unwrap_or_default();
+                    let vrel = (lb + wb.cross(rb)) - (la + wa.cross(ra));
+                    let tangential = vrel - n * vrel.dot(n);
+                    tangential.length()
+                };
+                let friction = if vt > cfg.static_friction_speed {
+                    friction_dynamic
+                } else {
+                    friction_static
+                };
+                let anisotropy = if va.friction_anisotropy >= vb.friction_anisotropy {
+                    (va.friction_axis, va.friction_anisotropy, va.rot)
+                } else {
+                    (vb.friction_axis, vb.friction_anisotropy, vb.rot)
+                };
+                let friction_tangent = anisotropic_friction(
+                    friction,
+                    anisotropy.0,
+                    anisotropy.1,
+                    anisotropy.2,
+                    n,
+                    t1,
+                    t2,
+                );
+                let mut normal_impulse = 0.0;
+                let mut tangent_impulse = [0.0f32; 2];
+                if cfg.warm_starting {
+                    let list = cached_pair.get_or_insert_with(|| {
+                        #[cfg(test)]
+                        {
+                            pair_searches += 1;
+                        }
+                        cache.list(a as u32, b as u32)
+                    });
+                    if let Some(c) =
+                        ContactCache::lookup_in_list(list, local_a, local_b, feature_id, 0.02)
+                    {
+                        normal_impulse = c.normal.max(0.0);
+                        tangent_impulse = c.tangent;
+                    }
+                }
+                self.contacts.push(SolverContact {
+                    a,
+                    b,
+                    normal: n,
+                    ra,
+                    rb,
+                    local_a,
+                    local_b,
+                    tangent: [t1, t2],
+                    k_normal,
+                    k_tangent: [k1, k2],
+                    normal_arm,
+                    tangent_arm,
+                    precomputed: precompute,
+                    friction,
+                    friction_tangent,
+                    rolling_friction,
+                    friction_cone: cfg.friction_cone,
+                    restitution_bias,
+                    speculative_bias,
+                    penetration,
+                    normal_impulse,
+                    tangent_impulse,
+                    feature_id,
+                    pseudo_impulse: 0.0,
+                });
+            }
+        }
+        #[cfg(test)]
+        CACHE_PAIR_SEARCHES.set(CACHE_PAIR_SEARCHES.get() + pair_searches);
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_reference(
         &mut self,
         views: &[BodyView],
         materials: &[ContactMaterial],
@@ -1448,5 +1737,296 @@ mod world_inv_inertia_tests {
     fn frozen_view_has_zero_inertia() {
         let v = BodyView::frozen();
         assert!(v.inv_i_world(Vec3::new(1.0, 2.0, 3.0)).length() == 0.0);
+    }
+}
+
+#[cfg(test)]
+mod cache_algorithm_tests {
+    use super::*;
+
+    fn contact(a: usize, b: usize, i: usize) -> SolverContact {
+        SolverContact {
+            a,
+            b,
+            normal: Vec3::Y,
+            ra: Vec3::ZERO,
+            rb: Vec3::ZERO,
+            local_a: vec3((i % 4) as f32 * 0.005, 0.0, 0.0),
+            local_b: Vec3::ZERO,
+            tangent: [Vec3::X, Vec3::Z],
+            k_normal: 1.0,
+            k_tangent: [1.0; 2],
+            normal_arm: [Vec3::ZERO; 2],
+            tangent_arm: [[Vec3::ZERO; 2]; 2],
+            precomputed: false,
+            friction: 0.8,
+            friction_tangent: [0.8; 2],
+            rolling_friction: 0.0,
+            friction_cone: false,
+            restitution_bias: 0.0,
+            speculative_bias: 0.0,
+            penetration: 0.01,
+            normal_impulse: i as f32 + 0.25,
+            tangent_impulse: [i as f32 * 0.01, -0.0],
+            feature_id: (i % 3) as u32,
+            pseudo_impulse: 0.0,
+        }
+    }
+
+    fn bits(c: CachedImpulse) -> Vec<u32> {
+        let mut out = Vec::new();
+        for v in [c.local_a, c.local_b] {
+            out.extend([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]);
+        }
+        out.extend([
+            c.normal.to_bits(),
+            c.tangent[0].to_bits(),
+            c.tangent[1].to_bits(),
+            c.feature_id,
+        ]);
+        out
+    }
+
+    #[test]
+    fn cache_rebuild_and_lookup_match_reference_multiframe() {
+        CACHE_REFERENCE.set(0);
+        CACHE_FAST_REBUILDS.set(0);
+        let mut actual = ContactCache::default();
+        let mut reference = ContactCache::default();
+        for frame in 0..40 {
+            let mut contacts = Vec::new();
+            for a in 0..32 {
+                for i in 0..16 {
+                    contacts.push(contact(a, a + 1, i + frame));
+                }
+            }
+            // Duplicate feature IDs, equal-distance anchors and opposite pair order.
+            contacts.push(contact(1, 0, frame));
+            if frame % 2 == 0 {
+                contacts.sort_by_key(|c| (c.a, c.b));
+            } else {
+                contacts.rotate_left(17);
+                contacts.reverse();
+            }
+            // Retain unusual bits: selection must not silently normalize them.
+            contacts[7].local_a.x = f32::NAN;
+            contacts[9].normal_impulse = -0.0;
+            actual.rebuild(&contacts);
+            reference.rebuild_unsorted(&contacts);
+            assert_eq!(actual.keys, reference.keys);
+            assert_eq!(actual.ranges, reference.ranges);
+            assert_eq!(
+                actual
+                    .impulses
+                    .iter()
+                    .copied()
+                    .map(bits)
+                    .collect::<Vec<_>>(),
+                reference
+                    .impulses
+                    .iter()
+                    .copied()
+                    .map(bits)
+                    .collect::<Vec<_>>()
+            );
+            for a in 0..34 {
+                for id in [0, 1, 2, 99] {
+                    for x in [0.0, 0.0025, 0.0075, 0.02, 0.5, f32::NAN] {
+                        let anchor = vec3(x, 0.0, 0.0);
+                        let got = ContactCache::lookup_in_list(
+                            actual.list(a, a + 1),
+                            anchor,
+                            Vec3::ZERO,
+                            id,
+                            0.02,
+                        );
+                        let expected = reference.lookup(a, a + 1, anchor, Vec3::ZERO, id, 0.02);
+                        assert_eq!(
+                            got.map(bits),
+                            expected.map(bits),
+                            "frame={frame} a={a} id={id} x={x}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            CACHE_FAST_REBUILDS.get(),
+            20,
+            "both sorted fast path and unsorted fallback exercised"
+        );
+        actual.clear();
+        assert!(actual.impulses.is_empty());
+        actual.rebuild(&[]);
+        assert!(actual.keys.is_empty());
+    }
+
+    #[test]
+    fn cache_lookup_retains_feature_priority_and_first_ties() {
+        let make = |x, normal, feature_id| CachedImpulse {
+            local_a: vec3(x, 0.0, 0.0),
+            local_b: Vec3::ZERO,
+            normal,
+            tangent: [-0.0, 0.0],
+            feature_id,
+        };
+        let list = [make(-0.01, 1.0, 5), make(0.01, 2.0, 5), make(1.0, 3.0, 8)];
+        // Exact feature matching wins even outside the geometric tolerance.
+        assert_eq!(
+            ContactCache::lookup_in_list(&list, Vec3::ZERO, Vec3::ZERO, 8, 0.02)
+                .unwrap()
+                .normal,
+            3.0
+        );
+        // Duplicate features and equally near fallbacks retain the first entry.
+        for id in [0, 5, 99] {
+            assert_eq!(
+                ContactCache::lookup_in_list(&list, Vec3::ZERO, Vec3::ZERO, id, 0.02)
+                    .unwrap()
+                    .normal,
+                1.0
+            );
+        }
+        let boundary = [make(0.02, 4.0, 0)];
+        assert!(ContactCache::lookup_in_list(&boundary, Vec3::ZERO, Vec3::ZERO, 0, 0.02).is_some());
+        assert!(ContactCache::lookup_in_list(
+            &boundary,
+            vec3(-0.001, 0.0, 0.0),
+            Vec3::ZERO,
+            0,
+            0.02
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn cache_prepare_reuses_pair_search_and_preserves_warm_start_bits() {
+        CACHE_REFERENCE.set(0);
+        let mut cache = ContactCache::default();
+        let contacts: Vec<_> = (0..16).map(|i| contact(0, 1, i)).collect();
+        cache.rebuild(&contacts);
+        let body = crate::BodyBuilder::dynamic(crate::Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        })
+        .build();
+        let views = [BodyView::from_body(&body), BodyView::from_body(&body)];
+        let material = ContactMaterial {
+            dynamic_friction: 0.8,
+            static_friction: 0.9,
+            rolling_friction: 0.0,
+            restitution: 0.0,
+            friction_combine: None,
+            restitution_combine: None,
+        };
+        let mut m = ManifoldEntry {
+            a: 0,
+            b: 1,
+            points: SmallVec::new(),
+        };
+        for i in 0..4 {
+            m.points.push(ContactPoint {
+                position: vec3(i as f32 * 0.005, 0.0, 0.0),
+                normal: Vec3::Y,
+                penetration: 0.01,
+                feature_id: 0,
+            });
+        }
+        let mut opt = ContactSolver::default();
+        let mut old = ContactSolver::default();
+        let mut cfg = SolverConfig::default();
+        CACHE_PAIR_SEARCHES.set(0);
+        for frame in 0..40 {
+            for p in &mut m.points {
+                p.position.x += 0.00001;
+            }
+            opt.prepare(
+                &views,
+                &[material; 2],
+                &[],
+                std::slice::from_ref(&m),
+                &cache,
+                &cfg,
+                1.0 / 60.0,
+                frame % 2 == 0,
+            );
+            old.prepare_reference(
+                &views,
+                &[material; 2],
+                &[],
+                std::slice::from_ref(&m),
+                &cache,
+                &cfg,
+                1.0 / 60.0,
+                frame % 2 == 0,
+            );
+            assert_eq!(opt.contacts.len(), old.contacts.len());
+            for (a, b) in opt.contacts.iter().zip(&old.contacts) {
+                assert_eq!(a.normal_impulse.to_bits(), b.normal_impulse.to_bits());
+                assert_eq!(
+                    a.tangent_impulse.map(f32::to_bits),
+                    b.tangent_impulse.map(f32::to_bits)
+                );
+            }
+            let mut v1 = views;
+            let mut v2 = views;
+            for _ in 0..10 {
+                opt.solve_velocity(&mut v1);
+                old.solve_velocity(&mut v2);
+            }
+            for (a, b) in v1.iter().zip(v2) {
+                for (va, vb) in [(a.lin, b.lin), (a.ang, b.ang)] {
+                    assert_eq!(
+                        [va.x.to_bits(), va.y.to_bits(), va.z.to_bits()],
+                        [vb.x.to_bits(), vb.y.to_bits(), vb.z.to_bits()]
+                    );
+                }
+            }
+            cache.rebuild(&opt.contacts);
+        }
+        assert_eq!(
+            CACHE_PAIR_SEARCHES.get(),
+            40,
+            "four contacts require only one pair lookup per manifold"
+        );
+        cfg.warm_starting = false;
+        opt.prepare(
+            &views,
+            &[material; 2],
+            &[],
+            std::slice::from_ref(&m),
+            &cache,
+            &cfg,
+            1.0 / 60.0,
+            false,
+        );
+        assert_eq!(CACHE_PAIR_SEARCHES.get(), 40);
+        cfg.warm_starting = true;
+        for p in &mut m.points {
+            p.normal = Vec3::ZERO;
+        }
+        opt.prepare(
+            &views,
+            &[material; 2],
+            &[],
+            std::slice::from_ref(&m),
+            &cache,
+            &cfg,
+            1.0 / 60.0,
+            false,
+        );
+        assert!(opt.contacts.is_empty());
+        assert_eq!(CACHE_PAIR_SEARCHES.get(), 40);
+        m.points.clear();
+        opt.prepare(
+            &views,
+            &[material; 2],
+            &[],
+            &[m],
+            &cache,
+            &cfg,
+            1.0 / 60.0,
+            false,
+        );
+        assert_eq!(CACHE_PAIR_SEARCHES.get(), 40);
     }
 }

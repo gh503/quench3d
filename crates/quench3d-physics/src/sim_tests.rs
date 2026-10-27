@@ -3958,3 +3958,151 @@ fn deep_stack_2000_perf() {
         .fold(f32::INFINITY, f32::min);
     assert!(lowest > -1.0, "堆不能穿地：最低 y = {lowest}");
 }
+
+fn deep_stack_2000_cache_ab_run(reference: bool) -> (f64, Vec<u32>) {
+    crate::solver::CACHE_REFERENCE.set(if reference { 1 } else { 0 });
+    crate::solver::CACHE_FAST_REBUILDS.set(0);
+    crate::solver::CACHE_PAIR_SEARCHES.set(0);
+    let mut world = PhysicsWorld::new();
+    add_ground(&mut world, 0.8, 0.0);
+    let mut n = 0;
+    for y in 0..20 {
+        for x in 0..10 {
+            for z in 0..10 {
+                world.add_builder(
+                    BodyBuilder::dynamic(Shape::Box {
+                        half_extents: Vec3::splat(0.1),
+                    })
+                    .position(vec3(
+                        (x as f32 - 4.5) * 0.205,
+                        y as f32 * 0.205 + 0.105,
+                        (z as f32 - 4.5) * 0.205,
+                    ))
+                    .friction(0.8)
+                    .restitution(0.0),
+                );
+                n += 1;
+            }
+        }
+    }
+    assert_eq!(n, 2000);
+    world.set_phase_timing(true);
+    let start = std::time::Instant::now();
+    for _ in 0..60 {
+        world.step(DT);
+    }
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let per_step = ms / 60.0;
+    let awake = world.bodies().filter(|(_, b)| !b.is_sleeping()).count();
+    println!("2000 体深堆：60 步 {ms:.1} ms（{per_step:.2} ms/步），清醒 {awake}");
+    let t = world.phase_timings();
+    println!(
+        "  候选对/步 {:.0}，流形/步 {:.0}，岛 {}（最大 {}，多体 {}）",
+        t.candidate_pairs as f64 / t.steps.max(1) as f64,
+        t.manifolds as f64 / t.steps.max(1) as f64,
+        t.islands,
+        t.largest_island,
+        t.multi_body_islands
+    );
+    for (name, us) in t.per_step() {
+        println!("  {name}: {us:.1} us");
+    }
+    assert_all_finite(&world, "2000 体深堆");
+    let lowest = world
+        .bodies()
+        .map(|(_, b)| b.position().y)
+        .fold(f32::INFINITY, f32::min);
+    assert!(lowest > -1.0, "堆不能穿地：最低 y = {lowest}");
+    let mut digest = Vec::new();
+    let mut max_speed = 0.0f32;
+    for (_, b) in world.bodies() {
+        for v in [
+            b.position(),
+            b.linear_velocity,
+            b.angular_velocity,
+            b.transform.scale,
+            b.prev_transform.position,
+            b.prev_transform.scale,
+            b.pseudo_linear_velocity,
+            b.pseudo_angular_velocity,
+            b.force,
+            b.torque,
+            b.inertia_local,
+            b.inv_inertia_local,
+            b.local_center,
+            b.friction_axis,
+        ] {
+            digest.extend([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]);
+        }
+        for q in [b.transform.rotation, b.prev_transform.rotation] {
+            digest.extend([q.x.to_bits(), q.y.to_bits(), q.z.to_bits(), q.w.to_bits()]);
+        }
+        for f in [
+            b.sleep_timer,
+            b.submerged,
+            b.mass,
+            b.inv_mass,
+            b.restitution,
+            b.friction,
+            b.static_friction,
+            b.rolling_friction,
+            b.friction_anisotropy,
+            b.linear_damping,
+            b.angular_damping,
+            b.gravity_scale,
+        ] {
+            digest.push(f.to_bits());
+        }
+        digest.extend([b.is_sleeping() as u32, b.allow_sleep as u32]);
+        max_speed = max_speed.max(b.linear_velocity.length());
+    }
+    println!("AB reference={reference} lowest={lowest} maxspeed={max_speed}");
+    let fast = crate::solver::CACHE_FAST_REBUILDS.get();
+    let searches = crate::solver::CACHE_PAIR_SEARCHES.get();
+    println!("CACHE fast_rebuilds={fast} pair_searches={searches}");
+    if !reference {
+        assert!(fast > 0);
+        assert!(searches > 0);
+    }
+    crate::solver::CACHE_REFERENCE.set(0);
+    (per_step, digest)
+}
+
+#[test]
+#[ignore = "manual interleaved release performance comparison"]
+fn deep_stack_2000_cache_ab() {
+    let mut reference_times = Vec::new();
+    let mut optimized_times = Vec::new();
+    for round in 0..6 {
+        let first_reference = (round % 2 == 0) != std::env::var_os("CACHE_AB_REVERSE").is_some();
+        let repeats = if std::env::var_os("CACHE_AB_TRIPLES").is_some() {
+            3
+        } else {
+            1
+        };
+        let mut refs = Vec::new();
+        let mut opts = Vec::new();
+        for sample in 0..repeats {
+            let reference_first = first_reference != (sample % 2 != 0);
+            let (first, first_bits) = deep_stack_2000_cache_ab_run(reference_first);
+            let (second, second_bits) = deep_stack_2000_cache_ab_run(!reference_first);
+            assert_eq!(first_bits, second_bits, "round {round} sample {sample}");
+            let (r, o) = if reference_first {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            refs.push(r);
+            opts.push(o);
+            println!("RAW round={round} sample={sample} reference={r:.6} optimized={o:.6}");
+        }
+        refs.sort_by(f64::total_cmp);
+        opts.sort_by(f64::total_cmp);
+        let reference = refs[repeats / 2];
+        let optimized = opts[repeats / 2];
+        reference_times.push(reference);
+        optimized_times.push(optimized);
+        println!("PAIR {round} reference={reference:.4} optimized={optimized:.4}");
+    }
+    println!("SUMMARY reference={reference_times:?} optimized={optimized_times:?}");
+}
