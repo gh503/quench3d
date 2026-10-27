@@ -51,6 +51,24 @@ pub(crate) fn write_water_fields(water: &WaterVolume, doc: &mut WaterDoc) {
     doc.flow = Some([water.flow.x, water.flow.y]);
 }
 
+/// 把运行时的关节目标写回场景文档。
+///
+/// 铰链文档用度、滑块文档用米；关节类型不匹配或目标非有限时不写。
+pub(crate) fn write_joint_target(
+    kind: &str,
+    target: f32,
+    joint: &mut quench3d_cli::scene_doc::JointDoc,
+) {
+    if !target.is_finite() {
+        return;
+    }
+    match kind {
+        "hinge" => joint.motor_target_deg = Some(target.to_degrees()),
+        "slider" => joint.motor_target_m = Some(target),
+        _ => {}
+    }
+}
+
 /// 导出结果。
 pub struct SavedScene {
     /// 场景 JSON 文本。
@@ -1541,5 +1559,24 @@ mod tests {
             let dot = (q.x * back.x + q.y * back.y + q.z * back.z + q.w * back.w).abs();
             assert!(dot > 0.9999, "{q:?} → {deg:?} → {back:?}（dot={dot}）");
         }
+    }
+    #[test]
+    fn joint_target_writeback_uses_degrees_for_hinges_and_meters_for_sliders() {
+        let mut hinge: quench3d_cli::scene_doc::JointDoc =
+            serde_json::from_value(serde_json::json!({"type": "hinge", "a": "a", "b": "b"}))
+                .unwrap();
+        write_joint_target("hinge", std::f32::consts::FRAC_PI_2, &mut hinge);
+        assert!((hinge.motor_target_deg.unwrap() - 90.0).abs() < 1e-4);
+        write_joint_target("hinge", f32::NAN, &mut hinge);
+        assert!((hinge.motor_target_deg.unwrap() - 90.0).abs() < 1e-4);
+
+        let mut slider: quench3d_cli::scene_doc::JointDoc =
+            serde_json::from_value(serde_json::json!({"type": "slider", "a": "a", "b": "b"}))
+                .unwrap();
+        write_joint_target("slider", 1.25, &mut slider);
+        assert!((slider.motor_target_m.unwrap() - 1.25).abs() < 1e-6);
+        // 类型不匹配时不能把铰链角写进滑块字段。
+        write_joint_target("ball", 3.0, &mut slider);
+        assert_eq!(slider.motor_target_m, Some(1.25));
     }
 }

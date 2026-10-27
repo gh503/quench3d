@@ -896,6 +896,7 @@ fn render_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             });
         });
         ui.separator();
+        joint_physics_section(ui, engine, doc);
         water_physics_section(ui, engine, doc);
         water_section(ui, engine);
     });
@@ -1658,6 +1659,126 @@ fn local_lights_section(ui: &mut Ui, engine: &mut Engine, changed: &mut bool) {
 ///
 /// 这里不提供"新增/删除水域"：那还要同时改底稿、物理体和场景树；本面板只
 /// 负责已有水域的调参，避免出现"预览里有、存盘后没有"的半截编辑。
+/// 物理关节：列出运行时关节、显示当前坐标/限位，并可直接改伺服目标。
+///
+/// 目标改的是运行时 `PhysicsWorld`；同时写回场景底稿的 `motor_target_deg` /
+/// `motor_target_m`，所以存盘后 CLI/MCP 会看到同一个目标。删除关节也会同步
+/// 移除底稿条目（否则存出来的文件会多一个不存在的关节）。
+fn joint_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    let handles = engine.world.joint_handles();
+    egui::CollapsingHeader::new("物理关节")
+        .default_open(false)
+        .show(ui, |ui| {
+            if handles.is_empty() {
+                ui.label("当前场景没有关节。");
+                return;
+            }
+            let mut remove = None;
+            for (index, handle) in handles.iter().enumerate() {
+                let Some(tel) = engine.world.joint_telemetry(*handle, 1.0 / 60.0) else {
+                    continue;
+                };
+                let name = doc
+                    .base_doc()
+                    .and_then(|base| base.joints.get(index))
+                    .and_then(|joint| joint.name.clone())
+                    .unwrap_or_else(|| format!("joint{index}"));
+                ui.push_id(("joint-physics", index), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{name}（{}）", tel.kind)).strong());
+                        if ui
+                            .small_button("删除")
+                            .on_hover_text("删除关节，并从场景底稿移除")
+                            .clicked()
+                        {
+                            remove = Some((index, *handle));
+                        }
+                    });
+                    let coordinate = match tel.kind {
+                        "hinge" => format!("{:.2}°", tel.coordinate.to_degrees()),
+                        "slider" => format!("{:.3} m", tel.coordinate),
+                        _ => format!("{:.3}", tel.coordinate),
+                    };
+                    ui.label(format!("当前坐标：{coordinate}"));
+                    if let Some((lo, hi)) = tel.limits {
+                        let text = match tel.kind {
+                            "hinge" => {
+                                format!("限位：{:.1}° … {:.1}°", lo.to_degrees(), hi.to_degrees())
+                            }
+                            _ => format!("限位：{lo:.3} … {hi:.3}"),
+                        };
+                        ui.label(text);
+                    }
+                    if let Some(mut target) = tel.target {
+                        let (label, suffix, speed) = match tel.kind {
+                            "hinge" => ("目标角", "°", 1.0),
+                            "slider" => ("目标位移", " m", 0.01),
+                            _ => ("目标", "", 0.01),
+                        };
+                        if tel.kind == "hinge" {
+                            target = target.to_degrees();
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            let changed = ui
+                                .add(
+                                    egui::DragValue::new(&mut target)
+                                        .speed(speed)
+                                        .suffix(suffix),
+                                )
+                                .changed();
+                            if ui.small_button("归零").clicked() {
+                                target = 0.0;
+                                let engine_target = 0.0f32;
+                                if engine.world.set_joint_target(*handle, engine_target) {
+                                    if let Some(base) = doc.base_doc_mut() {
+                                        if let Some(joint) = base.joints.get_mut(index) {
+                                            crate::scene_io::write_joint_target(
+                                                tel.kind,
+                                                engine_target,
+                                                joint,
+                                            );
+                                        }
+                                    }
+                                }
+                            } else if changed {
+                                let engine_target = if tel.kind == "hinge" {
+                                    target.to_radians()
+                                } else {
+                                    target
+                                };
+                                if engine.world.set_joint_target(*handle, engine_target) {
+                                    if let Some(base) = doc.base_doc_mut() {
+                                        if let Some(joint) = base.joints.get_mut(index) {
+                                            crate::scene_io::write_joint_target(
+                                                tel.kind,
+                                                engine_target,
+                                                joint,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    } else {
+                        ui.label("没有位置目标（无马达或速度模式）");
+                    }
+                    if tel.motor_torque.abs() > 1e-4 {
+                        ui.label(format!("马达力矩：{:.3} N·m", tel.motor_torque));
+                    }
+                });
+            }
+            if let Some((index, handle)) = remove {
+                engine.world.remove_joint(handle);
+                if let Some(base) = doc.base_doc_mut() {
+                    if index < base.joints.len() {
+                        base.joints.remove(index);
+                    }
+                }
+            }
+        });
+}
+
 fn water_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     let mut waters = engine.world.waters().to_vec();
     egui::CollapsingHeader::new("水域物理")
