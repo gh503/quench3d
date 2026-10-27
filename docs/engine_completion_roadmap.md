@@ -380,7 +380,7 @@
 
 - [ ] 三平台 + wasm CI 每次提交真跑；真 GPU WebGPU 路径验收。
 - [ ] `wasm-opt`/文件名哈希/签名；预编译发行。
-  - [x] 发行包内 Brotli `.br`（quality 11；13,983,657 → 3,082,663 字节），门禁解压
+  - [x] 发行包内 Brotli `.br`（quality 11；13,985,918 → 3,081,965 字节），门禁解压
     后与 wasm 逐字节比较；静态服务器仍需配置 `Content-Encoding: br`。
   - [ ] `wasm-opt`、文件名哈希、签名/安装器。
   - [x] 本地可复现发行包（`tools/package_release.sh` + 门禁里的

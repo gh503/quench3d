@@ -13,10 +13,17 @@
   没有 PD 收敛。回归
   `kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately`
   （一步到 +90°，关节遥测同角）、
-  `kinematic_fk_moves_the_whole_descendant_subtree`（孙体随子树整体旋转）与 CLI
+  `kinematic_fk_moves_the_whole_descendant_subtree`（孙体随子树整体旋转）、
+  `kinematic_fk_slides_a_slider_subtree_to_the_target`（滑块位移一步到 2.0）与 CLI
   `fk_mode_reaches_the_joint_target_in_one_step`（机械臂 35° 一步到位）。
-  只处理 `hinge`；`ball/slider/fixed` 仍走原求解器，目标速度斜坡仍由
-  `joint_target speed_deg_s` 控制。`normal`/`drive` 缺省路径逐位不变。
+  支持 `hinge` 转角与 `slider` 位移；`ball/fixed` 仍走原求解器，目标速度斜坡
+  仍由 `joint_target speed_deg_s` 控制。`normal`/`drive` 缺省路径逐位不变。
+- **轨道相机防穿墙**：`Engine::camera_collision`（缺省 false）+ `camera_collision_margin`；
+  开时从焦点向眼睛射线检测，命中几何就把相机拉到命中点前，不改
+  `orbit.distance`，移开遮挡后恢复。编辑器默认开启并在「相机」面板可关；飞行相机
+  不处理（第一人称穿墙是预期）。回归
+  `orbit_camera_collision_pulls_in_front_of_a_wall`（墙前缩到 z≈3.8；空世界逐位
+  等于原相机）。
 
 - **粒子局部流场拖曳（`fluids[].flow_coupling`）**：用刚体 AABB 内 PBF 粒子的
   平均速度作为局部流速，按 1/s 耦合把浸没刚体的 XZ 速度拖向它；周围没有粒子时
@@ -53,7 +60,7 @@
 
 - **发行包 Brotli**：`tools/package_release.sh` 现在为包内 wasm 生成
   `quench3d_web_bg.wasm.br`（Brotli quality 11）；`tools/check_package.sh` 解压后
-  与 wasm 逐字节比较，并验证确实变小。本机 13,983,657 → 3,082,663 字节（22.0%）。
+  与 wasm 逐字节比较，并验证确实变小。本机 13,985,918 → 3,081,965 字节（22.0%）。
   压缩只在打包目录内做，不写回 `web/pkg`；静态服务器仍需配置
   `Content-Encoding: br`。仍没有 wasm-opt/文件名哈希/签名/安装器。
 

@@ -278,8 +278,9 @@ link_bar 100 mm）推导并与关节轴对位；立柱本轮已从横躺修正�
   前把铰链子树直接旋到马达目标角；没有 PD 收敛，限位仍会夹住。回归
   `kinematic_fk_rotates_the_hinge_subtree_to_the_target_immediately`（一步到
   +90°）与 CLI `fk_mode_reaches_the_joint_target_in_one_step`（同一机械臂场景
-  一步到 35°）。边界：只处理 `hinge`；`ball/slider/fixed` 仍走原求解器，
-  目标速度斜坡仍由 CLI 的 `joint_target speed_deg_s` 控制。
+  一步到 35°）、`kinematic_fk_slides_a_slider_subtree_to_the_target`（滑块一步
+  到 2.0）。边界：支持 `hinge/slider`；`ball/fixed` 仍走原求解器，目标速度斜坡
+  仍由 CLI 的 `joint_target speed_deg_s` 控制。
 
 ## 10. P1-3：wasm 关节 API
 
