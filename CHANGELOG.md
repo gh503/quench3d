@@ -8,6 +8,13 @@
 
 ## [Unreleased]
 
+- **编辑器物理关节面板**：列出运行时关节（名字/类型/当前坐标/限位/马达力矩），
+  铰链与滑块可直接改伺服目标；改目标写回场景底稿的 `motor_target_deg` /
+  `motor_target_m`，删除关节同时移除底稿条目。回归
+  `joint_target_writeback_uses_degrees_for_hinges_and_meters_for_sliders`
+  （PI/2 rad → 90°、滑块 1.25 m、NaN 不改、类型不匹配不写）。
+  边界：面板只改已有马达；没有马达的关节仍要回场景文件加 `motor_*` 字段。
+
 - **纯 FK 回放（`physics.mode:"fk"`）**：与 `drive` 一样无重力/无接触，但每步
   先沿关节图从静态根 BFS 定向，把铰链子树直接旋到马达目标角（限位仍夹），
   没有 PD 收敛。回归
@@ -60,7 +67,7 @@
 
 - **发行包 Brotli**：`tools/package_release.sh` 现在为包内 wasm 生成
   `quench3d_web_bg.wasm.br`（Brotli quality 11）；`tools/check_package.sh` 解压后
-  与 wasm 逐字节比较，并验证确实变小。本机 13,985,918 → 3,081,965 字节（22.0%）。
+  与 wasm 逐字节比较，并验证确实变小。本机 13,995,474 → 3,086,148 字节（22.0%）。
   压缩只在打包目录内做，不写回 `web/pkg`；静态服务器仍需配置
   `Content-Encoding: br`。仍没有 wasm-opt/文件名哈希/签名/安装器。
 

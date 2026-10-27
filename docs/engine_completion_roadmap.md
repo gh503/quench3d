@@ -306,6 +306,9 @@
     旋转平面/旋转球仍按静态姿态；三角网精确路径是逐三角形 O(T)，大网格需空间索引。
 - [ ] 流形跨帧复用；三角网↔三角网、平面↔平面接触。
 - [ ] 关节并行求解；多体/articulation。
+  - 已做：编辑器「物理关节」面板（改伺服目标写回底稿、删除关节）；回归
+    `joint_target_writeback_uses_degrees_for_hinges_and_meters_for_sliders`。
+  - 仍缺：关节/锚点/轴 gizmo 编辑、无马达关节加马达、6DOF/万向节。
 - [x] 滚动摩擦（`rolling_friction`，缺省关闭，球体回归测试）。
 - [x] 圆形摩擦锥（`physics.friction_cone`，缺省关闭，斜向滑动单测）。
 - [x] 各向异性摩擦（`friction_anisotropy` + `friction_axis`，缺省关闭；
@@ -380,7 +383,7 @@
 
 - [ ] 三平台 + wasm CI 每次提交真跑；真 GPU WebGPU 路径验收。
 - [ ] `wasm-opt`/文件名哈希/签名；预编译发行。
-  - [x] 发行包内 Brotli `.br`（quality 11；13,985,918 → 3,081,965 字节），门禁解压
+  - [x] 发行包内 Brotli `.br`（quality 11；13,995,474 → 3,086,148 字节），门禁解压
     后与 wasm 逐字节比较；静态服务器仍需配置 `Content-Encoding: br`。
   - [ ] `wasm-opt`、文件名哈希、签名/安装器。
   - [x] 本地可复现发行包（`tools/package_release.sh` + 门禁里的
