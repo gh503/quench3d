@@ -128,6 +128,16 @@ impl Camera {
 
     /// 由屏幕像素坐标生成世界空间射线（`viewport` 为 `(宽, 高)`）。
     pub fn screen_ray(&self, screen: Vec2, viewport: Vec2) -> Ray {
+        // Invalid canvas dimensions can occur during resize or before layout. Keep the
+        // public ray API finite and deterministic instead of allowing division by zero
+        // or NaN dimensions to poison the inverse projection.
+        if !viewport.x.is_finite()
+            || !viewport.y.is_finite()
+            || viewport.x <= 0.0
+            || viewport.y <= 0.0
+        {
+            return self.ndc_ray(Vec2::ZERO);
+        }
         let ndc = Vec2::new(
             (screen.x / viewport.x) * 2.0 - 1.0,
             1.0 - (screen.y / viewport.y) * 2.0,
@@ -491,6 +501,30 @@ mod tests {
         // 射线应穿过原点附近的该点方向
         let to_p = (p - ray.origin).normalize_or_zero();
         assert!(to_p.dot(ray.dir) > 0.999, "射线未对准目标");
+    }
+
+    #[test]
+    fn screen_ray_invalid_viewport_stays_finite_and_predictable() {
+        let c = Camera::perspective(1.0);
+        for viewport in [
+            Vec2::new(0.0, 720.0),
+            Vec2::new(1280.0, 0.0),
+            Vec2::new(-1280.0, 720.0),
+            Vec2::new(1280.0, -720.0),
+            Vec2::new(f32::NAN, 720.0),
+            Vec2::new(1280.0, f32::INFINITY),
+        ] {
+            let ray = c.screen_ray(Vec2::new(640.0, 360.0), viewport);
+            assert!(
+                ray.origin.is_finite() && ray.dir.is_finite(),
+                "invalid viewport {viewport:?} produced non-finite ray {ray:?}"
+            );
+            assert!(
+                (ray.dir - Vec3::NEG_Z).length() < 1e-4,
+                "invalid viewport {viewport:?} should use the center ray, got {:?}",
+                ray.dir
+            );
+        }
     }
 
     #[test]
