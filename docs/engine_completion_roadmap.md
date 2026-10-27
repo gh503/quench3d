@@ -156,7 +156,9 @@
   垂直速度仍走原阻尼；0 时旧路径逐位不变。回归
   `water_current_drags_a_submerged_body_along_the_flow`（静水无水平速度；1.5 m/s
   水流把球拖向 +X 且无垂直速度）与 CLI `waters_parse_validate_and_roundtrip`。
-  这不是 PBF 粒子流场/波浪。
+  这不是 PBF 粒子流场/波浪。编辑器「渲染 → 水域物理」逐块调 flow/水面/密度/阻尼，
+  写回路径回归 `water_edit_writes_flow_and_size_into_scene_doc`；NaN 水流由
+  `nan_water_current_is_rejected` 与 `set_water_validates_and_replaces_by_index` 拦住。
 - [x] 流体初始速度 + 开放排水面（`velocity` / `drain_y`，缺省不变）。
 - [x] 流体连续发射器（`emit_*`，黄金角确定撒点、上限/排空/CLI 接线）。
 - [x] 流体泡沫/飞沫（`fluids[].foam`，缺省关闭）：高速度粒子甩出被动白水，
@@ -370,10 +372,13 @@
 ### M6 交付与发布（2–3 人月）
 
 - [ ] 三平台 + wasm CI 每次提交真跑；真 GPU WebGPU 路径验收。
-- [ ] `wasm-opt`/Brotli/文件名哈希；预编译发行。
+- [ ] `wasm-opt`/文件名哈希/签名；预编译发行。
+  - [x] 发行包内 Brotli `.br`（quality 11；13,972,130 → 3,079,044 字节），门禁解压
+    后与 wasm 逐字节比较；静态服务器仍需配置 `Content-Encoding: br`。
+  - [ ] `wasm-opt`、文件名哈希、签名/安装器。
   - [x] 本地可复现发行包（`tools/package_release.sh` + 门禁里的
     `tools/check_package.sh`）：二进制、web/pkg、manifest、SHA256SUMS。
-  - [ ] wasm-opt/Brotli、文件名哈希、签名/安装器与真实三平台发行。
+  - [ ] wasm-opt、文件名哈希、签名/安装器与真实三平台发行（Brotli `.br` 已有）。
 - [ ] `cargo publish --dry-run`、SBOM、依赖漏洞扫描、semver 策略。
 
 ## 2. 执行顺序与规则

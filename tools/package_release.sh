@@ -8,8 +8,8 @@
 #   tools/package_release.sh --out DIR       # 指定输出目录（必须不存在）
 #
 # 包内容：bin/quench3d、bin/quench3d-editor、web/pkg/*、README/CHANGELOG/LICENSE、
-# manifest.json（版本/提交/文件大小）与 SHA256SUMS。没有 wasm-opt/Brotli，
-# 也不生成平台安装器；这些仍属于发布流水线未完成的部分。
+# manifest.json（版本/提交/文件大小）与 SHA256SUMS。wasm 额外生成 Brotli
+# `.br` 供静态服务器协商；没有 wasm-opt，也不生成平台安装器。
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$(pwd)
@@ -72,7 +72,7 @@ printf '  平台：%s-%s\n' "$os" "$arch"
 printf '  提交：%s\n' "$commit"
 printf '  输出：%s\n' "$dest"
 printf '  二进制：bin/quench3d、bin/quench3d-editor\n'
-printf '  Web：web/pkg（wasm + JS + build_stamp）\n'
+printf '  Web：web/pkg（wasm + JS + build_stamp + wasm.br）\n'
 printf '  文档：README.md、CHANGELOG.md、LICENSE-MIT、LICENSE-APACHE\n'
 printf '  清单：manifest.json、SHA256SUMS\n'
 if [ "$DRY_RUN" = "1" ]; then
@@ -109,6 +109,25 @@ install -m 755 "$bin_dir/quench3d" "$dest/bin/quench3d"
 install -m 755 "$bin_dir/quench3d-editor" "$dest/bin/quench3d-editor"
 cp -a web/pkg/. "$dest/web/pkg/"
 cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$dest/"
+
+# 静态服务器可直接对 Accept-Encoding: br 返回同一路径的 `.br`（需配置
+# `Content-Encoding: br` 与 `Content-Type: application/wasm`）。压缩在打包目录
+# 内完成，不把派生文件写回 web/pkg，保证源树与门禁状态稳定。
+python3 - "$dest/web/pkg/quench3d_web_bg.wasm" <<'PY'
+import brotli
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as f:
+    data = f.read()
+packed = brotli.compress(data, quality=11)
+if not packed or len(packed) >= len(data):
+    raise SystemExit(f"Brotli 压缩无效：{len(data)} -> {len(packed)}")
+with open(path + ".br", "wb") as f:
+    f.write(packed)
+print(f"brotli: {len(data)} -> {len(packed)} bytes ({len(packed) * 100 / len(data):.1f}%)")
+PY
 
 python3 - "$dest" "$version" "$commit" "$PROFILE" "$os" "$arch" <<'PY'
 import hashlib

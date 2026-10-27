@@ -27,6 +27,7 @@ test -x "$tmp/pkg/bin/quench3d"
 test -x "$tmp/pkg/bin/quench3d-editor"
 test -f "$tmp/pkg/web/pkg/quench3d_web_bg.wasm"
 test -f "$tmp/pkg/web/pkg/quench3d_web.js"
+test -f "$tmp/pkg/web/pkg/quench3d_web_bg.wasm.br"
 test -f "$tmp/pkg/manifest.json"
 test -f "$tmp/pkg/SHA256SUMS"
 test -f "$tmp/pkg/README.md"
@@ -61,6 +62,23 @@ PY
   cd "$tmp/pkg"
   sha256sum -c SHA256SUMS >/dev/null
 )
+
+# Brotli 产物必须真的能还原出同一份 wasm，而不是空文件/旧缓存。
+python3 - "$tmp/pkg" <<'PY'
+import brotli
+import os
+import sys
+
+root = sys.argv[1]
+with open(os.path.join(root, "web/pkg/quench3d_web_bg.wasm"), "rb") as f:
+    wasm = f.read()
+with open(os.path.join(root, "web/pkg/quench3d_web_bg.wasm.br"), "rb") as f:
+    packed = f.read()
+assert packed, "Brotli 文件为空"
+assert len(packed) < len(wasm), f"Brotli 没有变小：{len(packed)} >= {len(wasm)}"
+assert brotli.decompress(packed) == wasm, "Brotli 解压后与 wasm 不一致"
+print(f"brotli: {len(wasm)} -> {len(packed)} bytes")
+PY
 
 "$tmp/pkg/bin/quench3d" --help >/dev/null
 "$tmp/pkg/bin/quench3d" --version | grep -q 'quench3d'

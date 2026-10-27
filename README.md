@@ -297,7 +297,9 @@ python3 -m http.server 8000 --directory web
 构成大致是：`wgpu` 的 WebGPU + WebGL2 两条后端、引擎与物理、glTF/OBJ 与图片解码
 （自检探针要用）、egui 与内嵌的中文子集字体。
 比物理示例包（5.4 MB）大了一倍，多出来的主要就是 egui 这一套 + 字体 + 模型解析。
-真要压体积：加一步 `wasm-opt -Oz`、把自检探针从发布包里去掉，或者只保留必需特性。
+真要压体积：`tools/package_release.sh` 已为 wasm 生成 Brotli `.br`（本机
+13,972,130 → 3,079,044 字节），静态服务器对 `Accept-Encoding: br` 返回 `.br` 即可；
+还能加 `wasm-opt -Oz`、把自检探针从发布包里去掉，或者只保留必需特性。
 浏览器里 `Esc` 退出、`Tab` 切换相机、`F3`~`F8` 与 `F11` 是调试开关、`T` 循环色调映射、`K` 3D 光标、`O` 自动 LOD，和桌面端完全一致。
 
 #### 后端怎么选（WebGPU → WebGL2 回退）
@@ -1198,7 +1200,8 @@ NaN 刚体  : 0
   仍走原阻尼。睡眠体**不受浮力**（否则浮力会把它一直唤醒——这是性能取舍，水面变了要显式唤醒）。
   `validate` 只查参数；浮力结果看 `simulate` 的 `states[].submerged`（0~1）与顶层
   `waters` 计数，人读输出有"浸没 %"。水面物体只是半透明平面，**没有波浪 / 折射**；
-  `flow` 是刚体拖曳，不是 PBF 粒子流场。
+  `flow` 是刚体拖曳，不是 PBF 粒子流场。编辑器的「渲染 → 水域物理」逐块调
+  flow/水面/密度/阻尼，改完立即写回世界与场景底稿；NaN 水流会被 `is_valid` 拒绝。
 * `fluids` 是 **CPU PBF 粒子流体**（M2 求解器 + M3 双向耦合）：`{ "center": [x, y, z],
   "size": [x, y, z], "spacing": 0.1, "radius": 0.05, "rest_density": 1000,
   "viscosity": 0.05, "surface_tension": 0, "vorticity": 0,

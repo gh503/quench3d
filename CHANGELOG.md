@@ -41,12 +41,22 @@
   回归的旋转凸包/三角网截停角度保持 1.672 rad。默认路径不变，仅影响
   `ccd_precise`。
 
-- **本地发行打包**：新增 `tools/package_release.sh`，把 CLI/编辑器 release 二进制、
-  `web/pkg`、README/CHANGELOG/LICENSE、`manifest.json`（版本/提交/大小/哈希）与
-  `SHA256SUMS` 打进一个目录；`--skip-build` 复用已有二进制，`--dry-run` 只打印计划。
-  `tools/check_package.sh` 在门禁里实际构建 debug 二进制、检查目录结构、清单大小、
-  `sha256sum -c`，并运行包内 `quench3d --help/--version`。仍没有 wasm-opt/Brotli/
-  文件名哈希，也不是安装器；这些仍属未完成的发布流水线。
+- **发行包 Brotli**：`tools/package_release.sh` 现在为包内 wasm 生成
+  `quench3d_web_bg.wasm.br`（Brotli quality 11）；`tools/check_package.sh` 解压后
+  与 wasm 逐字节比较，并验证确实变小。本机 13,972,130 → 3,079,044 字节（22.0%）。
+  压缩只在打包目录内做，不写回 `web/pkg`；静态服务器仍需配置
+  `Content-Encoding: br`。仍没有 wasm-opt/文件名哈希/签名/安装器。
+
+- **编辑器水域物理面板**：「水域物理」逐块编辑水流 X/Z、水面高度、密度、中心、
+  半尺寸和浸没阻尼；改完立即写回 `PhysicsWorld`，同一份数值写回场景底稿
+  `waters[i]`，存盘不丢。写回路径回归
+  `water_edit_writes_flow_and_size_into_scene_doc`（半尺寸→全尺寸、flow 显式
+  写回）。不提供新增/删除水域，避免只改预览不改底稿。
+
+- **NaN 水流拒绝**：`WaterVolume::is_valid` 现在要求 `flow.is_finite()`，
+  `add_water`/`set_water` 都会拒绝 NaN 水流；回归
+  `nan_water_current_is_rejected`、`set_water_validates_and_replaces_by_index`
+  （越界/负阻尼/NaN 不改动已有水域）。非 NaN 旧场景逐位不变。
 
 - **模型动画循环子区间**：`models[].animation.loop_start` /
   `models[].animation.blend.loop_start`（秒，缺省 0）把循环限制在
