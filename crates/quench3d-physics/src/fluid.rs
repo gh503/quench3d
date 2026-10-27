@@ -1393,6 +1393,12 @@ impl Fluid {
                 let recoil = liquid_momentum * (momentum_coupling / added_mass);
                 b.velocity = (b.velocity - recoil).clamp_length(10.0);
             }
+            // 排水优先于液面破裂：已流出的气泡不能留下下一步才被排掉的泡沫。
+            if let Some(y) = self.desc.drain_y {
+                if b.position.y < y {
+                    continue;
+                }
+            }
             if b.position.y > surface + b.radius {
                 // 到达液面：气泡破裂消失，并在液面留下一颗**被动泡沫**。
                 // 只有开启 `foam` 时才留；泡沫数量仍受 `max_foam` 限制。
@@ -1407,11 +1413,6 @@ impl Fluid {
                     });
                 }
                 continue;
-            }
-            if let Some(y) = self.desc.drain_y {
-                if b.position.y < y {
-                    continue;
-                }
             }
             if !b.position.is_finite() || !b.velocity.is_finite() {
                 continue;
@@ -2151,6 +2152,54 @@ mod tests {
             max_radius > 0.03 * 1.2,
             "气泡应随上升膨胀：最大半径 {max_radius}（初始 0.03）"
         );
+    }
+
+    #[test]
+    fn drained_bursting_bubbles_do_not_leave_foam() {
+        for drain in [None, Some(2.0)] {
+            for empty_before_step in [false, true] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                world
+                    .add_fluid(FluidDesc {
+                        center: Vec3::ZERO,
+                        half_extents: Vec3::splat(0.2),
+                        max_particles: 8,
+                        drain_y: drain,
+                        foam: true,
+                        foam_rate: 0.0,
+                        bubble_buoyancy: 0.0,
+                        bubble_drag: 0.0,
+                        bubble_expansion: 0.0,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                if empty_before_step {
+                    // Use public stepping to drain the liquid before injecting the bubble.
+                    if drain.is_some() {
+                        world.step(1.0 / 60.0);
+                        assert!(world.fluids()[0].particles().is_empty());
+                    } else {
+                        continue;
+                    }
+                }
+                world.fluids_mut()[0].add_bubble(Bubble {
+                    position: Vec3::Y,
+                    velocity: Vec3::ZERO,
+                    radius: 0.05,
+                    rest_radius: 0.05,
+                    age: 0.0,
+                    life: 2.0,
+                });
+                world.step(1.0 / 60.0);
+                let fluid = &world.fluids()[0];
+                assert!(fluid.bubbles().is_empty());
+                let expected = usize::from(drain.is_none());
+                assert_eq!(fluid.foam().len(), expected,
+                    "drain={drain:?}, empty_before_step={empty_before_step}: drained bubble must not leave foam");
+                assert_eq!(fluid.stats().foam, expected);
+                assert_eq!(fluid.stats().bubbles, 0);
+            }
+        }
     }
 
     #[test]
