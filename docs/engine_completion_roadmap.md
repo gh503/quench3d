@@ -157,7 +157,11 @@
   `water_current_drags_a_submerged_body_along_the_flow`（静水无水平速度；1.5 m/s
   水流把球拖向 +X 且无垂直速度）与 CLI `waters_parse_validate_and_roundtrip`。
   这不是 PBF 粒子流场/波浪。编辑器「渲染 → 水域物理」逐块调 flow/水面/密度/阻尼，
-  写回路径回归 `water_edit_writes_flow_and_size_into_scene_doc`；NaN 水流由
+  也可新增/删除水域（删除同步移除底稿；空白场景新增后存盘由 `sync_water_docs`
+  从世界补全）；写回路径回归
+  `water_edit_writes_flow_and_size_into_scene_doc`、
+  `empty_scene_doc_gets_world_waters_on_save`，删除回归
+  `remove_water_removes_by_index_and_shifts_later_entries`；NaN 水流由
   `nan_water_current_is_rejected` 与 `set_water_validates_and_replaces_by_index` 拦住。
 - [x] 流体初始速度 + 开放排水面（`velocity` / `drain_y`，缺省不变）。
 - [x] 流体连续发射器（`emit_*`，黄金角确定撒点、上限/排空/CLI 接线）。
@@ -335,7 +339,6 @@
     仍走旧的逐次运算，黄金摘要回归逐位不变；大场景角速度末位可能差 1 ulp，
     因此这是按规模启用的快速路径，不是无条件替换。
   - 剩余大头仍是单岛内速度迭代（~6.9 ms）；TGS/SIMD 仍未做。
-    TGS/SIMD 仍未做。
 
 ### M5 玩法与平台（4–6 人月）
 
@@ -373,7 +376,7 @@
 
 - [ ] 三平台 + wasm CI 每次提交真跑；真 GPU WebGPU 路径验收。
 - [ ] `wasm-opt`/文件名哈希/签名；预编译发行。
-  - [x] 发行包内 Brotli `.br`（quality 11；13,972,130 → 3,079,044 字节），门禁解压
+  - [x] 发行包内 Brotli `.br`（quality 11；13,975,756 → 3,080,572 字节），门禁解压
     后与 wasm 逐字节比较；静态服务器仍需配置 `Content-Encoding: br`。
   - [ ] `wasm-opt`、文件名哈希、签名/安装器。
   - [x] 本地可复现发行包（`tools/package_release.sh` + 门禁里的

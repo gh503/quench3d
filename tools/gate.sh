@@ -101,17 +101,20 @@ else
   grep -E '^(test result: FAILED|error)' -A 10 "$LOG_DIR/gate-test.log" | head -n 30
 fi
 
-step "发行打包（debug 二进制；结构/清单/校验和）"
-if bash tools/check_package.sh >"$LOG_DIR/gate-package.log" 2>&1; then
-  ok package
-  tail -n 2 "$LOG_DIR/gate-package.log"
-else
-  bad package
-  tail -n 20 "$LOG_DIR/gate-package.log"
-fi
+package_step() {
+  step "发行打包（debug 二进制；结构/清单/校验和）"
+  if bash tools/check_package.sh >"$LOG_DIR/gate-package.log" 2>&1; then
+    ok package
+    tail -n 2 "$LOG_DIR/gate-package.log"
+  else
+    bad package
+    tail -n 20 "$LOG_DIR/gate-package.log"
+  fi
+}
 
 if [ "$FAST" = "1" ]; then
   printf '\n（--fast：跳过 wasm 构建与 check_web）\n'
+  package_step
 else
   step "wasm 构建（web_client）"
   if tools/build_web.sh web_client >"$LOG_DIR/gate-wasm.log" 2>&1; then
@@ -121,6 +124,9 @@ else
     bad web-build
     tail -n 20 "$LOG_DIR/gate-wasm.log"
   fi
+
+  # 打包必须读取**刚构建**的 wasm；否则 `.br` 校验的是上一轮产物。
+  package_step
 
   # 必须最后跑：它检查的就是上一步刚构建出来的产物。
   step "web 产物检查（check_web.mjs）"

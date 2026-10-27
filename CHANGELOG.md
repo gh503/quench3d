@@ -43,15 +43,19 @@
 
 - **发行包 Brotli**：`tools/package_release.sh` 现在为包内 wasm 生成
   `quench3d_web_bg.wasm.br`（Brotli quality 11）；`tools/check_package.sh` 解压后
-  与 wasm 逐字节比较，并验证确实变小。本机 13,972,130 → 3,079,044 字节（22.0%）。
+  与 wasm 逐字节比较，并验证确实变小。本机 13,975,756 → 3,080,572 字节（22.0%）。
   压缩只在打包目录内做，不写回 `web/pkg`；静态服务器仍需配置
   `Content-Encoding: br`。仍没有 wasm-opt/文件名哈希/签名/安装器。
 
 - **编辑器水域物理面板**：「水域物理」逐块编辑水流 X/Z、水面高度、密度、中心、
   半尺寸和浸没阻尼；改完立即写回 `PhysicsWorld`，同一份数值写回场景底稿
-  `waters[i]`，存盘不丢。写回路径回归
+  `waters[i]`，存盘不丢。面板可新增（原点 10×10 m 静水）和删除水域，删除同时
+  移除底稿条目；空白场景里先加水也能存盘（底稿水域数量与运行时不一致时由
+  `sync_water_docs` 从世界补全）。写回路径回归
   `water_edit_writes_flow_and_size_into_scene_doc`（半尺寸→全尺寸、flow 显式
-  写回）。不提供新增/删除水域，避免只改预览不改底稿。
+  写回）、`empty_scene_doc_gets_world_waters_on_save`（空底稿补全；数量一致时
+  不改老字段），删除 API 回归
+  `remove_water_removes_by_index_and_shifts_later_entries`。
 
 - **NaN 水流拒绝**：`WaterVolume::is_valid` 现在要求 `flow.is_finite()`，
   `add_water`/`set_water` 都会拒绝 NaN 水流；回归
