@@ -3416,7 +3416,13 @@ impl PhysicsWorld {
             let mut stack = vec![root];
             while let Some(parent) = stack.pop() {
                 for &(edge_index, child) in &adj[parent] {
-                    if visited[child] {
+                    // Host-owned anchors delimit FK trees. Leave them unvisited so
+                    // the outer root traversal can drive their own descendants.
+                    // Cross-root constraints remain the dynamics solver's responsibility.
+                    let anchored = self.bodies[child].body.as_ref().is_some_and(|body| {
+                        matches!(body.body_type, BodyType::Static | BodyType::Kinematic)
+                    });
+                    if visited[child] || anchored {
                         continue;
                     }
                     visited[child] = true;
@@ -5631,6 +5637,110 @@ mod tests {
                 let coordinate = w.joint_telemetry(joint, 1.0 / 60.0).unwrap().coordinate;
                 assert!((coordinate - expected).abs() < 2e-3,
                     "slider={slider}, target={target}, limits={limits:?}: coordinate={coordinate}, expected={expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn kinematic_fk_preserves_other_anchored_roots() {
+        for second_static in [false, true] {
+            for reverse in [false, true] {
+                for root_first in [false, true] {
+                    let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    w.set_collisions_enabled(false);
+                    w.set_kinematic_fk(true);
+                    let shape = Shape::Sphere { radius: 0.1 };
+                    let base = BodyBuilder::r#static(shape.clone()).build();
+                    let other = if second_static {
+                        BodyBuilder::r#static(shape.clone())
+                    } else {
+                        BodyBuilder::kinematic(shape.clone())
+                    }
+                    .position(Vec3::X * 3.0)
+                    .build();
+                    let (root, anchor) = if root_first {
+                        (w.add_body(base), w.add_body(other))
+                    } else {
+                        let anchor = w.add_body(other);
+                        (w.add_body(base), anchor)
+                    };
+                    let link = w.add_body(
+                        BodyBuilder::dynamic(shape.clone())
+                            .position(Vec3::X)
+                            .build(),
+                    );
+                    let payload =
+                        w.add_body(BodyBuilder::dynamic(shape).position(Vec3::X * 4.0).build());
+                    let motor = crate::joints::HingeMotor {
+                        target_velocity: 0.0,
+                        max_impulse: 10.0,
+                        target_angle: Some(if reverse { -2.0 } else { 2.0 }),
+                        stiffness: 8.0,
+                        damping: 1.0,
+                        kp: 0.0,
+                        kd: 0.0,
+                        max_torque: 0.0,
+                    };
+                    w.add_joint(Joint::Slider {
+                        a: if reverse { link } else { root },
+                        b: if reverse { root } else { link },
+                        local_anchor_a: Vec3::ZERO,
+                        local_anchor_b: Vec3::ZERO,
+                        local_axis_a: Vec3::X,
+                        local_axis_b: Vec3::X,
+                        limits: None,
+                        motor: Some(motor),
+                    });
+                    for (a, b, gap) in [(link, anchor, 2.0), (anchor, payload, 1.0)] {
+                        w.add_joint(Joint::Fixed {
+                            a: if reverse { b } else { a },
+                            b: if reverse { a } else { b },
+                            local_anchor_a: if reverse { Vec3::ZERO } else { Vec3::X * gap },
+                            local_anchor_b: if reverse { Vec3::X * gap } else { Vec3::ZERO },
+                            local_frame_a: Quat::IDENTITY,
+                            local_frame_b: Quat::IDENTITY,
+                        });
+                    }
+                    let initial = w.snapshot();
+                    let anchor_pose = w.body(anchor).unwrap().transform;
+                    let payload_pose = w.body(payload).unwrap().transform;
+                    // Public dynamics cannot move a host-owned anchor to repair an FK teleport.
+                    w.step_substeps(1.0 / 60.0, 1);
+                    assert_eq!(
+                        w.body(anchor).unwrap().transform,
+                        anchor_pose,
+                        "static={second_static} reverse={reverse} root_first={root_first}"
+                    );
+                    // Isolate FK propagation: dynamics may resolve the incompatible bridge
+                    // afterwards, so do not require the dynamic payload to stay frozen in step.
+                    w.restore(initial);
+                    w.apply_kinematic_targets();
+                    assert_eq!(w.body(anchor).unwrap().transform, anchor_pose);
+                    assert_eq!(w.body(payload).unwrap().transform, payload_pose);
+                    // Close the graph through the anchors. This tests termination and
+                    // root ownership, not an exact solution of the incompatible loop.
+                    w.add_joint(Joint::Fixed {
+                        a: if reverse { anchor } else { root },
+                        b: if reverse { root } else { anchor },
+                        local_anchor_a: if reverse { Vec3::ZERO } else { Vec3::X * 3.0 },
+                        local_anchor_b: if reverse { Vec3::X * 3.0 } else { Vec3::ZERO },
+                        local_frame_a: Quat::IDENTITY,
+                        local_frame_b: Quat::IDENTITY,
+                    });
+                    let root_pose = w.body(root).unwrap().transform;
+                    for _ in 0..20 {
+                        w.step_substeps(1.0 / 60.0, 1);
+                        assert_eq!(w.body(root).unwrap().transform, root_pose);
+                        assert_eq!(w.body(anchor).unwrap().transform, anchor_pose);
+                        for handle in [link, payload] {
+                            let body = w.body(handle).unwrap();
+                            assert!(body.position().is_finite());
+                            assert!(body.transform.rotation.is_finite());
+                            assert!(body.linear_velocity.is_finite());
+                            assert!(body.angular_velocity.is_finite());
+                        }
+                    }
+                }
             }
         }
     }
