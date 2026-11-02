@@ -5305,6 +5305,164 @@ mod tests {
     }
 
     #[test]
+    fn compound_mesh_pruning_fixed_convex_audit() {
+        use crate::body::{CompoundTransformMode::BodyLocal, ShapePart};
+        // Fixed 256 cases, seed and five public steps; never search until a desired result.
+        let mut failures = Vec::new();
+        let mut total_queries = [0usize; 2];
+        for case in 0..256usize {
+            let scale = [0.01, 0.1, 1.0, 4.0][(case / 8) % 4];
+            let frame =
+                Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), case as f32 * 0.173);
+            let local_rotation = Quat::from_axis_angle(Vec3::Y, case as f32 * 0.071);
+            let shape = match case % 8 {
+                0 => Shape::Capsule {
+                    half_height: 0.17 * scale,
+                    radius: 0.09 * scale,
+                },
+                1 => Shape::Cone {
+                    half_height: 0.17 * scale,
+                    radius: 0.12 * scale,
+                },
+                2 => Shape::Cylinder {
+                    half_height: 0.17 * scale,
+                    radius: 0.12 * scale,
+                },
+                3 => Shape::RoundedBox {
+                    half_extents: Vec3::new(0.12, 0.17, 0.11) * scale,
+                    radius: 0.03 * scale,
+                },
+                4 | 5 => Shape::ConvexHull {
+                    points: vec![
+                        Vec3::new(-0.13, -0.17, -0.11) * scale,
+                        Vec3::new(0.15, -0.17, -0.11) * scale,
+                        Vec3::new(0.0, 0.19, -0.07) * scale,
+                        Vec3::new(0.0, 0.0, 0.16) * scale,
+                    ],
+                },
+                6 => Shape::Box {
+                    half_extents: Vec3::new(0.12, 0.17, 0.11) * scale,
+                },
+                _ => Shape::Sphere {
+                    radius: 0.12 * scale,
+                },
+            };
+            let origin = if case >= 128 {
+                Vec3::splat(1000.0)
+            } else {
+                Vec3::ZERO
+            };
+            let mut seed = 0x5eed1234u32 ^ case as u32;
+            let mut triangles = Vec::new();
+            for i in 0..96 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let jitter = (seed >> 16) as f32 / 65535.0;
+                let shift = if i < 4 {
+                    Vec3::X * (i as f32 * 0.00001 * scale)
+                } else {
+                    Vec3::new(jitter, 5.0 + i as f32 * 0.3, jitter * 2.0) * scale
+                };
+                let mut tri = [
+                    Vec3::new(0.0, -1.0, -1.0) * scale + shift,
+                    Vec3::new(0.0, 1.0, -1.0) * scale + shift,
+                    Vec3::new(0.0, 0.0, 1.0) * scale + shift,
+                ];
+                if i >= 4 && i % 11 == 0 {
+                    tri[2] = tri[1];
+                }
+                if i >= 4 && i % 13 == 0 {
+                    tri[2] = (tri[0] + tri[1]) * 0.5;
+                }
+                triangles.push(tri);
+            }
+            if (case / 32) % 2 == 1 {
+                triangles.reverse();
+            }
+            triangles.rotate_left((case * 17) % 96);
+            let vertices: Vec<Vec3> = triangles.into_iter().flatten().collect();
+            let indices: Vec<u32> = (0..vertices.len() as u32).collect();
+            let mut snapshots = Vec::new();
+            for (path, reference) in [true, false].into_iter().enumerate() {
+                COMPOUND_MESH_REFERENCE.with(|flag| flag.set(reference));
+                COMPOUND_MESH_GJK_QUERIES.with(|count| count.set(0));
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::Sphere {
+                        radius: 0.1 * scale,
+                    })
+                    .position(origin + frame.mul_vec3(-Vec3::Y * (3.0 * scale)))
+                    .rotation(frame)
+                    .part_at(
+                        Shape::TriMesh {
+                            vertices: vertices.clone(),
+                            indices: indices.clone(),
+                        },
+                        Vec3::Y * (5.0 * scale),
+                    )
+                    .compound_transform_mode(BodyLocal),
+                );
+                let grazing = [0.0, 0.87, 1.01, 1.15][(case / 64) % 4];
+                let velocity = frame.mul_vec3(Vec3::X * (120.0 * scale));
+                let angular = if case % 3 == 0 {
+                    frame.mul_vec3(Vec3::Z * 3.0)
+                } else {
+                    Vec3::ZERO
+                };
+                let moving = world.add_builder(
+                    BodyBuilder::dynamic(Shape::Sphere {
+                        radius: 0.1 * scale,
+                    })
+                    .position(origin + frame.mul_vec3(Vec3::new(-1.0, grazing, 0.0) * scale))
+                    .rotation(frame)
+                    .part(ShapePart::at(
+                        shape.clone(),
+                        Vec3::Y * (2.0 * scale),
+                        local_rotation,
+                    ))
+                    .linear_velocity(velocity)
+                    .angular_velocity(angular)
+                    .compound_transform_mode(BodyLocal)
+                    .ccd_precise(true),
+                );
+                let body = world.body(moving).unwrap();
+                assert_eq!(
+                    body.linear_velocity, velocity,
+                    "velocity clamped case={case}"
+                );
+                assert_eq!(body.angular_velocity, angular, "omega clamped case={case}");
+                assert_eq!(body.transform.scale, Vec3::ONE);
+                let mut digest = Vec::new();
+                for _ in 0..5 {
+                    digest.push(
+                        world
+                            .sweep_convex_bodies(moving.index as usize, 1.0 / 60.0)
+                            .map(f32::to_bits),
+                    );
+                    assert_eq!(world.step_substeps(1.0 / 60.0, 1), 1);
+                    digest.extend(compound_mesh_state_bits(&world).into_iter().map(Some));
+                }
+                total_queries[path] += COMPOUND_MESH_GJK_QUERIES.with(|count| count.get());
+                snapshots.push(digest);
+            }
+            if snapshots[0] != snapshots[1] {
+                let index = snapshots[0]
+                    .iter()
+                    .zip(&snapshots[1])
+                    .position(|(a, b)| a != b)
+                    .unwrap();
+                failures.push((case, index, snapshots[0][index], snapshots[1][index]));
+            }
+        }
+        COMPOUND_MESH_REFERENCE.with(|flag| flag.set(false));
+        println!("fixed_cases=256 steps_per_case=5 seed=0x5eed1234 gjk_queries={total_queries:?} differences={failures:?}");
+        assert!(failures.is_empty(), "fixed audit differences={failures:?}");
+        assert!(
+            total_queries[1] < total_queries[0],
+            "audit must exercise pruning: {total_queries:?}"
+        );
+    }
+
+    #[test]
     fn precise_compound_mesh_predicts_extra_sphere_wall() {
         let (world, moving) = compound_mesh_ccd_world();
         let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
