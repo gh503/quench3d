@@ -2961,10 +2961,13 @@ impl PhysicsWorld {
                     break;
                 }
                 let advance = hit.distance / step;
-                if !(advance.is_finite() && advance > 1e-6) {
+                let next = t + advance;
+                // A small normalized step can still represent substantial separation for
+                // large bodies. Stop only when the computed time cannot advance.
+                if !(next.is_finite() && next > t) {
                     break;
                 }
-                t += advance;
+                t = next;
                 if t >= 1.0 {
                     break;
                 }
@@ -4494,6 +4497,47 @@ mod tests {
             (rotated - base).abs() < 0.002,
             "base={base}, rotated={rotated}"
         );
+    }
+
+    #[test]
+    fn precise_rotating_sphere_box_preserves_toi_across_scales() {
+        let dt = 1.0 / 60.0;
+        for scale in [1.0f32, 10.0, 100.0] {
+            for offset in [Vec3::ZERO, Vec3::splat(10.0), Vec3::splat(1000.0)] {
+                for frame in [
+                    Quat::IDENTITY,
+                    Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2),
+                ] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let sphere = world.add_builder(
+                        BodyBuilder::dynamic(Shape::Sphere {
+                            radius: 0.1 * scale,
+                        })
+                        .position(offset + frame.mul_vec3(Vec3::Y * scale))
+                        .rotation(frame)
+                        .linear_velocity(frame.mul_vec3(Vec3::Z * (0.6 * scale)))
+                        .ccd_precise(true),
+                    );
+                    world.add_builder(
+                        BodyBuilder::kinematic(Shape::Box {
+                            half_extents: Vec3::new(2.0, 0.1, 0.1) * scale,
+                        })
+                        .position(offset)
+                        .rotation(frame)
+                        .angular_velocity(
+                            frame.mul_vec3(Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt)),
+                        ),
+                    );
+                    let hit = world.sweep_convex_bodies(sphere.index as usize, dt);
+                    let t =
+                        hit.expect("rotating long box must reach the sphere at every tested scale");
+                    let expected = 0.2f32.acos() / std::f32::consts::FRAC_PI_2;
+                    // This bounds normalized TOI error, not spatial penetration to 1e-4.
+                    assert!((t - expected).abs() < 0.002,
+                        "scale={scale}, offset={offset:?}, frame={frame:?}, t={t}, analytic={expected}");
+                }
+            }
+        }
     }
 
     #[test]

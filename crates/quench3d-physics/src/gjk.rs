@@ -215,6 +215,37 @@ fn tetra_orientation(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> f64 {
         + (u[0] * v[1] - u[1] * v[0]) * w[2]
 }
 
+/// Fast orient3d filter (no adaptive exact fallback). The permanent bounds the
+/// six determinant products; Shewchuk's (7 + 56u)u bound includes subtraction
+/// rounding for IEEE binary64, u = 2^-53. An uncertain sign returns zero and
+/// forces the precise reducer to examine faces instead of claiming an interior.
+fn tetra_orientation_filtered(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> f64 {
+    let difference = |p: Vec3| {
+        [
+            f64::from(p.x) - f64::from(a.x),
+            f64::from(p.y) - f64::from(a.y),
+            f64::from(p.z) - f64::from(a.z),
+        ]
+    };
+    let u = difference(b);
+    let v = difference(c);
+    let w = difference(d);
+    let permanent = (u[1] * v[2]).abs() * w[0].abs()
+        + (u[2] * v[1]).abs() * w[0].abs()
+        + (u[2] * v[0]).abs() * w[1].abs()
+        + (u[0] * v[2]).abs() * w[1].abs()
+        + (u[0] * v[1]).abs() * w[2].abs()
+        + (u[1] * v[0]).abs() * w[2].abs();
+    let determinant = tetra_orientation(a, b, c, d);
+    let unit_roundoff = f64::EPSILON * 0.5;
+    let bound = (7.0 + 56.0 * unit_roundoff) * unit_roundoff * permanent;
+    if determinant.abs() > bound {
+        determinant
+    } else {
+        0.0
+    }
+}
+
 fn reduce<const ROBUST: bool>(points: &[SupportPoint]) -> Reduced {
     match points.len() {
         0 => Reduced {
@@ -279,7 +310,7 @@ fn reduce<const ROBUST: bool>(points: &[SupportPoint]) -> Reduced {
             let p = [points[0].v, points[1].v, points[2].v, points[3].v];
             let vol = (p[1] - p[0]).dot((p[2] - p[0]).cross(p[3] - p[0]));
             let non_degenerate = if ROBUST {
-                tetra_orientation(p[0], p[1], p[2], p[3]).abs() > 1e-14
+                tetra_orientation_filtered(p[0], p[1], p[2], p[3]) != 0.0
             } else {
                 vol.abs() > 1e-14
             };
@@ -293,9 +324,9 @@ fn reduce<const ROBUST: bool>(points: &[SupportPoint]) -> Reduced {
                 if ROBUST {
                     // Compute differences after widening: near-repeated vertices can cancel
                     // a positive f32 orientation to zero and invert the separating face.
-                    let opposite = tetra_orientation(p[i], p[j], p[k], p[r]);
-                    let origin = tetra_orientation(p[i], p[j], p[k], Vec3::ZERO);
-                    if non_degenerate && opposite * origin >= 0.0 {
+                    let opposite = tetra_orientation_filtered(p[i], p[j], p[k], p[r]);
+                    let origin = tetra_orientation_filtered(p[i], p[j], p[k], Vec3::ZERO);
+                    if non_degenerate && opposite * origin > 0.0 {
                         continue;
                     }
                     // Degenerate tetrahedra have no interior; consider every face.
@@ -1208,6 +1239,80 @@ mod tests {
             b: Vec3::ZERO,
         });
         assert!(reduce::<true>(&points).inside);
+    }
+
+    #[test]
+    fn precise_tetrahedron_rejects_large_duplicate_vertices() {
+        let vertices = [
+            vec3(-176.64105, 4.0938797, -9.747912),
+            vec3(-176.64099, 4.0939026, 10.254273),
+            vec3(192.13441, 159.02853, -9.746792),
+            vec3(192.13441, 159.02853, -9.746792),
+        ];
+        assert_eq!(vertices[2], vertices[3]);
+        let volume = tetra_orientation(vertices[0], vertices[1], vertices[2], vertices[3]);
+        assert!(
+            volume.abs() > 1e-14,
+            "capture must reproduce cancellation residue"
+        );
+        assert_eq!(
+            tetra_orientation_filtered(vertices[0], vertices[1], vertices[2], vertices[3]),
+            0.0
+        );
+        let points = vertices.map(|v| SupportPoint {
+            v,
+            a: v,
+            b: Vec3::ZERO,
+        });
+        let result = reduce::<true>(&points);
+        assert!(
+            !result.inside,
+            "duplicate vertices have no tetrahedral interior: volume={volume:e}"
+        );
+        assert!(
+            result.closest.length() > 72.0,
+            "separated simplex must not collapse onto origin: {:?}",
+            result.closest
+        );
+    }
+
+    #[test]
+    fn precise_tetrahedron_filter_handles_scale_and_flatness() {
+        for scale in [0.01f32, 1.0, 100.0, 10000.0] {
+            for vertices in [
+                [Vec3::X, Vec3::Y, Vec3::Z, -Vec3::ONE],
+                [
+                    vec3(1.0, 0.0, 0.0001),
+                    vec3(-1.0, 0.0, 0.0001),
+                    vec3(0.0, 1.0, -0.0001),
+                    vec3(0.0, -1.0, -0.0001),
+                ],
+            ] {
+                let points = vertices.map(|v| SupportPoint {
+                    v: v * scale,
+                    a: v * scale,
+                    b: Vec3::ZERO,
+                });
+                assert!(
+                    reduce::<true>(&points).inside,
+                    "true interior at scale {scale}"
+                );
+            }
+            let vertices = [
+                vec3(1.0, -1.0, -1.0),
+                vec3(1.0, 1.0, -1.0),
+                vec3(1.0, 1.0, 1.0),
+                vec3(1.0, -1.0, 1.0),
+            ];
+            let points = vertices.map(|v| SupportPoint {
+                v: v * scale,
+                a: v * scale,
+                b: Vec3::ZERO,
+            });
+            let reduced = reduce::<true>(&points);
+            assert!(!reduced.inside, "coplanar simplex at scale {scale}");
+            assert!((reduced.closest.length() / scale - 1.0).abs() < 1e-4);
+        }
     }
 
     #[test]
