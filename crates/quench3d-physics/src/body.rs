@@ -1065,7 +1065,7 @@ impl BodyBuilder {
 
     /// Select the compound transform convention. The default preserves legacy scenes.
     /// BodyLocal fixes part placement for contacts, queries, water and fluid boundaries;
-    /// it does not enable rotating compound CCD.
+    /// rotating convex compound CCD additionally requires `ccd_precise(true)`.
     pub fn compound_transform_mode(mut self, mode: CompoundTransformMode) -> Self {
         self.compound_transform_mode = mode;
         self

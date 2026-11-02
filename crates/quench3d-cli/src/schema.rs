@@ -532,8 +532,8 @@ pub fn scene_grammar() -> Value {
             "collides_with": "愿意碰的层号列表，缺省所有层；判断是**对称**的（双方都愿意才碰），[] 表示谁也不碰",
             "sensor": "true = 触发区：照常报进入/离开，但不产生冲量（别的物体穿过去）；需要 body 不为 none",
             "ccd": "true = 连续碰撞检测（中心射线 + 盒子 8 角射线；有角速度的盒子再做 8 角点旋转扫掠，按最早命中时间同时缩放线/角速度）；只对 dynamic 生效",
-            "ccd_precise": "true = 对凸-凸体用 GJK 距离做保守推进，找到真实首次接触（隐含 ccd=true）；每个开启体每子步 O(其它凸体)，半空间/三角网仍走默认路径",
-            "compound_transform_mode": "legacy（缺省）保留历史部件变换；body_local 显式按刚体局部坐标组合部件，统一接触、查询、水域与流体边界，不解锁旋转复合 CCD",
+            "ccd_precise": "true = 用距离保守推进预测碰撞时间（隐含 ccd=true），主形状支持凸体/平面/三角网；复合凸部件的旋转还需 compound_transform_mode=body_local，不保证精确连续轨迹，每个部件对最多 64 次距离迭代",
+            "compound_transform_mode": "legacy（缺省）保留历史部件变换；body_local 显式按刚体局部坐标组合部件，统一接触、查询、水域与流体边界；同时开启 ccd_precise 可扫掠旋转凸部件与凸体/平面，复合网格部件不支持",
             "note": "linear/angular_damping、gravity_scale、mass、allow_sleep、angular_velocity 只对 body=dynamic 生效"
         },
         "model": {

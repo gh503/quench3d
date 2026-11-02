@@ -2748,8 +2748,113 @@ impl PhysicsWorld {
         best
     }
 
+    /// Rotating convex/plane part pairs with explicitly body-local compound placement.
+    /// Mesh parts and all compound bodies using legacy placement remain excluded.
+    fn sweep_body_local_compound_parts(&self, self_index: usize, dt: f32) -> Option<f32> {
+        let a = self.bodies.get(self_index)?.body.as_ref()?;
+        let mut best: Option<f32> = None;
+        let allowed = |body: &RigidBody| {
+            body.extra_parts.is_empty()
+                || body.compound_transform_mode() == crate::body::CompoundTransformMode::BodyLocal
+        };
+        if !allowed(a) {
+            return None;
+        }
+        let pose = |body: &RigidBody, linear: Vec3, angular: Vec3, t: f32| {
+            let speed = angular.length();
+            Transform {
+                position: body.transform.position + linear * (dt * t),
+                rotation: if speed > 1e-9 {
+                    Quat::from_axis_angle(angular.normalize_or_zero(), speed * dt * t)
+                        * body.transform.rotation
+                } else {
+                    body.transform.rotation
+                },
+                scale: body.transform.scale,
+            }
+        };
+        for (index, slot) in self.bodies.iter().enumerate() {
+            let Some(b) = &slot.body else { continue };
+            if index == self_index
+                || b.sensor
+                || !a.groups.interacts(b.groups)
+                || (a.extra_parts.is_empty() && b.extra_parts.is_empty())
+            {
+                continue;
+            }
+            let (linear, angular) = if b.body_type == BodyType::Static {
+                (Vec3::ZERO, Vec3::ZERO)
+            } else {
+                (b.linear_velocity, b.angular_velocity)
+            };
+            if !allowed(b) {
+                continue;
+            }
+            for (ai, (sa, local_a)) in a.parts().enumerate() {
+                if sa.is_static_only() {
+                    continue;
+                }
+                for (bi, (sb, local_b)) in b.parts().enumerate() {
+                    // The existing predictor covers the primary pair, including meshes.
+                    // Additional mesh/heightfield parts are not handled by this convex path.
+                    let plane = matches!(sb, Shape::Plane { .. });
+                    if (ai == 0 && bi == 0) || (sb.is_static_only() && !plane) {
+                        continue;
+                    }
+                    let ra = local_a.position.length() + sa.bounding_radius();
+                    let rb = if plane {
+                        0.0
+                    } else {
+                        local_b.position.length() + sb.bounding_radius()
+                    };
+                    let step = ((a.linear_velocity - linear).length()
+                        + a.angular_velocity.length() * ra
+                        + angular.length() * rb)
+                        * dt;
+                    if !(step.is_finite() && step > 1e-6) {
+                        continue;
+                    }
+                    let mut t = 0.0;
+                    for _ in 0..64 {
+                        let ta = pose(a, a.linear_velocity, a.angular_velocity, t)
+                            .mul_transform(&local_a);
+                        let tb = pose(b, linear, angular, t).mul_transform(&local_b);
+                        let support_a = gjk::Support::new(sa, &ta);
+                        let (touching, distance) = if let Shape::Plane { normal } = sb {
+                            let n = tb.rotation.mul_vec3(*normal);
+                            if n.length_squared() < 0.5 {
+                                break;
+                            }
+                            let n = n.normalize();
+                            let distance = (support_a.support(-n) - tb.position).dot(n);
+                            (distance <= 1e-4, distance)
+                        } else {
+                            let hit = gjk::gjk_precise(&support_a, &gjk::Support::new(sb, &tb));
+                            (hit.intersect || hit.distance <= 1e-4, hit.distance)
+                        };
+                        if touching {
+                            if t > 1e-5 && best.is_none_or(|cur| t < cur) {
+                                best = Some(t);
+                            }
+                            break;
+                        }
+                        let next = t + distance / step;
+                        if !(next.is_finite() && next > t) {
+                            break;
+                        }
+                        t = next;
+                        if t >= 1.0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// Opt-in conservative CCD for primary convex shapes, planes and triangle meshes.
-    /// Also checks supported translation-only compound parts; returns normalized time.
+    /// Also checks legacy translated parts and opted-in body-local rotating convex parts.
     fn sweep_convex_bodies(&self, self_index: usize, dt: f32) -> Option<f32> {
         let a = self.bodies.get(self_index)?.body.as_ref()?;
         if a.shape.is_static_only() || a.sensor || !(dt.is_finite() && dt > 0.0) {
@@ -2758,6 +2863,11 @@ impl PhysicsWorld {
         let groups = a.groups;
         let ra = a.shape.bounding_radius();
         let mut best = self.sweep_translated_compound_parts(self_index, dt);
+        if let Some(t) = self.sweep_body_local_compound_parts(self_index, dt) {
+            if best.is_none_or(|cur| t < cur) {
+                best = Some(t);
+            }
+        }
         for (i, slot) in self.bodies.iter().enumerate() {
             if i == self_index {
                 continue;
@@ -3584,11 +3694,16 @@ impl PhysicsWorld {
                     | Shape::ConvexHull { .. }
             ) && spin.is_finite()
                 && spin > 1e-4;
-            if (!total.is_finite() || total <= 0.0) && !sweep_spin {
+            let precise_compound_spin = b.ccd_precise
+                && !b.extra_parts.is_empty()
+                && b.compound_transform_mode() == crate::body::CompoundTransformMode::BodyLocal
+                && spin.is_finite()
+                && spin > 1e-4;
+            if (!total.is_finite() || total <= 0.0) && !sweep_spin && !precise_compound_spin {
                 continue;
             }
-            // 精确凸-凸路径：和旧路径取更早的 TOI；半空间/三角网目标不在
-            // 这里处理（GJK 无有限支持点），仍由旧射线/角点扫掠兜底。
+            // 显式距离推进：主形状支持凸体、平面与三角网；附加凸部件按
+            // 模式补扫（旋转需 BodyLocal），并与旧射线/角点路径取更早的 TOI。
             let precise_t = if b.ccd_precise {
                 self.sweep_convex_bodies(i, dt)
             } else {
@@ -4724,6 +4839,169 @@ mod tests {
         assert_eq!(body.transform.scale, Vec3::ONE);
         assert_eq!(body.part_count(), 2);
         (world, moving)
+    }
+
+    fn rotating_compound_ccd_world(precise: bool) -> (PhysicsWorld, BodyHandle) {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let omega = -Vec3::Z * (std::f32::consts::FRAC_PI_2 * 60.0);
+        let moving = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .part_at(Shape::Sphere { radius: 0.1 }, Vec3::X * 2.0)
+                .position(Vec3::Y)
+                .angular_velocity(omega)
+                .compound_transform_mode(crate::body::CompoundTransformMode::BodyLocal)
+                .ccd_precise(precise),
+        );
+        let body = world.body(moving).unwrap();
+        assert_eq!(body.angular_velocity, omega);
+        assert_eq!(body.linear_velocity, Vec3::ZERO);
+        assert_eq!(body.part_count(), 2);
+        world.add_builder(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }));
+        (world, moving)
+    }
+
+    #[test]
+    fn precise_body_local_rotating_compound_predicts_offset_sphere() {
+        let (world, moving) = rotating_compound_ccd_world(true);
+        let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+        let expected = 0.45f32.asin() / std::f32::consts::FRAC_PI_2;
+        assert!(
+            hit.is_some_and(|t| (t - expected).abs() < 2e-4),
+            "expected axis-angle TOI {expected}, got {hit:?}"
+        );
+    }
+
+    #[test]
+    fn precise_body_local_rotating_compound_public_step_does_not_cross_plane() {
+        let mut bottoms = Vec::new();
+        for accumulated in [false, true] {
+            for precise in [false, true] {
+                let (mut world, moving) = rotating_compound_ccd_world(precise);
+                if accumulated {
+                    world.step(1.0 / 60.0);
+                } else {
+                    assert_eq!(world.step_substeps(1.0 / 60.0, 1), 1);
+                }
+                let body = world.body(moving).unwrap();
+                let (_, local) = body.parts().nth(1).unwrap();
+                bottoms.push(body.part_world_transform(&local).position.y - 0.1);
+            }
+        }
+        assert!(
+            bottoms[0] < -0.5 && bottoms[2] < -0.5,
+            "disabled CCD must cross: {bottoms:?}"
+        );
+        // The solver uses normalized Euler, not the predictor's exact axis-angle path.
+        assert!(
+            [bottoms[1], bottoms[3]]
+                .iter()
+                .all(|y| *y >= -1e-4 && *y < 0.1),
+            "precise CCD must stop the offset sphere before crossing: {bottoms:?}"
+        );
+    }
+
+    #[test]
+    fn precise_body_local_rotating_compound_frames_and_legacy() {
+        use crate::body::CompoundTransformMode::{BodyLocal, Legacy};
+        for frame in [
+            Quat::IDENTITY,
+            Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7),
+        ] {
+            for sign in [-1.0, 1.0] {
+                for mode in [Legacy, BodyLocal] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let moving =
+                        world.add_builder(
+                            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                                .part_at(Shape::Sphere { radius: 0.1 }, Vec3::X * (2.0 * sign))
+                                .position(frame.mul_vec3(Vec3::Y))
+                                .rotation(frame)
+                                .angular_velocity(frame.mul_vec3(
+                                    -Vec3::Z * (sign * std::f32::consts::FRAC_PI_2 * 60.0),
+                                ))
+                                .compound_transform_mode(mode)
+                                .ccd_precise(true),
+                        );
+                    world.add_builder(
+                        BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).rotation(frame),
+                    );
+                    let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+                    if mode == Legacy {
+                        assert!(
+                            hit.is_none(),
+                            "legacy rotating compound remains excluded: {hit:?}"
+                        );
+                        let omega = world.body(moving).unwrap().angular_velocity;
+                        world.apply_ccd(1.0 / 60.0);
+                        assert_eq!(world.body(moving).unwrap().angular_velocity, omega);
+                    } else {
+                        let expected = 0.45f32.asin() / std::f32::consts::FRAC_PI_2;
+                        assert!(hit.is_some_and(|t| (t - expected).abs() < 2e-4), "{hit:?}");
+                        let omega = world.body(moving).unwrap().angular_velocity.length();
+                        world.apply_ccd(1.0 / 60.0);
+                        assert!(
+                            world.body(moving).unwrap().angular_velocity.length() < omega * 0.4
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn precise_body_local_rotating_compound_target_pose_and_filters() {
+        use crate::body::{CompoundTransformMode, ShapePart};
+        let body_pose = Transform::new(
+            Vec3::new(0.0, 3.0, 0.0),
+            Quat::from_axis_angle(Vec3::Z, 0.7),
+            Vec3::ONE,
+        );
+        let local = Transform::new(
+            Vec3::X * 2.0,
+            Quat::from_axis_angle(Vec3::Y, 0.4),
+            Vec3::ONE,
+        );
+        let expected_pose = body_pose.mul_transform(&local);
+        let shape = Shape::Box {
+            half_extents: Vec3::new(0.05, 0.5, 0.5),
+        };
+        let mut hits = Vec::new();
+        for case in 0..5 {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let target = if case == 0 {
+                BodyBuilder::r#static(shape.clone()).transform(expected_pose)
+            } else {
+                BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                    .part(ShapePart::at(shape.clone(), local.position, local.rotation))
+                    .transform(body_pose)
+                    .compound_transform_mode(if case == 4 {
+                        CompoundTransformMode::Legacy
+                    } else {
+                        CompoundTransformMode::BodyLocal
+                    })
+                    .linear_velocity(Vec3::X * 100.0)
+                    .angular_velocity(Vec3::Z * 10.0)
+                    .sensor(case == 2)
+            };
+            let target = world.add_builder(target);
+            if case == 3 {
+                world.body_mut(target).unwrap().groups.filter = 0;
+            }
+            let direction = expected_pose.rotation.mul_vec3(Vec3::X);
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .position(expected_pose.position - direction)
+                    .linear_velocity(direction * 120.0)
+                    .ccd_precise(true),
+            );
+            let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+            if case < 2 {
+                hits.push(hit.unwrap());
+            } else {
+                assert!(hit.is_none(), "case={case} hit={hit:?}");
+            }
+        }
+        assert!((hits[0] - hits[1]).abs() < 2e-4, "{hits:?}");
     }
 
     #[test]
