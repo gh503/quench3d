@@ -1712,7 +1712,7 @@ pub struct Renderer {
     prev_skin_palette: Vec<[[f32; 4]; 4]>,
     decals: Vec<DecalDesc>,
     decal_layout: wgpu::BindGroupLayout,
-    decal_pipeline: wgpu::RenderPipeline,
+    decal_pipeline: Option<wgpu::RenderPipeline>,
     staging: Vec<(InstanceRaw, Aabb)>,
     /// GPU 剔除缓冲（`options.gpu_culling` 打开且后端支持 compute 时才有）。
     gpu_cull: Option<GpuCull>,
@@ -3308,7 +3308,9 @@ impl Renderer {
         });
 
         let decal_layout = decal_bind_group_layout(device);
-        let decal_pipeline = create_decal_pipeline(device, &decal_layout);
+        // GLSL cannot translate textureLoad on depth textures, even for an unused pass.
+        let decal_pipeline =
+            depth_texture_read.then(|| create_decal_pipeline(device, &decal_layout));
         Self {
             decals: Vec::new(),
             decal_layout,
@@ -3461,6 +3463,12 @@ impl Renderer {
             frame_index: 0,
             stats: RenderStats::default(),
         }
+    }
+
+    /// Whether depth-projected decals are available on this renderer.
+    /// GL/WebGL2 cannot translate depth texture loads and returns false.
+    pub fn supports_decals(&self) -> bool {
+        self.decal_pipeline.is_some()
     }
 
     /// 这个渲染器**能不能**做 SSAO。
@@ -6144,7 +6152,11 @@ impl Renderer {
         // 全屏三角形 + 场景深度重建世界坐标；贴在已经写进深度的任意表面上，而不是
         // 浮在空中的透明四边形。带 alpha 混合，直接写 HDR 中间目标。
         if decals_on && !self.decals.is_empty() {
-            if let (Some(depth), Some(color)) = (&self.resolved_depth_view, &self.hdr_view) {
+            if let (Some(pipeline), Some(depth), Some(color)) = (
+                &self.decal_pipeline,
+                &self.resolved_depth_view,
+                &self.hdr_view,
+            ) {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("quench3d-decal-pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -6161,7 +6173,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.decal_pipeline);
+                pass.set_pipeline(pipeline);
                 for decal in &self.decals {
                     let Some(texture) = self.textures.get(decal.texture) else {
                         continue;

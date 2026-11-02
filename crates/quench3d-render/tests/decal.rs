@@ -5,6 +5,41 @@ use quench3d_render::context::with_gpu_tests;
 use quench3d_render::prelude::*;
 use quench3d_render::{DecalDesc, GpuOptions, RendererOptions};
 
+#[test]
+fn gl_renderer_starts_without_depth_decal_pipeline() {
+    let Some(result) = with_gpu_tests("GL decal startup", || {
+        pollster::block_on(GpuContext::from_candidates_with(
+            &[wgpu::Backends::GL],
+            96,
+            96,
+            GpuOptions::default(),
+            |_| Ok(None),
+        ))
+    }) else {
+        return;
+    };
+    let mut ctx = match result {
+        Ok(ctx) => ctx,
+        Err(error) => {
+            eprintln!("SKIP GL adapter unavailable: {error}");
+            return;
+        }
+    };
+    assert_eq!(ctx.adapter_info.backend, wgpu::Backend::Gl);
+    let mut renderer = Renderer::new(&ctx, RendererOptions::default());
+    assert!(!renderer.supports_decals());
+    let image = renderer
+        .capture(
+            &mut ctx,
+            96,
+            96,
+            &Camera::perspective(1.0),
+            &Lighting::default(),
+        )
+        .expect("GL first frame");
+    assert_eq!(image.rgba.len(), 96 * 96 * 4);
+}
+
 const W: u32 = 96;
 const H: u32 = 96;
 

@@ -1276,3 +1276,70 @@ fn viewport_click_uses_window_coordinates() {
         view.rect.min
     );
 }
+
+#[test]
+fn fly_camera_panel_edits_fov_and_switches_orthographic() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    engine.camera_mode = CameraMode::Fly;
+    engine.fly.fov_y = 70_f32.to_radians();
+    let original_orbit_fov = engine.orbit.fov_y;
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 2400.0));
+    let mut run = |engine: &mut Engine, events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            focused: true,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ui::panels(ui, engine, &mut doc, &mut view, &mut gizmo, &mut camera);
+        });
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let _ = run(&mut engine, vec![]);
+    let shapes = run(&mut engine, vec![]);
+    let fov = text_shape_rect(&shapes, "70.0")
+        .or_else(|| text_shape_rect(&shapes, "70"))
+        .expect("flight FOV value must be shown");
+    let pos = fov.center();
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    run(
+        &mut engine,
+        vec![egui::Event::PointerMoved(pos), button(pos, true)],
+    );
+    let moved = pos + egui::vec2(30.0, 0.0);
+    run(&mut engine, vec![egui::Event::PointerMoved(moved)]);
+    let shapes = run(&mut engine, vec![button(moved, false)]);
+    assert_ne!(engine.fly.fov_y.to_bits(), 70_f32.to_radians().to_bits());
+    assert_eq!(engine.orbit.fov_y.to_bits(), original_orbit_fov.to_bits());
+    let ortho = text_shape_rect(&shapes, "正交").expect("orthographic checkbox shown");
+    let eye = engine.camera().position;
+    let forward = engine.camera().forward();
+    let pos = ortho.center();
+    run(
+        &mut engine,
+        vec![
+            egui::Event::PointerMoved(pos),
+            button(pos, true),
+            button(pos, false),
+        ],
+    );
+    assert_eq!(engine.camera_mode, CameraMode::Orbit);
+    assert!(engine.orbit.orthographic_height.is_some());
+    assert!((engine.camera().position - eye).length() < 1e-4);
+    assert!(engine.camera().forward().dot(forward) > 0.99999);
+}

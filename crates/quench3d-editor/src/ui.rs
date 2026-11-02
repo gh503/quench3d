@@ -354,14 +354,25 @@ fn top_bar(
                 ui.checkbox(&mut engine.debug.joints, "关节");
                 ui.separator();
                 let mode_label = match engine.camera_mode {
-                    CameraMode::Orbit => "轨道相机",
+                    CameraMode::Orbit => "环绕对象",
                     CameraMode::Fly => "飞行相机",
                 };
                 egui::ComboBox::from_id_salt("camera-mode-quick")
                     .selected_text(mode_label)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
-                        ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
+                        if ui
+                            .selectable_label(engine.camera_mode == CameraMode::Orbit, "环绕对象")
+                            .clicked()
+                        {
+                            let center = doc.selection_center(engine);
+                            crate::navigation::switch(engine, CameraMode::Orbit, center);
+                        }
+                        if ui
+                            .selectable_label(engine.camera_mode == CameraMode::Fly, "飞行相机")
+                            .clicked()
+                        {
+                            crate::navigation::switch(engine, CameraMode::Fly, None);
+                        }
                     });
             });
             if doc.recovery.is_some() {
@@ -696,14 +707,25 @@ fn view_menu(
         ui.separator();
         ui.label(RichText::new("相机").small().weak());
         let mode_label = match engine.camera_mode {
-            CameraMode::Orbit => "轨道相机",
+            CameraMode::Orbit => "环绕对象",
             CameraMode::Fly => "飞行相机",
         };
         egui::ComboBox::from_id_salt("camera-mode")
             .selected_text(mode_label)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
-                ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
+                if ui
+                    .selectable_label(engine.camera_mode == CameraMode::Orbit, "环绕对象")
+                    .clicked()
+                {
+                    let center = doc.selection_center(engine);
+                    crate::navigation::switch(engine, CameraMode::Orbit, center);
+                }
+                if ui
+                    .selectable_label(engine.camera_mode == CameraMode::Fly, "飞行相机")
+                    .clicked()
+                {
+                    crate::navigation::switch(engine, CameraMode::Fly, None);
+                }
             });
         ui.checkbox(&mut engine.camera_collision, "相机防穿墙")
             .on_hover_text("轨道相机被几何挡住时自动拉近；不改缩放距离，移开后恢复");
@@ -1218,7 +1240,7 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
                 }
                 if let Some(indices) = focus_request {
                     if let Some(bounds) = engine.scene.bounds_of(&engine.renderer, &indices) {
-                        engine.orbit.focus_on(&bounds);
+                        crate::navigation::focus_bounds(engine, &bounds);
                     }
                     doc.select_only(indices.first().copied());
                 }
@@ -2058,14 +2080,25 @@ fn camera_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         .default_open(true)
         .show(ui, |ui| {
             let mode_label = match engine.camera_mode {
-                CameraMode::Orbit => "轨道相机",
+                CameraMode::Orbit => "环绕对象",
                 CameraMode::Fly => "飞行相机",
             };
             egui::ComboBox::from_id_salt("camera-mode-panel")
                 .selected_text(mode_label)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut engine.camera_mode, CameraMode::Orbit, "轨道相机");
-                    ui.selectable_value(&mut engine.camera_mode, CameraMode::Fly, "飞行相机");
+                    if ui
+                        .selectable_label(engine.camera_mode == CameraMode::Orbit, "环绕对象")
+                        .clicked()
+                    {
+                        let center = doc.selection_center(engine);
+                        crate::navigation::switch(engine, CameraMode::Orbit, center);
+                    }
+                    if ui
+                        .selectable_label(engine.camera_mode == CameraMode::Fly, "飞行相机")
+                        .clicked()
+                    {
+                        crate::navigation::switch(engine, CameraMode::Fly, None);
+                    }
                 });
 
             let names: Vec<String> = doc
@@ -2198,19 +2231,27 @@ fn camera_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             }
 
             ui.separator();
-            let mut ortho = engine.orbit.orthographic_height.is_some();
+            let mut ortho = engine.camera_mode == CameraMode::Orbit
+                && engine.orbit.orthographic_height.is_some();
             if ui
                 .checkbox(&mut ortho, "正交")
                 .on_hover_text("关 = 透视（近大远小）；开 = 工程制图式正交投影")
                 .changed()
             {
+                if ortho {
+                    crate::navigation::switch(engine, CameraMode::Orbit, None);
+                }
                 engine.orbit.orthographic_height = if ortho {
                     Some(engine.orbit.orthographic_height.unwrap_or(12.0))
                 } else {
                     None
                 };
             }
-            let mut fov_deg = engine.orbit.fov_y.to_degrees();
+            let mut fov_deg = match engine.camera_mode {
+                CameraMode::Orbit => engine.orbit.fov_y,
+                CameraMode::Fly => engine.fly.fov_y,
+            }
+            .to_degrees();
             ui.add_enabled_ui(!ortho, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("视场角");
@@ -2222,7 +2263,10 @@ fn camera_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         )
                         .changed()
                     {
-                        engine.orbit.fov_y = fov_deg.to_radians();
+                        match engine.camera_mode {
+                            CameraMode::Orbit => engine.orbit.fov_y = fov_deg.to_radians(),
+                            CameraMode::Fly => engine.fly.fov_y = fov_deg.to_radians(),
+                        }
                     }
                 });
             });
@@ -2240,6 +2284,7 @@ fn camera_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                         .range(10.0..=10_000.0),
                 );
             });
+            engine.set_camera_clip_override(Some((engine.orbit.near, engine.orbit.far)));
             if let Some(height) = engine.orbit.orthographic_height.as_mut() {
                 ui.horizontal(|ui| {
                     ui.label("正交高度");
@@ -4556,7 +4601,12 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         return;
     }
     ui.separator();
-    ui.label(RichText::new(format!("贴花（{} 个）", decals.len())));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("贴花（{} 个）", decals.len())));
+        if !engine.renderer.supports_decals() {
+            ui.label(RichText::new("当前 WebGL 后端不可用").weak());
+        }
+    });
     for (i, decal) in decals {
         let mut position = decal.position.unwrap_or([0.0, 0.0, 0.0]);
         let mut normal = decal.normal.unwrap_or([0.0, 1.0, 0.0]);
@@ -5028,7 +5078,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
             ui.horizontal(|ui| {
                 if ui.button("聚焦").clicked() {
                     if let Some(bounds) = engine.scene.bounds_of(&engine.renderer, &[index]) {
-                        engine.orbit.focus_on(&bounds);
+                        crate::navigation::focus_bounds(engine, &bounds);
                     }
                 }
                 if ui.button("复制").clicked() {
@@ -5119,9 +5169,9 @@ fn viewport(
             // 左上角提示：当前相机模式与操作。
             let hint = match engine.camera_mode {
                 CameraMode::Orbit => {
-                    "轨道相机：在空白处左键拖动旋转 · 右键拖动平移 · 滚轮缩放 · Shift+左键拖动框选"
+                    "环绕对象：左键左右拖动旋转、上下拖动俯仰 · 右键拖动平移 · 滚轮缩放 · Shift+左键拖动框选"
                 }
-                CameraMode::Fly => "飞行相机：右键拖动看向，WASD 移动，Q/E 升降",
+                CameraMode::Fly => "飞行相机：右键拖动看向 · WASD 移动 · Q/E 升降 · 滚轮远近 · Tab 切换环绕",
             };
             let painter = ui.painter();
             let pos = rect.left_top() + egui::vec2(10.0, 8.0);

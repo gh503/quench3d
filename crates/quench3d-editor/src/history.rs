@@ -262,11 +262,17 @@ impl History {
 ///
 /// 返回 `(物体数, 模型实例映射)`：映射必须一路传出去，见 [`Restored::instances`]。
 fn restore(engine: &mut Engine, snapshot: &str) -> Result<(usize, Vec<ModelInstance>), String> {
+    let clip = engine.camera_clip_override();
     let orbit = engine.orbit;
+    let fly = engine.fly;
+    let mode = engine.camera_mode;
     let paused = engine.paused;
     match scene_io::install_text(engine, snapshot) {
         Ok(installed) => {
+            engine.set_camera_clip_override(clip);
             engine.orbit = orbit;
+            engine.fly = fly;
+            engine.camera_mode = mode;
             engine.paused = paused;
             Ok((installed.objects, installed.instances))
         }

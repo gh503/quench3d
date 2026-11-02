@@ -241,6 +241,19 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     };
     // 相机位置只在"用 position/look_at 描述"时才写，否则让 yaw/pitch/distance 说话。
     out.camera.position = None;
+    if engine.camera_mode == quench3d::app::CameraMode::Fly {
+        let camera = engine.camera();
+        let eye = camera.position;
+        let target = eye + camera.forward() * engine.orbit.distance.max(0.2);
+        out.camera = CameraDoc {
+            position: Some([eye.x, eye.y, eye.z]),
+            look_at: Some([target.x, target.y, target.z]),
+            fov_deg: Some(camera.fov_y.to_degrees()),
+            near: Some(camera.near),
+            far: Some(camera.far),
+            ..Default::default()
+        };
+    }
 
     // 光照：编辑器能改的字段从**引擎**写回（所以拖了太阳方向、改了曝光，存盘会生效），
     // 编辑器不管的（点光、bloom…）沿用底稿。`preset` 必须清掉：预设会在载入时
@@ -1028,8 +1041,10 @@ fn install_doc(engine: &mut Engine, doc: SceneDoc) -> Result<Installed, String> 
     engine.renderer.options.auto_lod = doc.render.auto_lod.unwrap_or(false);
     engine.assets = quench3d::AssetCache::new(&mut engine.renderer, &engine.gpu);
     engine.world = build.world;
+    let camera_mode = engine.camera_mode;
     let instances =
         runner::setup_visuals(engine, &doc, &build.handles).map_err(|e| e.to_string())?;
+    engine.camera_mode = camera_mode;
     apply_camera(engine, &doc.camera);
     // 阴影级联：用 CLI 的同一份映射函数，保证编辑器预览与 `quench3d render` 是同一种阴影。
     // （以前这里什么也没设：载入一个 `cascades: 4` 的场景，编辑器预览仍是引擎默认的单级。）
@@ -1102,6 +1117,11 @@ pub(crate) fn apply_camera(engine: &mut Engine, camera: &CameraDoc) {
         engine.orbit.far = far;
     }
     engine.orbit.orthographic_height = camera.orthographic_height.filter(|h| *h > 0.0);
+    if engine.orbit.orthographic_height.is_some() {
+        engine.camera_mode = quench3d::app::CameraMode::Orbit;
+    } else if engine.camera_mode == quench3d::app::CameraMode::Fly {
+        crate::navigation::fly_from_orbit(engine);
+    }
 }
 
 /// 底稿里同名物体的形状 —— 引擎里的形状**反推不出来**时的兜底。

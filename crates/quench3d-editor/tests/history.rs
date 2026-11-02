@@ -661,3 +661,65 @@ fn editor_gltf_export_is_valid_and_contains_the_scene() {
     );
     assert!(exported.triangles > 0);
 }
+
+#[test]
+fn undo_redo_preserve_flight_navigation_and_mode() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    doc.reset_history(&engine);
+    let base = engine.scene.len();
+    doc.spawn(&mut engine, Primitive::Cube);
+    doc.record_edit(&engine);
+    engine.camera_mode = CameraMode::Fly;
+    engine.fly.position = Vec3::new(19.0, 7.0, -13.0);
+    engine.fly.yaw = 0.91;
+    engine.fly.pitch = -0.31;
+    engine.fly.fov_y = 0.8;
+    let fly = engine.fly;
+    let orbit = engine.orbit;
+    for redo in [false, true] {
+        if redo {
+            doc.redo(&mut engine);
+        } else {
+            doc.undo(&mut engine);
+        }
+        assert_eq!(engine.scene.len(), if redo { base + 1 } else { base });
+        assert_eq!(engine.camera_mode, CameraMode::Fly);
+        assert_eq!(engine.fly.position, fly.position);
+        assert_eq!(engine.fly.yaw.to_bits(), fly.yaw.to_bits());
+        assert_eq!(engine.fly.pitch.to_bits(), fly.pitch.to_bits());
+        assert_eq!(engine.fly.fov_y.to_bits(), fly.fov_y.to_bits());
+        assert_eq!(engine.orbit.focus, orbit.focus);
+        assert_eq!(engine.orbit.distance.to_bits(), orbit.distance.to_bits());
+    }
+}
+
+#[test]
+fn flight_clip_override_is_opt_in_and_rejects_invalid_planes() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    engine.camera_mode = CameraMode::Fly;
+    let original = engine.fly.camera(engine.gpu.aspect());
+    assert_eq!(engine.camera_clip_override(), None);
+    assert_eq!(engine.camera().near.to_bits(), original.near.to_bits());
+    assert_eq!(engine.camera().far.to_bits(), original.far.to_bits());
+    assert!(engine.set_camera_clip_override(Some((0.7, 1234.0))));
+    assert_eq!(engine.camera().near, 0.7);
+    assert_eq!(engine.camera().far, 1234.0);
+    for pair in [
+        (f32::NAN, 100.0),
+        (0.0, 100.0),
+        (2.0, 1.0),
+        (1.0, f32::INFINITY),
+    ] {
+        assert!(!engine.set_camera_clip_override(Some(pair)));
+        assert_eq!(engine.camera_clip_override(), Some((0.7, 1234.0)));
+    }
+    assert!(engine.set_camera_clip_override(None));
+    assert_eq!(engine.camera().near.to_bits(), original.near.to_bits());
+    assert_eq!(engine.camera().far.to_bits(), original.far.to_bits());
+}

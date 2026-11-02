@@ -122,30 +122,99 @@ struct EditorGame {
     orbit_with_left: bool,
     /// 右键拖动是否当作平移（在视口里按下才算）。
     pan_with_right: bool,
+    fly_with_right: bool,
+    orbit_with_middle: bool,
+    pointer_in_viewport: bool,
+    pending_mode: Option<CameraMode>,
+    pending_look: Vec2,
+    pending_pan: Vec2,
+    pending_scroll: f32,
     /// 视口高度（**渲染像素**），右键平移的像素→世界换算用。
     viewport_height: f32,
     /// egui 是否想要键盘（输入框聚焦时，快捷键要让路）。
     keys_enabled: bool,
 }
 
+impl EditorGame {
+    fn accept_motion(&mut self, mode: CameraMode, delta: Vec2) {
+        if self.pending_mode != Some(mode) {
+            self.pending_look = Vec2::ZERO;
+            self.pending_pan = Vec2::ZERO;
+            self.pending_scroll = 0.0;
+        }
+        self.pending_mode = Some(mode);
+        match mode {
+            CameraMode::Fly if self.fly_with_right => self.pending_look += delta,
+            CameraMode::Orbit => {
+                if self.orbit_with_left || self.orbit_with_middle {
+                    self.pending_look += delta;
+                }
+                if self.pan_with_right {
+                    self.pending_pan += delta;
+                }
+            }
+            _ => {}
+        }
+    }
+    fn accept_scroll(&mut self, mode: CameraMode, scroll: f32, in_viewport: bool) {
+        if in_viewport {
+            if self.pending_mode != Some(mode) {
+                self.pending_look = Vec2::ZERO;
+                self.pending_pan = Vec2::ZERO;
+                self.pending_scroll = 0.0;
+            }
+            self.pending_mode = Some(mode);
+            self.pending_scroll += scroll;
+        }
+    }
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn capture_pointer(&mut self, engine: &Engine) {
+        self.accept_motion(engine.camera_mode, engine.input.mouse_delta);
+        self.accept_scroll(
+            engine.camera_mode,
+            engine.input.scroll_delta,
+            self.pointer_in_viewport,
+        );
+    }
+}
+
 impl Game for EditorGame {
     fn update(&mut self, engine: &mut Engine, dt: f32) {
-        let orbit_drag = self.orbit_with_left
-            || engine.input.mouse_button_down(MouseButton::Middle)
-            || (engine.input.alt && engine.input.mouse_button_down(MouseButton::Left));
-        let camera_input = engine.input.camera_input(dt, orbit_drag);
+        if self
+            .pending_mode
+            .take()
+            .is_some_and(|mode| mode != engine.camera_mode)
+        {
+            self.pending_look = Vec2::ZERO;
+            self.pending_pan = Vec2::ZERO;
+            self.pending_scroll = 0.0;
+        }
+        let mut camera_input = engine.input.camera_input(dt, false);
+        camera_input.look_delta = std::mem::take(&mut self.pending_look);
+        camera_input.scroll = std::mem::take(&mut self.pending_scroll);
+        camera_input.dragging = camera_input.look_delta.length_squared() > 0.0;
+        let pan_delta = std::mem::take(&mut self.pending_pan);
+        if !self.keys_enabled {
+            camera_input.forward = 0.0;
+            camera_input.right = 0.0;
+            camera_input.up = 0.0;
+        }
         match engine.camera_mode {
             CameraMode::Orbit => {
                 engine.orbit.update(&camera_input);
                 // 右键拖 = 平移焦点，不旋转。放在 `update` 之后，避免同一帧
                 // 的鼠标位移既转又移。
-                if self.pan_with_right {
-                    engine
-                        .orbit
-                        .pan_screen(engine.input.mouse_delta, self.viewport_height);
+                if pan_delta.length_squared() > 0.0 {
+                    engine.orbit.pan_screen(pan_delta, self.viewport_height);
                 }
             }
-            CameraMode::Fly => engine.fly.update(&camera_input),
+            CameraMode::Fly => {
+                engine.fly.update(&camera_input);
+                engine.fly.position += engine.fly.camera(1.0).forward()
+                    * camera_input.scroll.clamp(-20.0, 20.0)
+                    * engine.fly.speed
+                    * 0.15;
+            }
         }
     }
 
@@ -383,6 +452,7 @@ impl Inner {
                 doc.pip_camera = Some(name);
             }
         }
+        crate::navigation::initialize(&mut engine);
         doc.reset_history(&engine);
         // 上次崩溃留下的自动保存：先挂出来，等用户点「恢复 / 丢弃」。
         // 桌面读文件，Web 读 localStorage（同一个版本化的键）。
@@ -423,6 +493,13 @@ impl Inner {
             game: EditorGame {
                 orbit_with_left: false,
                 pan_with_right: false,
+                fly_with_right: false,
+                orbit_with_middle: false,
+                pointer_in_viewport: false,
+                pending_mode: None,
+                pending_look: Vec2::ZERO,
+                pending_pan: Vec2::ZERO,
+                pending_scroll: 0.0,
                 viewport_height: 1.0,
                 keys_enabled: true,
             },
@@ -541,6 +618,7 @@ impl Inner {
         // ---- 2. 引擎一帧：物理 + 提交绘制指令 ----
         let mut game = std::mem::take(&mut self.game);
         game.keys_enabled = keys_enabled;
+        game.pointer_in_viewport = self.viewport.contains_pointer();
         game.viewport_height =
             (self.viewport.rect.height() * full_output.pixels_per_point).max(1.0);
         // 回放播放头在 tick 之前推进并写回位姿：这样本帧的 submit 用的是新位姿，
@@ -632,6 +710,16 @@ impl Inner {
                 .count(),
             camera_pose: self.camera.has_pose(),
             camera_world: self.camera.has_world_pose(),
+            camera_eye: match self.engine.camera_mode {
+                CameraMode::Fly => self.engine.fly.position.to_array(),
+                CameraMode::Orbit => self.engine.orbit.camera(1.0).position.to_array(),
+            },
+            camera_forward: match self.engine.camera_mode {
+                CameraMode::Fly => self.engine.fly.camera(1.0).forward().to_array(),
+                CameraMode::Orbit => self.engine.orbit.camera(1.0).forward().to_array(),
+            },
+            orbit_focus: self.engine.orbit.focus.to_array(),
+            orbit_distance: self.engine.orbit.distance,
         });
 
         // ---- 3. 取帧 → 3D → egui 叠上去 → 呈现 ----
@@ -1146,6 +1234,10 @@ struct UiDebugState {
     camera_pose: bool,
     /// Web 摄像头是否已有外部 JS 注入的 3D 世界点。
     camera_world: bool,
+    camera_eye: [f32; 3],
+    camera_forward: [f32; 3],
+    orbit_focus: [f32; 3],
+    orbit_distance: f32,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1179,6 +1271,10 @@ fn publish_ui_debug_state(state: UiDebugState) {
         parents,
         camera_pose,
         camera_world,
+        camera_eye,
+        camera_forward,
+        orbit_focus,
+        orbit_distance,
     } = state;
     let Some(window) = web_sys::window() else {
         return;
@@ -1192,7 +1288,7 @@ fn publish_ui_debug_state(state: UiDebugState) {
     };
     let state = format!(
         "keys_enabled={keys_enabled};paused={paused};grid={grid};shadows={shadows};\
-lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};hovered={hovered};motion_blur={motion_blur};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world}"
+lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};hovered={hovered};motion_blur={motion_blur};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world};camera_eye={camera_eye:?};camera_forward={camera_forward:?};orbit_focus={orbit_focus:?};orbit_distance={orbit_distance}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
 }
@@ -1274,6 +1370,63 @@ impl EditorApp {
         let Some(inner) = self.inner.as_mut() else {
             return;
         };
+        #[cfg(target_arch = "wasm32")]
+        if let WindowEvent::KeyboardInput { event, .. } = &event {
+            if event.state == ElementState::Pressed {
+                if let Some(body) = web_sys::window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.body())
+                {
+                    if body.has_attribute("data-quench3d-ui") {
+                        let _ = body.set_attribute(
+                            "data-quench3d-key-routing",
+                            &format!(
+                                "{:?};repeat={};viewport={};keys={};wants={}",
+                                event.physical_key,
+                                event.repeat,
+                                inner.viewport.contains_pointer(),
+                                inner.game.keys_enabled,
+                                inner.egui_ctx.egui_wants_keyboard_input()
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        if inner.viewport.contains_pointer()
+            && inner.game.keys_enabled
+            && !inner.egui_ctx.egui_wants_keyboard_input()
+        {
+            if let WindowEvent::KeyboardInput { event, .. } = &event {
+                if event.physical_key == PhysicalKey::Code(KeyCode::Tab)
+                    && event.state == ElementState::Pressed
+                {
+                    if !event.repeat {
+                        let mode = if inner.engine.camera_mode == CameraMode::Fly {
+                            CameraMode::Orbit
+                        } else {
+                            CameraMode::Fly
+                        };
+                        let center = inner.doc.selection_center(&inner.engine);
+                        crate::navigation::switch(&mut inner.engine, mode, center);
+                        inner.window.request_redraw();
+                        #[cfg(target_arch = "wasm32")]
+                        if let Some(body) = web_sys::window()
+                            .and_then(|w| w.document())
+                            .and_then(|d| d.body())
+                        {
+                            if body.has_attribute("data-quench3d-ui") {
+                                let _ = body.set_attribute(
+                                    "data-quench3d-tab-mode",
+                                    &format!("{:?}", inner.engine.camera_mode),
+                                );
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // egui 先看一遍：它消费掉的事件（点在面板上、在输入框里打字）就不再喂给引擎，
         // 否则会出现「点一下面板，相机也转了一下」这种事。
         let response = inner.egui_state.on_window_event(&inner.window, &event);
@@ -1322,7 +1475,50 @@ impl EditorApp {
             _ => {}
         }
 
-        if !forward {
+        // Releases and focus loss must reach input even when a panel consumes them.
+        match &event {
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    inner.engine.input.on_key_up(code);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button,
+                ..
+            } => match button {
+                WinitMouseButton::Left => {
+                    inner.engine.input.on_mouse_up(MouseButton::Left);
+                    inner.game.orbit_with_left = false;
+                }
+                WinitMouseButton::Right => {
+                    inner.engine.input.on_mouse_up(MouseButton::Right);
+                    inner.game.pan_with_right = false;
+                    inner.game.fly_with_right = false;
+                }
+                WinitMouseButton::Middle => {
+                    inner.engine.input.on_mouse_up(MouseButton::Middle);
+                    inner.game.orbit_with_middle = false;
+                }
+                _ => {}
+            },
+            WindowEvent::Focused(false) => {
+                inner.engine.input.on_focus_lost();
+                inner.game.orbit_with_left = false;
+                inner.game.orbit_with_middle = false;
+                inner.game.pan_with_right = false;
+                inner.game.fly_with_right = false;
+                inner.game.pending_look = Vec2::ZERO;
+                inner.game.pending_pan = Vec2::ZERO;
+                inner.game.pending_scroll = 0.0;
+            }
+            _ => {}
+        }
+        let captured = inner.game.orbit_with_left
+            || inner.game.orbit_with_middle
+            || inner.game.fly_with_right
+            || inner.game.pan_with_right;
+        if !forward && !(captured && matches!(event, WindowEvent::CursorMoved { .. })) {
             return;
         }
         let keys_enabled = inner.game.keys_enabled;
@@ -1343,6 +1539,9 @@ impl EditorApp {
                     // 编辑器快捷键先于引擎：Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y 是编辑器的，
                     // F 聚焦选中。引擎拿到的仍然是它认识的那些键（不会重复处理）。
                     if event.state == ElementState::Pressed {
+                        if code == KeyCode::Tab {
+                            return;
+                        }
                         if engine.input.ctrl {
                             match code {
                                 KeyCode::KeyZ => {
@@ -1480,12 +1679,22 @@ impl EditorApp {
                             // 在视口里按下左键 = 开始「转视角」；点一下（没拖动）
                             // 会被 egui 认成 click，那时光标没动，转视角也看不出。
                             if b == MouseButton::Left
+                                && engine.camera_mode == CameraMode::Orbit
                                 && pointer_in_viewport
                                 && !inner.viewport.gizmo_active
                                 && !engine.input.shift
                                 && !engine.input.ctrl
                             {
                                 inner.game.orbit_with_left = true;
+                            }
+                            if pointer_in_viewport && !inner.viewport.gizmo_active {
+                                if b == MouseButton::Right && engine.camera_mode == CameraMode::Fly
+                                {
+                                    inner.game.fly_with_right = true;
+                                }
+                                if b == MouseButton::Middle {
+                                    inner.game.orbit_with_middle = true;
+                                }
                             }
                             if b == MouseButton::Right
                                 && pointer_in_viewport
@@ -1508,16 +1717,22 @@ impl EditorApp {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let before = engine.input.mouse_delta;
                 engine
                     .input
                     .on_cursor_moved(Vec2::new(position.x as f32, position.y as f32));
+                inner
+                    .game
+                    .accept_motion(engine.camera_mode, engine.input.mouse_delta - before);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_, y) => *y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
                 };
-                engine.input.on_scroll(scroll);
+                if pointer_in_viewport {
+                    inner.game.accept_scroll(engine.camera_mode, scroll, true);
+                }
             }
             _ => {}
         }
@@ -2482,5 +2697,206 @@ mod font_tests {
                 ch as u32
             );
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod navigation_regression_tests {
+    use super::*;
+    #[test]
+    fn queued_flight_wheel_is_cancelled_after_orbit_hover() {
+        if std::env::var("QUENCH3D_GPU_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let gpu = pollster::block_on(GpuContext::headless(64, 64, Default::default())).unwrap();
+        let mut engine = Engine::new(gpu, &EngineConfig::default());
+        engine.auto_camera = false;
+        engine.paused = true;
+        engine.camera_mode = CameraMode::Fly;
+        let mut game = EditorGame {
+            pointer_in_viewport: true,
+            ..Default::default()
+        };
+        engine.input.scroll_delta = 1.0;
+        game.capture_pointer(&engine);
+        crate::navigation::switch(&mut engine, CameraMode::Orbit, None);
+        let before = engine.orbit;
+        game.accept_motion(CameraMode::Orbit, Vec2::new(5.0, 3.0));
+        engine.tick(&mut game, 1.0 / 60.0);
+        assert_eq!(
+            engine.orbit.distance.to_bits(),
+            before.distance.to_bits(),
+            "old flight wheel must not zoom orbit after hover"
+        );
+        assert_eq!(engine.orbit.yaw.to_bits(), before.yaw.to_bits());
+        assert_eq!(engine.orbit.pitch.to_bits(), before.pitch.to_bits());
+        assert_eq!(engine.orbit.focus, before.focus);
+    }
+
+    #[test]
+    fn camera_clip_load_and_mode_switch_do_not_reinterpret_pending_drag() {
+        if std::env::var("QUENCH3D_GPU_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let gpu = pollster::block_on(GpuContext::headless(64, 64, Default::default())).unwrap();
+        let mut engine = Engine::new(gpu, &EngineConfig::default());
+        engine.auto_camera = false;
+        engine.paused = true;
+        engine.camera_mode = CameraMode::Fly;
+        let mut doc = Doc::new();
+        crate::scene_io::load_text_into_doc(
+            &mut engine,
+            &mut doc,
+            r#"{"camera":{"near":0.7,"far":1234.0},"objects":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(engine.camera().near.to_bits(), 0.7_f32.to_bits());
+        assert_eq!(engine.camera().far.to_bits(), 1234.0_f32.to_bits());
+        let saved = crate::scene_io::scene_to_json(&engine, &doc).unwrap();
+        let parsed = quench3d_cli::scene_doc::SceneDoc::from_json(&saved.json).unwrap();
+        assert_eq!(parsed.camera.near, Some(0.7));
+        assert_eq!(parsed.camera.far, Some(1234.0));
+        let mut game = EditorGame {
+            fly_with_right: true,
+            ..Default::default()
+        };
+        game.accept_motion(CameraMode::Fly, Vec2::new(30.0, 20.0));
+        crate::navigation::switch(&mut engine, CameraMode::Orbit, None);
+        let before = engine.orbit;
+        engine.tick(&mut game, 1.0 / 60.0);
+        assert_eq!(engine.orbit.yaw.to_bits(), before.yaw.to_bits());
+        assert_eq!(engine.orbit.pitch.to_bits(), before.pitch.to_bits());
+        assert_eq!(engine.orbit.focus, before.focus);
+    }
+
+    #[test]
+    fn flight_hover_does_not_rotate_and_wheel_moves_camera() {
+        if std::env::var("QUENCH3D_GPU_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let gpu = pollster::block_on(GpuContext::headless(64, 64, Default::default())).unwrap();
+        let mut engine = Engine::new(gpu, &EngineConfig::default());
+        engine.camera_mode = CameraMode::Fly;
+        engine.auto_camera = false;
+        engine.paused = true;
+        let mut game = EditorGame {
+            fly_with_right: true,
+            pointer_in_viewport: true,
+            ..Default::default()
+        };
+        engine.input.mouse_delta = Vec2::new(20.0, 10.0);
+        engine.input.scroll_delta = 1.0;
+        let old_eye = engine.fly.position;
+        game.capture_pointer(&engine);
+        engine.tick(&mut game, 1.0 / 60.0);
+        assert_ne!(
+            engine.fly.position, old_eye,
+            "real tick must consume wheel before reset"
+        );
+        game.fly_with_right = true;
+        engine.input.mouse_delta = Vec2::new(40.0, 10.0);
+        game.capture_pointer(&engine);
+        game.fly_with_right = false;
+        let released_yaw = engine.fly.yaw;
+        engine.tick(&mut game, 1.0 / 60.0);
+        assert_ne!(
+            engine.fly.yaw, released_yaw,
+            "release must retain accepted drag"
+        );
+        let mut game = EditorGame::default();
+        let before = engine.fly;
+        engine.input.mouse_delta = Vec2::new(30.0, 20.0);
+        game.capture_pointer(&engine);
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_eq!(
+            engine.fly.yaw.to_bits(),
+            before.yaw.to_bits(),
+            "hover must not rotate"
+        );
+        assert_eq!(engine.fly.pitch.to_bits(), before.pitch.to_bits());
+        game.pointer_in_viewport = true;
+        engine.input.scroll_delta = 1.0;
+        game.capture_pointer(&engine);
+        game.update(&mut engine, 1.0 / 60.0);
+        assert!((engine.fly.position - before.position).dot(before.camera(1.0).forward()) > 0.0);
+        engine.input.scroll_delta = 0.0;
+        game.fly_with_right = true;
+        game.capture_pointer(&engine);
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_ne!(engine.fly.yaw.to_bits(), before.yaw.to_bits());
+        game.fly_with_right = false;
+        engine.input.on_key_down(KeyCode::KeyW);
+        let stopped = engine.fly.position;
+        game.capture_pointer(&engine);
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_eq!(engine.fly.position, stopped, "text focus blocks movement");
+        game.keys_enabled = true;
+        game.capture_pointer(&engine);
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_ne!(engine.fly.position, stopped);
+        engine.input.on_focus_lost();
+        let stopped = engine.fly.position;
+        game.capture_pointer(&engine);
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_eq!(engine.fly.position, stopped);
+
+        engine.camera_mode = CameraMode::Orbit;
+        let old = engine.orbit.camera(1.0);
+        crate::navigation::initialize(&mut engine);
+        assert_eq!(engine.camera_mode, CameraMode::Fly);
+        assert!((engine.fly.position - old.position).length() < 1e-5);
+        assert!(engine.fly.camera(1.0).forward().dot(old.forward()) > 0.99999);
+        crate::navigation::switch(&mut engine, CameraMode::Orbit, None);
+        assert!((engine.orbit.camera(1.0).position - old.position).length() < 1e-4);
+        assert!(engine.orbit.camera(1.0).forward().dot(old.forward()) > 0.99999);
+        crate::navigation::switch(&mut engine, CameraMode::Fly, None);
+        let eye = engine.fly.position;
+        let center = Vec3::new(2.0, 1.0, -3.0);
+        crate::navigation::switch(&mut engine, CameraMode::Orbit, Some(center));
+        assert_eq!(engine.orbit.focus, center);
+        assert!((engine.orbit.camera(1.0).position - eye).length() < 1e-4);
+        let distance = engine.orbit.distance;
+        game.orbit_with_left = true;
+        engine.input.mouse_delta = Vec2::new(30.0, 20.0);
+        engine.input.scroll_delta = 1.0;
+        let yaw = engine.orbit.yaw;
+        let pitch = engine.orbit.pitch;
+        game.capture_pointer(&engine);
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_ne!(engine.orbit.yaw, yaw);
+        assert_ne!(engine.orbit.pitch, pitch);
+        assert!(engine.orbit.distance < distance);
+        assert_eq!(engine.orbit.focus, center);
+        crate::navigation::switch(&mut engine, CameraMode::Fly, None);
+        let mut doc = Doc::new();
+        crate::scene_io::load_text_into_doc(
+            &mut engine,
+            &mut doc,
+            r#"{"objects":[{"name":"box","shape":{"type":"box","size":[1,1,1]}}]}"#,
+        )
+        .unwrap();
+        engine.fly.position = Vec3::new(15.0, 8.0, 12.0);
+        engine.fly.yaw = 0.7;
+        engine.fly.pitch = -0.3;
+        let original = engine.fly.camera(1.0);
+        let saved = crate::scene_io::scene_to_json(&engine, &doc).unwrap();
+        engine.fly.position = Vec3::ZERO;
+        crate::scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+        assert_eq!(engine.camera_mode, CameraMode::Fly);
+        assert!((engine.fly.position - original.position).length() < 1e-4);
+        assert!(engine.fly.camera(1.0).forward().dot(original.forward()) > 0.99999);
+        doc.select_only(Some(0));
+        doc.focus_selected(&mut engine);
+        assert_eq!(engine.camera_mode, CameraMode::Fly);
+        assert!((engine.fly.position - original.position).length() > 1.0);
+        let direction = (engine.orbit.focus - engine.fly.position).normalize_or_zero();
+        assert!(engine.fly.camera(1.0).forward().dot(direction) > 0.99999);
+        let orthographic = quench3d_cli::scene_doc::CameraDoc {
+            orthographic_height: Some(5.0),
+            ..Default::default()
+        };
+        crate::scene_io::apply_camera(&mut engine, &orthographic);
+        assert_eq!(engine.camera_mode, CameraMode::Orbit);
+        assert_eq!(engine.orbit.orthographic_height, Some(5.0));
     }
 }

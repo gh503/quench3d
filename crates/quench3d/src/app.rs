@@ -289,6 +289,8 @@ pub struct Engine {
     pub audio: crate::audio::AudioMixer,
     /// 最近一帧渲染统计。
     pub stats: RenderStats,
+    /// Optional flight-camera clipping override; disabled by default.
+    camera_clip_override: Option<(f32, f32)>,
     /// 固定步长累加器。
     accumulator: f32,
     /// 窗口句柄（离屏模式下为 `None`）。
@@ -326,6 +328,7 @@ impl Engine {
             auto_camera: true,
             audio: crate::audio::AudioMixer::new(48_000),
             stats: RenderStats::default(),
+            camera_clip_override: None,
             accumulator: 0.0,
             window: None,
         }
@@ -339,6 +342,22 @@ impl Engine {
     /// 窗口句柄。
     pub fn window(&self) -> Option<&Arc<Window>> {
         self.window.as_ref()
+    }
+
+    /// Opt in to custom flight-camera clipping; None preserves the original camera.
+    /// Invalid planes are rejected without changing the current override.
+    pub fn set_camera_clip_override(&mut self, value: Option<(f32, f32)>) -> bool {
+        if value.is_some_and(|(near, far)| {
+            !near.is_finite() || !far.is_finite() || near <= 0.0 || far <= near
+        }) {
+            return false;
+        }
+        self.camera_clip_override = value;
+        true
+    }
+    /// Current optional flight-camera clipping override.
+    pub fn camera_clip_override(&self) -> Option<(f32, f32)> {
+        self.camera_clip_override
     }
 
     /// 当前相机。
@@ -358,7 +377,14 @@ impl Engine {
                     camera
                 }
             }
-            CameraMode::Fly => self.fly.camera(aspect),
+            CameraMode::Fly => {
+                let mut camera = self.fly.camera(aspect);
+                if let Some((near, far)) = self.camera_clip_override {
+                    camera.near = near;
+                    camera.far = far;
+                }
+                camera
+            }
         }
     }
 

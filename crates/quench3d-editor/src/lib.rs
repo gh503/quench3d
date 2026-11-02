@@ -29,6 +29,7 @@ pub mod doc;
 pub mod gizmo;
 pub mod history;
 pub mod layout;
+mod navigation;
 pub mod picker;
 pub mod reconstruct;
 pub mod scene_io;

@@ -1158,7 +1158,7 @@ impl Doc {
         }
         match engine.scene.bounds_of(&engine.renderer, &indices) {
             Some(bounds) => {
-                engine.orbit.focus_on(&bounds);
+                crate::navigation::focus_bounds(engine, &bounds);
                 self.status = match self.selected {
                     Some(_) => "已聚焦选中物体".to_string(),
                     None => "未选中：已聚焦整个场景".to_string(),
