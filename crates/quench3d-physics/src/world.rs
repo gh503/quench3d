@@ -45,6 +45,13 @@ use crate::water::{self, WaterVolume};
 /// 因此不把它设为无条件路径，也不改小场景的默认行为。
 const PRECOMPUTE_CONTACT_RESPONSE_MIN: usize = 2048;
 
+#[cfg(test)]
+thread_local! {
+    static COMPOUND_MESH_TRIANGLE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COMPOUND_MESH_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static COMPOUND_MESH_GJK_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// 三角网局部 AABB 的均匀网格。三角形按**中心**放入唯一格子，查询时把刚体
 /// AABB 按最大三角形半径膨胀——只要三角形 AABB 真的碰到刚体 AABB，它的中心
 /// 一定落在膨胀后的查询范围内，所以不会漏检。大网格精确 CCD 不再全扫。
@@ -2822,6 +2829,30 @@ impl PhysicsWorld {
                     )
                 })
                 .collect();
+            #[cfg(test)]
+            let prune = !COMPOUND_MESH_REFERENCE.with(|flag| flag.get());
+            #[cfg(not(test))]
+            let prune = true;
+            let has_convex = a.parts().any(|(shape, _)| {
+                !shape.is_static_only() && !matches!(shape, Shape::Sphere { .. })
+            });
+            let mesh_bounds: Vec<Option<Vec<Aabb>>> = if prune && has_convex {
+                meshes
+                    .iter()
+                    .map(|mesh| {
+                        mesh.as_ref()
+                            .filter(|triangles| triangles.len() >= 64)
+                            .map(|triangles| {
+                                triangles
+                                    .iter()
+                                    .map(|points| Aabb::from_points(points))
+                                    .collect()
+                            })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for (ai, (sa, local_a)) in a.parts().enumerate() {
                 if sa.is_static_only() {
                     continue;
@@ -2858,7 +2889,39 @@ impl PhysicsWorld {
                         let (touching, distance) = if let Some(triangles) = triangles {
                             let mut distance = f32::INFINITY;
                             let mut touching = false;
-                            for points in triangles {
+                            let pruning = if matches!(sa, Shape::Sphere { .. }) {
+                                None
+                            } else {
+                                mesh_bounds.get(bi).and_then(Option::as_ref).map(|bounds| {
+                                    (
+                                        sa.local_aabb().transformed_conservative(&ta.matrix()),
+                                        bounds,
+                                    )
+                                })
+                            };
+                            for (triangle_index, points) in triangles.iter().enumerate() {
+                                if let Some((source_bounds, bounds)) = pruning.as_ref() {
+                                    let bound = &bounds[triangle_index];
+                                    // Preserve original order and all near/tied candidates. This
+                                    // margin leaves rounding-sensitive gaps on the exact path.
+                                    let scale = source_bounds
+                                        .min
+                                        .abs()
+                                        .max(source_bounds.max.abs())
+                                        .max(bound.min.abs())
+                                        .max(bound.max.abs())
+                                        .max_element()
+                                        .max(1.0);
+                                    let margin = 1e-4 + 64.0 * f32::EPSILON * scale;
+                                    if distance.is_finite()
+                                        && aabb_gap(source_bounds, bound) > distance + margin
+                                    {
+                                        continue;
+                                    }
+                                }
+                                #[cfg(test)]
+                                COMPOUND_MESH_TRIANGLE_QUERIES
+                                    .with(|count| count.set(count.get() + 1));
                                 let (hit, d) = if let Shape::Sphere { radius } = sa {
                                     let d = gjk::point_triangle_distance(
                                         ta.position,
@@ -2868,6 +2931,9 @@ impl PhysicsWorld {
                                     ) - radius.abs();
                                     (d <= 1e-4, d.max(0.0))
                                 } else {
+                                    #[cfg(test)]
+                                    COMPOUND_MESH_GJK_QUERIES
+                                        .with(|count| count.set(count.get() + 1));
                                     let hit = gjk::gjk_precise(
                                         &support_a,
                                         &gjk::Support::triangle(*points),
@@ -4940,6 +5006,302 @@ mod tests {
         assert_eq!(b.angular_velocity, Vec3::ZERO);
         assert_eq!(b.part_count(), 2);
         (world, moving)
+    }
+
+    #[test]
+    fn compound_mesh_pruning_threshold_preserves_small_mesh_scan() {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        for count in [63, 64] {
+            let mut results = Vec::new();
+            for reference in [true, false] {
+                COMPOUND_MESH_REFERENCE.with(|flag| flag.set(reference));
+                COMPOUND_MESH_GJK_QUERIES.with(|n| n.set(0));
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let moving = world.add_builder(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                        .part_at(
+                            Shape::Box {
+                                half_extents: Vec3::splat(0.1),
+                            },
+                            Vec3::Y * 2.0,
+                        )
+                        .position(-Vec3::X)
+                        .linear_velocity(Vec3::X * 120.0)
+                        .compound_transform_mode(BodyLocal)
+                        .ccd_precise(true),
+                );
+                let mut vertices = Vec::new();
+                let mut indices = Vec::new();
+                for i in 0..count {
+                    let offset = if i == 0 {
+                        Vec3::ZERO
+                    } else {
+                        Vec3::Y * (10.0 + i as f32 * 3.0)
+                    };
+                    for p in [
+                        Vec3::new(0.0, -1.0, -1.0),
+                        Vec3::new(0.0, 1.0, -1.0),
+                        Vec3::new(0.0, 0.0, 1.0),
+                    ] {
+                        indices.push(vertices.len() as u32);
+                        vertices.push(p + offset);
+                    }
+                }
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                        .position(-Vec3::Y * 3.0)
+                        .part_at(Shape::TriMesh { vertices, indices }, Vec3::Y * 5.0)
+                        .compound_transform_mode(BodyLocal),
+                );
+                let toi = world
+                    .sweep_convex_bodies(moving.index as usize, 1.0 / 60.0)
+                    .unwrap();
+                world.step_substeps(1.0 / 60.0, 1);
+                results.push((
+                    toi.to_bits(),
+                    compound_mesh_state_bits(&world),
+                    COMPOUND_MESH_GJK_QUERIES.with(|n| n.get()),
+                ));
+            }
+            assert_eq!(results[0].0, results[1].0);
+            assert_eq!(results[0].1, results[1].1);
+            if count == 63 {
+                assert_eq!(results[0].2, results[1].2);
+            } else {
+                assert!(results[1].2 < results[0].2 / 4);
+            }
+        }
+        COMPOUND_MESH_REFERENCE.with(|flag| flag.set(false));
+    }
+
+    #[test]
+    #[ignore = "manual fixed-sample release compound mesh scaling benchmark"]
+    fn compound_mesh_scaling_baseline() {
+        fn fixture(count: usize, convex: bool) -> (PhysicsWorld, BodyHandle) {
+            use crate::body::CompoundTransformMode::BodyLocal;
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let part = if convex {
+                Shape::Box {
+                    half_extents: Vec3::splat(0.1),
+                }
+            } else {
+                Shape::Sphere { radius: 0.1 }
+            };
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .part_at(part, Vec3::Y * 2.0)
+                    .position(-Vec3::X)
+                    .linear_velocity(Vec3::X * 120.0)
+                    .compound_transform_mode(BodyLocal)
+                    .ccd_precise(true),
+            );
+            let mut vertices = Vec::with_capacity(count * 3);
+            let mut indices = Vec::with_capacity(count * 3);
+            for i in 0..count {
+                let offset = if i == 0 {
+                    Vec3::ZERO
+                } else {
+                    Vec3::new(0.0, 10.0 + (i % 100) as f32 * 3.0, (i / 100) as f32 * 3.0)
+                };
+                for p in [
+                    Vec3::new(0.0, -1.0, -1.0),
+                    Vec3::new(0.0, 1.0, -1.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                ] {
+                    indices.push(vertices.len() as u32);
+                    vertices.push(p + offset);
+                }
+            }
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                    .position(-Vec3::Y * 3.0)
+                    .part_at(Shape::TriMesh { vertices, indices }, Vec3::Y * 5.0)
+                    .compound_transform_mode(BodyLocal),
+            );
+            assert_eq!(world.body(moving).unwrap().linear_velocity, Vec3::X * 120.0);
+            world.set_phase_timing(true);
+            (world, moving)
+        }
+        // Fixed before measurement: three rounds, every size and both convex types.
+        // Construction of fixtures is excluded; all per-query mesh caches are included.
+        for sample in 0..3 {
+            for count in [64, 128, 256, 512, 2_000, 20_000] {
+                for convex in [false, true] {
+                    if !convex && count < 2_000 {
+                        continue;
+                    }
+                    let mut reference_state = None;
+                    for reference in if sample % 2 == 0 {
+                        [true, false]
+                    } else {
+                        [false, true]
+                    } {
+                        COMPOUND_MESH_REFERENCE.with(|flag| flag.set(reference));
+                        let (mut world, moving) = fixture(count, convex);
+                        COMPOUND_MESH_TRIANGLE_QUERIES.with(|n| n.set(0));
+                        COMPOUND_MESH_GJK_QUERIES.with(|n| n.set(0));
+                        let start = std::time::Instant::now();
+                        let toi = world
+                            .sweep_convex_bodies(moving.index as usize, 1.0 / 60.0)
+                            .unwrap();
+                        let query_us = start.elapsed().as_secs_f64() * 1e6;
+                        let query_count = COMPOUND_MESH_TRIANGLE_QUERIES.with(|n| n.get());
+                        assert!((toi - 0.45).abs() < 2e-4, "{count} {convex} {toi}");
+                        COMPOUND_MESH_TRIANGLE_QUERIES.with(|n| n.set(0));
+                        COMPOUND_MESH_GJK_QUERIES.with(|n| n.set(0));
+                        let start = std::time::Instant::now();
+                        assert_eq!(world.step_substeps(1.0 / 60.0, 1), 1);
+                        let step_us = start.elapsed().as_secs_f64() * 1e6;
+                        let step_count = COMPOUND_MESH_TRIANGLE_QUERIES.with(|n| n.get());
+                        let gjk_count = COMPOUND_MESH_GJK_QUERIES.with(|n| n.get());
+                        if count == 20_000 && convex && reference {
+                            assert!(
+                                gjk_count > 1000,
+                                "reference must exercise full scan: {gjk_count}"
+                            );
+                        }
+                        if count == 20_000 && convex && !reference {
+                            assert!(
+                                gjk_count < 1_000,
+                                "sparse mesh must avoid distant GJK queries: {gjk_count}"
+                            );
+                        }
+                        let body = world.body(moving).unwrap();
+                        assert!((body.position().x + 0.1).abs() < 0.002);
+                        let state = [
+                            body.position().x.to_bits(),
+                            body.position().y.to_bits(),
+                            body.position().z.to_bits(),
+                            body.linear_velocity.x.to_bits(),
+                            body.linear_velocity.y.to_bits(),
+                            body.linear_velocity.z.to_bits(),
+                        ];
+                        let digest = (toi.to_bits(), compound_mesh_state_bits(&world));
+                        if let Some(previous) = reference_state.replace(digest.clone()) {
+                            assert_eq!(previous, digest);
+                        }
+                        println!("sample={sample} triangles={count} convex={convex} reference={reference} query_us={query_us:.3} query_count={query_count} step_us={step_us:.3} step_count={step_count} gjk_count={gjk_count} toi_bits={} state={state:?} phases={:?}", toi.to_bits(), world.phase_timings().per_step());
+                    }
+                }
+            }
+        }
+        COMPOUND_MESH_REFERENCE.with(|flag| flag.set(false));
+    }
+
+    fn compound_mesh_state_bits(world: &PhysicsWorld) -> Vec<u32> {
+        let mut bits = Vec::new();
+        for (_, b) in world.bodies() {
+            for v in [
+                b.position(),
+                b.linear_velocity,
+                b.angular_velocity,
+                b.transform.scale,
+                b.prev_transform.position,
+                b.prev_transform.scale,
+                b.pseudo_linear_velocity,
+                b.pseudo_angular_velocity,
+                b.force,
+                b.torque,
+                b.inertia_local,
+                b.inv_inertia_local,
+                b.local_center,
+                b.friction_axis,
+            ] {
+                bits.extend([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]);
+            }
+            for q in [b.transform.rotation, b.prev_transform.rotation] {
+                bits.extend([q.x.to_bits(), q.y.to_bits(), q.z.to_bits(), q.w.to_bits()]);
+            }
+            for f in [
+                b.sleep_timer,
+                b.submerged,
+                b.mass,
+                b.inv_mass,
+                b.restitution,
+                b.friction,
+                b.static_friction,
+                b.rolling_friction,
+                b.friction_anisotropy,
+                b.linear_damping,
+                b.angular_damping,
+                b.gravity_scale,
+            ] {
+                bits.push(f.to_bits());
+            }
+            bits.extend([b.is_sleeping() as u32, b.allow_sleep as u32]);
+        }
+        bits
+    }
+
+    #[test]
+    fn compound_mesh_pruning_matches_reference_over_multiple_steps() {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        for case in 0..24 {
+            let frame =
+                Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), case as f32 * 0.13);
+            let mut snapshots = Vec::new();
+            for reference in [true, false] {
+                COMPOUND_MESH_REFERENCE.with(|flag| flag.set(reference));
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let mut vertices = Vec::new();
+                let mut indices = Vec::new();
+                for i in 0..300 {
+                    // Near-tied layers and edge/grazing placements, then a sparse far grid.
+                    let shift = if i < 3 {
+                        Vec3::X * (i as f32 * 0.00001)
+                    } else {
+                        Vec3::new(0.0, 10.0 + (i % 30) as f32, (i / 30) as f32)
+                    };
+                    for p in [
+                        Vec3::new(0.0, -1.0, -1.0),
+                        Vec3::new(0.0, 1.0, -1.0),
+                        Vec3::new(0.0, 0.0, 1.0),
+                    ] {
+                        indices.push(vertices.len() as u32);
+                        vertices.push(p + shift);
+                    }
+                }
+                let origin = if case % 3 == 0 {
+                    Vec3::splat(1000.0)
+                } else {
+                    Vec3::ZERO
+                };
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                        .position(origin + frame.mul_vec3(-Vec3::Y * 3.0))
+                        .rotation(frame)
+                        .part_at(Shape::TriMesh { vertices, indices }, Vec3::Y * 5.0)
+                        .compound_transform_mode(BodyLocal),
+                );
+                let shape = if case % 2 == 0 {
+                    Shape::Box {
+                        half_extents: Vec3::splat(0.1),
+                    }
+                } else {
+                    Shape::Sphere { radius: 0.1 }
+                };
+                let grazing = [0.0, 0.89, 1.01, 1.11][case as usize % 4];
+                let moving = world.add_builder(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                        .position(origin + frame.mul_vec3(Vec3::new(-1.0, grazing, 0.0)))
+                        .rotation(frame)
+                        .part_at(shape, Vec3::Y * 2.0)
+                        .linear_velocity(frame.mul_vec3(Vec3::X * 120.0))
+                        .compound_transform_mode(BodyLocal)
+                        .ccd_precise(true),
+                );
+                let mut digest = Vec::new();
+                for _ in 0..5 {
+                    let toi = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+                    digest.push(toi.map(f32::to_bits));
+                    world.step_substeps(1.0 / 60.0, 1);
+                    digest.extend(compound_mesh_state_bits(&world).into_iter().map(Some));
+                }
+                snapshots.push(digest);
+            }
+            assert_eq!(snapshots[0], snapshots[1], "case={case}");
+        }
+        COMPOUND_MESH_REFERENCE.with(|flag| flag.set(false));
     }
 
     #[test]
