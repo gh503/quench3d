@@ -2889,10 +2889,11 @@ impl PhysicsWorld {
                     // 精确距离/接触判定。
                     if nearest_gap > 1e-4 {
                         let advance = nearest_gap / step;
-                        if !(advance.is_finite() && advance > 1e-6) {
+                        let next = t + advance;
+                        if !(next.is_finite() && next > t) {
                             break;
                         }
-                        t += advance;
+                        t = next;
                         if t >= 1.0 {
                             break;
                         }
@@ -2942,10 +2943,11 @@ impl PhysicsWorld {
                         break;
                     }
                     let advance = min_distance / step;
-                    if !(advance.is_finite() && advance > 1e-6) {
+                    let next = t + advance;
+                    if !(next.is_finite() && next > t) {
                         break;
                     }
-                    t += advance;
+                    t = next;
                     if t >= 1.0 {
                         break;
                     }
@@ -4498,6 +4500,61 @@ mod tests {
         assert!(
             (rotated - base).abs() < 0.002,
             "base={base}, rotated={rotated}"
+        );
+    }
+
+    #[test]
+    fn precise_trimesh_retains_small_progress_in_both_distance_branches() {
+        let mut results = Vec::new();
+        for (dt, scale, angular_speed) in [
+            (1.0, 1.0, 10.0),
+            (1.0, 10.0, 10.0),
+            (1.0, 100.0, 10.0),
+            (1.0 / 60.0, 1.0, 100.0),
+        ] {
+            for tilted in [false, true] {
+                let frame = if tilted {
+                    Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_4)
+                } else {
+                    Quat::IDENTITY
+                };
+                let n = frame.mul_vec3(Vec3::Y);
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let sphere = world.add_builder(
+                    BodyBuilder::dynamic(Shape::Sphere { radius: scale })
+                        .position(n * (2.0 * scale))
+                        .linear_velocity(-n * (4.0 * scale / dt))
+                        .angular_velocity(Vec3::Z * angular_speed)
+                        .ccd_precise(true),
+                );
+                assert_eq!(
+                    world.body(sphere).unwrap().linear_velocity,
+                    -n * (4.0 * scale / dt)
+                );
+                assert_eq!(
+                    world.body(sphere).unwrap().angular_velocity,
+                    Vec3::Z * angular_speed
+                );
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::TriMesh {
+                        vertices: vec![
+                            Vec3::new(-20.0, 0.0, -20.0) * scale,
+                            Vec3::new(20.0, 0.0, -20.0) * scale,
+                            Vec3::new(0.0, 0.0, 20.0) * scale,
+                        ],
+                        indices: vec![0, 1, 2],
+                    })
+                    .rotation(frame),
+                );
+                let hit = world.sweep_convex_bodies(sphere.index as usize, dt);
+                results.push((dt, scale, tilted, hit));
+            }
+        }
+        assert!(
+            results
+                .iter()
+                .all(|(_, _, _, hit)| hit.is_some_and(|t| (t - 0.25).abs() < 2e-4)),
+            "analytic=0.25 actual={results:?}"
         );
     }
 
