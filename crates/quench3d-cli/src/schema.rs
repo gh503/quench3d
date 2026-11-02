@@ -533,7 +533,7 @@ pub fn scene_grammar() -> Value {
             "sensor": "true = 触发区：照常报进入/离开，但不产生冲量（别的物体穿过去）；需要 body 不为 none",
             "ccd": "true = 连续碰撞检测（中心射线 + 盒子 8 角射线；有角速度的盒子再做 8 角点旋转扫掠，按最早命中时间同时缩放线/角速度）；只对 dynamic 生效",
             "ccd_precise": "true = 用距离保守推进预测碰撞时间（隐含 ccd=true），主形状支持凸体/平面/三角网；复合凸部件的旋转还需 compound_transform_mode=body_local，不保证精确连续轨迹，每个部件对最多 64 次距离迭代",
-            "compound_transform_mode": "legacy（缺省）保留历史部件变换；body_local 显式按刚体局部坐标组合部件，统一接触、查询、水域与流体边界；同时开启 ccd_precise 可扫掠旋转凸部件与凸体/平面/静态三角网格部件；静态网格逐三角形查询，运动网格与高度场部件不支持",
+            "compound_transform_mode": "legacy（缺省）保留历史部件变换；body_local 显式按刚体局部坐标组合部件，统一接触、查询、水域与流体边界；同时开启 ccd_precise 可扫掠旋转凸部件与凸体/平面/静态三角网格部件；静态网格逐三角形查询，高度场部件在场景加载时转换为静态三角网格并走同一路径；运动网格不支持",
             "note": "linear/angular_damping、gravity_scale、mass、allow_sleep、angular_velocity 只对 body=dynamic 生效"
         },
         "model": {

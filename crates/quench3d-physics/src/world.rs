@@ -2750,7 +2750,8 @@ impl PhysicsWorld {
 
     /// Body-local convex parts against convex/plane parts and static triangle meshes.
     /// Mesh triangles are cached once per target and scanned without a spatial index;
-    /// moving mesh parts, heightfields and legacy compound placement remain excluded.
+    /// scene heightfields use the same static mesh path after conversion.
+    /// Moving mesh parts and legacy compound placement remain excluded.
     fn sweep_body_local_compound_parts(&self, self_index: usize, dt: f32) -> Option<f32> {
         let a = self.bodies.get(self_index)?.body.as_ref()?;
         let mut best: Option<f32> = None;
@@ -2827,7 +2828,7 @@ impl PhysicsWorld {
                 }
                 for (bi, (sb, local_b)) in b.parts().enumerate() {
                     // The existing predictor covers the primary pair, including meshes.
-                    // Only static triangle meshes are included; heightfields remain excluded.
+                    // Static triangle meshes include heightfields converted by the scene loader.
                     let plane = matches!(sb, Shape::Plane { .. });
                     let triangles = meshes[bi].as_ref();
                     if (ai == 0 && bi == 0)

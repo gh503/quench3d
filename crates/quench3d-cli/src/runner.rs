@@ -6888,6 +6888,68 @@ mod tests {
     /// 这条抓的是"两处各写一遍展开代码"：谁改了一处、另一处没改，就会看见一个地形、
     /// 踩到另一个地形（而且只在真渲染 + 真碰撞下才看得出来）。
     #[test]
+    fn compound_heightfield_scene_precise_ccd_stops_offset_sphere() {
+        let mut results = Vec::new();
+        for accumulated in [false, true] {
+            for precise in [false, true] {
+                let json = format!(
+                    r#"{{"gravity":[0,0,0],"objects":[
+                    {{"name":"moving","body":"dynamic","position":[-3,1,0],
+                      "velocity":[0,-120,0],"ccd_precise":{precise},
+                      "compound_transform_mode":"body_local",
+                      "shapes":[{{"shape":{{"type":"sphere","radius":0.1}}}},
+                        {{"shape":{{"type":"sphere","radius":0.1}},"position":[3,0,0]}}]}},
+                    {{"name":"terrain","body":"static","position":[-4,0,0],
+                      "compound_transform_mode":"body_local",
+                      "shapes":[{{"shape":{{"type":"sphere","radius":0.1}}}},
+                        {{"shape":{{"type":"heightfield","cell_size":2,
+                          "heights":[[0,0],[0,0]]}},"position":[4,0,0]}}]}}
+                ]}}"#
+                );
+                let doc = SceneDoc::from_json(&json).unwrap();
+                assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+                let mut build = build_world(&doc).unwrap();
+                let moving = build.handles["moving"];
+                let terrain = build.world.body(build.handles["terrain"]).unwrap();
+                assert_eq!(terrain.body_type, quench3d::physics::BodyType::Static);
+                assert_eq!(
+                    terrain.compound_transform_mode(),
+                    quench3d::physics::CompoundTransformMode::BodyLocal
+                );
+                let (shape, local) = terrain.parts().nth(1).unwrap();
+                assert!(
+                    matches!(shape, Shape::TriMesh { vertices, indices } if vertices.len() == 4 && indices.len() == 6)
+                );
+                assert_eq!(terrain.part_world_transform(&local).position, Vec3::ZERO);
+                let body = build.world.body(moving).unwrap();
+                assert_eq!(body.linear_velocity, Vec3::new(0.0, -120.0, 0.0));
+                assert_eq!(
+                    body.compound_transform_mode(),
+                    quench3d::physics::CompoundTransformMode::BodyLocal
+                );
+                assert_eq!(body.ccd_precise, precise);
+                if accumulated {
+                    build.world.step(1.0 / 60.0);
+                } else {
+                    assert_eq!(build.world.step_substeps(1.0 / 60.0, 1), 1);
+                }
+                let body = build.world.body(moving).unwrap();
+                let (_, local) = body.parts().nth(1).unwrap();
+                let bottom = body.part_world_transform(&local).position.y - 0.1;
+                results.push((accumulated, precise, bottom));
+            }
+        }
+        assert!(
+            results.iter().all(|(_, precise, bottom)| if *precise {
+                bottom.abs() < 0.002
+            } else {
+                *bottom < -1.0
+            }),
+            "heightfield CCD on must stop and off must cross: {results:?}"
+        );
+    }
+
+    #[test]
     fn heightfield_expands_to_a_trimesh_matching_the_render_mesh() {
         let doc = ShapeDoc {
             kind: ShapeKind::HeightField,
