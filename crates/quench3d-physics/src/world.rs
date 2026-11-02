@@ -2661,13 +2661,95 @@ impl PhysicsWorld {
         None
     }
 
-    /// 凸-凸精确 CCD：用 GJK 距离做保守推进，直到两形状真正接触。
-    ///
-    /// 距离函数在时间上是 1-Lipschitz 的，速度上界
-    /// `|v_rel| + |ω_a|·R_a + |ω_b|·R_b` 保证 `Δ距离 / 上界` 不会越过首次接触。
-    /// 只处理两侧都是凸形状（半空间/三角网走默认射线/角点路径）；返回归一化
-    /// 时间 `t∈[0,1]`。每个开了 `ccd_precise` 的物体每子步 O(其它体)，是
-    /// 明确的高成本精确路径，不是默认开关。
+    /// Additional convex/plane part pairs for translation-only, unrotated compound bodies.
+    /// Main pairs retain the original predictor; rotated parts and extra meshes are excluded.
+    fn sweep_translated_compound_parts(&self, self_index: usize, dt: f32) -> Option<f32> {
+        let a = self.bodies.get(self_index)?.body.as_ref()?;
+        let mut best: Option<f32> = None;
+        // Rotated compound poses currently differ between broadphase and narrowphase.
+        // Restrict this additive path to translations where their conventions agree.
+        if a.angular_velocity != Vec3::ZERO || a.transform.rotation != Quat::IDENTITY {
+            return None;
+        }
+        let pose = |body: &RigidBody, linear: Vec3, t: f32| Transform {
+            position: body.transform.position + linear * (dt * t),
+            ..body.transform
+        };
+        for (index, slot) in self.bodies.iter().enumerate() {
+            let Some(b) = &slot.body else { continue };
+            if index == self_index
+                || b.sensor
+                || !a.groups.interacts(b.groups)
+                || (a.extra_parts.is_empty() && b.extra_parts.is_empty())
+            {
+                continue;
+            }
+            let (linear, angular) = if b.body_type == BodyType::Static {
+                (Vec3::ZERO, Vec3::ZERO)
+            } else {
+                (b.linear_velocity, b.angular_velocity)
+            };
+            if angular != Vec3::ZERO || b.transform.rotation != Quat::IDENTITY {
+                continue;
+            }
+            for (ai, (sa, local_a)) in a.parts().enumerate() {
+                if sa.is_static_only() || local_a.rotation != Quat::IDENTITY {
+                    continue;
+                }
+                for (bi, (sb, local_b)) in b.parts().enumerate() {
+                    // The existing predictor covers the primary pair, including meshes.
+                    // Additional mesh/heightfield parts are not handled by this convex path.
+                    let plane = matches!(sb, Shape::Plane { .. });
+                    if (ai == 0 && bi == 0)
+                        || (sb.is_static_only() && !plane)
+                        || local_b.rotation != Quat::IDENTITY
+                    {
+                        continue;
+                    }
+                    let step = (a.linear_velocity - linear).length() * dt;
+                    if !(step.is_finite() && step > 1e-6) {
+                        continue;
+                    }
+                    let mut t = 0.0;
+                    for _ in 0..64 {
+                        let ta = local_a.mul_transform(&pose(a, a.linear_velocity, t));
+                        let tb = local_b.mul_transform(&pose(b, linear, t));
+                        let support_a = gjk::Support::new(sa, &ta);
+                        let (touching, distance) = if let Shape::Plane { normal } = sb {
+                            let n = tb.rotation.mul_vec3(*normal);
+                            if n.length_squared() < 0.5 {
+                                break;
+                            }
+                            let n = n.normalize();
+                            let distance = (support_a.support(-n) - tb.position).dot(n);
+                            (distance <= 1e-4, distance)
+                        } else {
+                            let hit = gjk::gjk_precise(&support_a, &gjk::Support::new(sb, &tb));
+                            (hit.intersect || hit.distance <= 1e-4, hit.distance)
+                        };
+                        if touching {
+                            if t > 1e-5 && best.is_none_or(|cur| t < cur) {
+                                best = Some(t);
+                            }
+                            break;
+                        }
+                        let next = t + distance / step;
+                        if !(next.is_finite() && next > t) {
+                            break;
+                        }
+                        t = next;
+                        if t >= 1.0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Opt-in conservative CCD for primary convex shapes, planes and triangle meshes.
+    /// Also checks supported translation-only compound parts; returns normalized time.
     fn sweep_convex_bodies(&self, self_index: usize, dt: f32) -> Option<f32> {
         let a = self.bodies.get(self_index)?.body.as_ref()?;
         if a.shape.is_static_only() || a.sensor || !(dt.is_finite() && dt > 0.0) {
@@ -2675,7 +2757,7 @@ impl PhysicsWorld {
         }
         let groups = a.groups;
         let ra = a.shape.bounding_radius();
-        let mut best: Option<f32> = None;
+        let mut best = self.sweep_translated_compound_parts(self_index, dt);
         for (i, slot) in self.bodies.iter().enumerate() {
             if i == self_index {
                 continue;
@@ -4500,6 +4582,118 @@ mod tests {
         assert!(
             (rotated - base).abs() < 0.002,
             "base={base}, rotated={rotated}"
+        );
+    }
+
+    fn compound_ccd_world() -> (PhysicsWorld, BodyHandle) {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let moving = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .part_at(Shape::Sphere { radius: 0.1 }, Vec3::Y * 2.0)
+                .position(Vec3::new(-1.0, 0.0, 0.0))
+                .linear_velocity(Vec3::X * 120.0)
+                .ccd_precise(true),
+        );
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::new(0.05, 0.5, 0.5),
+            })
+            .position(Vec3::Y * 2.0),
+        );
+        let body = world.body(moving).unwrap();
+        assert_eq!(body.linear_velocity, Vec3::X * 120.0);
+        assert_eq!(body.angular_velocity, Vec3::ZERO);
+        assert_eq!(body.transform.scale, Vec3::ONE);
+        assert_eq!(body.part_count(), 2);
+        (world, moving)
+    }
+
+    #[test]
+    fn precise_compound_source_sweep_hits_offset_part() {
+        let (world, moving) = compound_ccd_world();
+        let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+        assert!(
+            hit.is_some_and(|t| (t - 0.425).abs() < 2e-4),
+            "expected offset sphere TOI .425, got {hit:?}"
+        );
+    }
+
+    #[test]
+    fn precise_compound_target_translation_and_filters() {
+        for filtered in 0..3 {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let target = world.add_builder(
+                BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                    .part_at(
+                        Shape::Box {
+                            half_extents: Vec3::new(0.05, 0.5, 0.5),
+                        },
+                        Vec3::Y * 2.0,
+                    )
+                    // Static residual velocities must not move compound targets either.
+                    .linear_velocity(Vec3::X * 100.0)
+                    .angular_velocity(Vec3::Y)
+                    .sensor(filtered == 1),
+            );
+            if filtered == 2 {
+                world.body_mut(target).unwrap().groups.filter = 0;
+            }
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .position(Vec3::new(-1.0, 2.0, 0.0))
+                    .linear_velocity(Vec3::X * 120.0)
+                    .ccd_precise(true),
+            );
+            let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+            if filtered == 0 {
+                assert!(hit.is_some_and(|t| (t - 0.425).abs() < 2e-4), "{hit:?}");
+                world.step_substeps(1.0 / 60.0, 1);
+                assert!((world.body(moving).unwrap().position().x + 0.15).abs() < 0.002);
+            } else {
+                assert!(hit.is_none(), "excluded target must not stop CCD: {hit:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn precise_compound_translated_offset_reaches_plane() {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let moving = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .part_at(Shape::Sphere { radius: 0.1 }, -Vec3::Y)
+                .position(Vec3::Y * 2.0)
+                .linear_velocity(-Vec3::Y * 120.0)
+                .ccd_precise(true),
+        );
+        world.add_builder(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }));
+        let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+        assert!(hit.is_some_and(|t| (t - 0.45).abs() < 2e-4), "{hit:?}");
+        world.step_substeps(1.0 / 60.0, 1);
+        assert!((world.body(moving).unwrap().position().y - 1.1).abs() < 0.002);
+    }
+
+    #[test]
+    fn precise_compound_source_public_step_stops_offset_part() {
+        let mut results = Vec::new();
+        for accumulated in [false, true] {
+            let (mut world, moving) = compound_ccd_world();
+            if accumulated {
+                world.step(1.0 / 60.0);
+            } else {
+                assert_eq!(world.step_substeps(1.0 / 60.0, 1), 1);
+            }
+            let body = world.body(moving).unwrap();
+            results.push((accumulated, body.position().x));
+            let (mut reference, handle) = compound_ccd_world();
+            let b = reference.body_mut(handle).unwrap();
+            b.ccd = false;
+            b.ccd_precise = false;
+            assert_eq!(reference.step_substeps(1.0 / 60.0, 1), 1);
+            assert!((reference.body(handle).unwrap().position().x - 1.0).abs() < 1e-5);
+        }
+        assert!(
+            results.iter().all(|(_, x)| (x + 0.15).abs() < 0.002),
+            "offset sphere must stop at wall for both public entries: {results:?}"
         );
     }
 
