@@ -2777,10 +2777,12 @@ impl PhysicsWorld {
                         break;
                     }
                     let advance = distance / step;
-                    if !(advance.is_finite() && advance > 1e-6) {
+                    let next = t + advance;
+                    // Preserve representable progress even when the normalized increment is small.
+                    if !(next.is_finite() && next > t) {
                         break;
                     }
-                    t += advance;
+                    t = next;
                     if t >= 1.0 {
                         break;
                     }
@@ -4497,6 +4499,42 @@ mod tests {
             (rotated - base).abs() < 0.002,
             "base={base}, rotated={rotated}"
         );
+    }
+
+    #[test]
+    fn precise_rotating_box_reaches_static_plane_at_large_scale() {
+        let dt = 1.0 / 60.0;
+        let expected =
+            ((1.0f32 / 4.01f32.sqrt()).asin() - 0.05f32.atan()) / std::f32::consts::FRAC_PI_2;
+        for scale in [1.0, 10.0, 100.0, 1000.0] {
+            for sign in [-1.0, 1.0] {
+                for frame in [
+                    Quat::IDENTITY,
+                    Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2),
+                    Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7),
+                ] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let moving = world.add_builder(
+                        BodyBuilder::dynamic(Shape::Box {
+                            half_extents: Vec3::new(2.0, 0.1, 0.1) * scale,
+                        })
+                        .position(frame.mul_vec3(Vec3::Y * scale))
+                        .rotation(frame)
+                        .angular_velocity(
+                            frame.mul_vec3(Vec3::Z * (sign * std::f32::consts::FRAC_PI_2 / dt)),
+                        )
+                        .ccd_precise(true),
+                    );
+                    world.add_builder(
+                        BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).rotation(frame),
+                    );
+                    let hit = world.sweep_convex_bodies(moving.index as usize, dt);
+                    let t = hit.unwrap_or_else(|| panic!("rotating corner must reach static plane: scale={scale}, sign={sign}, frame={frame:?}"));
+                    assert!((t - expected).abs() < 2e-4,
+                        "scale={scale}, sign={sign}, frame={frame:?}, actual={t}, analytic={expected}");
+                }
+            }
+        }
     }
 
     #[test]
