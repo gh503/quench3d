@@ -50,6 +50,31 @@ fn headless_engine() -> Option<Engine> {
 }
 
 #[test]
+fn fluid_boundary_velocity_mode_survives_scene_load_save() {
+    use quench3d::physics::FluidBoundaryVelocityMode;
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0,1,0]]},{"size":[0.1,0.1,0.1],"initial_positions":[[2,1,0]],"boundary_velocity_mode":"body_motion"}]}"#).unwrap();
+    let check = |engine: &Engine| {
+        assert_eq!(
+            engine.world.fluids()[0].desc().boundary_velocity_mode,
+            FluidBoundaryVelocityMode::Legacy
+        );
+        assert_eq!(
+            engine.world.fluids()[1].desc().boundary_velocity_mode,
+            FluidBoundaryVelocityMode::BodyMotion
+        );
+    };
+    check(&engine);
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    assert_eq!(saved.json.matches("boundary_velocity_mode").count(), 1);
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    check(&engine);
+}
+
+#[test]
 fn compound_transform_mode_survives_scene_load_save() {
     use quench3d::physics::CompoundTransformMode;
     use quench3d_cli::scene_doc::CompoundTransformModeDoc;

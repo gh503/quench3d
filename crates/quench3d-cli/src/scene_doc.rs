@@ -1131,6 +1131,16 @@ pub struct WaterStyleDoc {
     pub refraction: Option<f32>,
 }
 
+/// Liquid-particle boundary velocity policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FluidBoundaryVelocityModeDoc {
+    /// Preserve stored boundary velocities, including static bodies.
+    Legacy,
+    /// Treat static boundaries as stationary; keep moving-body point velocities.
+    BodyMotion,
+}
+
 /// 粒子流体（CPU PBF）。
 ///
 /// 这是**粒子**流体，与 [`WaterDoc`] 的解析水域是两套东西：水域给刚体浮力，
@@ -1192,6 +1202,9 @@ pub struct FluidDoc {
     /// 粒子局部流场对刚体的速度耦合（1/s），缺省 0 = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_coupling: Option<f32>,
+    /// Boundary velocity policy; omitted preserves historical stored velocities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_velocity_mode: Option<FluidBoundaryVelocityModeDoc>,
     /// 密度约束迭代次数 1~8，缺省 4。
     #[serde(default = "default_fluid_iterations")]
     pub iterations: u32,

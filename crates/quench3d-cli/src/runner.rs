@@ -2340,6 +2340,12 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             emit_spread: f.emit_spread.unwrap_or(0.0),
             drag: f.drag,
             flow_coupling: f.flow_coupling.unwrap_or(0.0),
+            boundary_velocity_mode: match f.boundary_velocity_mode {
+                Some(crate::scene_doc::FluidBoundaryVelocityModeDoc::BodyMotion) => {
+                    quench3d::physics::FluidBoundaryVelocityMode::BodyMotion
+                }
+                _ => quench3d::physics::FluidBoundaryVelocityMode::Legacy,
+            },
             iterations: f.iterations,
             max_particles: f.max_particles,
             foam: f.foam,
@@ -6887,6 +6893,42 @@ mod tests {
     ///
     /// 这条抓的是"两处各写一遍展开代码"：谁改了一处、另一处没改，就会看见一个地形、
     /// 踩到另一个地形（而且只在真渲染 + 真碰撞下才看得出来）。
+    #[test]
+    fn fluid_boundary_velocity_mode_loads_and_preserves_legacy() {
+        use crate::scene_doc::FluidBoundaryVelocityModeDoc;
+        for (field, expected) in [
+            ("", 3.0),
+            (",\"boundary_velocity_mode\":\"legacy\"", 3.0),
+            (",\"boundary_velocity_mode\":\"body_motion\"", 0.0),
+        ] {
+            let json = format!(
+                r#"{{"gravity":[0,0,0],"objects":[{{"body":"static","velocity":[0,3,0],"shape":{{"type":"box","size":[2,0.2,2]}}}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[0,0.16,0]],"velocity":[0,-2,0],"radius":0.04,"spacing":0.1{field}}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+            let serialized = serde_json::to_string(&doc).unwrap();
+            assert_eq!(
+                serialized.contains("boundary_velocity_mode"),
+                !field.is_empty()
+            );
+            let again = SceneDoc::from_json(&serialized).unwrap();
+            assert_eq!(
+                again.fluids[0].boundary_velocity_mode,
+                doc.fluids[0].boundary_velocity_mode
+            );
+            let mut build = build_world(&again).unwrap();
+            build.world.step(1.0 / 60.0);
+            assert_eq!(build.world.fluids()[0].velocities()[0].y, expected);
+        }
+        assert!(
+            SceneDoc::from_json(r#"{"fluids":[{"boundary_velocity_mode":"unknown"}]}"#).is_err()
+        );
+        assert_eq!(
+            serde_json::to_string(&FluidBoundaryVelocityModeDoc::BodyMotion).unwrap(),
+            "\"body_motion\""
+        );
+    }
+
     #[test]
     fn compound_heightfield_scene_precise_ccd_stops_offset_sphere() {
         let mut results = Vec::new();

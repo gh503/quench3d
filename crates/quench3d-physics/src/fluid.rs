@@ -28,6 +28,16 @@ const MAX_SPEED: f32 = 40.0;
 /// 估算自由表面至少需要的粒子数（少于此数就当作"这里没有水"）。
 const MIN_SURFACE_PARTICLES: usize = 8;
 
+/// Velocity policy for fluid contacts with rigid boundaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FluidBoundaryVelocityMode {
+    /// Preserve historical use of stored rigid-body velocities.
+    #[default]
+    Legacy,
+    /// Static boundaries have zero velocity; other body types retain point velocity.
+    BodyMotion,
+}
+
 /// 流体参数（场景格式的 `fluids[]` 一项）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FluidDesc {
@@ -61,6 +71,8 @@ pub struct FluidDesc {
     /// 用刚体 AABB 内粒子的平均速度作为局部流速，把浸没部分的速度拖向它；
     /// 这是**局部流场拖曳**，不是粒子对刚体的逐点无滑移边界，也不是两相流。
     pub flow_coupling: f32,
+    /// Boundary velocity policy; Legacy preserves existing scenes.
+    pub boundary_velocity_mode: FluidBoundaryVelocityMode,
     /// 初始速度（米/秒），缺省 0；给水柱一个喷射方向。
     pub initial_velocity: Vec3,
     /// 排水面高度：粒子 y 低于它就被移除（`None` = 不排水）。
@@ -175,6 +187,7 @@ impl Default for FluidDesc {
             emit_spread: 0.0,
             drag: 6.0,
             flow_coupling: 0.0,
+            boundary_velocity_mode: FluidBoundaryVelocityMode::Legacy,
             iterations: 4,
             max_particles: 4000,
             foam: false,
@@ -887,7 +900,7 @@ impl Fluid {
         }
         // 分离可能把粒子推进墙；重新投影一次（不做速度/摩擦）。
         for p in &mut self.predicted {
-            *p = collide_position(*p, *p, bodies, radius).0;
+            *p = collide_position(*p, *p, bodies, radius, self.desc.boundary_velocity_mode).0;
         }
     }
 
@@ -979,7 +992,13 @@ impl Fluid {
             }
             for (i, d) in self.delta.iter().enumerate() {
                 let prev = self.predicted[i];
-                let (p, contact) = collide_position(prev, prev + *d, &*bodies, radius);
+                let (p, contact) = collide_position(
+                    prev,
+                    prev + *d,
+                    &*bodies,
+                    radius,
+                    self.desc.boundary_velocity_mode,
+                );
                 self.predicted[i] = p;
                 if contact.is_some() {
                     self.contacts[i] = contact;
@@ -1358,8 +1377,13 @@ impl Fluid {
                 (b.velocity + accel * (size_factor * dt)) * (1.0 - drag * dt).clamp(0.0, 1.0);
             b.velocity = b.velocity.clamp_length(10.0);
             b.position += b.velocity * dt;
-            let (corrected, contact) =
-                collide_position(prev, b.position, bodies, b.radius.max(0.005));
+            let (corrected, contact) = collide_position(
+                prev,
+                b.position,
+                bodies,
+                b.radius.max(0.005),
+                self.desc.boundary_velocity_mode,
+            );
             b.position = corrected;
             if let Some(contact) = contact {
                 let vn = b.velocity.dot(contact.normal);
@@ -1582,7 +1606,13 @@ impl Fluid {
             let prev = f.position;
             f.velocity = (f.velocity + g * dt) * (1.0 - 2.2 * dt).clamp(0.0, 1.0);
             f.position += f.velocity * dt;
-            let (corrected, contact) = collide_position(prev, f.position, bodies, radius);
+            let (corrected, contact) = collide_position(
+                prev,
+                f.position,
+                bodies,
+                radius,
+                self.desc.boundary_velocity_mode,
+            );
             f.position = corrected;
             if let Some(contact) = contact {
                 let vn = f.velocity.dot(contact.normal);
@@ -1808,6 +1838,7 @@ fn collide_position(
     mut p: Vec3,
     bodies: &[BodySlot],
     radius: f32,
+    mode: FluidBoundaryVelocityMode,
 ) -> (Vec3, Option<Contact>) {
     let mut contact = None;
     // 位移可能比半径大（快速下落/薄网格）：AABB 拒绝测试要把整段位移算进去，
@@ -1845,11 +1876,20 @@ fn collide_position(
             // 而不是顺着 n 推到穿过去的那一侧（那会让它卡在网格背面/穿到地下）。
             let signed_prev = (prev - world.transform_point(surf)).dot(n);
             let crossed = signed_prev < -1e-5 && signed > -radius;
+            let boundary_velocity = || {
+                if mode == FluidBoundaryVelocityMode::BodyMotion
+                    && body.body_type == crate::body::BodyType::Static
+                {
+                    Vec3::ZERO
+                } else {
+                    body.velocity_at_point(surf_world)
+                }
+            };
             if crossed {
                 p = surf_world - n * radius;
                 contact = Some(Contact {
                     normal: -n,
-                    velocity: body.velocity_at_point(surf_world),
+                    velocity: boundary_velocity(),
                     point: surf_world,
                     body: body_index as u32,
                 });
@@ -1857,7 +1897,7 @@ fn collide_position(
                 p = surf_world + n * radius;
                 contact = Some(Contact {
                     normal: n,
-                    velocity: body.velocity_at_point(surf_world),
+                    velocity: boundary_velocity(),
                     point: surf_world,
                     body: body_index as u32,
                 });
@@ -1883,6 +1923,287 @@ mod tests {
     use crate::body::BodyBuilder;
     use crate::shape::Shape;
     use crate::world::PhysicsWorld;
+
+    #[test]
+    fn body_local_rotated_compound_matches_independent_fluid_obstacle() {
+        use crate::body::{CompoundTransformMode, ShapePart};
+
+        let body_pose = Transform {
+            position: vec3(0.4, 0.2, -0.3),
+            rotation: Quat::from_rotation_z(0.6),
+            scale: Vec3::ONE,
+        };
+        let local = Transform {
+            position: Vec3::X * 2.0,
+            rotation: Quat::from_rotation_x(0.7),
+            scale: Vec3::ONE,
+        };
+        let expected = body_pose.mul_transform(&local);
+        let normal = expected.rotation * Vec3::Y;
+        let tangent = expected.rotation * Vec3::X;
+        let start = expected.position + normal * 0.55;
+        let obstacle = Shape::Box {
+            half_extents: vec3(0.8, 0.15, 0.8),
+        };
+        for kinematic in [false, true] {
+            let mut trajectories = Vec::new();
+            let mut obstacle_poses = Vec::new();
+            for variant in 0..5 {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let primary = if variant == 1 {
+                    obstacle.clone()
+                } else {
+                    Shape::Sphere { radius: 0.05 }
+                };
+                let mut builder = if kinematic {
+                    BodyBuilder::kinematic(primary)
+                } else {
+                    BodyBuilder::r#static(primary)
+                };
+                let pose = if variant == 1 { expected } else { body_pose };
+                builder = builder.position(pose.position).rotation(pose.rotation);
+                if variant != 1 {
+                    builder = builder.part(ShapePart::at(
+                        obstacle.clone(),
+                        local.position,
+                        local.rotation,
+                    ));
+                }
+                if variant <= 2 {
+                    builder = builder.compound_transform_mode(CompoundTransformMode::BodyLocal);
+                } else if variant == 4 {
+                    builder = builder.compound_transform_mode(CompoundTransformMode::Legacy);
+                }
+                if variant == 2 {
+                    builder = builder.sensor(true);
+                }
+                if kinematic {
+                    builder = builder.linear_velocity(Vec3::Z * 0.2);
+                }
+                let handle = world.add_builder(builder);
+                assert_eq!(
+                    world.body(handle).unwrap().linear_velocity,
+                    if kinematic { Vec3::Z * 0.2 } else { Vec3::ZERO }
+                );
+                world
+                    .add_fluid(FluidDesc {
+                        initial_positions: Some(vec![
+                            start - tangent * 0.3,
+                            start,
+                            start + tangent * 0.3,
+                        ]),
+                        initial_velocity: -normal * 2.0,
+                        spacing: 0.1,
+                        radius: 0.04,
+                        viscosity: 0.0,
+                        surface_tension: 0.0,
+                        vorticity: 0.0,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                assert_eq!(world.fluids()[0].velocities()[0], -normal * 2.0);
+                let mut trajectory = Vec::new();
+                let mut poses = Vec::new();
+                for _ in 0..24 {
+                    world.step(1.0 / 60.0);
+                    let body = world.body(handle).unwrap();
+                    let (_, part) = body.parts().nth(if variant == 1 { 0 } else { 1 }).unwrap();
+                    let pose = body.part_world_transform(&part);
+                    poses.push((
+                        pose.position.to_array().map(f32::to_bits),
+                        pose.rotation.to_array().map(f32::to_bits),
+                    ));
+                    let fluid = &world.fluids()[0];
+                    trajectory.push((fluid.particles().to_vec(), fluid.velocities().to_vec()));
+                }
+                obstacle_poses.push(poses);
+                trajectories.push(trajectory);
+            }
+            assert_eq!(
+                obstacle_poses[0], obstacle_poses[1],
+                "equivalent obstacle poses must match every step"
+            );
+            for (compound, independent) in trajectories[0].iter().zip(&trajectories[1]) {
+                for (a, b) in compound.0.iter().zip(&independent.0) {
+                    assert!(
+                        (*a - *b).length() < 2e-4,
+                        "position kine={kinematic}: {a:?} {b:?}"
+                    );
+                }
+                for (a, b) in compound.1.iter().zip(&independent.1) {
+                    assert!(
+                        (*a - *b).length() < 2e-3,
+                        "velocity kine={kinematic}: {a:?} {b:?}"
+                    );
+                }
+            }
+            let end = trajectories[0].last().unwrap().0[1];
+            let control = trajectories[2].last().unwrap().0[1];
+            assert!((end - start).length() > 0.2, "particles must actually move");
+            assert!(
+                (end - expected.position).dot(normal) >= 0.189,
+                "must stop outside box: {end:?}"
+            );
+            assert!(
+                (control - expected.position).dot(normal) < 0.0,
+                "sensor control must cross"
+            );
+            for (default, explicit) in trajectories[3].iter().zip(&trajectories[4]) {
+                for (a, b) in default
+                    .0
+                    .iter()
+                    .chain(&default.1)
+                    .zip(explicit.0.iter().chain(&explicit.1))
+                {
+                    assert_eq!(
+                        a.to_array().map(f32::to_bits),
+                        b.to_array().map(f32::to_bits)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn static_obstacle_residual_velocity_does_not_drive_fluid() {
+        let mut trajectories = Vec::new();
+        for residual in [Vec3::ZERO, Vec3::Y * 3.0] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let handle = world.add_builder(
+                BodyBuilder::r#static(Shape::Box {
+                    half_extents: vec3(1.0, 0.1, 1.0),
+                })
+                .linear_velocity(residual),
+            );
+            assert_eq!(world.body(handle).unwrap().linear_velocity, residual);
+            world
+                .add_fluid(FluidDesc {
+                    boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                    initial_positions: Some(vec![Vec3::Y * 0.16]),
+                    initial_velocity: -Vec3::Y * 2.0,
+                    radius: 0.04,
+                    spacing: 0.1,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            assert_eq!(world.body(handle).unwrap().position(), Vec3::ZERO);
+            trajectories.push((
+                world.fluids()[0].particles()[0],
+                world.fluids()[0].velocities()[0],
+            ));
+        }
+        assert_eq!(
+            trajectories[0], trajectories[1],
+            "static residual must not impart boundary motion"
+        );
+    }
+
+    #[test]
+    fn boundary_velocity_modes_preserve_moving_bodies_and_legacy_bits() {
+        use crate::body::BodyType;
+        for body_type in [BodyType::Static, BodyType::Kinematic, BodyType::Dynamic] {
+            for angular in [false, true] {
+                let mut outputs = Vec::new();
+                for mode in [
+                    None,
+                    Some(FluidBoundaryVelocityMode::Legacy),
+                    Some(FluidBoundaryVelocityMode::BodyMotion),
+                ] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let shape = Shape::Box {
+                        half_extents: vec3(1.0, 0.1, 1.0),
+                    };
+                    let builder = match body_type {
+                        BodyType::Static => BodyBuilder::r#static(shape),
+                        BodyType::Kinematic => BodyBuilder::kinematic(shape),
+                        BodyType::Dynamic => BodyBuilder::dynamic(shape),
+                    };
+                    let v = if angular { Vec3::ZERO } else { Vec3::Y * 3.0 };
+                    let w = if angular { Vec3::Z * 3.0 } else { Vec3::ZERO };
+                    let handle = world.add_builder(builder.linear_velocity(v).angular_velocity(w));
+                    assert_eq!(world.body(handle).unwrap().linear_velocity, v);
+                    assert_eq!(world.body(handle).unwrap().angular_velocity, w);
+                    let mut desc = FluidDesc {
+                        initial_positions: Some(vec![vec3(0.3, 0.16, 0.0)]),
+                        initial_velocity: -Vec3::Y * 2.0,
+                        radius: 0.04,
+                        spacing: 0.1,
+                        ..FluidDesc::default()
+                    };
+                    if let Some(mode) = mode {
+                        desc.boundary_velocity_mode = mode;
+                    }
+                    world.add_fluid(desc).unwrap();
+                    world.step(1.0 / 60.0);
+                    let fluid = &world.fluids()[0];
+                    outputs.push((
+                        fluid.particles()[0].to_array().map(f32::to_bits),
+                        fluid.velocities()[0].to_array().map(f32::to_bits),
+                    ));
+                    if body_type == BodyType::Static
+                        && mode == Some(FluidBoundaryVelocityMode::BodyMotion)
+                    {
+                        assert_eq!(fluid.velocities()[0], Vec3::ZERO);
+                    }
+                }
+                assert_eq!(
+                    outputs[0], outputs[1],
+                    "default must preserve explicit legacy"
+                );
+                if body_type != BodyType::Static {
+                    assert_eq!(
+                        outputs[0], outputs[2],
+                        "moving boundary policy must be unchanged"
+                    );
+                } else {
+                    assert_ne!(
+                        outputs[0], outputs[2],
+                        "residual fixture must exercise contact"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_velocity_policy_keeps_passive_spray_response() {
+        let mut states = Vec::new();
+        for mode in [
+            FluidBoundaryVelocityMode::Legacy,
+            FluidBoundaryVelocityMode::BodyMotion,
+        ] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Box {
+                    half_extents: vec3(1.0, 0.1, 1.0),
+                })
+                .linear_velocity(Vec3::Y * 3.0),
+            );
+            world
+                .add_fluid(FluidDesc {
+                    boundary_velocity_mode: mode,
+                    radius: 0.04,
+                    spacing: 0.1,
+                    initial_positions: Some(vec![Vec3::Y * 2.0]),
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.fluids_mut()[0].foam.push(FoamParticle {
+                position: Vec3::Y * 0.13,
+                velocity: -Vec3::Y * 2.0,
+                life: 1.0,
+                kind: FoamKind::Spray,
+            });
+            world.step(1.0 / 60.0);
+            let particle = world.fluids()[0].foam[0];
+            // Passive spray uses half the liquid collision radius.
+            assert!((particle.position.y - 0.12).abs() < 1e-6);
+            assert!(particle.velocity.y > 0.0);
+            states.push(particle);
+        }
+        assert_eq!(states[0], states[1]);
+    }
 
     #[test]
     fn gas_volume_ignores_nonfinite_radius_without_losing_valid_bubbles() {
