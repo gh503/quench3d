@@ -931,8 +931,8 @@ pub fn json_schema() -> Value {
             "description": "粒子局部流场速度耦合（1/s），缺省 0 = 关闭；把浸没刚体 XZ 速度拖向 AABB 内粒子平均速度"
         });
         d["properties"]["collision_mode"] = json!({
-            "type": "string", "enum": ["legacy", "swept_spheres"],
-            "description": "Default legacy keeps discrete projection. swept_spheres sweeps initial liquid-particle motion against static sphere parts only; excludes moving boundaries, other shapes, secondary particles and later PBF corrections."
+            "type": "string", "enum": ["legacy", "swept_spheres", "swept_primitives"],
+            "description": "Default legacy keeps discrete projection. swept_spheres sweeps static sphere parts; swept_primitives also sweeps static boxes using rounded particle clearance. Only initial liquid motion is swept; moving boundaries, other shapes, secondary particles and later PBF corrections are excluded. Initial overlaps use discrete projection; first contact stops the remaining motion."
         });
         d["properties"]["boundary_velocity_mode"] = json!({
             "type": "string", "enum": ["legacy", "body_motion"],

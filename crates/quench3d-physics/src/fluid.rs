@@ -46,6 +46,8 @@ pub enum FluidCollisionMode {
     Legacy,
     /// Sweep initial particle motion against static sphere parts.
     SweptSpheres,
+    /// Sweep initial motion against static sphere and box parts.
+    SweptPrimitives,
 }
 
 /// 流体参数（场景格式的 `fluids[]` 一项）。
@@ -954,7 +956,7 @@ impl Fluid {
 
         // Only the explicit mode captures the actual temporal segment, before
         // neighbor construction and later density corrections change its endpoint.
-        let swept_contacts = if self.desc.collision_mode == FluidCollisionMode::SweptSpheres {
+        let swept_contacts = if self.desc.collision_mode != FluidCollisionMode::Legacy {
             Some(
                 self.predicted
                     .iter_mut()
@@ -966,6 +968,7 @@ impl Fluid {
                             bodies,
                             self.desc.radius,
                             self.desc.boundary_velocity_mode,
+                            self.desc.collision_mode == FluidCollisionMode::SweptPrimitives,
                         );
                         *p = end;
                         contact
@@ -1872,7 +1875,100 @@ fn calibrated_mass(desc: &FluidDesc) -> f32 {
     }
 }
 
-/// Sweep only the initial liquid movement against static sphere parts. Later
+/// Earliest entry into the exact rounded Minkowski sum of a box and a particle.
+/// Coordinate-plane breakpoints make squared point-to-box distance quadratic.
+fn sweep_rounded_box(start: Vec3, end: Vec3, half: Vec3, radius: f32) -> Option<(f64, Vec3, Vec3)> {
+    let s = start.to_array().map(f64::from);
+    let e = end.to_array().map(f64::from);
+    let h = half.to_array().map(f64::from);
+    let d = [e[0] - s[0], e[1] - s[1], e[2] - s[2]];
+    let r = f64::from(radius);
+    if !s
+        .iter()
+        .chain(e.iter())
+        .chain(h.iter())
+        .all(|v| v.is_finite())
+        || !(r > 0.0 && r.is_finite())
+    {
+        return None;
+    }
+    let initial: f64 = (0..3).map(|i| (s[i].abs() - h[i]).max(0.0).powi(2)).sum();
+    if initial < r * r {
+        return None;
+    }
+    let mut cuts = vec![0.0, 1.0];
+    for i in 0..3 {
+        if d[i] != 0.0 {
+            for face in [-h[i], h[i]] {
+                let t = (face - s[i]) / d[i];
+                if t > 0.0 && t < 1.0 {
+                    cuts.push(t);
+                }
+            }
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    for range in cuts.windows(2) {
+        let left = range[0];
+        let width = range[1] - left;
+        let mid = left + width * 0.5;
+        let (mut a, mut b, mut c) = (0.0, 0.0, -r * r);
+        for i in 0..3 {
+            let value = s[i] + d[i] * mid;
+            let bound = if value < -h[i] {
+                -h[i]
+            } else if value > h[i] {
+                h[i]
+            } else {
+                continue;
+            };
+            let offset = s[i] + d[i] * left - bound;
+            a += d[i] * d[i];
+            b += offset * d[i];
+            c += offset * offset;
+        }
+        if a <= 0.0 {
+            continue;
+        }
+        let discriminant = b * b - a * c;
+        if !discriminant.is_finite() || discriminant <= 0.0 {
+            continue;
+        }
+        let q = -b - discriminant.sqrt().copysign(b);
+        let mut roots = [q / a, if q != 0.0 { c / q } else { 0.0 }];
+        roots.sort_by(f64::total_cmp);
+        for u in roots {
+            if !u.is_finite() || u < 0.0 || u > width || b + a * u >= 0.0 {
+                continue;
+            }
+            let t = left + u;
+            let p = [s[0] + d[0] * t, s[1] + d[1] * t, s[2] + d[2] * t];
+            let closest = [
+                p[0].clamp(-h[0], h[0]),
+                p[1].clamp(-h[1], h[1]),
+                p[2].clamp(-h[2], h[2]),
+            ];
+            let gap = [p[0] - closest[0], p[1] - closest[1], p[2] - closest[2]];
+            let length = (gap[0] * gap[0] + gap[1] * gap[1] + gap[2] * gap[2]).sqrt();
+            if !(length > 0.0 && length.is_finite()) {
+                continue;
+            }
+            return Some((
+                t,
+                Vec3::new(closest[0] as f32, closest[1] as f32, closest[2] as f32),
+                Vec3::new(
+                    (gap[0] / length) as f32,
+                    (gap[1] / length) as f32,
+                    (gap[2] / length) as f32,
+                ),
+            ));
+        }
+    }
+    None
+}
+
+/// Sweep initial liquid movement against static spheres, and optionally boxes. Later
 /// density corrections and initially overlapping particles retain discrete projection.
 fn sweep_static_spheres(
     start: Vec3,
@@ -1880,6 +1976,7 @@ fn sweep_static_spheres(
     bodies: &[BodySlot],
     radius: f32,
     mode: FluidBoundaryVelocityMode,
+    boxes: bool,
 ) -> (Vec3, Option<Contact>) {
     let wide = |v: Vec3| [f64::from(v.x), f64::from(v.y), f64::from(v.z)];
     let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -1899,6 +1996,37 @@ fn sweep_static_spheres(
             continue;
         }
         for (shape, local) in body.parts() {
+            if boxes {
+                if let crate::shape::Shape::Box { half_extents } = shape {
+                    let world = body.part_world_transform(&local);
+                    if let Some((t, point, normal)) = sweep_rounded_box(
+                        world.inverse_transform_point(start),
+                        world.inverse_transform_point(end),
+                        half_extents.abs(),
+                        radius,
+                    ) {
+                        if t < earliest {
+                            let point = world.transform_point(point);
+                            let normal = world.rotation.mul_vec3(normal).normalize_or_zero();
+                            earliest = t;
+                            result = (
+                                point + normal * radius,
+                                Some(Contact {
+                                    normal,
+                                    point,
+                                    body: index as u32,
+                                    velocity: if mode == FluidBoundaryVelocityMode::BodyMotion {
+                                        Vec3::ZERO
+                                    } else {
+                                        body.velocity_at_point(point)
+                                    },
+                                }),
+                            );
+                        }
+                    }
+                    continue;
+                }
+            }
             let crate::shape::Shape::Sphere {
                 radius: sphere_radius,
             } = shape
@@ -2317,6 +2445,247 @@ mod tests {
                     assert!(world.fluids()[0].particles()[0].x < -0.1562);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn swept_primitives_preserves_sphere_mode_bits() {
+        for y in [0.0, 0.05, 0.12, 0.2] {
+            let mut traces = Vec::new();
+            for mode in [
+                FluidCollisionMode::SweptSpheres,
+                FluidCollisionMode::SweptPrimitives,
+            ] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                world.add_builder(BodyBuilder::r#static(Shape::Sphere { radius: 0.1 }));
+                world
+                    .add_fluid(FluidDesc {
+                        collision_mode: mode,
+                        initial_positions: Some(vec![vec3(-0.25, y, 0.0)]),
+                        initial_velocity: Vec3::X * 30.0,
+                        radius: 0.01,
+                        spacing: 0.1,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                let mut trace = Vec::new();
+                for _ in 0..12 {
+                    world.step(1.0 / 60.0);
+                    trace.extend(
+                        world.fluids()[0].particles()[0]
+                            .to_array()
+                            .map(f32::to_bits),
+                    );
+                    trace.extend(
+                        world.fluids()[0].velocities()[0]
+                            .to_array()
+                            .map(f32::to_bits),
+                    );
+                }
+                traces.push(trace);
+            }
+            assert_eq!(traces[0], traces[1], "y={y}");
+        }
+    }
+
+    #[test]
+    fn rounded_box_sweep_edges_corners_and_misses() {
+        let h = Vec3::splat(0.125);
+        let r = 0.03125;
+        for direction in [-1.0f32, 1.0] {
+            for (axis, count) in [
+                (Vec3::X, 1.0f64),
+                (vec3(1.0, 1.0, 0.0), 2.0),
+                (Vec3::ONE, 3.0),
+            ] {
+                let start = axis * (0.3 * direction);
+                let end = -start;
+                let (t, _, n) = sweep_rounded_box(start, end, h, r).unwrap();
+                let expected = (f64::from(0.3f32) - (0.125 + f64::from(r) / count.sqrt()))
+                    / (2.0 * f64::from(0.3f32));
+                assert!((t - expected).abs() < 1e-12, "{axis:?} {t} {expected}");
+                assert!((n - axis.normalize() * direction).length() < 1e-6);
+            }
+        }
+        // Inside the inflated AABB, outside the true rounded edge cylinder.
+        let offset = 0.125 + r * 0.8;
+        assert!(
+            sweep_rounded_box(vec3(-0.3, offset, offset), vec3(0.3, offset, offset), h, r)
+                .is_none()
+        );
+        assert!(
+            sweep_rounded_box(vec3(-0.3, 0.125 + r, 0.0), vec3(0.3, 0.125 + r, 0.0), h, r)
+                .is_none()
+        );
+        assert!(
+            sweep_rounded_box(vec3(-0.125 - r, 0.0, 0.0), vec3(-0.3, 0.0, 0.0), h, r).is_none()
+        );
+        assert_eq!(
+            sweep_rounded_box(vec3(-0.125 - r, 0.0, 0.0), Vec3::ZERO, h, r)
+                .unwrap()
+                .0,
+            0.0
+        );
+        assert!(sweep_rounded_box(Vec3::ZERO, Vec3::X, h, r).is_none());
+    }
+
+    #[test]
+    fn swept_primitives_public_corner_miss_and_old_modes() {
+        let offset = 0.125 + 0.03125 * 0.8;
+        for start in [vec3(-0.25, offset, offset), vec3(-0.25, 0.0, 0.0)] {
+            let mut states = Vec::new();
+            for mode in [
+                FluidCollisionMode::Legacy,
+                FluidCollisionMode::SweptSpheres,
+                FluidCollisionMode::SweptPrimitives,
+            ] {
+                for sensor in [false, true] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    world.add_builder(
+                        BodyBuilder::r#static(Shape::Box {
+                            half_extents: Vec3::splat(0.125),
+                        })
+                        .sensor(sensor),
+                    );
+                    world
+                        .add_fluid(FluidDesc {
+                            collision_mode: mode,
+                            initial_positions: Some(vec![start]),
+                            initial_velocity: Vec3::X * 30.0,
+                            radius: 0.03125,
+                            spacing: 0.1,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    world.step(1.0 / 60.0);
+                    states.push((
+                        world.fluids()[0].particles()[0],
+                        world.fluids()[0].velocities()[0],
+                    ));
+                }
+            }
+            assert_eq!(states[0], states[2]); // Both historical modes still ignore initial box sweeps.
+            if start.y != 0.0 {
+                assert!(states.iter().all(|s| *s == states[0]), "{states:?}");
+            } else {
+                assert!(states[4].0.x < -0.15);
+                assert_eq!(states[5], states[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn swept_primitives_rotated_compound_and_mixed_earliest() {
+        use crate::body::{CompoundTransformMode, ShapePart};
+        let pose = Transform {
+            position: vec3(0.4, 0.3, 0.2),
+            rotation: Quat::from_rotation_z(0.6),
+            scale: Vec3::ONE,
+        };
+        let local = Transform {
+            position: Vec3::Y,
+            rotation: Quat::from_rotation_x(0.7),
+            scale: Vec3::ONE,
+        };
+        let target = pose.mul_transform(&local);
+        let mut positions = Vec::new();
+        for compound in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let shape = Shape::Box {
+                half_extents: Vec3::splat(0.125),
+            };
+            let builder = if compound {
+                BodyBuilder::r#static(Shape::Sphere { radius: 0.01 })
+                    .position(pose.position)
+                    .rotation(pose.rotation)
+                    .part(ShapePart::at(shape, local.position, local.rotation))
+                    .compound_transform_mode(CompoundTransformMode::BodyLocal)
+            } else {
+                BodyBuilder::r#static(shape)
+                    .position(target.position)
+                    .rotation(target.rotation)
+            };
+            world.add_builder(builder);
+            world
+                .add_fluid(FluidDesc {
+                    collision_mode: FluidCollisionMode::SweptPrimitives,
+                    initial_positions: Some(vec![target.transform_point(-Vec3::X * 0.25)]),
+                    initial_velocity: target.rotation * Vec3::X * 30.0,
+                    radius: 0.03125,
+                    spacing: 0.1,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            let p = world.fluids()[0].particles()[0];
+            assert!((target.inverse_transform_point(p).x + 0.15625).abs() < 2e-6);
+            positions.push(p);
+        }
+        assert_eq!(positions[0], positions[1]);
+        for sphere_first in [false, true] {
+            let mut states = Vec::new();
+            for reverse in [false, true] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                for i in if reverse { [1, 0] } else { [0, 1] } {
+                    let shape = if (i == 0) == sphere_first {
+                        Shape::Sphere { radius: 0.05 }
+                    } else {
+                        Shape::Box {
+                            half_extents: Vec3::splat(0.05),
+                        }
+                    };
+                    world.add_builder(
+                        BodyBuilder::r#static(shape).position(Vec3::X * (i as f32 * 0.2)),
+                    );
+                }
+                world
+                    .add_fluid(FluidDesc {
+                        collision_mode: FluidCollisionMode::SweptPrimitives,
+                        initial_positions: Some(vec![-Vec3::X * 0.25]),
+                        initial_velocity: Vec3::X * 30.0,
+                        radius: 0.01,
+                        spacing: 0.1,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                world.step(1.0 / 60.0);
+                states.push((
+                    world.fluids()[0].particles()[0],
+                    world.fluids()[0].velocities()[0],
+                ));
+            }
+            assert_eq!(states[0], states[1]);
+            assert!((states[0].0.x + 0.06).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn swept_primitives_box_face_stops_public_particle() {
+        for direction in [-1.0f32, 1.0] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(BodyBuilder::r#static(Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            }));
+            world
+                .add_fluid(FluidDesc {
+                    collision_mode: FluidCollisionMode::SweptPrimitives,
+                    initial_positions: Some(vec![Vec3::X * (-0.25 * direction)]),
+                    initial_velocity: Vec3::X * (30.0 * direction),
+                    radius: 0.01,
+                    spacing: 0.1,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            assert_eq!(
+                world.fluids()[0].velocities()[0],
+                Vec3::X * (30.0 * direction)
+            );
+            world.step(1.0 / 60.0);
+            let x = world.fluids()[0].particles()[0].x;
+            assert!(
+                (x * direction + 0.11).abs() < 1e-5,
+                "direction={direction} x={x}"
+            );
         }
     }
 

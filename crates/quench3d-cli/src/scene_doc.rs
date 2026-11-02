@@ -1149,6 +1149,8 @@ pub enum FluidCollisionModeDoc {
     Legacy,
     /// Sweep initial motion against static sphere parts only.
     SweptSpheres,
+    /// Sweep initial motion against static sphere and box parts.
+    SweptPrimitives,
 }
 
 /// 粒子流体（CPU PBF）。
