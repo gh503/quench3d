@@ -2748,8 +2748,9 @@ impl PhysicsWorld {
         best
     }
 
-    /// Rotating convex/plane part pairs with explicitly body-local compound placement.
-    /// Mesh parts and all compound bodies using legacy placement remain excluded.
+    /// Body-local convex parts against convex/plane parts and static triangle meshes.
+    /// Mesh triangles are cached once per target and scanned without a spatial index;
+    /// moving mesh parts, heightfields and legacy compound placement remain excluded.
     fn sweep_body_local_compound_parts(&self, self_index: usize, dt: f32) -> Option<f32> {
         let a = self.bodies.get(self_index)?.body.as_ref()?;
         let mut best: Option<f32> = None;
@@ -2790,19 +2791,52 @@ impl PhysicsWorld {
             if !allowed(b) {
                 continue;
             }
+            // Static mesh geometry is transformed once per target, outside source-part
+            // and advancement loops. This opt-in path intentionally scans all triangles.
+            let meshes: Vec<Option<Vec<[Vec3; 3]>>> = b
+                .parts()
+                .map(|(shape, local)| {
+                    if b.body_type != BodyType::Static {
+                        return None;
+                    }
+                    let Shape::TriMesh { vertices, indices } = shape else {
+                        return None;
+                    };
+                    let world = b.transform.mul_transform(&local);
+                    Some(
+                        indices
+                            .as_chunks::<3>()
+                            .0
+                            .iter()
+                            .filter_map(|tri| {
+                                let points = [
+                                    *vertices.get(tri[0] as usize)?,
+                                    *vertices.get(tri[1] as usize)?,
+                                    *vertices.get(tri[2] as usize)?,
+                                ];
+                                let points = points.map(|p| world.transform_point(p));
+                                points.iter().all(|p| p.is_finite()).then_some(points)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
             for (ai, (sa, local_a)) in a.parts().enumerate() {
                 if sa.is_static_only() {
                     continue;
                 }
                 for (bi, (sb, local_b)) in b.parts().enumerate() {
                     // The existing predictor covers the primary pair, including meshes.
-                    // Additional mesh/heightfield parts are not handled by this convex path.
+                    // Only static triangle meshes are included; heightfields remain excluded.
                     let plane = matches!(sb, Shape::Plane { .. });
-                    if (ai == 0 && bi == 0) || (sb.is_static_only() && !plane) {
+                    let triangles = meshes[bi].as_ref();
+                    if (ai == 0 && bi == 0)
+                        || (sb.is_static_only() && !plane && triangles.is_none())
+                    {
                         continue;
                     }
                     let ra = local_a.position.length() + sa.bounding_radius();
-                    let rb = if plane {
+                    let rb = if plane || triangles.is_some() {
                         0.0
                     } else {
                         local_b.position.length() + sb.bounding_radius()
@@ -2820,7 +2854,33 @@ impl PhysicsWorld {
                             .mul_transform(&local_a);
                         let tb = pose(b, linear, angular, t).mul_transform(&local_b);
                         let support_a = gjk::Support::new(sa, &ta);
-                        let (touching, distance) = if let Shape::Plane { normal } = sb {
+                        let (touching, distance) = if let Some(triangles) = triangles {
+                            let mut distance = f32::INFINITY;
+                            let mut touching = false;
+                            for points in triangles {
+                                let (hit, d) = if let Shape::Sphere { radius } = sa {
+                                    let d = gjk::point_triangle_distance(
+                                        ta.position,
+                                        points[0],
+                                        points[1],
+                                        points[2],
+                                    ) - radius.abs();
+                                    (d <= 1e-4, d.max(0.0))
+                                } else {
+                                    let hit = gjk::gjk_precise(
+                                        &support_a,
+                                        &gjk::Support::triangle(*points),
+                                    );
+                                    (hit.intersect || hit.distance <= 1e-4, hit.distance)
+                                };
+                                if hit {
+                                    touching = true;
+                                    break;
+                                }
+                                distance = distance.min(d);
+                            }
+                            (touching, distance)
+                        } else if let Shape::Plane { normal } = sb {
                             let n = tb.rotation.mul_vec3(*normal);
                             if n.length_squared() < 0.5 {
                                 break;
@@ -4839,6 +4899,192 @@ mod tests {
         assert_eq!(body.transform.scale, Vec3::ONE);
         assert_eq!(body.part_count(), 2);
         (world, moving)
+    }
+
+    fn compound_mesh_ccd_world() -> (PhysicsWorld, BodyHandle) {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let moving = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .part_at(Shape::Sphere { radius: 0.1 }, Vec3::Y * 2.0)
+                .position(-Vec3::X)
+                .linear_velocity(Vec3::X * 120.0)
+                .compound_transform_mode(BodyLocal)
+                .ccd_precise(true),
+        );
+        let target = world.add_builder(
+            BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                .position(-Vec3::Y * 3.0)
+                .part_at(
+                    Shape::TriMesh {
+                        vertices: vec![
+                            Vec3::new(0.0, -1.0, -1.0),
+                            Vec3::new(0.0, 1.0, -1.0),
+                            Vec3::new(0.0, 0.0, 1.0),
+                        ],
+                        indices: vec![0, 1, 2],
+                    },
+                    Vec3::Y * 5.0,
+                )
+                .compound_transform_mode(BodyLocal),
+        );
+        assert_eq!(world.body(target).unwrap().body_type, BodyType::Static);
+        assert_eq!(
+            world.body(target).unwrap().compound_transform_mode(),
+            BodyLocal
+        );
+        let b = world.body(moving).unwrap();
+        assert_eq!(b.compound_transform_mode(), BodyLocal);
+        assert_eq!(b.linear_velocity, Vec3::X * 120.0);
+        assert_eq!(b.angular_velocity, Vec3::ZERO);
+        assert_eq!(b.part_count(), 2);
+        (world, moving)
+    }
+
+    #[test]
+    fn precise_compound_mesh_predicts_extra_sphere_wall() {
+        let (world, moving) = compound_mesh_ccd_world();
+        let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+        assert!(
+            hit.is_some_and(|t| (t - 0.45).abs() < 2e-4),
+            "expected .45, got {hit:?}"
+        );
+    }
+
+    #[test]
+    fn precise_compound_mesh_public_step_stops_extra_sphere() {
+        let mut positions = Vec::new();
+        for accumulated in [false, true] {
+            for precise in [false, true] {
+                let (mut world, moving) = compound_mesh_ccd_world();
+                if !precise {
+                    let b = world.body_mut(moving).unwrap();
+                    b.ccd = false;
+                    b.ccd_precise = false;
+                }
+                if accumulated {
+                    world.step(1.0 / 60.0);
+                } else {
+                    assert_eq!(world.step_substeps(1.0 / 60.0, 1), 1);
+                }
+                positions.push(world.body(moving).unwrap().position().x);
+            }
+        }
+        assert!((positions[0] - 1.0).abs() < 1e-5 && (positions[2] - 1.0).abs() < 1e-5);
+        assert!(
+            [positions[1], positions[3]]
+                .iter()
+                .all(|x| (x + 0.1).abs() < 0.002),
+            "extra sphere must stop at triangle: {positions:?}"
+        );
+    }
+
+    #[test]
+    fn precise_compound_mesh_pose_filters_and_invalid_triangles() {
+        use crate::body::{
+            CompoundTransformMode::{BodyLocal, Legacy},
+            ShapePart,
+        };
+        let body_pose = Transform::new(
+            Vec3::new(0.0, 3.0, 0.0),
+            Quat::from_axis_angle(Vec3::Z, 0.7),
+            Vec3::ONE,
+        );
+        let local = Transform::new(
+            Vec3::X * 2.0,
+            Quat::from_axis_angle(Vec3::Y, 0.4),
+            Vec3::ONE,
+        );
+        let expected = body_pose.mul_transform(&local);
+        let mut hits = Vec::new();
+        for case in 0..7 {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let mesh = Shape::TriMesh {
+                vertices: vec![
+                    Vec3::new(0.0, -2.0, -2.0),
+                    Vec3::new(0.0, 2.0, -2.0),
+                    Vec3::new(0.0, 0.0, 2.0),
+                ],
+                indices: if case == 5 {
+                    vec![0, 1, 99, 0]
+                } else if case == 6 {
+                    vec![]
+                } else {
+                    vec![0, 1, 2]
+                },
+            };
+            let target = if case == 0 {
+                BodyBuilder::r#static(mesh).transform(expected)
+            } else {
+                BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                    .part(ShapePart::at(mesh, local.position, local.rotation))
+                    .transform(body_pose)
+                    .compound_transform_mode(if case == 4 { Legacy } else { BodyLocal })
+                    .linear_velocity(Vec3::X * 100.0)
+                    .angular_velocity(Vec3::Z * 10.0)
+                    .sensor(case == 2)
+            };
+            let target = world.add_builder(target);
+            if case == 3 {
+                world.body_mut(target).unwrap().groups.filter = 0;
+            }
+            let direction = expected.rotation.mul_vec3(Vec3::X);
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .position(expected.position - direction)
+                    .linear_velocity(direction * 120.0)
+                    .ccd_precise(true),
+            );
+            let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+            if case < 2 {
+                hits.push(hit.unwrap());
+            } else {
+                assert!(hit.is_none(), "case={case} hit={hit:?}");
+            }
+        }
+        assert!(hits.iter().all(|t| (t - 0.45).abs() < 2e-4), "{hits:?}");
+    }
+
+    #[test]
+    fn precise_compound_mesh_primary_target_and_convex_extra() {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        for convex in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let part = if convex {
+                Shape::Box {
+                    half_extents: Vec3::splat(0.1),
+                }
+            } else {
+                Shape::Sphere { radius: 0.1 }
+            };
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .part_at(part, Vec3::Y * 2.0)
+                    .position(-Vec3::X)
+                    .linear_velocity(Vec3::X * 120.0)
+                    .compound_transform_mode(BodyLocal)
+                    .ccd_precise(true),
+            );
+            world.add_builder(
+                BodyBuilder::r#static(Shape::TriMesh {
+                    vertices: vec![
+                        Vec3::new(0.0, -1.0, -1.0),
+                        Vec3::new(0.0, 1.0, -1.0),
+                        Vec3::new(0.0, 0.0, 1.0),
+                    ],
+                    indices: vec![0, 1, 2],
+                })
+                .position(Vec3::Y * 2.0),
+            );
+            let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+            assert!(
+                hit.is_some_and(|t| (t - 0.45).abs() < 2e-4),
+                "convex={convex} {hit:?}"
+            );
+            world.step_substeps(1.0 / 60.0, 1);
+            let x = world.body(moving).unwrap().position().x;
+            assert!((x + 0.1).abs() < 0.002, "convex={convex} x={x}");
+        }
     }
 
     fn rotating_compound_ccd_world(precise: bool) -> (PhysicsWorld, BodyHandle) {
