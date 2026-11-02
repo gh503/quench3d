@@ -2340,6 +2340,12 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             emit_spread: f.emit_spread.unwrap_or(0.0),
             drag: f.drag,
             flow_coupling: f.flow_coupling.unwrap_or(0.0),
+            collision_mode: match f.collision_mode {
+                Some(crate::scene_doc::FluidCollisionModeDoc::SweptSpheres) => {
+                    quench3d::physics::FluidCollisionMode::SweptSpheres
+                }
+                _ => quench3d::physics::FluidCollisionMode::Legacy,
+            },
             boundary_velocity_mode: match f.boundary_velocity_mode {
                 Some(crate::scene_doc::FluidBoundaryVelocityModeDoc::BodyMotion) => {
                     quench3d::physics::FluidBoundaryVelocityMode::BodyMotion
@@ -6893,6 +6899,32 @@ mod tests {
     ///
     /// 这条抓的是"两处各写一遍展开代码"：谁改了一处、另一处没改，就会看见一个地形、
     /// 踩到另一个地形（而且只在真渲染 + 真碰撞下才看得出来）。
+    #[test]
+    fn fluid_collision_mode_loads_and_preserves_legacy() {
+        for (field, expected) in [
+            ("", 0.25f32),
+            (",\"collision_mode\":\"legacy\"", 0.25),
+            (",\"collision_mode\":\"swept_spheres\"", -0.11),
+        ] {
+            let json = format!(
+                r#"{{"gravity":[0,0,0],"objects":[{{"body":"static","shape":{{"type":"sphere","radius":0.1}}}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[-0.25,0,0]],"velocity":[30,0,0],"radius":0.01,"spacing":0.1{field}}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+            let serialized = serde_json::to_string(&doc).unwrap();
+            assert_eq!(serialized.contains("collision_mode"), !field.is_empty());
+            let again = SceneDoc::from_json(&serialized).unwrap();
+            assert_eq!(again.fluids[0].collision_mode, doc.fluids[0].collision_mode);
+            let mut build = build_world(&again).unwrap();
+            build.world.step(1.0 / 60.0);
+            assert!((build.world.fluids()[0].particles()[0].x - expected).abs() < 1e-6);
+        }
+        assert!(
+            SceneDoc::from_json(r#"{"fluids":[{"size":[1,1,1],"collision_mode":"unknown"}]}"#)
+                .is_err()
+        );
+    }
+
     #[test]
     fn fluid_boundary_velocity_mode_loads_and_preserves_legacy() {
         use crate::scene_doc::FluidBoundaryVelocityModeDoc;

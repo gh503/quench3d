@@ -1141,6 +1141,16 @@ pub enum FluidBoundaryVelocityModeDoc {
     BodyMotion,
 }
 
+/// Initial liquid-particle collision policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FluidCollisionModeDoc {
+    /// Historical discrete projection.
+    Legacy,
+    /// Sweep initial motion against static sphere parts only.
+    SweptSpheres,
+}
+
 /// 粒子流体（CPU PBF）。
 ///
 /// 这是**粒子**流体，与 [`WaterDoc`] 的解析水域是两套东西：水域给刚体浮力，
@@ -1205,6 +1215,9 @@ pub struct FluidDoc {
     /// Boundary velocity policy; omitted preserves historical stored velocities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary_velocity_mode: Option<FluidBoundaryVelocityModeDoc>,
+    /// Optional initial-motion sweep; omitted keeps historical projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collision_mode: Option<FluidCollisionModeDoc>,
     /// 密度约束迭代次数 1~8，缺省 4。
     #[serde(default = "default_fluid_iterations")]
     pub iterations: u32,

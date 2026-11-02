@@ -871,6 +871,7 @@ pub fn json_schema() -> Value {
             "drag",
             "flow_coupling",
             "boundary_velocity_mode",
+            "collision_mode",
             "iterations",
             "max_particles",
             "surface_tension",
@@ -928,6 +929,10 @@ pub fn json_schema() -> Value {
         d["properties"]["flow_coupling"] = json!({
             "type": "number", "minimum": 0, "maximum": 100,
             "description": "粒子局部流场速度耦合（1/s），缺省 0 = 关闭；把浸没刚体 XZ 速度拖向 AABB 内粒子平均速度"
+        });
+        d["properties"]["collision_mode"] = json!({
+            "type": "string", "enum": ["legacy", "swept_spheres"],
+            "description": "Default legacy keeps discrete projection. swept_spheres sweeps initial liquid-particle motion against static sphere parts only; excludes moving boundaries, other shapes, secondary particles and later PBF corrections."
         });
         d["properties"]["boundary_velocity_mode"] = json!({
             "type": "string", "enum": ["legacy", "body_motion"],

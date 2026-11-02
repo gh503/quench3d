@@ -50,6 +50,31 @@ fn headless_engine() -> Option<Engine> {
 }
 
 #[test]
+fn fluid_collision_mode_survives_scene_load_save() {
+    use quench3d::physics::FluidCollisionMode;
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0,1,0]]},{"size":[0.1,0.1,0.1],"initial_positions":[[2,1,0]],"collision_mode":"swept_spheres"}]}"#).unwrap();
+    let check = |engine: &Engine| {
+        assert_eq!(
+            engine.world.fluids()[0].desc().collision_mode,
+            FluidCollisionMode::Legacy
+        );
+        assert_eq!(
+            engine.world.fluids()[1].desc().collision_mode,
+            FluidCollisionMode::SweptSpheres
+        );
+    };
+    check(&engine);
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    assert_eq!(saved.json.matches("collision_mode").count(), 1);
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    check(&engine);
+}
+
+#[test]
 fn fluid_boundary_velocity_mode_survives_scene_load_save() {
     use quench3d::physics::FluidBoundaryVelocityMode;
     let Some(mut engine) = headless_engine() else {
