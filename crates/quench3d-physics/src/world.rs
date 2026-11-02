@@ -2923,7 +2923,7 @@ impl PhysicsWorld {
                                 COMPOUND_MESH_TRIANGLE_QUERIES
                                     .with(|count| count.set(count.get() + 1));
                                 let (hit, d) = if let Shape::Sphere { radius } = sa {
-                                    let d = gjk::point_triangle_distance(
+                                    let d = gjk::point_triangle_distance_precise(
                                         ta.position,
                                         points[0],
                                         points[1],
@@ -3133,8 +3133,9 @@ impl PhysicsWorld {
                     };
                     let test_triangle = |pts: [Vec3; 3]| -> (bool, f32) {
                         if let Some((center, radius)) = sphere {
-                            let d = gjk::point_triangle_distance(center, pts[0], pts[1], pts[2])
-                                - radius;
+                            let d = gjk::point_triangle_distance_precise(
+                                center, pts[0], pts[1], pts[2],
+                            ) - radius;
                             (d <= 1e-4, d.max(0.0))
                         } else {
                             let hit = gjk::gjk_precise(&sa, &gjk::Support::triangle(pts));
@@ -5302,6 +5303,89 @@ mod tests {
             assert_eq!(snapshots[0], snapshots[1], "case={case}");
         }
         COMPOUND_MESH_REFERENCE.with(|flag| flag.set(false));
+    }
+
+    #[test]
+    fn precise_degenerate_triangle_public_step_stops_sphere() {
+        let mut results = Vec::new();
+        for accumulated in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(BodyBuilder::r#static(Shape::TriMesh {
+                vertices: vec![-Vec3::Y, -Vec3::Y, Vec3::Y],
+                indices: vec![0, 1, 2],
+            }));
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .position(-Vec3::X)
+                    .linear_velocity(Vec3::X * 120.0)
+                    .ccd_precise(true),
+            );
+            if accumulated {
+                world.step(1.0 / 60.0);
+            } else {
+                assert_eq!(world.step_substeps(1.0 / 60.0, 1), 1);
+            }
+            results.push(world.body(moving).unwrap().position().x);
+        }
+        assert!(
+            results.iter().all(|x| (x + 0.1).abs() < 0.002),
+            "sphere should stop at segment: {results:?}"
+        );
+    }
+
+    #[test]
+    fn precise_degenerate_triangle_sphere_toi_matches_segment_geometry() {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        let low = -Vec3::Y;
+        let high = Vec3::Y;
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        let mut failures = Vec::new();
+        for (kind, points) in [[low, low, high], [low, Vec3::ZERO, high], [Vec3::ZERO; 3]]
+            .into_iter()
+            .enumerate()
+        {
+            for order in permutations {
+                for compound in [false, true] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let shape = Shape::TriMesh {
+                        vertices: order.map(|i| points[i]).to_vec(),
+                        indices: vec![0, 1, 2],
+                    };
+                    let target = if compound {
+                        BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                            .position(Vec3::Y * 4.0)
+                            .part_at(shape, -Vec3::Y * 4.0)
+                            .compound_transform_mode(BodyLocal)
+                    } else {
+                        BodyBuilder::r#static(shape)
+                    };
+                    world.add_builder(target);
+                    let moving = world.add_builder(
+                        BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                            .position(-Vec3::X)
+                            .linear_velocity(Vec3::X * 120.0)
+                            .ccd_precise(true),
+                    );
+                    assert_eq!(world.body(moving).unwrap().linear_velocity, Vec3::X * 120.0);
+                    let hit = world.sweep_convex_bodies(moving.index as usize, 1.0 / 60.0);
+                    // The sphere crosses the segment (or point) at the origin: (1 - r) / 2.
+                    if !hit.is_some_and(|t| (t - 0.45).abs() < 2e-4) {
+                        failures.push((kind, order, compound, hit));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "analytic TOI .45; failures={failures:?}"
+        );
     }
 
     #[test]

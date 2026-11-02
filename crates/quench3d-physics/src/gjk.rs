@@ -890,6 +890,46 @@ pub(crate) fn distance_point_to_shape(shape: &Shape, t: &Transform, p: Vec3) -> 
     }
 }
 
+/// Opt-in CCD distance for triangles whose widened cross product vanishes.
+/// Keep the historical arithmetic for every nonzero-area triangle; no area epsilon
+/// turns thin triangles into segments. This is not an adaptive exact predicate.
+pub(crate) fn point_triangle_distance_precise(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    let wide = |v: Vec3| [f64::from(v.x), f64::from(v.y), f64::from(v.z)];
+    let sub = |u: [f64; 3], v: [f64; 3]| [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+    let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    let (a64, b64, c64, p64) = (wide(a), wide(b), wide(c), wide(p));
+    let ab = sub(b64, a64);
+    let ac = sub(c64, a64);
+    let cross = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    if cross != [0.0; 3] {
+        return point_triangle_distance(p, a, b, c);
+    }
+    let segment_distance_squared = |u: [f64; 3], v: [f64; 3]| {
+        let edge = sub(v, u);
+        let relative = sub(p64, u);
+        let length_squared = dot(edge, edge);
+        let t = if length_squared > 0.0 {
+            (dot(relative, edge) / length_squared).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let delta = [
+            relative[0] - edge[0] * t,
+            relative[1] - edge[1] * t,
+            relative[2] - edge[2] * t,
+        ];
+        dot(delta, delta)
+    };
+    segment_distance_squared(a64, b64)
+        .min(segment_distance_squared(b64, c64))
+        .min(segment_distance_squared(c64, a64))
+        .sqrt() as f32
+}
+
 /// 点到三角形的最近距离。
 pub(crate) fn point_triangle_distance(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
     // 先在平面法线方向投影，用与 closest_on_triangle 相同的 Voronoi 区域逻辑。
@@ -1446,6 +1486,64 @@ mod tests {
         assert!(point_in_convex(&pts, Vec3::ZERO, 1e-4));
         assert!(point_in_convex(&pts, vec3(0.9, 0.9, 0.9), 1e-4));
         assert!(!point_in_convex(&pts, vec3(1.5, 0.0, 0.0), 1e-4));
+    }
+
+    #[test]
+    fn precise_point_triangle_distance_handles_degenerate_permutations() {
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for points in [
+            [-Vec3::Y, -Vec3::Y, Vec3::Y],
+            [-Vec3::Y, Vec3::ZERO, Vec3::Y],
+            [Vec3::ZERO; 3],
+        ] {
+            for order in permutations {
+                let [a, b, c] = order.map(|i| points[i]);
+                for x in [0.0, 0.05, 0.1, 0.25, 2.0] {
+                    let actual = point_triangle_distance_precise(Vec3::X * x, a, b, c);
+                    assert!(
+                        (actual - x).abs() < 1e-6,
+                        "{points:?} {order:?} x={x} actual={actual}"
+                    );
+                }
+            }
+        }
+        for y in [-2.0, 2.0] {
+            let outside = point_triangle_distance_precise(
+                Vec3::new(0.1, y, 0.0),
+                -Vec3::Y,
+                -Vec3::Y,
+                Vec3::Y,
+            );
+            assert!((outside - 1.01f32.sqrt()).abs() < 1e-6);
+        }
+        // The legacy query deliberately retains its historical behavior.
+        assert_eq!(
+            point_triangle_distance(Vec3::X * 0.1, -Vec3::Y, -Vec3::Y, Vec3::Y).to_bits(),
+            (1.01f32).sqrt().to_bits()
+        );
+    }
+
+    #[test]
+    fn precise_point_triangle_distance_preserves_nonzero_area_bits() {
+        for thickness in [1.0, 0.01, 1e-6] {
+            let (a, b, c) = (-Vec3::Y, Vec3::Y, Vec3::Z * thickness);
+            for x in [-1.0, -0.1, 0.0, 0.1, 1.0] {
+                for y in [-2.0, 0.0, 2.0] {
+                    let p = Vec3::new(x, y, thickness * 0.25);
+                    assert_eq!(
+                        point_triangle_distance_precise(p, a, b, c).to_bits(),
+                        point_triangle_distance(p, a, b, c).to_bits()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
