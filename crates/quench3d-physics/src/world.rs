@@ -2720,8 +2720,9 @@ impl PhysicsWorld {
             let tf = |body: &RigidBody, linear: Vec3, angular: Vec3, t: f32| {
                 let speed = angular.length();
                 let rotation = if speed > 1e-9 {
-                    body.transform.rotation
-                        * Quat::from_axis_angle(angular.normalize_or_zero(), speed * dt * t)
+                    // Angular velocity is expressed in world space, as in position integration.
+                    Quat::from_axis_angle(angular.normalize_or_zero(), speed * dt * t)
+                        * body.transform.rotation
                 } else {
                     body.transform.rotation
                 };
@@ -4399,6 +4400,55 @@ mod tests {
                 assert_eq!(
                     legacy_actual, legacy_expected,
                     "default CCD state must stay identical for static {shape:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn precise_sweep_rotation_uses_world_angular_velocity() {
+        fn hit(frame: Quat, sign: f32) -> Option<f32> {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let dt = 1.0 / 60.0;
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Box {
+                    half_extents: Vec3::new(2.0, 0.1, 0.1),
+                })
+                .position(frame.mul_vec3(Vec3::Y))
+                .rotation(frame)
+                .linear_velocity(frame.mul_vec3(Vec3::Z * 0.6))
+                .angular_velocity(
+                    frame.mul_vec3(Vec3::Z * (sign * std::f32::consts::FRAC_PI_2 / dt)),
+                )
+                .ccd_precise(true),
+            );
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).rotation(frame),
+            );
+            world.sweep_convex_bodies(moving.index as usize, dt)
+        }
+        // The lowest box corner reaches the plane when
+        // 2 sin(theta) + 0.1 cos(theta) = 1, for either angular sign.
+        let expected =
+            ((1.0 / 4.01f32.sqrt()).asin() - 0.05f32.atan()) / std::f32::consts::FRAC_PI_2;
+        for sign in [-1.0, 1.0] {
+            let base = hit(Quat::IDENTITY, sign).expect("a rotating corner must reach the plane");
+            assert!(
+                (base - expected).abs() < 0.0002,
+                "base={base}, analytic={expected}"
+            );
+            for frame in [
+                Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2),
+                Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7),
+            ] {
+                let rotated = hit(frame, sign).expect("world rotation must preserve the contact");
+                assert!(
+                    (rotated - expected).abs() < 0.0002,
+                    "rotated={rotated}, analytic={expected}"
+                );
+                assert!(
+                    (rotated - base).abs() < 0.0002,
+                    "base={base}, rotated={rotated}"
                 );
             }
         }
