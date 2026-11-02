@@ -4585,6 +4585,124 @@ mod tests {
         );
     }
 
+    fn round126_rotated_compound() -> BodyBuilder {
+        BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+            .compound_transform_mode(crate::CompoundTransformMode::BodyLocal)
+            .part_at(Shape::Sphere { radius: 0.2 }, Vec3::X * 2.0)
+            .position(Vec3::X * 3.0)
+            .rotation(Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2))
+    }
+
+    #[test]
+    fn round126_legacy_default_preserves_query_and_step_bits() {
+        let mut states = Vec::new();
+        for explicit in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let mut builder = BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                .part_at(Shape::Sphere { radius: 0.2 }, Vec3::X * 2.0)
+                .position(Vec3::X * 3.0)
+                .rotation(Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2));
+            if explicit {
+                builder = builder.compound_transform_mode(crate::CompoundTransformMode::Legacy);
+            }
+            let target = world.add_builder(builder);
+            assert_eq!(
+                world.body(target).unwrap().compound_transform_mode(),
+                crate::CompoundTransformMode::Legacy
+            );
+            assert!(world
+                .raycast(Vec3::new(3.0, 2.0, 2.0), -Vec3::Z, 4.0)
+                .is_none());
+            // The legacy broadphase bounds reject this misplaced part; preserve that
+            // public result while comparing the historical per-body query separately.
+            assert!(world
+                .raycast(Vec3::new(5.0, 0.0, 2.0), -Vec3::Z, 4.0)
+                .is_none());
+            let hit = crate::query::ray_body(
+                world.body(target).unwrap(),
+                Vec3::new(5.0, 0.0, 2.0),
+                -Vec3::Z,
+                4.0,
+            )
+            .unwrap();
+            let probe = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+                    .position(Vec3::new(3.0, 2.3, 0.0)),
+            );
+            world.step_substeps(1.0 / 60.0, 1);
+            let b = world.body(probe).unwrap();
+            assert_eq!(b.position().y.to_bits(), 2.3f32.to_bits());
+            states.push([
+                hit.0.to_bits(),
+                b.position().x.to_bits(),
+                b.position().y.to_bits(),
+                b.position().z.to_bits(),
+                b.linear_velocity.x.to_bits(),
+                b.linear_velocity.y.to_bits(),
+                b.linear_velocity.z.to_bits(),
+            ]);
+        }
+        assert_eq!(states[0], states[1]);
+    }
+
+    #[test]
+    fn round126_rotated_compound_contact_matches_world_geometry() {
+        let body = round126_rotated_compound().build();
+        assert_eq!(
+            body.compound_transform_mode(),
+            crate::CompoundTransformMode::BodyLocal
+        );
+        let probe = BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+            .position(Vec3::new(3.0, 2.3, 0.0))
+            .build();
+        assert!(body.world_aabb().contains_point(Vec3::new(3.0, 2.0, 0.0)));
+        assert!(
+            collide_bodies_raw(&body, &probe, 0.0).is_some(),
+            "body-local offset 2X rotated 90 degrees must contact at world (3,2,0)"
+        );
+    }
+
+    #[test]
+    fn round126_rotated_compound_public_query_matches_world_geometry() {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let target = world.add_builder(round126_rotated_compound());
+        let hit = world.raycast(Vec3::new(3.0, 2.0, 2.0), -Vec3::Z, 4.0);
+        assert!(
+            hit.is_some_and(|hit| hit.handle == target && (hit.distance - 1.8).abs() < 1e-4),
+            "ray through rotated offset sphere must hit at distance 1.8: {hit:?}"
+        );
+    }
+
+    #[test]
+    fn round126_rotated_compound_public_step_resolves_contact() {
+        let mut positions = Vec::new();
+        for compound in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            if compound {
+                world.add_builder(round126_rotated_compound());
+            } else {
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::Sphere { radius: 0.2 })
+                        .position(Vec3::new(3.0, 2.0, 0.0)),
+                );
+            }
+            let moving = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.2 })
+                    .position(Vec3::new(3.0, 2.3, 0.0)),
+            );
+            assert_eq!(world.step_substeps(1.0 / 60.0, 1), 1);
+            positions.push(world.body(moving).unwrap().position());
+        }
+        assert!(
+            positions[0].y > 2.3,
+            "reference must resolve penetration: {positions:?}"
+        );
+        assert!(
+            (positions[0] - positions[1]).length() < 1e-5,
+            "compound public step must match the same standalone sphere: {positions:?}"
+        );
+    }
+
     fn compound_ccd_world() -> (PhysicsWorld, BodyHandle) {
         let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
         let moving = world.add_builder(

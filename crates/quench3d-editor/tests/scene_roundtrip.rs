@@ -50,6 +50,59 @@ fn headless_engine() -> Option<Engine> {
 }
 
 #[test]
+fn compound_transform_mode_survives_scene_load_save() {
+    use quench3d::physics::CompoundTransformMode;
+    use quench3d_cli::scene_doc::CompoundTransformModeDoc;
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let doc = Doc::new();
+    let text = r#"{"objects":[
+        {"name":"legacy","body":"static","shape":{"type":"sphere","radius":0.2}},
+        {"name":"correct","body":"static","position":[3,0,0],"shape":{"type":"sphere","radius":0.2},"compound_transform_mode":"body_local"}
+    ]}"#;
+    scene_io::load_into_engine(&mut engine, text).unwrap();
+    let check = |engine: &Engine| {
+        for (name, expected) in [
+            ("legacy", CompoundTransformMode::Legacy),
+            ("correct", CompoundTransformMode::BodyLocal),
+        ] {
+            let object = &engine.scene.objects[engine.scene.find(name).unwrap()];
+            assert_eq!(
+                engine
+                    .world
+                    .body(object.body.unwrap())
+                    .unwrap()
+                    .compound_transform_mode(),
+                expected
+            );
+        }
+    };
+    check(&engine);
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let parsed = SceneDoc::from_json(&saved.json).unwrap();
+    assert!(parsed
+        .objects
+        .iter()
+        .find(|o| o.name.as_deref() == Some("legacy"))
+        .unwrap()
+        .compound_transform_mode
+        .is_none());
+    assert_eq!(
+        parsed
+            .objects
+            .iter()
+            .find(|o| o.name.as_deref() == Some("correct"))
+            .unwrap()
+            .compound_transform_mode,
+        Some(CompoundTransformModeDoc::BodyLocal)
+    );
+    assert_eq!(saved.json.matches("compound_transform_mode").count(), 1);
+    scene_io::load_into_engine(&mut engine, &saved.json).unwrap();
+    check(&engine);
+}
+
+#[test]
 fn generated_objects_are_not_written_to_scene_json() {
     let Some(mut engine) = headless_engine() else {
         return;

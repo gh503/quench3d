@@ -192,7 +192,7 @@ pub(crate) fn body_volume(body: &RigidBody) -> f32 {
 mod tests {
     use super::*;
     use crate::{BodyBuilder, PhysicsWorld, Shape};
-    use quench3d_math::vec3;
+    use quench3d_math::{vec3, Quat};
 
     fn sphere_body(world: &mut PhysicsWorld, y: f32) -> crate::BodyHandle {
         world.add_builder(
@@ -200,6 +200,27 @@ mod tests {
                 .position(vec3(0.0, y, 0.0))
                 .density(500.0),
         )
+    }
+
+    #[test]
+    fn body_local_compound_water_volume_tracks_rotated_part() {
+        let water = WaterVolume::new(Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.5), 0.0);
+        let build = |mode| {
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                .part_at(Shape::Sphere { radius: 0.2 }, Vec3::X * 2.0)
+                .position(Vec3::Y)
+                .rotation(Quat::from_axis_angle(Vec3::Z, -std::f32::consts::FRAC_PI_2))
+                .compound_transform_mode(mode)
+                .build()
+        };
+        let legacy = submerged_in(&build(crate::CompoundTransformMode::Legacy), &water);
+        let corrected = submerged_in(&build(crate::CompoundTransformMode::BodyLocal), &water);
+        assert_eq!(legacy.volume.to_bits(), 0.0f32.to_bits());
+        assert!(
+            corrected.volume > 0.03,
+            "rotated extra sphere must be submerged: {corrected:?}"
+        );
+        assert!((corrected.centroid - vec3(0.0, -1.0, 0.0)).length() < 1e-4);
     }
 
     #[test]

@@ -533,6 +533,7 @@ pub fn scene_grammar() -> Value {
             "sensor": "true = 触发区：照常报进入/离开，但不产生冲量（别的物体穿过去）；需要 body 不为 none",
             "ccd": "true = 连续碰撞检测（中心射线 + 盒子 8 角射线；有角速度的盒子再做 8 角点旋转扫掠，按最早命中时间同时缩放线/角速度）；只对 dynamic 生效",
             "ccd_precise": "true = 对凸-凸体用 GJK 距离做保守推进，找到真实首次接触（隐含 ccd=true）；每个开启体每子步 O(其它凸体)，半空间/三角网仍走默认路径",
+            "compound_transform_mode": "legacy（缺省）保留历史部件变换；body_local 显式按刚体局部坐标组合部件，统一接触、查询、水域与流体边界，不解锁旋转复合 CCD",
             "note": "linear/angular_damping、gravity_scale、mass、allow_sleep、angular_velocity 只对 body=dynamic 生效"
         },
         "model": {
@@ -797,8 +798,12 @@ pub fn json_schema() -> Value {
             "sensor",
             "ccd",
             "ccd_precise",
+            "compound_transform_mode",
         ]),
     );
+    defs.get_mut("object").expect("object schema exists")["properties"]
+        ["compound_transform_mode"] =
+        json!({"type": "string", "enum": ["legacy", "body_local"], "default": "legacy"});
     defs.insert(
         "material".into(),
         def(&[

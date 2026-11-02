@@ -325,6 +325,16 @@ fn diagonal_inertia_at(mp: &MassProperties, t: &Transform) -> Vec3 {
     rotated + parallel
 }
 
+/// Compound-part transform convention. Existing scenes retain historical ordering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompoundTransformMode {
+    /// Preserve historical local-parent composition, including its rotation limitations.
+    #[default]
+    Legacy,
+    /// Interpret part offsets and rotations in the body's local coordinate system.
+    BodyLocal,
+}
+
 /// 刚体。
 #[derive(Clone, Debug, PartialEq)]
 pub struct RigidBody {
@@ -337,6 +347,7 @@ pub struct RigidBody {
     /// 空 Vec = 单形状刚体：这时质量属性、AABB、窄相、查询全部走老路径，
     /// 数值与以前**逐位一致**（不是"应该一样"，是同一个分支）。
     pub(crate) extra_parts: Vec<ShapePart>,
+    compound_transform_mode: CompoundTransformMode,
     /// 位姿（`position` 为形状本地原点在世界中的位置）。
     pub transform: Transform,
     /// 上一个固定子步开始前的位姿，仅供渲染插值；不参与求解。
@@ -689,7 +700,15 @@ impl RigidBody {
 
     /// 某个部件的**世界**变换（`local` 来自 [`Self::parts`]）。
     pub fn part_world_transform(&self, local: &Transform) -> Transform {
-        local.mul_transform(&self.transform)
+        match self.compound_transform_mode {
+            CompoundTransformMode::Legacy => local.mul_transform(&self.transform),
+            CompoundTransformMode::BodyLocal => self.transform.mul_transform(local),
+        }
+    }
+
+    /// Selected compound transform convention; fixed when the body is built.
+    pub fn compound_transform_mode(&self) -> CompoundTransformMode {
+        self.compound_transform_mode
     }
 
     /// 附加部件（只读；部件在 [`BodyBuilder`] 阶段配置）。
@@ -755,6 +774,7 @@ pub struct BodyBuilder {
     shape: Shape,
     /// 复合形状的附加部件（`BodyBuilder::part` 追加）。
     extra_parts: Vec<ShapePart>,
+    compound_transform_mode: CompoundTransformMode,
     body_type: BodyType,
     transform: Transform,
     linear_velocity: Vec3,
@@ -786,6 +806,7 @@ impl BodyBuilder {
         Self {
             shape,
             extra_parts: Vec::new(),
+            compound_transform_mode: CompoundTransformMode::Legacy,
             body_type,
             transform: Transform::IDENTITY,
             linear_velocity: Vec3::ZERO,
@@ -1042,6 +1063,14 @@ impl BodyBuilder {
         self
     }
 
+    /// Select the compound transform convention. The default preserves legacy scenes.
+    /// BodyLocal fixes part placement for contacts, queries, water and fluid boundaries;
+    /// it does not enable rotating compound CCD.
+    pub fn compound_transform_mode(mut self, mode: CompoundTransformMode) -> Self {
+        self.compound_transform_mode = mode;
+        self
+    }
+
     /// 构建刚体。
     pub fn build(self) -> RigidBody {
         let mut body_type = self.body_type;
@@ -1080,6 +1109,7 @@ impl BodyBuilder {
             body_type,
             shape: self.shape,
             extra_parts: self.extra_parts,
+            compound_transform_mode: self.compound_transform_mode,
             transform,
             prev_transform: transform,
             linear_velocity: self.linear_velocity.clamp_length(MAX_LINEAR_SPEED),
@@ -1127,6 +1157,45 @@ mod tests {
 
     fn sphere() -> Shape {
         Shape::Sphere { radius: 0.5 }
+    }
+
+    #[test]
+    fn body_local_part_rotation_agrees_with_aabb_and_mass_frame() {
+        let make = |mode| {
+            BodyBuilder::dynamic(sphere())
+                .part(ShapePart::at(
+                    Shape::Box {
+                        half_extents: Vec3::new(0.2, 0.3, 0.4),
+                    },
+                    Vec3::X * 2.0,
+                    Quat::from_axis_angle(Vec3::X, 0.7),
+                ))
+                .position(Vec3::new(3.0, 4.0, 5.0))
+                .rotation(Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2))
+                .compound_transform_mode(mode)
+                .build()
+        };
+        let legacy = make(CompoundTransformMode::Legacy);
+        let correct = make(CompoundTransformMode::BodyLocal);
+        let (shape, local) = correct.parts().nth(1).unwrap();
+        let world = correct.part_world_transform(&local);
+        assert!((world.position - Vec3::new(3.0, 6.0, 5.0)).length() < 1e-5);
+        for p in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let expected = correct.transform.transform_point(local.transform_point(p));
+            assert!((world.transform_point(p) - expected).length() < 1e-5);
+        }
+        let part_bounds = shape.local_aabb().transformed_conservative(&world.matrix());
+        assert!(correct.world_aabb().contains_point(part_bounds.min));
+        assert!(correct.world_aabb().contains_point(part_bounds.max));
+        assert_eq!(legacy.world_aabb(), correct.world_aabb());
+        assert_eq!(legacy.mass.to_bits(), correct.mass.to_bits());
+        assert_eq!(legacy.local_center, correct.local_center);
+        assert_eq!(legacy.inertia_local, correct.inertia_local);
+        assert_eq!(legacy.com_world(), correct.com_world());
+        assert_eq!(
+            legacy.apply_inv_inertia_world(Vec3::Y),
+            correct.apply_inv_inertia_world(Vec3::Y)
+        );
     }
 
     #[test]

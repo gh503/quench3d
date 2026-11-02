@@ -2520,6 +2520,16 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if o.ccd_precise == Some(true) {
             builder = builder.ccd_precise(true);
         }
+        if let Some(mode) = o.compound_transform_mode {
+            builder = builder.compound_transform_mode(match mode {
+                crate::scene_doc::CompoundTransformModeDoc::Legacy => {
+                    quench3d::physics::CompoundTransformMode::Legacy
+                }
+                crate::scene_doc::CompoundTransformModeDoc::BodyLocal => {
+                    quench3d::physics::CompoundTransformMode::BodyLocal
+                }
+            });
+        }
         let handle = world.add_builder(builder);
         let name = object_name(doc, i);
         handles.insert(name.clone(), handle);

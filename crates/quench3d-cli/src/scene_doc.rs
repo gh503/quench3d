@@ -839,6 +839,7 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         sensor: o.sensor.or(t.sensor),
         ccd: o.ccd.or(t.ccd),
         ccd_precise: o.ccd_precise.or(t.ccd_precise),
+        compound_transform_mode: o.compound_transform_mode.or(t.compound_transform_mode),
     }
 }
 
@@ -1815,6 +1816,19 @@ pub struct ObjectDoc {
     /// 采样点之间会漏的高速接触。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ccd_precise: Option<bool>,
+    /// Compound-part transform convention. Missing preserves historical behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compound_transform_mode: Option<CompoundTransformModeDoc>,
+}
+
+/// Explicit opt-in to body-local compound placement, independent of CCD settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompoundTransformModeDoc {
+    /// Historical transform order.
+    Legacy,
+    /// Body transform is the parent of each part's local transform.
+    BodyLocal,
 }
 
 fn default_true() -> bool {
@@ -8970,6 +8984,36 @@ mod tests {
 
         // 字段名拼错要报未知字段，而不是静默忽略
         assert!(SceneDoc::from_json(r#"{"objects":[],"lighting":{"fxaa":{"knee":1.0}}}"#).is_err());
+    }
+
+    #[test]
+    fn compound_transform_mode_defaults_merges_and_validates() {
+        let plain: ObjectDoc = serde_json::from_str(r#"{"name":"plain"}"#).unwrap();
+        assert!(plain.compound_transform_mode.is_none());
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("compound_transform_mode"));
+        let opted: ObjectDoc =
+            serde_json::from_str(r#"{"compound_transform_mode":"body_local"}"#).unwrap();
+        let legacy: ObjectDoc =
+            serde_json::from_str(r#"{"compound_transform_mode":"legacy"}"#).unwrap();
+        assert_eq!(
+            merge_object(&plain, &opted).compound_transform_mode,
+            Some(CompoundTransformModeDoc::BodyLocal)
+        );
+        assert_eq!(
+            merge_object(&legacy, &opted).compound_transform_mode,
+            Some(CompoundTransformModeDoc::Legacy)
+        );
+        let json = serde_json::to_string(&opted).unwrap();
+        let restored: ObjectDoc = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.compound_transform_mode,
+            opted.compound_transform_mode
+        );
+        assert!(
+            SceneDoc::from_json(r#"{"objects":[{"compound_transform_mode":"typo"}]}"#).is_err()
+        );
     }
 
     #[test]

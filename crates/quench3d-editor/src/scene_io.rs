@@ -655,6 +655,10 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             sensor: body.map(|b| b.sensor).filter(|s| *s),
             ccd: body.map(|b| b.ccd && !b.ccd_precise).filter(|c| *c),
             ccd_precise: body.map(|b| b.ccd_precise).filter(|c| *c),
+            compound_transform_mode: body.and_then(|b| {
+                (b.compound_transform_mode() == quench3d::physics::CompoundTransformMode::BodyLocal)
+                    .then_some(quench3d_cli::scene_doc::CompoundTransformModeDoc::BodyLocal)
+            }),
         });
         exported.push((index, out.objects.len() - 1));
     }
