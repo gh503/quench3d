@@ -199,7 +199,23 @@ fn closest_on_segment(a: Vec3, b: Vec3) -> (Vec3, (f32, f32)) {
 }
 
 /// 把单纯形裁剪到离原点最近的面特征上。
-fn reduce(points: &[SupportPoint]) -> Reduced {
+fn tetra_orientation(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> f64 {
+    let difference = |p: Vec3| {
+        [
+            f64::from(p.x) - f64::from(a.x),
+            f64::from(p.y) - f64::from(a.y),
+            f64::from(p.z) - f64::from(a.z),
+        ]
+    };
+    let u = difference(b);
+    let v = difference(c);
+    let w = difference(d);
+    (u[1] * v[2] - u[2] * v[1]) * w[0]
+        + (u[2] * v[0] - u[0] * v[2]) * w[1]
+        + (u[0] * v[1] - u[1] * v[0]) * w[2]
+}
+
+fn reduce<const ROBUST: bool>(points: &[SupportPoint]) -> Reduced {
     match points.len() {
         0 => Reduced {
             closest: Vec3::ZERO,
@@ -262,7 +278,11 @@ fn reduce(points: &[SupportPoint]) -> Reduced {
         _ => {
             let p = [points[0].v, points[1].v, points[2].v, points[3].v];
             let vol = (p[1] - p[0]).dot((p[2] - p[0]).cross(p[3] - p[0]));
-            let non_degenerate = vol.abs() > 1e-14;
+            let non_degenerate = if ROBUST {
+                tetra_orientation(p[0], p[1], p[2], p[3]).abs() > 1e-14
+            } else {
+                vol.abs() > 1e-14
+            };
             // 四个面（i, j, k）：r 是剩余顶点下标。
             const FACES: [[usize; 3]; 4] = [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]];
             let mut all_inside = true;
@@ -270,15 +290,26 @@ fn reduce(points: &[SupportPoint]) -> Reduced {
             for f in FACES {
                 let (i, j, k) = (f[0], f[1], f[2]);
                 let r = 6 - i - j - k;
-                let mut n = (p[j] - p[i]).cross(p[k] - p[i]);
-                if n.dot(p[r] - p[i]) > 0.0 {
-                    n = -n;
-                }
-                if n.length_squared() <= 1e-20 {
-                    continue;
-                }
-                if n.dot(p[i]) >= 0.0 {
-                    continue;
+                if ROBUST {
+                    // Compute differences after widening: near-repeated vertices can cancel
+                    // a positive f32 orientation to zero and invert the separating face.
+                    let opposite = tetra_orientation(p[i], p[j], p[k], p[r]);
+                    let origin = tetra_orientation(p[i], p[j], p[k], Vec3::ZERO);
+                    if non_degenerate && opposite * origin >= 0.0 {
+                        continue;
+                    }
+                    // Degenerate tetrahedra have no interior; consider every face.
+                } else {
+                    let mut n = (p[j] - p[i]).cross(p[k] - p[i]);
+                    if n.dot(p[r] - p[i]) > 0.0 {
+                        n = -n;
+                    }
+                    if n.length_squared() <= 1e-20 {
+                        continue;
+                    }
+                    if n.dot(p[i]) >= 0.0 {
+                        continue;
+                    }
                 }
                 all_inside = false;
                 let (c, b) = closest_on_triangle(p[i], p[j], p[k]);
@@ -365,6 +396,16 @@ fn witness(simplex: &[SupportPoint], bary: &[f32]) -> (Vec3, Vec3) {
 // 单纯形长度与重心数组在循环内重新赋值，初值仅用于「循环零次」的健全性检查。
 #[allow(unused_assignments)]
 pub(crate) fn gjk(sa: &Support, sb: &Support) -> GjkResult {
+    gjk_impl::<false>(sa, sb)
+}
+
+/// Opt-in CCD query with widened tetrahedron side predicates.
+pub(crate) fn gjk_precise(sa: &Support, sb: &Support) -> GjkResult {
+    gjk_impl::<true>(sa, sb)
+}
+
+#[allow(unused_assignments)]
+fn gjk_impl<const ROBUST: bool>(sa: &Support, sb: &Support) -> GjkResult {
     let mut simplex: [SupportPoint; 4] = [SupportPoint::default(); 4];
     let mut bary: [f32; 4] = [0.0; 4];
     let mut len = 0usize;
@@ -422,7 +463,7 @@ pub(crate) fn gjk(sa: &Support, sb: &Support) -> GjkResult {
         len += 1;
 
         let slice = &simplex[..len];
-        let r = reduce(slice);
+        let r = reduce::<ROBUST>(slice);
         // 按掩码重建单纯形。
         let mut new_len = 0usize;
         let mut new_simplex: [SupportPoint; 4] = [SupportPoint::default(); 4];
@@ -870,6 +911,359 @@ pub(crate) fn point_triangle_distance(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32
 mod tests {
     use super::*;
     use crate::shape::Shape;
+
+    fn legacy_reduce(points: &[SupportPoint]) -> Reduced {
+        match points.len() {
+            0 => Reduced {
+                closest: Vec3::ZERO,
+                mask: 0,
+                bary: [0.0; 4],
+                inside: true,
+            },
+            1 => Reduced {
+                closest: points[0].v,
+                mask: 0b0001,
+                bary: [1.0, 0.0, 0.0, 0.0],
+                inside: false,
+            },
+            2 => {
+                let (p, (u, v)) = closest_on_segment(points[0].v, points[1].v);
+                let mut mask = 0u8;
+                if u > 0.0 {
+                    mask |= 0b01;
+                }
+                if v > 0.0 {
+                    mask |= 0b10;
+                }
+                if mask == 0 {
+                    mask = 0b01;
+                }
+                Reduced {
+                    closest: p,
+                    mask,
+                    bary: [u, v, 0.0, 0.0],
+                    inside: false,
+                }
+            }
+            3 => {
+                let (p, b) = closest_on_triangle(points[0].v, points[1].v, points[2].v);
+                let mut mask = 0u8;
+                if b[0] > 0.0 {
+                    mask |= 0b001;
+                }
+                if b[1] > 0.0 {
+                    mask |= 0b010;
+                }
+                if b[2] > 0.0 {
+                    mask |= 0b100;
+                }
+                if mask == 0 {
+                    mask = 0b001;
+                }
+                // 原点落在三角形（内部或边上）时必须保留全部三个顶点，
+                // 否则会退化成线段并让后续探测方向失效。
+                if p.length_squared() <= TOUCH_EPS * TOUCH_EPS {
+                    mask = 0b111;
+                }
+                Reduced {
+                    closest: p,
+                    mask,
+                    bary: [b[0], b[1], b[2], 0.0],
+                    inside: false,
+                }
+            }
+            _ => {
+                let p = [points[0].v, points[1].v, points[2].v, points[3].v];
+                let vol = (p[1] - p[0]).dot((p[2] - p[0]).cross(p[3] - p[0]));
+                let non_degenerate = vol.abs() > 1e-14;
+                // 四个面（i, j, k）：r 是剩余顶点下标。
+                const FACES: [[usize; 3]; 4] = [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]];
+                let mut all_inside = true;
+                let mut best: Option<(f32, Vec3, u8, [f32; 4])> = None;
+                for f in FACES {
+                    let (i, j, k) = (f[0], f[1], f[2]);
+                    let r = 6 - i - j - k;
+                    let mut n = (p[j] - p[i]).cross(p[k] - p[i]);
+                    if n.dot(p[r] - p[i]) > 0.0 {
+                        n = -n;
+                    }
+                    if n.length_squared() <= 1e-20 {
+                        continue;
+                    }
+                    if n.dot(p[i]) >= 0.0 {
+                        continue;
+                    }
+                    all_inside = false;
+                    let (c, b) = closest_on_triangle(p[i], p[j], p[k]);
+                    let d2 = c.length_squared();
+                    let mut mask = 0u8;
+                    if b[0] > 0.0 {
+                        mask |= 1 << i;
+                    }
+                    if b[1] > 0.0 {
+                        mask |= 1 << j;
+                    }
+                    if b[2] > 0.0 {
+                        mask |= 1 << k;
+                    }
+                    if mask == 0 {
+                        mask = 1 << i;
+                    }
+                    let mut bary = [0.0f32; 4];
+                    bary[i] = b[0];
+                    bary[j] = b[1];
+                    bary[k] = b[2];
+                    if best.is_none() || d2 < best.unwrap().0 {
+                        best = Some((d2, c, mask, bary));
+                    }
+                }
+                if all_inside && non_degenerate {
+                    Reduced {
+                        closest: Vec3::ZERO,
+                        mask: 0b1111,
+                        bary: [0.25; 4],
+                        inside: true,
+                    }
+                } else if let Some((_, c, mask, bary)) = best {
+                    Reduced {
+                        closest: c,
+                        mask,
+                        bary,
+                        inside: false,
+                    }
+                } else {
+                    // 完全退化：退回到点。
+                    Reduced {
+                        closest: points[0].v,
+                        mask: 0b0001,
+                        bary: [1.0, 0.0, 0.0, 0.0],
+                        inside: false,
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(unused_assignments)]
+    fn legacy_gjk(sa: &Support, sb: &Support) -> GjkResult {
+        let mut simplex: [SupportPoint; 4] = [SupportPoint::default(); 4];
+        let mut bary: [f32; 4] = [0.0; 4];
+        let mut len = 0usize;
+
+        let mut dir = sb.pos - sa.pos;
+        if dir.length_squared() < 1e-12 {
+            dir = Vec3::X;
+        }
+        let first = make_point(sa, sb, dir);
+        simplex[0] = first;
+        bary[0] = 1.0;
+        len = 1;
+        let mut closest = first.v;
+
+        let mut intersect = false;
+        let mut iters = 0;
+        while iters < GJK_MAX_ITERS {
+            iters += 1;
+            if closest.length_squared() <= TOUCH_EPS * TOUCH_EPS {
+                // 原点落在当前单纯形上：低维单纯形不能直接判定相交，
+                // 需要沿其正交方向继续探测（否则厚穿透会被误判为贴面接触）。
+                match len {
+                    1 => {
+                        intersect = true;
+                        break;
+                    }
+                    2 => {
+                        let ab = simplex[1].v - simplex[0].v;
+                        let (t, _) = ab.any_orthonormal_pair();
+                        dir = t;
+                    }
+                    _ => {
+                        let n = (simplex[1].v - simplex[0].v).cross(simplex[2].v - simplex[0].v);
+                        if n.length_squared() <= 1e-20 {
+                            intersect = true;
+                            break;
+                        }
+                        let n = n.normalize_or_zero();
+                        // 三角形法线有两个方向，取支持函数更远的一侧，避免退化单纯形。
+                        let sp = sa.support(n) - sb.support(-n);
+                        dir = if sp.dot(n) >= 0.0 { n } else { -n };
+                    }
+                }
+            } else {
+                dir = -closest;
+            }
+            let p = make_point(sa, sb, dir);
+            // 收敛判定：新支持点沿 `dir` 的投影不再比当前最近点更远 → 已找到分离平面。
+            let progress = p.v.dot(dir) - closest.dot(dir);
+            if progress <= 1e-7 * dir.length().max(1.0) {
+                break;
+            }
+            simplex[len] = p;
+            bary[len] = 0.0;
+            len += 1;
+
+            let slice = &simplex[..len];
+            let r = legacy_reduce(slice);
+            // 按掩码重建单纯形。
+            let mut new_len = 0usize;
+            let mut new_simplex: [SupportPoint; 4] = [SupportPoint::default(); 4];
+            let mut new_bary: [f32; 4] = [0.0; 4];
+            for (i, sp) in simplex.iter().enumerate().take(len) {
+                if r.mask & (1 << i) != 0 {
+                    new_simplex[new_len] = *sp;
+                    new_bary[new_len] = r.bary[i];
+                    new_len += 1;
+                }
+            }
+            if new_len == 0 {
+                new_simplex[0] = p;
+                new_bary[0] = 1.0;
+                new_len = 1;
+            }
+            simplex = new_simplex;
+            bary = new_bary;
+            len = new_len;
+            closest = r.closest;
+            if r.inside {
+                intersect = true;
+                break;
+            }
+        }
+
+        let (point_a, point_b) = witness(&simplex[..len], &bary[..len]);
+        if intersect {
+            return GjkResult {
+                intersect: true,
+                point_a,
+                point_b,
+                distance: 0.0,
+                normal: Vec3::Y,
+                simplex,
+                simplex_len: len,
+            };
+        }
+        let delta = point_b - point_a;
+        let distance = delta.length();
+        let normal = if distance > 1e-9 {
+            delta / distance
+        } else {
+            Vec3::Y
+        };
+        GjkResult {
+            intersect: false,
+            point_a,
+            point_b,
+            distance,
+            normal,
+            simplex,
+            simplex_len: len,
+        }
+    }
+
+    #[test]
+    fn precise_tetrahedron_rejects_captured_false_interior() {
+        let vertices = [
+            vec3(-0.092489645, -0.92542434, 0.5768391),
+            vec3(0.107988015, -0.9254456, 0.5768491),
+            vec3(0.10751264, 2.7730715, -0.94668865),
+            vec3(0.10751264, 2.7730715, -0.9466886),
+        ];
+        let points = vertices.map(|v| SupportPoint {
+            v,
+            a: v,
+            b: Vec3::ZERO,
+        });
+        let n = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
+        assert_eq!(n.dot(vertices[3] - vertices[0]), 0.0);
+        assert!(tetra_orientation(vertices[0], vertices[1], vertices[2], vertices[3]) > 4e-8);
+        assert!(
+            legacy_reduce(&points).inside,
+            "capture must reproduce the old false positive"
+        );
+        let fixed = reduce::<true>(&points);
+        assert!(!fixed.inside);
+        assert!((fixed.closest.length() - 0.18088187).abs() < 1e-5);
+        for vertices in [
+            [Vec3::X; 4],
+            [Vec3::X, Vec3::X * 2.0, Vec3::X * 3.0, Vec3::X * 4.0],
+            [
+                vec3(1.0, -1.0, -1.0),
+                vec3(1.0, 1.0, -1.0),
+                vec3(1.0, 1.0, 1.0),
+                vec3(1.0, -1.0, 1.0),
+            ],
+        ] {
+            let points = vertices.map(|v| SupportPoint {
+                v,
+                a: v,
+                b: Vec3::ZERO,
+            });
+            let r = reduce::<true>(&points);
+            assert!(!r.inside);
+            assert!((r.closest.length() - 1.0).abs() < 1e-5);
+        }
+        let points = [Vec3::X, Vec3::Y, Vec3::Z, -Vec3::ONE].map(|v| SupportPoint {
+            v,
+            a: v,
+            b: Vec3::ZERO,
+        });
+        assert!(reduce::<true>(&points).inside);
+    }
+
+    #[test]
+    fn default_gjk_remains_bit_identical_to_legacy() {
+        fn bits(r: GjkResult) -> Vec<u32> {
+            let mut out = vec![
+                r.intersect as u32,
+                r.simplex_len as u32,
+                r.distance.to_bits(),
+            ];
+            let mut push = |v: Vec3| out.extend([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]);
+            push(r.point_a);
+            push(r.point_b);
+            push(r.normal);
+            for s in r.simplex {
+                push(s.v);
+                push(s.a);
+                push(s.b);
+            }
+            out
+        }
+        let shapes = [
+            Shape::Sphere { radius: 0.1 },
+            Shape::Box {
+                half_extents: vec3(2.0, 0.1, 0.1),
+            },
+            Shape::Capsule {
+                radius: 0.2,
+                half_height: 0.8,
+            },
+        ];
+        for a in &shapes {
+            for b in &shapes {
+                for i in 0..48 {
+                    let f = i as f32;
+                    let ta = Transform {
+                        position: vec3((f * 0.73).sin() * 2.0, (f * 0.31).cos(), f * 0.002),
+                        rotation: Quat::from_axis_angle(vec3(1.0, 2.0, 3.0).normalize(), f * 0.17),
+                        scale: Vec3::ONE,
+                    };
+                    let tb = Transform {
+                        position: vec3(0.0, 0.0, 0.0),
+                        rotation: Quat::from_axis_angle(Vec3::Y, f * 0.13),
+                        scale: Vec3::ONE,
+                    };
+                    let sa = Support::new(a, &ta);
+                    let sb = Support::new(b, &tb);
+                    assert_eq!(
+                        bits(gjk(&sa, &sb)),
+                        bits(legacy_gjk(&sa, &sb)),
+                        "pair {a:?} {b:?} case {i}"
+                    );
+                }
+            }
+        }
+    }
 
     fn t_at(p: Vec3) -> Transform {
         Transform::from_translation(p)

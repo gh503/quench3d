@@ -2816,7 +2816,7 @@ impl PhysicsWorld {
                                 - radius;
                             (d <= 1e-4, d.max(0.0))
                         } else {
-                            let hit = gjk::gjk(&sa, &gjk::Support::triangle(pts));
+                            let hit = gjk::gjk_precise(&sa, &gjk::Support::triangle(pts));
                             (hit.intersect || hit.distance <= 1e-4, hit.distance)
                         }
                     };
@@ -2951,7 +2951,7 @@ impl PhysicsWorld {
                 }
                 let ga = gjk::Support::new(&a.shape, &ta);
                 let gb = gjk::Support::new(&b.shape, &tb);
-                let hit = gjk::gjk(&ga, &gb);
+                let hit = gjk::gjk_precise(&ga, &gb);
                 if hit.intersect || hit.distance <= 1e-4 {
                     // 起始姿态已经接触时交给窄相/求解器，不要把速度乘 0 冻住
                     // 一个本来只是贴在地板上的精确 CCD 物体。
@@ -4452,6 +4452,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn known_gjk_rotated_sphere_box_regression() {
+        fn hit(frame: Quat) -> Option<f32> {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let dt = 1.0 / 60.0;
+            let sphere = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .position(frame.mul_vec3(Vec3::Y))
+                    .rotation(frame)
+                    .linear_velocity(frame.mul_vec3(Vec3::Z * 0.6))
+                    .ccd_precise(true),
+            );
+            world.add_builder(
+                BodyBuilder::kinematic(Shape::Box {
+                    half_extents: Vec3::new(2.0, 0.1, 0.1),
+                })
+                .rotation(frame)
+                .angular_velocity(frame.mul_vec3(Vec3::Z * (std::f32::consts::FRAC_PI_2 / dt))),
+            );
+            world.sweep_convex_bodies(sphere.index as usize, dt)
+        }
+        // Until first contact the nearest feature is the long side of the box:
+        // cos(theta) - box_half_width = sphere_radius. The small Z displacement
+        // stays within the box thickness, so it does not change this exact TOI.
+        let expected = 0.2f32.acos() / std::f32::consts::FRAC_PI_2;
+        let base = hit(Quat::IDENTITY).expect("the rotating long side must reach the sphere");
+        assert!(
+            (base - expected).abs() < 0.002,
+            "base={base}, analytic={expected}"
+        );
+        let rotated = hit(Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2))
+            .expect("rotating the whole scene must not remove the predicted contact");
+        assert!(
+            (rotated - expected).abs() < 0.002,
+            "rotated={rotated}, analytic={expected}"
+        );
+        assert!(
+            (rotated - base).abs() < 0.002,
+            "base={base}, rotated={rotated}"
+        );
     }
 
     #[test]
