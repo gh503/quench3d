@@ -2698,27 +2698,35 @@ impl PhysicsWorld {
             if !(ra.is_finite() && rb.is_finite()) {
                 continue;
             }
-            let rel_v = a.linear_velocity - b.linear_velocity;
-            let bound = rel_v.length()
-                + a.angular_velocity.length() * ra
-                + b.angular_velocity.length() * rb;
+            // Static bodies may retain builder-provided velocities, but position integration
+            // never moves them. Predict the same fixed target as the ordinary sphere sweep.
+            let target_linear = if b.body_type == BodyType::Static {
+                Vec3::ZERO
+            } else {
+                b.linear_velocity
+            };
+            let target_angular = if b.body_type == BodyType::Static {
+                Vec3::ZERO
+            } else {
+                b.angular_velocity
+            };
+            let rel_v = a.linear_velocity - target_linear;
+            let bound =
+                rel_v.length() + a.angular_velocity.length() * ra + target_angular.length() * rb;
             if !(bound.is_finite() && bound > 1e-6) {
                 continue;
             }
             let step = bound * dt;
-            let tf = |body: &RigidBody, t: f32| {
-                let speed = body.angular_velocity.length();
+            let tf = |body: &RigidBody, linear: Vec3, angular: Vec3, t: f32| {
+                let speed = angular.length();
                 let rotation = if speed > 1e-9 {
                     body.transform.rotation
-                        * Quat::from_axis_angle(
-                            body.angular_velocity.normalize_or_zero(),
-                            speed * dt * t,
-                        )
+                        * Quat::from_axis_angle(angular.normalize_or_zero(), speed * dt * t)
                 } else {
                     body.transform.rotation
                 };
                 Transform {
-                    position: body.transform.position + body.linear_velocity * (dt * t),
+                    position: body.transform.position + linear * (dt * t),
                     rotation,
                     scale: body.transform.scale,
                 }
@@ -2748,8 +2756,8 @@ impl PhysicsWorld {
             let mut candidates: Vec<u32> = Vec::new();
             let mut t = 0.0f32;
             for _ in 0..64 {
-                let ta = tf(a, t);
-                let tb = tf(b, t);
+                let ta = tf(a, a.linear_velocity, a.angular_velocity, t);
+                let tb = tf(b, target_linear, target_angular, t);
                 // 半空间是无限支撑，GJK 没有有限支持点；用形状沿 -法线 的
                 // 支持点做 1-Lipschitz 保守推进。盒子/凸包/任意凸形状都适用。
                 if let Shape::Plane { normal } = &b.shape {
@@ -4321,6 +4329,79 @@ mod tests {
     #[test]
     fn stale_joint_does_not_filter_reused_body_b() {
         reused_joint_body_contacts(false);
+    }
+
+    #[test]
+    fn precise_ccd_ignores_static_target_velocity() {
+        fn run(
+            shape: Shape,
+            residual: bool,
+            incoming: bool,
+            precise: bool,
+        ) -> (Option<u32>, [u32; 6]) {
+            let mut w = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let target = w.add_builder(
+                BodyBuilder::r#static(shape)
+                    .linear_velocity(if residual { Vec3::Y * 2.0 } else { Vec3::ZERO })
+                    .angular_velocity(if residual { Vec3::Z * 1.5 } else { Vec3::ZERO }),
+            );
+            let start = w.body(target).unwrap().transform;
+            let stored_linear = w.body(target).unwrap().linear_velocity;
+            let stored_angular = w.body(target).unwrap().angular_velocity;
+            let sphere = w.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                    .position(Vec3::new(0.0, 1.0, 0.0))
+                    .linear_velocity(if incoming {
+                        -Vec3::Y * 2.0
+                    } else {
+                        Vec3::Z * 0.01
+                    })
+                    .ccd(true)
+                    .ccd_precise(precise),
+            );
+            let hit = w
+                .sweep_convex_bodies(sphere.index as usize, 1.0)
+                .map(f32::to_bits);
+            w.step_substeps(1.0, 1);
+            let fixed = w.body(target).unwrap();
+            assert_eq!(
+                fixed.transform, start,
+                "static target must not integrate residual velocity"
+            );
+            assert_eq!(fixed.linear_velocity, stored_linear);
+            assert_eq!(fixed.angular_velocity, stored_angular);
+            let b = w.body(sphere).unwrap();
+            (
+                hit,
+                [
+                    b.position().x.to_bits(),
+                    b.position().y.to_bits(),
+                    b.position().z.to_bits(),
+                    b.linear_velocity.x.to_bits(),
+                    b.linear_velocity.y.to_bits(),
+                    b.linear_velocity.z.to_bits(),
+                ],
+            )
+        }
+        for shape in [
+            Shape::Plane { normal: Vec3::Y },
+            Shape::Sphere { radius: 0.3 },
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.2, 0.3),
+            },
+        ] {
+            for incoming in [false, true] {
+                let expected = run(shape.clone(), false, incoming, true);
+                let actual = run(shape.clone(), true, incoming, true);
+                assert_eq!(actual, expected, "static {shape:?}, incoming={incoming}: precise prediction and public step must ignore residual velocity");
+                let legacy_expected = run(shape.clone(), false, incoming, false).1;
+                let legacy_actual = run(shape.clone(), true, incoming, false).1;
+                assert_eq!(
+                    legacy_actual, legacy_expected,
+                    "default CCD state must stay identical for static {shape:?}"
+                );
+            }
+        }
     }
 
     #[test]
