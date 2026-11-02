@@ -890,6 +890,48 @@ pub(crate) fn distance_point_to_shape(shape: &Shape, t: &Transform, p: Vec3) -> 
     }
 }
 
+/// Closest world point only for widened-zero-area triangles; no area tolerance.
+/// Used by opted-in contact continuation, leaving legacy triangle arithmetic intact.
+pub(crate) fn closest_on_degenerate_triangle(p: Vec3, points: [Vec3; 3]) -> Option<Vec3> {
+    let wide = |v: Vec3| [f64::from(v.x), f64::from(v.y), f64::from(v.z)];
+    let sub = |u: [f64; 3], v: [f64; 3]| [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+    let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    let [a, b, c] = points.map(wide);
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let cross = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    if cross != [0.0; 3] {
+        return None;
+    }
+    let p = wide(p);
+    let mut best = (f64::INFINITY, a);
+    for (u, v) in [(a, b), (b, c), (c, a)] {
+        let edge = sub(v, u);
+        let rel = sub(p, u);
+        let len = dot(edge, edge);
+        let t = if len > 0.0 {
+            (dot(rel, edge) / len).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let q = [u[0] + edge[0] * t, u[1] + edge[1] * t, u[2] + edge[2] * t];
+        let delta = sub(p, q);
+        let d2 = dot(delta, delta);
+        if d2 < best.0 {
+            best = (d2, q);
+        }
+    }
+    Some(Vec3::new(
+        best.1[0] as f32,
+        best.1[1] as f32,
+        best.1[2] as f32,
+    ))
+}
+
 /// Opt-in CCD distance for triangles whose widened cross product vanishes.
 /// Keep the historical arithmetic for every nonzero-area triangle; no area epsilon
 /// turns thin triangles into segments. This is not an adaptive exact predicate.

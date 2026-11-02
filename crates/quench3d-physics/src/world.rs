@@ -2388,6 +2388,20 @@ impl PhysicsWorld {
             } else {
                 b.world_aabb()
             };
+            let aabb = if !global
+                && aabb.is_valid()
+                && b.ccd_precise
+                && b.parts()
+                    .any(|(shape, _)| matches!(shape, Shape::Sphere { .. }))
+            {
+                let skin = Vec3::splat(narrowphase::PRECISE_DEGENERATE_CONTACT_SKIN);
+                Aabb {
+                    min: aabb.min - skin,
+                    max: aabb.max + skin,
+                }
+            } else {
+                aabb
+            };
             self.proxies.push(Proxy {
                 index: i as u32,
                 aabb,
@@ -4259,10 +4273,23 @@ fn collide_bodies(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactMa
 }
 
 fn collide_bodies_raw(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactManifold> {
+    let collide = |sa: &Shape, ta: &Transform, sb: &Shape, tb: &Transform| {
+        if (a.ccd_precise
+            && matches!(sa, Shape::Sphere { .. })
+            && matches!(sb, Shape::TriMesh { .. }))
+            || (b.ccd_precise
+                && matches!(sb, Shape::Sphere { .. })
+                && matches!(sa, Shape::TriMesh { .. }))
+        {
+            narrowphase::collide_shapes_precise_sphere_mesh(sa, ta, sb, tb)
+        } else {
+            narrowphase::collide_shapes(sa, ta, sb, tb)
+        }
+    };
     if a.extra_parts.is_empty() && b.extra_parts.is_empty() {
         let sa = a.shape.inflated(margin);
         let sb = b.shape.inflated(margin);
-        return narrowphase::collide_shapes(&sa, &a.transform, &sb, &b.transform);
+        return collide(&sa, &a.transform, &sb, &b.transform);
     }
     let mut points: SmallVec<ContactPoint, { ContactManifold::MAX_POINTS }> = SmallVec::new();
     for (sa, ta) in a.parts() {
@@ -4274,9 +4301,9 @@ fn collide_bodies_raw(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<Conta
             // 那些只跟**装配**有关，跟窄相用哪个几何无关）。`collide_bodies` 之后统一
             // 把 penetration 减回 margin。
             let hit = if margin > 0.0 {
-                narrowphase::collide_shapes(&sa.inflated(margin), &wa, &sb.inflated(margin), &wb)
+                collide(&sa.inflated(margin), &wa, &sb.inflated(margin), &wb)
             } else {
-                narrowphase::collide_shapes(sa, &wa, sb, &wb)
+                collide(sa, &wa, sb, &wb)
             };
             if let Some(m) = hit {
                 points.extend_from_slice(&m.points);
@@ -5303,6 +5330,206 @@ mod tests {
             assert_eq!(snapshots[0], snapshots[1], "case={case}");
         }
         COMPOUND_MESH_REFERENCE.with(|flag| flag.set(false));
+    }
+
+    #[test]
+    #[ignore = "fixed trajectory diagnostic; retained evidence, not a correctness assertion"]
+    fn round133_ccd_continuation_diagnostic() {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        for kind in 0..3 {
+            for compound in [false, true] {
+                for precise in [false, true] {
+                    for pushing in [false, true] {
+                        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                        let vertices = match kind {
+                            0 => vec![
+                                Vec3::new(0.0, -1.0, -1.0),
+                                Vec3::new(0.0, 1.0, -1.0),
+                                Vec3::new(0.0, 0.0, 1.0),
+                            ],
+                            1 => vec![-Vec3::Y, -Vec3::Y, Vec3::Y],
+                            _ => vec![Vec3::ZERO; 3],
+                        };
+                        let mesh = Shape::TriMesh {
+                            vertices,
+                            indices: vec![0, 1, 2],
+                        };
+                        let target = if compound {
+                            BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                                .position(Vec3::Y * 4.0)
+                                .part_at(mesh, -Vec3::Y * 4.0)
+                                .compound_transform_mode(BodyLocal)
+                        } else {
+                            BodyBuilder::r#static(mesh)
+                        };
+                        world.add_builder(target);
+                        let moving = world.add_builder(
+                            BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                                .position(-Vec3::X)
+                                .linear_velocity(Vec3::X * 120.0)
+                                .ccd_precise(precise),
+                        );
+                        assert_eq!(world.body(moving).unwrap().linear_velocity, Vec3::X * 120.0);
+                        let mut positions = Vec::new();
+                        for _ in 0..60 {
+                            if pushing {
+                                let body = world.body_mut(moving).unwrap();
+                                body.apply_force(Vec3::X * (body.mass * 10.0));
+                            }
+                            world.step(1.0 / 60.0);
+                            let body = world.body(moving).unwrap();
+                            positions.push((body.position().x, body.linear_velocity.x));
+                        }
+                        println!("kind={kind} compound={compound} precise={precise} pushing={pushing} steps={positions:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn precise_segment_skin_keeps_far_gap_and_normal_triangle_behavior() {
+        let sphere = Shape::Sphere { radius: 0.1 };
+        let line = Shape::TriMesh {
+            vertices: vec![-Vec3::Y, -Vec3::Y, Vec3::Y],
+            indices: vec![0, 1, 2],
+        };
+        let normal = Shape::TriMesh {
+            vertices: vec![
+                Vec3::new(0.0, -1.0, -1.0),
+                Vec3::new(0.0, 1.0, -1.0),
+                Vec3::Z,
+            ],
+            indices: vec![0, 1, 2],
+        };
+        for x in [-0.1002, -0.11] {
+            let t = Transform {
+                position: Vec3::X * x,
+                ..Transform::IDENTITY
+            };
+            assert!(narrowphase::collide_shapes_precise_sphere_mesh(
+                &sphere,
+                &t,
+                &line,
+                &Transform::IDENTITY
+            )
+            .is_none());
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(BodyBuilder::r#static(line.clone()));
+            let h = world.add_builder(
+                BodyBuilder::dynamic(sphere.clone())
+                    .position(Vec3::X * x)
+                    .linear_velocity(-Vec3::X)
+                    .ccd_precise(true),
+            );
+            world.step(1.0 / 60.0);
+            assert_eq!(
+                world.body(h).unwrap().linear_velocity.x.to_bits(),
+                (-1.0f32).to_bits()
+            );
+        }
+        for x in [-0.2, -0.10005, -0.1, -0.09, 0.03] {
+            let t = Transform {
+                position: Vec3::X * x,
+                ..Transform::IDENTITY
+            };
+            let old = narrowphase::collide_shapes(&sphere, &t, &normal, &Transform::IDENTITY);
+            let new = narrowphase::collide_shapes_precise_sphere_mesh(
+                &sphere,
+                &t,
+                &normal,
+                &Transform::IDENTITY,
+            );
+            let bits = |m: Option<ContactManifold>| {
+                m.map(|m| {
+                    m.points
+                        .iter()
+                        .flat_map(|p| {
+                            [
+                                p.position.x.to_bits(),
+                                p.position.y.to_bits(),
+                                p.position.z.to_bits(),
+                                p.normal.x.to_bits(),
+                                p.normal.y.to_bits(),
+                                p.normal.z.to_bits(),
+                                p.penetration.to_bits(),
+                                p.feature_id,
+                            ]
+                        })
+                        .collect::<Vec<_>>()
+                })
+            };
+            assert_eq!(bits(old), bits(new));
+        }
+    }
+
+    #[test]
+    fn precise_segment_contact_survives_continued_public_steps() {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        let mut failures = Vec::new();
+        for kind in 0..3 {
+            for compound in [false, true] {
+                for pushing in [false, true] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let mesh = Shape::TriMesh {
+                        vertices: match kind {
+                            0 => vec![-Vec3::Y, -Vec3::Y, Vec3::Y],
+                            1 => vec![Vec3::ZERO; 3],
+                            _ => vec![
+                                Vec3::new(0.0, -1.0, -1.0),
+                                Vec3::new(0.0, 1.0, -1.0),
+                                Vec3::Z,
+                            ],
+                        },
+                        indices: vec![0, 1, 2],
+                    };
+                    let target = if compound {
+                        BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
+                            .position(Vec3::Y * 4.0)
+                            .part_at(mesh, -Vec3::Y * 4.0)
+                            .compound_transform_mode(BodyLocal)
+                    } else {
+                        BodyBuilder::r#static(mesh)
+                    };
+                    world.add_builder(target);
+                    let moving = world.add_builder(
+                        BodyBuilder::dynamic(Shape::Sphere { radius: 0.1 })
+                            .position(-Vec3::X)
+                            .linear_velocity(Vec3::X * 120.0)
+                            .ccd_precise(true),
+                    );
+                    for step in 0..60 {
+                        if pushing {
+                            let body = world.body_mut(moving).unwrap();
+                            body.apply_force(Vec3::X * (body.mass * 10.0));
+                        }
+                        world.step(1.0 / 60.0);
+                        let x = world.body(moving).unwrap().position().x;
+                        if !x.is_finite()
+                            || x > -0.1 + 2.0 * narrowphase::PRECISE_DEGENERATE_CONTACT_SKIN
+                        {
+                            failures.push((kind, compound, pushing, step, x));
+                            break;
+                        }
+                    }
+                    let before = world.body(moving).unwrap().position().x;
+                    world
+                        .body_mut(moving)
+                        .unwrap()
+                        .set_linear_velocity(-Vec3::X);
+                    world.step(1.0 / 60.0);
+                    let after = world.body(moving).unwrap().position().x;
+                    assert!(
+                        after < before - 0.01,
+                        "depart compound={compound} pushing={pushing} {before}->{after}"
+                    );
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "precise segment contact crossed: {failures:?}"
+        );
     }
 
     #[test]

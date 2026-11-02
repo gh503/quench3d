@@ -17,6 +17,9 @@ use crate::gjk::{self, Support};
 use crate::shape::Shape;
 use crate::small_vec::SmallVec;
 
+/// Contact skin shared by precise sphere proxies and zero-area mesh contacts.
+pub(crate) const PRECISE_DEGENERATE_CONTACT_SKIN: f32 = 1e-4;
+
 /// 单个流形的最大接触点数。
 const MAX_POINTS: usize = 4;
 /// 裁剪前允许的候选接触点数（内联容量；超出会退化成堆，行为不变）。
@@ -632,7 +635,7 @@ fn closest_points_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec
 /// 3. EPA 失败或 GJK 假阴性时，用「三角形平面 + 支持点」给出面接触
 ///    （要求最近特征落在三角形内部，或有三角形顶点确实嵌在对方体内）；
 /// 4. 仍无结果则把三条边当作退化凸包（线段）各求一次，取最深接触。
-fn triangle_vs_shape(
+fn triangle_vs_shape<const PRECISE: bool>(
     tri: [Vec3; 3],
     other: &Shape,
     t_other: &Transform,
@@ -642,10 +645,28 @@ fn triangle_vs_shape(
     if let Shape::Sphere { radius } = other {
         let r = radius.abs();
         let c = t_other.position;
-        let (q, _w) = gjk::closest_on_triangle(tri[0] - c, tri[1] - c, tri[2] - c);
-        let q = q + c;
+        let degenerate = if PRECISE {
+            gjk::closest_on_degenerate_triangle(c, tri)
+        } else {
+            None
+        };
+        let q = if PRECISE {
+            degenerate.unwrap_or_else(|| {
+                let (q, _) = gjk::closest_on_triangle(tri[0] - c, tri[1] - c, tri[2] - c);
+                q + c
+            })
+        } else {
+            let (q, _) = gjk::closest_on_triangle(tri[0] - c, tri[1] - c, tri[2] - c);
+            q + c
+        };
         let d = (c - q).length();
-        if d >= r {
+        // Explicit precise CCD contact skin: zero-area triangles only. With the
+        // default solver this may stop inward motion within 1e-4, not at gap/dt.
+        if if degenerate.is_some() {
+            d > r + PRECISE_DEGENERATE_CONTACT_SKIN
+        } else {
+            d >= r
+        } {
             return None;
         }
         let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
@@ -761,7 +782,7 @@ fn triangle_plane_fallback(
 }
 
 /// 三角网格（A）与其他形状（B）。法线由网格指向对方。
-fn trimesh_vs_shape(
+fn trimesh_vs_shape<const PRECISE: bool>(
     vertices: &[Vec3],
     indices: &[u32],
     t_mesh: &Transform,
@@ -771,6 +792,14 @@ fn trimesh_vs_shape(
     let other_aabb = other
         .local_aabb()
         .transformed_conservative(&t_other.matrix());
+    let other_aabb = if PRECISE && matches!(other, Shape::Sphere { .. }) {
+        Aabb {
+            min: other_aabb.min - Vec3::splat(PRECISE_DEGENERATE_CONTACT_SKIN),
+            max: other_aabb.max + Vec3::splat(PRECISE_DEGENERATE_CONTACT_SKIN),
+        }
+    } else {
+        other_aabb
+    };
     let mut points: SmallVec<ContactPoint, MAX_CANDIDATES> = SmallVec::new();
     for tri in indices.as_chunks::<3>().0 {
         let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
@@ -787,7 +816,7 @@ fn trimesh_vs_shape(
         if !tri_aabb.intersects(&other_aabb) {
             continue;
         }
-        if let Some(m) = triangle_vs_shape([a, b, c], other, t_other) {
+        if let Some(m) = triangle_vs_shape::<PRECISE>([a, b, c], other, t_other) {
             points.extend_from_slice(&m.points);
         }
     }
@@ -797,6 +826,25 @@ fn trimesh_vs_shape(
 // ---------------------------------------------------------------------------
 // 入口
 // ---------------------------------------------------------------------------
+
+/// Contact continuation for an explicitly precise sphere against a triangle mesh.
+/// Every other pair retains the ordinary narrowphase.
+pub(crate) fn collide_shapes_precise_sphere_mesh(
+    sa: &Shape,
+    ta: &Transform,
+    sb: &Shape,
+    tb: &Transform,
+) -> Option<ContactManifold> {
+    match (sa, sb) {
+        (Shape::Sphere { .. }, Shape::TriMesh { vertices, indices }) => {
+            trimesh_vs_shape::<true>(vertices, indices, tb, sa, ta).map(|m| m.flipped())
+        }
+        (Shape::TriMesh { vertices, indices }, Shape::Sphere { .. }) => {
+            trimesh_vs_shape::<true>(vertices, indices, ta, sb, tb)
+        }
+        _ => collide_shapes(sa, ta, sb, tb),
+    }
+}
 
 /// 计算两个形状之间的接触流形（法线由 A 指向 B）。
 ///
@@ -828,10 +876,10 @@ pub(crate) fn collide_shapes(
         if matches!(sa, Shape::TriMesh { .. }) {
             return None;
         }
-        return trimesh_vs_shape(vertices, indices, tb, sa, ta).map(|m| m.flipped());
+        return trimesh_vs_shape::<false>(vertices, indices, tb, sa, ta).map(|m| m.flipped());
     }
     if let Shape::TriMesh { vertices, indices } = sa {
-        return trimesh_vs_shape(vertices, indices, ta, sb, tb);
+        return trimesh_vs_shape::<false>(vertices, indices, ta, sb, tb);
     }
 
     // 球体快速路径
