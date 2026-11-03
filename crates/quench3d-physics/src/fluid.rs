@@ -9140,6 +9140,142 @@ mod tests {
         }
     }
 
+    /// Public fixed-step audit of a finite, closed container, not an infinite plane.
+    /// Each dt executes 120 actual steps (2 s at 60 Hz, 1 s at 120 Hz).
+    #[test]
+    fn closed_static_container_long_term_public_step_audit() {
+        let mut failures = Vec::new();
+        let mut worlds_run = 0;
+        for mode in [FluidCollisionMode::Legacy, FluidCollisionMode::SweptMeshes] {
+            for particle_collision in [false, true] {
+                for dt in [1.0f32 / 60.0, 1.0f32 / 120.0] {
+                    let label = format!("mode={mode:?} pairs={particle_collision} dt={dt:.9}");
+                    let mut world = PhysicsWorld::with_gravity(vec3(0.0, -9.81, 0.0));
+                    world.set_fixed_dt(dt);
+                    // Inner faces: X/Z +/- .5, Y 0/1. All walls are .1 thick.
+                    // Full outer spans overlap at edges/corners, leaving no legal bypass.
+                    for (position, half_extents) in [
+                        (vec3(0.0, -0.05, 0.0), vec3(0.6, 0.05, 0.6)),
+                        (vec3(0.0, 1.05, 0.0), vec3(0.6, 0.05, 0.6)),
+                        (vec3(-0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+                        (vec3(0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+                        (vec3(0.0, 0.5, -0.55), vec3(0.6, 0.6, 0.05)),
+                        (vec3(0.0, 0.5, 0.55), vec3(0.6, 0.6, 0.05)),
+                    ] {
+                        world.add_builder(
+                            BodyBuilder::r#static(Shape::Box { half_extents }).position(position),
+                        );
+                    }
+                    let desc = FluidDesc {
+                        center: vec3(0.0, 0.5, 0.0),
+                        half_extents: Vec3::splat(0.2),
+                        spacing: 0.1,
+                        radius: 0.04,
+                        max_particles: 2000,
+                        initial_velocity: vec3(0.15, 0.0, -0.1),
+                        collision_mode: mode,
+                        particle_collision,
+                        ..FluidDesc::default()
+                    };
+                    let radius = f64::from(desc.radius);
+                    assert_eq!(desc.boundary_motion_mode, FluidBoundaryMotionMode::Legacy);
+                    assert_eq!(desc.estimated_particles(), 125);
+                    world
+                        .add_fluid(desc)
+                        .expect("valid closed-container fixture");
+                    let mut density_entries = 0;
+                    let mut density_nonzero = 0;
+                    let mut boundary_contacts = 0;
+                    let mut min_clearance = f64::INFINITY;
+                    let mut min_pair = f64::INFINITY;
+                    let mut max_speed = 0.0f64;
+                    let mut first_bad = None;
+                    SEPARATION_PUSHES.with(|n| n.set(0));
+                    for step in 1..=120 {
+                        MESH_DENSITY_TRACE.with(|trace| *trace.borrow_mut() = Some(Vec::new()));
+                        world.step(dt);
+                        let trace =
+                            MESH_DENSITY_TRACE.with(|trace| trace.borrow_mut().take().unwrap());
+                        density_entries += trace.len();
+                        density_nonzero += trace.iter().filter(|(_, a, b, _)| a != b).count();
+                        let fluid = &world.fluids()[0];
+                        boundary_contacts += fluid.contacts.iter().filter(|c| c.is_some()).count();
+                        let mut step_bad = Vec::new();
+                        if world.step_count != step || world.accumulator() != 0.0 {
+                            step_bad.push(format!(
+                                "actual_steps={} accumulator={}",
+                                world.step_count,
+                                world.accumulator()
+                            ));
+                        }
+                        if fluid.particles().len() != 125 || fluid.velocities().len() != 125 {
+                            step_bad.push(format!(
+                                "particle_count={} velocity_count={}",
+                                fluid.particles().len(),
+                                fluid.velocities().len()
+                            ));
+                        }
+                        for (i, (p, v)) in
+                            fluid.particles().iter().zip(fluid.velocities()).enumerate()
+                        {
+                            if !p.is_finite() || !v.is_finite() {
+                                step_bad.push(format!("nonfinite particle={i} p={p:?} v={v:?}"));
+                                continue;
+                            }
+                            let p64 = [f64::from(p.x), f64::from(p.y), f64::from(p.z)];
+                            // Independent analytic inner-face signed sphere clearance.
+                            let clearance = [
+                                p64[0] + 0.5 - radius,
+                                0.5 - p64[0] - radius,
+                                p64[1] - radius,
+                                1.0 - p64[1] - radius,
+                                p64[2] + 0.5 - radius,
+                                0.5 - p64[2] - radius,
+                            ]
+                            .into_iter()
+                            .fold(f64::INFINITY, f64::min);
+                            min_clearance = min_clearance.min(clearance);
+                            let speed = (f64::from(v.x).powi(2)
+                                + f64::from(v.y).powi(2)
+                                + f64::from(v.z).powi(2))
+                            .sqrt();
+                            max_speed = max_speed.max(speed);
+                            if clearance < -1e-4 || speed > f64::from(MAX_SPEED) + 1e-4 {
+                                step_bad.push(format!("particle={i} p={p:?} v={v:?} clearance={clearance:.9} speed={speed:.9}"));
+                            }
+                            for q in &fluid.particles()[i + 1..] {
+                                let distance = ((p64[0] - f64::from(q.x)).powi(2)
+                                    + (p64[1] - f64::from(q.y)).powi(2)
+                                    + (p64[2] - f64::from(q.z)).powi(2))
+                                .sqrt();
+                                min_pair = min_pair.min(distance);
+                            }
+                        }
+                        if first_bad.is_none() && !step_bad.is_empty() {
+                            first_bad = Some(format!("step={step}: {}", step_bad.join("; ")));
+                        }
+                    }
+                    let pushes = SEPARATION_PUSHES.with(|n| n.get());
+                    if density_entries != 120 * 125 * 4
+                        || density_nonzero == 0
+                        || boundary_contacts == 0
+                        || (particle_collision && pushes == 0)
+                        || (!particle_collision && pushes != 0)
+                    {
+                        failures.push(format!("{label}: vacuous/incomplete work density_entries={density_entries} density_nonzero={density_nonzero} boundary_contacts={boundary_contacts} pair_pushes={pushes}"));
+                    }
+                    if let Some(bad) = first_bad {
+                        failures.push(format!("{label}: {bad}"));
+                    }
+                    println!("closed_container {label} actual_steps={} duration_s={:.9} particles={} density_entries={density_entries} density_nonzero={density_nonzero} boundary_contacts={boundary_contacts} pair_pushes={pushes} min_clearance={min_clearance:.9} min_pair={min_pair:.9} max_stored_speed={max_speed:.9}", world.step_count, f64::from(dt) * world.step_count as f64, world.fluids()[0].particles().len());
+                    worlds_run += 1;
+                }
+            }
+        }
+        assert_eq!(worlds_run, 8);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     fn settled_world() -> PhysicsWorld {
         let mut world = PhysicsWorld::new();
         world.set_fixed_dt(1.0 / 60.0);
