@@ -23,6 +23,11 @@ use crate::world::BodySlot;
 
 /// 浮点比较的兜底 epsilon。
 const EPS: f32 = 1e-6;
+
+#[cfg(test)]
+thread_local! {
+    static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 /// 单个粒子的速度上限（m/s）：防止参数失控时飞出宇宙。
 const MAX_SPEED: f32 = 40.0;
 /// 估算自由表面至少需要的粒子数（少于此数就当作"这里没有水"）。
@@ -46,7 +51,7 @@ pub enum FluidCollisionMode {
     Legacy,
     /// Sweep initial particle motion against static sphere parts.
     SweptSpheres,
-    /// Sweep initial motion and PBF density corrections against static spheres and boxes.
+    /// Sweep initial motion, PBF density corrections and pair separation against static spheres and boxes.
     /// Inward motion from the particle-clearance shell is held at contact.
     SweptPrimitives,
 }
@@ -910,8 +915,31 @@ impl Fluid {
                 // 非零距离保留连线方向；完全重合或长度下溢时用确定性 X，避免 0/0。
                 let dir = if dist > 0.0 { delta / dist } else { Vec3::X };
                 let push = (min_dist - dist) * 0.5;
-                predicted[i] += dir * push;
-                predicted[j] -= dir * push;
+                #[cfg(test)]
+                SEPARATION_PUSHES.with(|count| count.set(count.get() + 1));
+                if self.desc.collision_mode == FluidCollisionMode::SweptPrimitives {
+                    predicted[i] = sweep_static_spheres(
+                        predicted[i],
+                        predicted[i] + dir * push,
+                        bodies,
+                        radius,
+                        self.desc.boundary_velocity_mode,
+                        true,
+                    )
+                    .0;
+                    predicted[j] = sweep_static_spheres(
+                        predicted[j],
+                        predicted[j] - dir * push,
+                        bodies,
+                        radius,
+                        self.desc.boundary_velocity_mode,
+                        true,
+                    )
+                    .0;
+                } else {
+                    predicted[i] += dir * push;
+                    predicted[j] -= dir * push;
+                }
             }
         }
         // 分离可能把粒子推进墙；重新投影一次（不做速度/摩擦）。
@@ -2567,6 +2595,198 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn particle_separation_retains_original_pair_arithmetic() {
+        let initial = vec![
+            vec3(-0.01, 0.0, 0.0),
+            Vec3::ZERO,
+            vec3(0.002, 0.0, 0.0),
+            Vec3::ZERO,
+        ];
+        let neighbors = vec![vec![1, 2, 3], vec![0, 2, 3], vec![0, 1, 3], vec![0, 1, 2]];
+        let radius = 0.01f32;
+        let mut expected = initial.clone();
+        // Literal historical sequential pair arithmetic, independent of production dispatch.
+        for i in 0..expected.len() {
+            for &j in &neighbors[i] {
+                let j = j as usize;
+                if j <= i || j >= expected.len() {
+                    continue;
+                }
+                let delta = expected[i] - expected[j];
+                let dist = delta.length();
+                if !dist.is_finite() || dist >= 2.0 * radius {
+                    continue;
+                }
+                let dir = if dist > 0.0 { delta / dist } else { Vec3::X };
+                let push = (2.0 * radius - dist) * 0.5;
+                expected[i] += dir * push;
+                expected[j] -= dir * push;
+            }
+        }
+        for mode in [
+            FluidCollisionMode::Legacy,
+            FluidCollisionMode::SweptSpheres,
+            FluidCollisionMode::SweptPrimitives,
+        ] {
+            let mut fluid = Fluid::new(FluidDesc {
+                collision_mode: mode,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+            fluid.predicted = initial.clone();
+            fluid.neighbors = neighbors.clone();
+            fluid.separate_particles(radius, &[]);
+            assert_eq!(
+                fluid
+                    .predicted
+                    .iter()
+                    .map(|p| p.to_array().map(f32::to_bits))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|p| p.to_array().map(f32::to_bits))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn particle_separation_sensor_and_free_paths_match_old_modes() {
+        let mut states = Vec::new();
+        for mode in [
+            FluidCollisionMode::Legacy,
+            FluidCollisionMode::SweptSpheres,
+            FluidCollisionMode::SweptPrimitives,
+        ] {
+            for sensor in [false, true] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                if sensor {
+                    world.add_builder(
+                        BodyBuilder::r#static(Shape::Box {
+                            half_extents: vec3(0.005, 2.0, 2.0),
+                        })
+                        .sensor(true),
+                    );
+                }
+                world
+                    .add_fluid(FluidDesc {
+                        initial_positions: Some(
+                            (0..12)
+                                .map(|i| vec3(-0.009 - i as f32 * 0.003, 0.0, 0.0))
+                                .collect(),
+                        ),
+                        initial_velocity: Vec3::X * 2.0,
+                        radius: 0.003,
+                        spacing: 0.1,
+                        iterations: 1,
+                        viscosity: 0.0,
+                        particle_collision: true,
+                        collision_mode: mode,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                SEPARATION_PUSHES.with(|count| count.set(0));
+                let mut state = Vec::new();
+                let mut max_x = f32::NEG_INFINITY;
+                for _ in 0..8 {
+                    world.step(1.0 / 60.0);
+                    let f = &world.fluids()[0];
+                    for p in f.particles() {
+                        max_x = max_x.max(p.x);
+                    }
+                    for v in f.particles().iter().chain(f.velocities()) {
+                        state.extend(v.to_array().map(f32::to_bits));
+                    }
+                }
+                assert!(SEPARATION_PUSHES.with(|count| count.get()) > 0);
+                assert!(max_x > 0.0);
+                states.push(state);
+            }
+        }
+        for state in &states[1..] {
+            assert_eq!(&states[0], state);
+        }
+    }
+
+    #[test]
+    fn swept_primitives_particle_separation_remains_on_entry_side() {
+        // Fixed 16 cases. Collinear particles cannot legitimately go around a sphere;
+        // the box face extends far beyond every recorded transverse coordinate.
+        let mut failures = Vec::new();
+        let mut summaries = Vec::new();
+        for sphere in [false, true] {
+            for half in [0.005f32, 0.02] {
+                for iterations in [1, 4] {
+                    for speed in [0.0f32, 2.0] {
+                        let radius = 0.003;
+                        let initial: Vec<_> = (0..12)
+                            .map(|i| vec3(-half - radius - 0.001 - i as f32 * 0.003, 0.0, 0.0))
+                            .collect();
+                        let mut traces = Vec::new();
+                        for particle_collision in [false, true] {
+                            let obstacle = true;
+                            SEPARATION_PUSHES.with(|count| count.set(0));
+                            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                            if obstacle {
+                                world.add_builder(BodyBuilder::r#static(if sphere {
+                                    Shape::Sphere { radius: half }
+                                } else {
+                                    Shape::Box {
+                                        half_extents: vec3(half, 2.0, 2.0),
+                                    }
+                                }));
+                            }
+                            let desc = FluidDesc {
+                                initial_positions: Some(initial.clone()),
+                                initial_velocity: Vec3::X * speed,
+                                spacing: 0.1,
+                                radius,
+                                iterations,
+                                particle_collision,
+                                viscosity: 0.0,
+                                collision_mode: FluidCollisionMode::SweptPrimitives,
+                                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                ..FluidDesc::default()
+                            };
+                            assert!(desc.is_valid());
+                            world.add_fluid(desc).unwrap();
+                            let mut max_x = f32::NEG_INFINITY;
+                            for step in 0..8 {
+                                world.step(1.0 / 60.0);
+                                let fluid = &world.fluids()[0];
+                                for (i, p) in fluid.particles().iter().enumerate() {
+                                    assert!(p.is_finite());
+                                    assert_eq!(p.y, 0.0, "transverse escape");
+                                    assert_eq!(p.z, 0.0, "transverse escape");
+                                    max_x = max_x.max(p.x);
+                                    if obstacle && p.x > -half - radius + 1e-5 {
+                                        failures
+                                            .push((sphere, half, iterations, speed, step, i, p.x));
+                                    }
+                                }
+                            }
+                            let pushes = SEPARATION_PUSHES.with(|count| count.get());
+                            if particle_collision {
+                                assert!(pushes > 0, "separation did not execute");
+                            } else {
+                                assert_eq!(pushes, 0);
+                            }
+                            traces.push((max_x, pushes));
+                        }
+
+                        summaries.push((sphere, half, iterations, speed, traces));
+                    }
+                }
+            }
+        }
+        println!("fixed_cases=16 summaries={summaries:?} failures={failures:?}");
+        assert!(
+            failures.is_empty(),
+            "compressed particle penetration: {failures:?}"
+        );
     }
 
     #[test]
