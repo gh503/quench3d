@@ -1343,7 +1343,8 @@ impl EditorApp {
             .with_title(self.config.title.clone())
             .with_inner_size(LogicalSize::new(self.config.width, self.config.height));
         #[cfg(not(target_arch = "wasm32"))]
-        let attrs = apply_window_position(attrs, &crate::layout::Layout::load());
+        let attrs =
+            apply_window_position(attrs, &crate::layout::Layout::load()).with_maximized(true);
         #[cfg(target_arch = "wasm32")]
         let attrs = {
             use wasm_bindgen::JsCast;
@@ -2031,6 +2032,14 @@ pub fn run(config: EditorConfig) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_startup_requests_maximized_window() {
+        let attrs = EditorApp::new(EditorConfig::default()).window_attributes();
+        assert!(attrs.maximized);
+        assert!(attrs.fullscreen.is_none(), "keep normal window controls");
+    }
 
     #[test]
     fn layout_position_reaches_window_attributes() {

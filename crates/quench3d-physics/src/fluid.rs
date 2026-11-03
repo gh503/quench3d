@@ -26,6 +26,7 @@ const EPS: f32 = 1e-6;
 
 #[cfg(test)]
 thread_local! {
+    static MOVING_SCAN_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_SHELL_CARRY: std::cell::Cell<Option<(Vec3, Vec3)>> = const { std::cell::Cell::new(None) };
     static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SWEEP_CACHE_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -2486,6 +2487,12 @@ fn sweep_translating_spheres(
     let mut earliest = f64::INFINITY;
     let mut moving = None;
     for (index, slot) in bodies.iter().enumerate() {
+        #[cfg(test)]
+        MOVING_SCAN_WORK.with(|n| {
+            let mut w = n.get();
+            w[0] += 1;
+            n.set(w);
+        });
         let Some(body) = &slot.body else { continue };
         if body.sensor
             || body.body_type != crate::body::BodyType::Kinematic
@@ -2507,6 +2514,12 @@ fn sweep_translating_spheres(
             if !radius.is_finite() {
                 continue;
             }
+            #[cfg(test)]
+            MOVING_SCAN_WORK.with(|n| {
+                let mut w = n.get();
+                w[1] += 1;
+                n.set(w);
+            });
             let (c0, c1) = if part == 0 {
                 (body.prev_transform.position, body.transform.position)
             } else {
@@ -2518,6 +2531,12 @@ fn sweep_translating_spheres(
             if c0 == c1 || !c0.is_finite() || !c1.is_finite() {
                 continue;
             }
+            #[cfg(test)]
+            MOVING_SCAN_WORK.with(|n| {
+                let mut w = n.get();
+                w[2] += 1;
+                n.set(w);
+            });
             let s = start.to_array().map(f64::from);
             let e = end.to_array().map(f64::from);
             let a = c0.to_array().map(f64::from);
@@ -2578,6 +2597,12 @@ fn sweep_translating_spheres(
     let Some((hit, carry, contact)) = moving else {
         return static_sweep(start, end);
     };
+    #[cfg(test)]
+    MOVING_SCAN_WORK.with(|n| {
+        let mut w = n.get();
+        w[3] += 1;
+        n.set(w);
+    });
     let first = static_sweep(start, hit);
     if first.1.is_some() {
         return first;
@@ -5499,6 +5524,124 @@ mod tests {
             failures.is_empty(),
             "moving sphere swept through liquid: {failures:?}"
         );
+    }
+
+    fn moving_scan_fixture(count: usize, separation: bool) -> PhysicsWorld {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        for i in 0..count {
+            let position = if i == 0 {
+                vec3(-0.15, 0.0, 0.0)
+            } else {
+                vec3(10.0 + i as f32, 10.0, 0.0)
+            };
+            world.add_builder(
+                BodyBuilder::kinematic(Shape::Sphere { radius: 0.1 })
+                    .position(position)
+                    .linear_velocity(Vec3::X * 10.0),
+            );
+        }
+        world
+            .add_fluid(FluidDesc {
+                initial_positions: Some(
+                    (0..32)
+                        .map(|i| {
+                            vec3(
+                                0.0,
+                                (i % 8) as f32 * 0.003 - 0.0105,
+                                (i / 8) as f32 * 0.003 - 0.0045,
+                            )
+                        })
+                        .collect(),
+                ),
+                radius: 0.01,
+                spacing: 0.03,
+                viscosity: 0.0,
+                particle_collision: separation,
+                collision_mode: FluidCollisionMode::SweptMeshes,
+                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                boundary_motion_mode: FluidBoundaryMotionMode::TranslatingKinematicSpheres,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+        world
+    }
+
+    #[test]
+    #[ignore = "diagnostic budget: current implementation exceeds 10000 relative queries"]
+    fn moving_scan_query_budget() {
+        let mut world = moving_scan_fixture(1024, true);
+        MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+        world.step(1.0 / 60.0);
+        let work = MOVING_SCAN_WORK.with(|n| n.get());
+        assert!(work[3] > 0);
+        assert!(
+            work[2] < 10_000,
+            "moving relative query budget exceeded: {work:?}"
+        );
+    }
+
+    #[test]
+    fn moving_scan_scale_preserves_state() {
+        for separation in [false, true] {
+            let mut states = Vec::new();
+            for count in [1, 128] {
+                let mut world = moving_scan_fixture(count, separation);
+                MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+                SEPARATION_PUSHES.with(|n| n.set(0));
+                world.step(1.0 / 60.0);
+                assert_eq!(MOVING_SCAN_WORK.with(|n| n.get()[3]), 32);
+                if separation {
+                    assert!(SEPARATION_PUSHES.with(|n| n.get()) > 0);
+                }
+                let mut bits = Vec::new();
+                let f = &world.fluids()[0];
+                for (p, v) in f.particles().iter().zip(f.velocities()) {
+                    assert!(p.is_finite() && v.is_finite() && p.x > 0.0);
+                    bits.extend(p.to_array().map(f32::to_bits));
+                    bits.extend(v.to_array().map(f32::to_bits));
+                }
+                states.push(bits);
+            }
+            assert_eq!(states[0], states[1]);
+        }
+    }
+
+    #[test]
+    #[ignore = "fixed full-step moving sphere performance baseline"]
+    fn moving_scan_baseline() {
+        for round in 0..3 {
+            for separation in [false, true] {
+                let mut reference = None;
+                for count in [1, 128, 1024] {
+                    let mut world = moving_scan_fixture(count, separation);
+                    MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+                    SEPARATION_PUSHES.with(|n| n.set(0));
+                    let start = std::time::Instant::now();
+                    world.step(1.0 / 60.0);
+                    let ms = start.elapsed().as_secs_f64() * 1000.0;
+                    let work = MOVING_SCAN_WORK.with(|n| n.get());
+                    let pushes = SEPARATION_PUSHES.with(|n| n.get());
+                    assert!(work[3] > 0, "fixture must accept moving hits");
+                    if separation {
+                        assert!(pushes > 0);
+                    }
+                    let f = &world.fluids()[0];
+                    let mut bits = Vec::new();
+                    for (p, v) in f.particles().iter().zip(f.velocities()) {
+                        assert!(p.is_finite() && v.is_finite());
+                        assert!(p.x > 0.0, "real carry required: {p:?}");
+                        bits.extend(p.to_array().map(f32::to_bits));
+                        bits.extend(v.to_array().map(f32::to_bits));
+                    }
+                    if let Some(expected) = &reference {
+                        assert_eq!(&bits, expected);
+                    } else {
+                        reference = Some(bits);
+                    }
+                    eprintln!("MOVING_BASE round={round} bodies={count} separation={separation} ms={ms:.6} work={work:?} pushes={pushes}");
+                }
+            }
+        }
     }
 
     #[test]

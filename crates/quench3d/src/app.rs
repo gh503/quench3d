@@ -1065,6 +1065,8 @@ impl<G: Game> ForgeApp<G> {
                 self.config.width,
                 self.config.height,
             ));
+        #[cfg(not(target_arch = "wasm32"))]
+        let attrs = attrs.with_maximized(true);
         #[cfg(target_arch = "wasm32")]
         let attrs = {
             use wasm_bindgen::JsCast;
@@ -1770,6 +1772,14 @@ pub fn render_sequence_with_game<G: Game>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_startup_requests_maximized_window() {
+        let attrs = ForgeApp::new(EngineConfig::default(), NoGame).window_attributes();
+        assert!(attrs.maximized);
+        assert!(attrs.fullscreen.is_none(), "keep normal window controls");
+    }
 
     /// 相机防穿墙：墙在焦点和眼睛之间时把相机拉到墙前；关掉时保持原距离。
     #[test]

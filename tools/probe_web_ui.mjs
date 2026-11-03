@@ -108,6 +108,19 @@ async function main() {
   }
   if (!hidden) die("30 秒内遮罩没有收起（第一帧没画出来）");
 
+  // winit 的初始内联尺寸不能压过页面的全视口布局。
+  const viewport = await evaluate(send, `(() => {
+    const canvas = document.getElementById("quench3d-canvas");
+    const rect = canvas.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+             viewportWidth: innerWidth, viewportHeight: innerHeight };
+  })()`);
+  if (Math.abs(viewport.x) > 1 || Math.abs(viewport.y) > 1 ||
+      Math.abs(viewport.width - viewport.viewportWidth) > 1 ||
+      Math.abs(viewport.height - viewport.viewportHeight) > 1) {
+    die(`画布没有铺满可用视口：${JSON.stringify(viewport)}`);
+  }
+
   // 先把焦点从输入框挪到视口：`egui_wants_keyboard_input()` 为真时编辑器会
   // 故意让 F3/F4/P 让路（R 走编辑器自己的分支不受影响，所以只测 R 会假绿）。
   // 点一下视口中央即可；不拖动，不会转视角。

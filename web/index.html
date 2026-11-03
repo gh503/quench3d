@@ -14,7 +14,8 @@
   #stage { position: relative; flex: 1; min-height: 0; }
   /* 画布铺满整个工作区：界面（工具栏/场景树/属性面板）本身就是引擎用 egui 画上去的，
      所以页面这边不抢任何像素，只负责"给一张画布 + 探后端 + 收文件"。 */
-  canvas { display: block; width: 100%; height: 100%; background: #0b0e14;
+  /* winit 设置初始内联尺寸；布局始终由可用视口决定，ResizeObserver 同步绘制尺寸。 */
+  canvas { display: block; width: 100% !important; height: 100% !important; background: #0b0e14;
            outline: none; touch-action: none; }
   #overlay { position: absolute; inset: 0; display: flex; align-items: center;
              justify-content: center; flex-direction: column; gap: 10px; pointer-events: none;
