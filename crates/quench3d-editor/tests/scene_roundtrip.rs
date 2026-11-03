@@ -107,8 +107,12 @@ fn fluid_collision_mode_survives_scene_load_save() {
         return;
     };
     let mut doc = Doc::new();
-    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0,1,0]]},{"size":[0.1,0.1,0.1],"initial_positions":[[2,1,0]],"collision_mode":"swept_spheres"},{"size":[0.1,0.1,0.1],"initial_positions":[[4,1,0]],"collision_mode":"swept_primitives"},{"size":[0.1,0.1,0.1],"initial_positions":[[6,1,0]],"collision_mode":"swept_meshes","boundary_motion_mode":"translating_kinematic_spheres"},{"size":[0.1,0.1,0.1],"initial_positions":[[8,1,0]],"collision_mode":"swept_meshes","boundary_motion_mode":"translating_kinematic_primitives"}]}"#).unwrap();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0,1,0]]},{"size":[0.1,0.1,0.1],"initial_positions":[[2,1,0]],"collision_mode":"swept_spheres"},{"size":[0.1,0.1,0.1],"initial_positions":[[4,1,0]],"collision_mode":"swept_primitives"},{"size":[0.1,0.1,0.1],"initial_positions":[[6,1,0]],"collision_mode":"swept_meshes","boundary_motion_mode":"translating_kinematic_spheres"},{"size":[0.1,0.1,0.1],"initial_positions":[[8,1,0]],"collision_mode":"swept_meshes","boundary_motion_mode":"translating_kinematic_primitives"},{"size":[0.1,0.1,0.1],"initial_positions":[[10,1,0]],"collision_mode":"swept_meshes","boundary_motion_mode":"translating_kinematic_meshes"}]}"#).unwrap();
     let check = |engine: &Engine| {
+        assert_eq!(
+            engine.world.fluids()[5].desc().boundary_motion_mode,
+            quench3d::physics::FluidBoundaryMotionMode::TranslatingKinematicMeshes
+        );
         assert_eq!(
             engine.world.fluids()[4].desc().boundary_motion_mode,
             quench3d::physics::FluidBoundaryMotionMode::TranslatingKinematicPrimitives
@@ -140,7 +144,7 @@ fn fluid_collision_mode_survives_scene_load_save() {
     };
     check(&engine);
     let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
-    assert_eq!(saved.json.matches("collision_mode").count(), 4);
+    assert_eq!(saved.json.matches("collision_mode").count(), 5);
     scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
     check(&engine);
 }

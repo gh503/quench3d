@@ -82,6 +82,9 @@ pub enum FluidBoundaryMotionMode {
     /// Carry translating kinematic spheres and boxes, including BodyLocal parts.
     /// Requires SweptMeshes; rotation and repeated moving impacts are excluded.
     TranslatingKinematicPrimitives,
+    /// Carry translating kinematic spheres, boxes and triangle meshes.
+    /// Requires SweptMeshes; only the first moving impact is handled.
+    TranslatingKinematicMeshes,
 }
 
 struct CachedSweepTriangle {
@@ -2509,8 +2512,60 @@ fn sweep_translating_spheres(
             {
                 continue;
             }
-            if desc.boundary_motion_mode == FluidBoundaryMotionMode::TranslatingKinematicPrimitives
-            {
+            if desc.boundary_motion_mode == FluidBoundaryMotionMode::TranslatingKinematicMeshes {
+                if let crate::shape::Shape::TriMesh { vertices, indices } = shape {
+                    let (previous, current) = if part == 0 {
+                        (body.prev_transform, body.transform)
+                    } else {
+                        (
+                            body.prev_transform.mul_transform(&local),
+                            body.transform.mul_transform(&local),
+                        )
+                    };
+                    let delta = current.position - previous.position;
+                    if !delta.is_finite() || delta == Vec3::ZERO {
+                        continue;
+                    }
+                    for triangle in indices.as_chunks::<3>().0 {
+                        let (Some(a), Some(b), Some(c)) = (
+                            vertices.get(triangle[0] as usize),
+                            vertices.get(triangle[1] as usize),
+                            vertices.get(triangle[2] as usize),
+                        ) else {
+                            continue;
+                        };
+                        let points = [*a, *b, *c].map(|p| previous.transform_point(p));
+                        if let Some((t, point, normal)) =
+                            sweep_triangle(start, end - delta, points, desc.radius)
+                        {
+                            if t < earliest {
+                                let s = start.to_array().map(f64::from);
+                                let e = end.to_array().map(f64::from);
+                                let hit = Vec3::from_array(std::array::from_fn(|i| {
+                                    (s[i] + (e[i] - s[i]) * t) as f32
+                                }));
+                                earliest = t;
+                                moving = Some((
+                                    hit,
+                                    hit + delta * (1.0 - t) as f32,
+                                    Contact {
+                                        point: point + delta,
+                                        normal,
+                                        body: index as u32,
+                                        velocity: delta / dt,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            if matches!(
+                desc.boundary_motion_mode,
+                FluidBoundaryMotionMode::TranslatingKinematicPrimitives
+                    | FluidBoundaryMotionMode::TranslatingKinematicMeshes
+            ) {
                 if let crate::shape::Shape::Box { half_extents } = shape {
                     let half = half_extents.abs();
                     let (previous, current) = if part == 0 {
@@ -5865,11 +5920,246 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires future moving-mesh fluid sweeps and explicit kinematic mesh opt-in"]
+    fn translating_mesh_features_parts_and_safety() {
+        for kind in 0..5 {
+            for extra in [false, true] {
+                for motion in 0..3 {
+                    let vertices = match kind {
+                        0 => vec![
+                            vec3(0.0, -1.0, -1.0),
+                            vec3(0.0, 1.0, -1.0),
+                            vec3(0.0, 0.0, 1.0),
+                        ],
+                        1 => vec![Vec3::Y * -1.0, Vec3::Y, Vec3::Y],
+                        2 => vec![Vec3::ZERO; 3],
+                        _ => vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                    };
+                    let indices = match kind {
+                        3 => vec![],
+                        4 => vec![0, 1, 99],
+                        _ => vec![0, 1, 2],
+                    };
+                    let mesh = Shape::TriMesh { vertices, indices };
+                    let offset = if extra { Vec3::Y * 2.0 } else { Vec3::ZERO };
+                    let builder = if extra {
+                        BodyBuilder::kinematic(Shape::Sphere { radius: 0.01 })
+                            .compound_transform_mode(crate::body::CompoundTransformMode::BodyLocal)
+                            .part_at(mesh, -offset)
+                            .rotation(Quat::from_rotation_y(0.4))
+                    } else {
+                        BodyBuilder::kinematic(mesh)
+                    };
+                    let velocity = match motion {
+                        0 => Vec3::X * 15.3,
+                        1 => Vec3::X * -15.3,
+                        _ => Vec3::Z * 15.3,
+                    };
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    world.add_builder(
+                        builder
+                            .kinematic_trimesh(true)
+                            .position(offset - Vec3::X * 0.005)
+                            .linear_velocity(velocity),
+                    );
+                    world
+                        .add_fluid(FluidDesc {
+                            initial_positions: Some(vec![Vec3::ZERO]),
+                            radius: 0.01,
+                            spacing: 0.1,
+                            viscosity: 0.0,
+                            collision_mode: FluidCollisionMode::SweptMeshes,
+                            boundary_motion_mode:
+                                FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    world.step(1.0 / 60.0);
+                    let p = world.fluids()[0].particles()[0];
+                    if kind < 3 && motion == 0 {
+                        assert!(p.x > 0.24, "kind={kind} extra={extra} p={p:?}");
+                    }
+                    // Rotated finite faces have a nonzero normal component along Z.
+                    if kind >= 3 || motion == 1 {
+                        assert_eq!(p, Vec3::ZERO);
+                    }
+                    if motion == 2 && !extra {
+                        // The existing endpoint projection may push a tangent
+                        // face out of the clearance shell, without carrying it.
+                        assert!(p.length() <= 0.011, "kind={kind} tangent p={p:?}");
+                    }
+                }
+            }
+        }
+        for approach in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(
+                BodyBuilder::kinematic(Shape::TriMesh {
+                    vertices: vec![
+                        vec3(0.0, -2.0, -2.0),
+                        vec3(0.0, 2.0, -2.0),
+                        vec3(0.0, 0.0, 2.0),
+                    ],
+                    indices: vec![0, 1, 2],
+                })
+                .kinematic_trimesh(true)
+                .position(Vec3::X * -0.25)
+                .linear_velocity(Vec3::X * 30.0),
+            );
+            let wall = if approach { -0.30 } else { 0.15 };
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Box {
+                    half_extents: vec3(0.005, 1.0, 1.0),
+                })
+                .position(Vec3::X * wall),
+            );
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(vec![if approach {
+                        Vec3::X * -0.4
+                    } else {
+                        Vec3::ZERO
+                    }]),
+                    initial_velocity: if approach { Vec3::X * 39.0 } else { Vec3::ZERO },
+                    radius: 0.01,
+                    spacing: 0.1,
+                    viscosity: 0.0,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    boundary_motion_mode: FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            assert!((world.fluids()[0].particles()[0].x - (wall - 0.015)).abs() < 2e-6);
+        }
+    }
+
+    #[test]
+    fn translating_mesh_mixed_body_earliest_order() {
+        for mesh_first in [false, true] {
+            let mut records = Vec::new();
+            for reverse in [false, true] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let mesh_start = if mesh_first { -0.1 } else { -0.2 };
+                let mesh = BodyBuilder::kinematic(Shape::TriMesh {
+                    vertices: vec![
+                        vec3(0.0, -1.0, -1.0),
+                        vec3(0.0, 1.0, -1.0),
+                        vec3(0.0, 0.0, 1.0),
+                    ],
+                    indices: vec![0, 1, 2],
+                })
+                .kinematic_trimesh(true)
+                .position(Vec3::X * mesh_start)
+                .linear_velocity(Vec3::X * 30.0);
+                let sphere = BodyBuilder::kinematic(Shape::Sphere { radius: 0.1 })
+                    .position(Vec3::X * -0.25)
+                    .linear_velocity(Vec3::X * 30.0);
+                if reverse {
+                    world.add_builder(sphere);
+                    world.add_builder(mesh);
+                } else {
+                    world.add_builder(mesh);
+                    world.add_builder(sphere);
+                }
+                world
+                    .add_fluid(FluidDesc {
+                        initial_positions: Some(vec![Vec3::ZERO]),
+                        radius: 0.01,
+                        spacing: 0.1,
+                        collision_mode: FluidCollisionMode::SweptMeshes,
+                        boundary_motion_mode: FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                world.step(1.0 / 60.0);
+                let f = &world.fluids()[0];
+                assert!((f.particles()[0].x - if mesh_first { 0.41 } else { 0.36 }).abs() < 2e-6);
+                records.push((
+                    f.particles()[0].to_array().map(f32::to_bits),
+                    f.velocities()[0].to_array().map(f32::to_bits),
+                ));
+            }
+            assert_eq!(records[0], records[1]);
+        }
+    }
+
+    #[test]
+    fn translating_mesh_triangle_order_and_primitive_compatibility() {
+        for reverse in [false, true] {
+            let mut vertices = Vec::new();
+            for x in if reverse { [0.0, 0.1] } else { [0.1, 0.0] } {
+                vertices.extend([vec3(x, -1.0, -1.0), vec3(x, 1.0, -1.0), vec3(x, 0.0, 1.0)]);
+            }
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(
+                BodyBuilder::kinematic(Shape::TriMesh {
+                    vertices,
+                    indices: vec![0, 1, 2, 3, 4, 5],
+                })
+                .kinematic_trimesh(true)
+                .position(Vec3::X * -0.25)
+                .linear_velocity(Vec3::X * 30.0),
+            );
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(vec![Vec3::ZERO]),
+                    radius: 0.01,
+                    spacing: 0.1,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    boundary_motion_mode: FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            assert!((world.fluids()[0].particles()[0].x - 0.36).abs() < 2e-6);
+        }
+        for shape in [
+            Shape::Sphere { radius: 0.1 },
+            Shape::Box {
+                half_extents: Vec3::splat(0.1),
+            },
+        ] {
+            let mut records = Vec::new();
+            for mode in [
+                FluidBoundaryMotionMode::TranslatingKinematicPrimitives,
+                FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+            ] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                world.add_builder(
+                    BodyBuilder::kinematic(shape.clone())
+                        .position(Vec3::X * -0.15)
+                        .linear_velocity(Vec3::X * 5.0),
+                );
+                world
+                    .add_fluid(FluidDesc {
+                        initial_positions: Some(vec![Vec3::ZERO]),
+                        radius: 0.01,
+                        spacing: 0.1,
+                        collision_mode: FluidCollisionMode::SweptMeshes,
+                        boundary_motion_mode: mode,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                let mut bits = Vec::new();
+                for _ in 0..8 {
+                    world.step(1.0 / 60.0);
+                    let f = &world.fluids()[0];
+                    bits.extend(f.particles()[0].to_array().map(f32::to_bits));
+                    bits.extend(f.velocities()[0].to_array().map(f32::to_bits));
+                }
+                records.push(bits);
+            }
+            assert_eq!(records[0], records[1]);
+        }
+    }
+
+    #[test]
     fn translating_mesh_public_entry_matrix() {
         // New capability: current primitive motion policy does not sweep meshes.
         // Sixteen fixed trajectories, with historical motion and sensor controls.
         let mut failures = Vec::new();
+        let mut crossing_cases = 0;
+        let mut miss_cases = 0;
         for sign in [-1.0f32, 1.0] {
             for reverse in [false, true] {
                 for y in [0.1f32, 0.0, -0.02, 0.7] {
@@ -5878,7 +6168,7 @@ mod tests {
                     let mut states = Vec::new();
                     for mode in [
                         FluidBoundaryMotionMode::Legacy,
-                        FluidBoundaryMotionMode::TranslatingKinematicPrimitives,
+                        FluidBoundaryMotionMode::TranslatingKinematicMeshes,
                     ] {
                         for sensor in [false, true] {
                             let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
@@ -5895,6 +6185,7 @@ mod tests {
                                         vec![0, 1, 2]
                                     },
                                 })
+                                .kinematic_trimesh(true)
                                 .position(Vec3::X * (-0.25 * sign))
                                 .linear_velocity(velocity)
                                 .sensor(sensor),
@@ -5934,6 +6225,7 @@ mod tests {
                     assert_eq!(states[1], (particle, Vec3::ZERO), "historical sensor");
                     assert_eq!(states[3], (particle, Vec3::ZERO), "motion sensor");
                     if y == 0.0 || y == 0.1 {
+                        crossing_cases += 1;
                         // Relative entry t=(.25-.01)/.5=.48; carry .5*(1-t)=.26.
                         if (states[2].0 - vec3(sign * 0.26, y, 0.0)).length() > 2e-6
                             || (states[2].1 - velocity).length() > 2e-4
@@ -5941,6 +6233,7 @@ mod tests {
                             failures.push((sign, reverse, y, states[2]));
                         }
                     } else {
+                        miss_cases += 1;
                         assert_eq!(
                             states[2], states[3],
                             "near miss sign={sign} reverse={reverse} y={y}"
@@ -5949,6 +6242,8 @@ mod tests {
                 }
             }
         }
+        assert_eq!((crossing_cases, miss_cases), (8, 8));
+        eprintln!("moving mesh matrix: {crossing_cases} crossings, {miss_cases} misses, {} crossing failures; all 64 public worlds executed", failures.len());
         assert!(failures.is_empty(), "moving mesh entry gaps: {failures:?}");
     }
 

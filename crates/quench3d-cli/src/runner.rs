@@ -2353,6 +2353,9 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 _ => quench3d::physics::FluidCollisionMode::Legacy,
             },
             boundary_motion_mode: match f.boundary_motion_mode {
+                Some(crate::scene_doc::FluidBoundaryMotionModeDoc::TranslatingKinematicMeshes) => {
+                    quench3d::physics::FluidBoundaryMotionMode::TranslatingKinematicMeshes
+                }
                 Some(
                     crate::scene_doc::FluidBoundaryMotionModeDoc::TranslatingKinematicPrimitives,
                 ) => quench3d::physics::FluidBoundaryMotionMode::TranslatingKinematicPrimitives,
@@ -6955,6 +6958,30 @@ mod tests {
             SceneDoc::from_json(r#"{"fluids":[{"size":[1,1,1],"collision_mode":"unknown"}]}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn moving_mesh_fluid_scene_policy() {
+        for mode in [
+            "translating_kinematic_primitives",
+            "translating_kinematic_meshes",
+        ] {
+            let json = format!(
+                r#"{{"gravity":[0,0,0],"objects":[{{"body":"kinematic","kinematic_trimesh":true,"position":[0,-0.25,0],"velocity":[0,30,0],"shape":{{"type":"heightfield","heights":[[0,0],[0,0]],"cell_size":2}}}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[0,0,0]],"radius":0.01,"spacing":0.1,"collision_mode":"swept_meshes","boundary_motion_mode":"{mode}"}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc.validate().is_empty());
+            let mut build = build_world(&doc).unwrap();
+            build.world.step(1.0 / 60.0);
+            let expected = if mode == "translating_kinematic_meshes" {
+                0.26
+            } else {
+                0.0
+            };
+            assert!((build.world.fluids()[0].particles()[0].y - expected).abs() < 2e-6);
+        }
+        let invalid = SceneDoc::from_json(r#"{"fluids":[{"size":[1,1,1],"boundary_motion_mode":"translating_kinematic_meshes"}]}"#).unwrap();
+        assert!(!invalid.validate().is_empty());
     }
 
     #[test]

@@ -1152,6 +1152,8 @@ pub enum FluidBoundaryMotionModeDoc {
     TranslatingKinematicSpheres,
     /// First translating kinematic sphere/box contact, requiring swept_meshes.
     TranslatingKinematicPrimitives,
+    /// First translating kinematic sphere/box/mesh contact, requiring swept_meshes.
+    TranslatingKinematicMeshes,
 }
 
 /// Initial liquid-particle collision policy.
@@ -4452,6 +4454,7 @@ impl SceneDoc {
                 Some(
                     FluidBoundaryMotionModeDoc::TranslatingKinematicSpheres
                         | FluidBoundaryMotionModeDoc::TranslatingKinematicPrimitives
+                        | FluidBoundaryMotionModeDoc::TranslatingKinematicMeshes
                 )
             ) && f.collision_mode != Some(FluidCollisionModeDoc::SweptMeshes)
             {
