@@ -5073,6 +5073,120 @@ mod tests {
     }
 
     #[test]
+    fn swept_mesh_contact_departure_fixed_audit() {
+        // 24 fixed cases. Existing projection retains 80% tangential velocity;
+        // compare modes rather than incorrectly requiring frictionless motion.
+        let mut differences = Vec::new();
+        for kind in 0..3 {
+            for shell in [false, true] {
+                for tangent in [false, true] {
+                    for sign in [-1.0f32, 1.0] {
+                        let surface = if kind == 2 { 0.0 } else { 0.125 };
+                        let gap = if shell { 0.015625 } else { 0.03125 };
+                        let start = vec3(sign * (surface + gap), 0.0, 0.0);
+                        let velocity = if tangent {
+                            Vec3::Y * 0.75
+                        } else {
+                            Vec3::X * sign * 0.75
+                        };
+                        let shape = match kind {
+                            0 => Shape::Sphere { radius: 0.125 },
+                            1 => Shape::Box {
+                                half_extents: Vec3::splat(0.125),
+                            },
+                            _ => Shape::TriMesh {
+                                vertices: vec![
+                                    vec3(0.0, -1.0, -1.0),
+                                    vec3(0.0, 1.0, -1.0),
+                                    vec3(0.0, 0.0, 1.0),
+                                ],
+                                indices: vec![0, 1, 2],
+                            },
+                        };
+                        let mut records = Vec::new();
+                        for mode in [FluidCollisionMode::Legacy, FluidCollisionMode::SweptMeshes] {
+                            for sensor in [false, true] {
+                                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                                world.add_builder(
+                                    BodyBuilder::r#static(shape.clone()).sensor(sensor),
+                                );
+                                world
+                                    .add_fluid(FluidDesc {
+                                        initial_positions: Some(vec![start]),
+                                        initial_velocity: velocity,
+                                        radius: 0.03125,
+                                        spacing: 0.1,
+                                        viscosity: 0.0,
+                                        collision_mode: mode,
+                                        ..FluidDesc::default()
+                                    })
+                                    .unwrap();
+                                assert_eq!(world.fluids()[0].velocities()[0], velocity);
+                                let mut bits = Vec::new();
+                                for _ in 0..4 {
+                                    world.step(1.0 / 60.0);
+                                    let f = &world.fluids()[0];
+                                    bits.extend(f.particles()[0].to_array().map(f32::to_bits));
+                                    bits.extend(f.velocities()[0].to_array().map(f32::to_bits));
+                                }
+                                assert_ne!(world.fluids()[0].particles()[0], start);
+                                records.push(bits);
+                            }
+                        }
+                        if records[0] != records[2] || records[1] != records[3] {
+                            differences.push((kind, shell, tangent, sign));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            differences.is_empty(),
+            "departure audit differences: {differences:?}"
+        );
+    }
+
+    #[test]
+    fn swept_mesh_departure_can_hit_another_triangle() {
+        let tri = [
+            vec3(0.0, -1.0, -1.0),
+            vec3(0.0, 1.0, -1.0),
+            vec3(0.0, 0.0, 1.0),
+        ];
+        let start = Vec3::X * 0.015625;
+        let end = start + Vec3::X * 0.5;
+        assert!(sweep_triangle(start, end, tri, 0.03125).is_none());
+        let second = tri.map(|p| p + Vec3::X * 0.25);
+        let hit = sweep_triangle(start, end, second, 0.03125).unwrap();
+        assert_eq!(hit.0, (0.25 - 0.03125 - 0.015625) / 0.5);
+        for reverse in [false, true] {
+            let mut triangles = [tri, second];
+            if reverse {
+                triangles.reverse();
+            }
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(BodyBuilder::r#static(Shape::TriMesh {
+                vertices: triangles.into_iter().flatten().collect(),
+                indices: vec![0, 1, 2, 3, 4, 5],
+            }));
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(vec![start]),
+                    initial_velocity: Vec3::X * 30.0,
+                    radius: 0.03125,
+                    spacing: 0.1,
+                    viscosity: 0.0,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            let p = world.fluids()[0].particles()[0];
+            assert!((p.x - 0.21875).abs() < 1e-6, "reverse={reverse} p={p:?}");
+        }
+    }
+
+    #[test]
     fn triangle_sweep_features_and_degenerate_geometry() {
         let tri = [
             vec3(0.0, -0.5, -0.5),
