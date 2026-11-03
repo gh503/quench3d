@@ -36,6 +36,7 @@ thread_local! {
     static MOVING_SCAN_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_SHELL_CARRY: std::cell::Cell<Option<(Vec3, Vec3)>> = const { std::cell::Cell::new(None) };
     static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MESH_CONTINUITY_TRACE: std::cell::RefCell<Option<Vec<DensityTraceEntry>>> = const { std::cell::RefCell::new(None) };
     static MESH_DENSITY_TRACE: std::cell::RefCell<Option<Vec<DensityTraceEntry>>> = const { std::cell::RefCell::new(None) };
     static MESH_CORRECTION_TRACE: std::cell::RefCell<Option<Vec<(usize, Vec3, Vec3)>>> = const { std::cell::RefCell::new(None) };
     static SWEEP_CACHE_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1194,6 +1195,8 @@ impl Fluid {
                         trace.push((j, predicted[j], predicted[j] - dir * push));
                     }
                 });
+                #[cfg(test)]
+                let continuity_before = (predicted[i], predicted[j]);
                 if matches!(
                     self.desc.collision_mode,
                     FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
@@ -1230,9 +1233,29 @@ impl Fluid {
                     predicted[i] += dir * push;
                     predicted[j] -= dir * push;
                 }
+                #[cfg(test)]
+                MESH_CONTINUITY_TRACE.with(|trace| {
+                    if let Some(trace) = trace.borrow_mut().as_mut() {
+                        trace.push((
+                            i,
+                            continuity_before.0,
+                            continuity_before.0 + dir * push,
+                            predicted[i],
+                        ));
+                        trace.push((
+                            j,
+                            continuity_before.1,
+                            continuity_before.1 - dir * push,
+                            predicted[j],
+                        ));
+                    }
+                });
             }
         }
         // 分离可能把粒子推进墙；重新投影一次（不做速度/摩擦）。
+        #[cfg(test)]
+        let continuity_before = MESH_CONTINUITY_TRACE
+            .with(|trace| trace.borrow().as_ref().map(|_| self.predicted.clone()));
         for p in &mut self.predicted {
             *p = collide_position(
                 *p,
@@ -1243,6 +1266,16 @@ impl Fluid {
                 self.desc.boundary_motion_mode,
             )
             .0;
+        }
+        #[cfg(test)]
+        if let Some(before) = continuity_before {
+            MESH_CONTINUITY_TRACE.with(|trace| {
+                if let Some(trace) = trace.borrow_mut().as_mut() {
+                    for (i, (a, b)) in before.iter().zip(&self.predicted).enumerate() {
+                        trace.push((i, *a, *a, *b));
+                    }
+                }
+            });
         }
     }
 
@@ -1512,6 +1545,12 @@ impl Fluid {
                 };
                 #[cfg(test)]
                 MESH_DENSITY_TRACE.with(|trace| {
+                    if let Some(trace) = trace.borrow_mut().as_mut() {
+                        trace.push((i, prev, prev + *d, p));
+                    }
+                });
+                #[cfg(test)]
+                MESH_CONTINUITY_TRACE.with(|trace| {
                     if let Some(trace) = trace.borrow_mut().as_mut() {
                         trace.push((i, prev, prev + *d, p));
                     }
@@ -5328,6 +5367,229 @@ mod tests {
             assert_eq!(a, b);
             assert!(a.0.iter().all(|p| p.is_finite() && p.x >= 0.00299));
         }
+    }
+
+    #[test]
+    fn moving_mesh_coupled_contact_continuity_audit() {
+        // Fixed 12 trajectories, eight public steps, cached/reference = 192 steps.
+        let mut total = [0usize; 3];
+        for sign in [-1.0f32, 1.0] {
+            for extra in [false, true] {
+                for phase in 0..3 {
+                    let mut records = Vec::new();
+                    for reference in [false, true] {
+                        MOVING_MESH_REFERENCE.with(|f| f.set(reference));
+                        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                        let mesh = Shape::TriMesh {
+                            vertices: vec![
+                                vec3(0.0, -20.0, -20.0),
+                                vec3(0.0, 20.0, -20.0),
+                                vec3(0.0, 0.0, 20.0),
+                            ],
+                            indices: vec![0, 1, 2],
+                        };
+                        let offset = if extra { Vec3::Y * 40.0 } else { Vec3::ZERO };
+                        let builder = if extra {
+                            BodyBuilder::kinematic(Shape::Sphere { radius: 0.001 })
+                                .part_at(mesh, -offset)
+                                .compound_transform_mode(
+                                    crate::body::CompoundTransformMode::BodyLocal,
+                                )
+                        } else {
+                            BodyBuilder::kinematic(mesh)
+                        };
+                        let handle = world.add_builder(
+                            builder
+                                .kinematic_trimesh(true)
+                                .position(offset - Vec3::X * (sign * 0.05))
+                                .linear_velocity(Vec3::X * (sign * 5.0)),
+                        );
+                        world
+                            .add_fluid(FluidDesc {
+                                initial_positions: Some(
+                                    (0..12)
+                                        .map(|i| {
+                                            vec3(
+                                                0.0,
+                                                (i % 3) as f32 * 0.0015,
+                                                (i / 3) as f32 * 0.0015,
+                                            )
+                                        })
+                                        .collect(),
+                                ),
+                                radius: 0.003,
+                                spacing: 0.1,
+                                iterations: 4,
+                                particle_collision: true,
+                                viscosity: 0.0,
+                                collision_mode: FluidCollisionMode::SweptMeshes,
+                                boundary_motion_mode:
+                                    FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                ..FluidDesc::default()
+                            })
+                            .unwrap();
+                        let mut bits = Vec::new();
+                        let mut case_counts = [0usize; 3];
+                        let mut traces = Vec::new();
+                        let mut release = 0.0;
+                        for step in 0..8 {
+                            if step == 4 {
+                                release = world.fluids()[0]
+                                    .velocities()
+                                    .iter()
+                                    .map(|v| v.x * sign)
+                                    .sum::<f32>()
+                                    / 12.0;
+                                assert!(release > 0.0);
+                                world.body_mut(handle).unwrap().set_linear_velocity(
+                                    Vec3::X
+                                        * sign
+                                        * match phase {
+                                            0 => 5.0,
+                                            1 => 0.0,
+                                            _ => -5.0,
+                                        },
+                                );
+                            }
+                            let body = world.body(handle).unwrap();
+                            let before = body.transform;
+                            let velocity = body.linear_velocity;
+                            let previous_centroid = if step == 0 {
+                                0.0
+                            } else {
+                                world.fluids()[0]
+                                    .particles()
+                                    .iter()
+                                    .map(|p| p.x * sign)
+                                    .sum::<f32>()
+                                    / 12.0
+                            };
+                            SEPARATION_PUSHES.with(|n| n.set(0));
+                            MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+                            MESH_DENSITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+                            MESH_CONTINUITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+                            world.step(1.0 / 60.0);
+                            let density =
+                                MESH_DENSITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
+                            let trace =
+                                MESH_CONTINUITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
+                            let impacts = MOVING_SCAN_WORK.with(|n| n.get()[3]);
+                            if step == 0 {
+                                assert!(impacts > 0, "first step must have true temporal impact");
+                            }
+                            case_counts[0] += impacts;
+                            case_counts[1] += density.iter().filter(|(_, a, b, _)| a != b).count();
+                            case_counts[2] += SEPARATION_PUSHES.with(|n| n.get());
+                            let body = world.body(handle).unwrap();
+                            assert_eq!(body.body_type, crate::body::BodyType::Kinematic);
+                            assert_eq!(body.prev_transform, before);
+                            assert_eq!(body.transform.rotation, before.rotation);
+                            assert_eq!(body.angular_velocity, Vec3::ZERO);
+                            assert_eq!(body.linear_velocity, velocity);
+                            assert!(
+                                (body.position() - before.position - velocity / 60.0).length()
+                                    < 2e-6
+                            );
+                            let face_x = body.position().x;
+                            let f = &world.fluids()[0];
+                            for (i, (p, v)) in f.particles().iter().zip(f.velocities()).enumerate()
+                            {
+                                assert!(p.is_finite() && v.is_finite());
+                                assert!(v.length() <= MAX_SPEED + 1e-5);
+                                let path: Vec<_> =
+                                    trace.iter().filter(|(j, _, _, _)| *j == i).collect();
+                                assert!(!path.is_empty());
+                                for adjacent in path.windows(2) {
+                                    assert_eq!(adjacent[0].3, adjacent[1].1);
+                                }
+                                assert_eq!(path.last().unwrap().3, *p);
+                                for (_, a, _, b) in &path {
+                                    // Independent strict finite triangle interior inequalities,
+                                    // margin >1: z>-20, 2|y|+z<20. Convexity covers each segment.
+                                    for q in [a, b] {
+                                        assert!(q.z > -19.0 && 2.0 * q.y.abs() + q.z < 19.0);
+                                    }
+                                    let entry = (a.x - face_x) * sign;
+                                    let exit = (b.x - face_x) * sign;
+                                    assert!(
+                                        entry >= -2e-6 && exit >= -2e-6,
+                                        "actual correction crossed face: {a:?}->{b:?}"
+                                    );
+                                }
+                                if step < 4 || phase == 0 {
+                                    assert!((p.x - face_x) * sign >= 0.003 - 2e-6);
+                                }
+                            }
+                            for c in f.contacts.iter().flatten() {
+                                assert!(
+                                    c.point.is_finite()
+                                        && c.velocity.is_finite()
+                                        && c.normal.is_finite()
+                                );
+                                assert!((c.normal.length() - 1.0).abs() < 1e-4);
+                                assert!(c.normal.x * sign > 0.99);
+                            }
+                            if step >= 4 && phase != 0 {
+                                let centroid =
+                                    f.particles().iter().map(|p| p.x * sign).sum::<f32>() / 12.0;
+                                let speed =
+                                    f.velocities().iter().map(|v| v.x * sign).sum::<f32>() / 12.0;
+                                assert!(
+                                    release > 0.0 && speed > 0.0 && centroid > previous_centroid
+                                );
+                                assert!(
+                                    speed - velocity.x * sign > 0.0,
+                                    "departing liquid must not follow retreating boundary"
+                                );
+                            }
+                            for v in f
+                                .positions
+                                .iter()
+                                .chain(&f.velocities)
+                                .chain(&f.predicted)
+                                .chain(&f.delta)
+                            {
+                                bits.extend(v.to_array().map(f32::to_bits));
+                            }
+                            bits.extend(f.densities.iter().chain(&f.lambdas).map(|v| v.to_bits()));
+                            for c in &f.contacts {
+                                bits.push(u32::from(c.is_some()));
+                                if let Some(c) = c {
+                                    bits.push(c.body);
+                                    for v in [c.point, c.normal, c.velocity] {
+                                        bits.extend(v.to_array().map(f32::to_bits));
+                                    }
+                                }
+                            }
+                            bits.extend([f.revision() as u32, (f.revision() >> 32) as u32]);
+                            for pose in [body.prev_transform, body.transform] {
+                                bits.extend(pose.position.to_array().map(f32::to_bits));
+                                bits.extend(pose.rotation.to_array().map(f32::to_bits));
+                            }
+                            if std::env::var_os("QUENCH3D_MESH_CONTINUITY_TRACE").is_some() {
+                                println!("continuity sign={sign} extra={extra} phase={phase} reference={reference} step={step} impacts={impacts} density={} pair={} face={face_x} positions={:?} velocities={:?} actual_trace={trace:?}", density.iter().filter(|(_, a, b, _)| a != b).count(), SEPARATION_PUSHES.with(|n| n.get()), f.particles(), f.velocities());
+                            }
+                            traces.push(trace);
+                        }
+                        assert!(
+                            case_counts.iter().all(|n| *n > 0),
+                            "coupled nonvacuity: {case_counts:?}"
+                        );
+                        for (sum, n) in total.iter_mut().zip(case_counts) {
+                            *sum += n;
+                        }
+                        records.push((bits, traces, case_counts));
+                    }
+                    assert_eq!(
+                        records[0], records[1],
+                        "cached/reference sign={sign} extra={extra} phase={phase}"
+                    );
+                }
+            }
+        }
+        MOVING_MESH_REFERENCE.with(|f| f.set(false));
+        println!("fixed12_192steps totals impacts_density_pair={total:?}");
     }
 
     #[test]
