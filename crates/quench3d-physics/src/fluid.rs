@@ -26,6 +26,9 @@ const EPS: f32 = 1e-6;
 
 #[cfg(test)]
 thread_local! {
+    static MOVING_MESH_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MOVING_MESH_BOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MOVING_MESH_WORK: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
     static MOVING_SCAN_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_SHELL_CARRY: std::cell::Cell<Option<(Vec3, Vec3)>> = const { std::cell::Cell::new(None) };
     static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -90,6 +93,89 @@ pub enum FluidBoundaryMotionMode {
 struct CachedSweepTriangle {
     points: [Vec3; 3],
     bounds: Aabb,
+}
+
+struct MovingMeshPart {
+    delta: Vec3,
+    triangles: Vec<CachedSweepTriangle>,
+}
+
+struct MovingMeshCache {
+    bodies: Vec<Vec<Option<MovingMeshPart>>>,
+}
+
+impl MovingMeshCache {
+    fn build(bodies: &[BodySlot]) -> Self {
+        Self {
+            bodies: bodies
+                .iter()
+                .map(|slot| {
+                    let Some(body) = &slot.body else {
+                        return Vec::new();
+                    };
+                    if body.sensor
+                        || body.body_type != crate::body::BodyType::Kinematic
+                        || body.angular_velocity != Vec3::ZERO
+                        || body.prev_transform.rotation != body.transform.rotation
+                    {
+                        return Vec::new();
+                    }
+                    body.parts()
+                        .enumerate()
+                        .map(|(part, (shape, local))| {
+                            if part != 0
+                                && body.compound_transform_mode()
+                                    != crate::body::CompoundTransformMode::BodyLocal
+                            {
+                                return None;
+                            }
+                            let crate::shape::Shape::TriMesh { vertices, indices } = shape else {
+                                return None;
+                            };
+                            let (previous, current) = if part == 0 {
+                                (body.prev_transform, body.transform)
+                            } else {
+                                (
+                                    body.prev_transform.mul_transform(&local),
+                                    body.transform.mul_transform(&local),
+                                )
+                            };
+                            let delta = current.position - previous.position;
+                            if !delta.is_finite() || delta == Vec3::ZERO {
+                                return None;
+                            }
+                            let triangles = indices
+                                .as_chunks::<3>()
+                                .0
+                                .iter()
+                                .filter_map(|tri| {
+                                    let points = [
+                                        *vertices.get(tri[0] as usize)?,
+                                        *vertices.get(tri[1] as usize)?,
+                                        *vertices.get(tri[2] as usize)?,
+                                    ]
+                                    .map(|p| previous.transform_point(p));
+                                    #[cfg(test)]
+                                    MOVING_MESH_WORK.with(|n| {
+                                        let mut w = n.get();
+                                        w[0] += 1;
+                                        n.set(w);
+                                    });
+                                    points.iter().all(|p| p.is_finite()).then(|| {
+                                        CachedSweepTriangle {
+                                            points,
+                                            bounds: Aabb::from_points(&points),
+                                        }
+                                    })
+                                })
+                                .collect();
+                            Some(MovingMeshPart { delta, triangles })
+                        })
+                        .collect()
+                })
+                .collect(),
+        }
+    }
 }
 
 struct MeshSweepCache {
@@ -1247,6 +1333,18 @@ impl Fluid {
                 None
             };
 
+        #[cfg(test)]
+        let moving_cache_enabled = !MOVING_MESH_REFERENCE.with(|flag| flag.get());
+        #[cfg(not(test))]
+        let moving_cache_enabled = true;
+        let moving_mesh_cache = if moving_cache_enabled
+            && self.desc.boundary_motion_mode == FluidBoundaryMotionMode::TranslatingKinematicMeshes
+        {
+            Some(MovingMeshCache::build(bodies))
+        } else {
+            None
+        };
+
         // Only the explicit mode captures the actual temporal segment, before
         // neighbor construction and later density corrections change its endpoint.
         let swept_contacts = if self.desc.collision_mode != FluidCollisionMode::Legacy {
@@ -1263,6 +1361,7 @@ impl Fluid {
                                     bodies,
                                     dt,
                                     &self.desc,
+                                    moving_mesh_cache.as_ref(),
                                     SweepQueryContext {
                                         mesh_cache: mesh_cache.as_ref(),
                                         meshes: true,
@@ -2476,6 +2575,7 @@ fn sweep_translating_spheres(
     bodies: &[BodySlot],
     dt: f32,
     desc: &FluidDesc,
+    moving_cache: Option<&MovingMeshCache>,
     context: SweepQueryContext<'_>,
 ) -> (Vec3, Option<Contact>) {
     let static_sweep = |a, b| {
@@ -2514,27 +2614,13 @@ fn sweep_translating_spheres(
             }
             if desc.boundary_motion_mode == FluidBoundaryMotionMode::TranslatingKinematicMeshes {
                 if let crate::shape::Shape::TriMesh { vertices, indices } = shape {
-                    let (previous, current) = if part == 0 {
-                        (body.prev_transform, body.transform)
-                    } else {
-                        (
-                            body.prev_transform.mul_transform(&local),
-                            body.transform.mul_transform(&local),
-                        )
-                    };
-                    let delta = current.position - previous.position;
-                    if !delta.is_finite() || delta == Vec3::ZERO {
-                        continue;
-                    }
-                    for triangle in indices.as_chunks::<3>().0 {
-                        let (Some(a), Some(b), Some(c)) = (
-                            vertices.get(triangle[0] as usize),
-                            vertices.get(triangle[1] as usize),
-                            vertices.get(triangle[2] as usize),
-                        ) else {
-                            continue;
-                        };
-                        let points = [*a, *b, *c].map(|p| previous.transform_point(p));
+                    let mut visit = |points, delta| {
+                        #[cfg(test)]
+                        MOVING_MESH_WORK.with(|n| {
+                            let mut w = n.get();
+                            w[1] += 1;
+                            n.set(w);
+                        });
                         if let Some((t, point, normal)) =
                             sweep_triangle(start, end - delta, points, desc.radius)
                         {
@@ -2556,6 +2642,70 @@ fn sweep_translating_spheres(
                                     },
                                 ));
                             }
+                        }
+                    };
+                    if let Some(cache) = moving_cache {
+                        if let Some(part) = &cache.bodies[index][part] {
+                            let relative_end = end - part.delta;
+                            for triangle in &part.triangles {
+                                #[cfg(test)]
+                                MOVING_MESH_BOUNDS.with(|n| n.set(n.get() + 1));
+                                let bounds = triangle.bounds;
+                                let scale = bounds
+                                    .min
+                                    .abs()
+                                    .max(bounds.max.abs())
+                                    .max(start.abs())
+                                    .max(relative_end.abs())
+                                    .max_element()
+                                    .max(1.0);
+                                let margin = desc.radius + 64.0 * f32::EPSILON * scale;
+                                let segment = Aabb {
+                                    min: start.min(relative_end) - Vec3::splat(margin),
+                                    max: start.max(relative_end) + Vec3::splat(margin),
+                                };
+                                if start.is_finite()
+                                    && relative_end.is_finite()
+                                    && bounds.is_valid()
+                                    && segment.is_valid()
+                                    && margin.is_finite()
+                                    && margin >= 0.0
+                                    && !bounds.intersects(&segment)
+                                {
+                                    continue;
+                                }
+                                visit(triangle.points, part.delta);
+                            }
+                        }
+                    } else {
+                        let (previous, current) = if part == 0 {
+                            (body.prev_transform, body.transform)
+                        } else {
+                            (
+                                body.prev_transform.mul_transform(&local),
+                                body.transform.mul_transform(&local),
+                            )
+                        };
+                        let delta = current.position - previous.position;
+                        if !delta.is_finite() || delta == Vec3::ZERO {
+                            continue;
+                        }
+                        for triangle in indices.as_chunks::<3>().0 {
+                            let (Some(a), Some(b), Some(c)) = (
+                                vertices.get(triangle[0] as usize),
+                                vertices.get(triangle[1] as usize),
+                                vertices.get(triangle[2] as usize),
+                            ) else {
+                                continue;
+                            };
+                            let points = [*a, *b, *c].map(|p| previous.transform_point(p));
+                            #[cfg(test)]
+                            MOVING_MESH_WORK.with(|n| {
+                                let mut w = n.get();
+                                w[0] += 1;
+                                n.set(w);
+                            });
+                            visit(points, delta);
                         }
                     }
                     continue;
@@ -6325,6 +6475,282 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "moving box entry gaps: {failures:?}");
+    }
+
+    fn moving_mesh_scale_fixture(count: usize, separation: bool) -> PhysicsWorld {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for i in 0..count {
+            let offset = if i == 0 {
+                Vec3::ZERO
+            } else {
+                vec3(10.0 + i as f32, 10.0, 0.0)
+            };
+            let first = vertices.len() as u32;
+            vertices.extend(
+                [
+                    vec3(0.0, -1.0, -1.0),
+                    vec3(0.0, 1.0, -1.0),
+                    vec3(0.0, 0.0, 1.0),
+                ]
+                .map(|p| p + offset),
+            );
+            indices.extend([first, first + 1, first + 2]);
+        }
+        world.add_builder(
+            BodyBuilder::kinematic(Shape::TriMesh { vertices, indices })
+                .kinematic_trimesh(true)
+                .position(Vec3::X * -0.05)
+                .linear_velocity(Vec3::X * 10.0),
+        );
+        world
+            .add_fluid(FluidDesc {
+                initial_positions: Some(
+                    (0..32)
+                        .map(|i| {
+                            vec3(
+                                0.0,
+                                (i % 8) as f32 * 0.003 - 0.0105,
+                                (i / 8) as f32 * 0.003 - 0.0045,
+                            )
+                        })
+                        .collect(),
+                ),
+                radius: 0.01,
+                spacing: 0.03,
+                viscosity: 0.0,
+                particle_collision: separation,
+                collision_mode: FluidCollisionMode::SweptMeshes,
+                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                boundary_motion_mode: FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+        world
+    }
+
+    fn moving_mesh_scale_step(
+        count: usize,
+        separation: bool,
+    ) -> (Vec<u32>, [usize; 2], f64, usize) {
+        let mut world = moving_mesh_scale_fixture(count, separation);
+        let ray = world
+            .raycast(Vec3::new(-0.2, 0.0, 0.0), Vec3::X, 1.0)
+            .unwrap();
+        let handle = ray.handle;
+        let before = world.body(handle).unwrap().transform;
+        assert_eq!(world.body(handle).unwrap().linear_velocity, Vec3::X * 10.0);
+        MOVING_MESH_BOUNDS.with(|n| n.set(0));
+        MOVING_MESH_WORK.with(|n| n.set([0; 2]));
+        MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+        SEPARATION_PUSHES.with(|n| n.set(0));
+        let start = std::time::Instant::now();
+        world.step(1.0 / 60.0);
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        let body = world.body(handle).unwrap();
+        assert_eq!(body.prev_transform, before);
+        assert_eq!(body.angular_velocity, Vec3::ZERO);
+        assert_eq!(body.transform.rotation, before.rotation);
+        assert!((body.position().x - (-0.05 + 10.0 / 60.0)).abs() < 1e-6);
+        assert_eq!(
+            MOVING_SCAN_WORK.with(|n| n.get()[3]),
+            32,
+            "actual accepted moving contacts"
+        );
+        let pushes = SEPARATION_PUSHES.with(|n| n.get());
+        if separation {
+            assert!(pushes > 0);
+        }
+        let f = &world.fluids()[0];
+        let mut bits = Vec::new();
+        for (p, v) in f.particles().iter().zip(f.velocities()) {
+            assert!(p.is_finite() && v.is_finite());
+            assert!(p.x - body.position().x >= 0.01 - 2e-6, "clearance: {p:?}");
+            bits.extend(p.to_array().map(f32::to_bits));
+            bits.extend(v.to_array().map(f32::to_bits));
+        }
+        (bits, MOVING_MESH_WORK.with(|n| n.get()), ms, pushes)
+    }
+
+    #[test]
+    #[ignore = "fixed full-step translating mesh scale baseline"]
+    fn moving_mesh_scale_baseline() {
+        MOVING_MESH_REFERENCE.with(|f| f.set(true));
+        for round in 0..3 {
+            for separation in [false, true] {
+                let mut reference = None;
+                for count in [1, 128, 2048] {
+                    let (bits, work, ms, pushes) = moving_mesh_scale_step(count, separation);
+                    if let Some(expected) = &reference {
+                        assert_eq!(&bits, expected);
+                    } else {
+                        reference = Some(bits);
+                    }
+                    eprintln!("MOVING_MESH_BASE round={round} triangles={count} separation={separation} ms={ms:.6} transforms={} features={} hits=32 pushes={pushes}", work[0], work[1]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "fixed 36 full-step moving mesh cache comparisons"]
+    fn moving_mesh_cache_ab() {
+        for round in 0..3 {
+            for separation in [false, true] {
+                for count in [1, 128, 2048] {
+                    let mut states = Vec::new();
+                    for reference in if round % 2 == 0 {
+                        [true, false]
+                    } else {
+                        [false, true]
+                    } {
+                        MOVING_MESH_REFERENCE.with(|f| f.set(reference));
+                        let (bits, work, ms, pushes) = moving_mesh_scale_step(count, separation);
+                        let bounds = MOVING_MESH_BOUNDS.with(|n| n.get());
+                        eprintln!("MOVING_CACHE_AB round={round} triangles={count} separation={separation} reference={reference} ms={ms:.6} transforms={} features={} bounds={bounds} pushes={pushes}", work[0], work[1]);
+                        if !reference {
+                            assert!(work[0] <= count);
+                            assert!(work[1] < 10000);
+                        }
+                        states.push(bits);
+                    }
+                    assert_eq!(states[0], states[1]);
+                }
+            }
+        }
+        MOVING_MESH_REFERENCE.with(|f| f.set(false));
+    }
+
+    #[test]
+    fn moving_mesh_cache_state_and_refresh_audit() {
+        let mut hits = [0usize; 2];
+        for case in 0..32 {
+            let kind = case % 8;
+            let mut vertices = match kind {
+                2 => vec![-Vec3::Y, Vec3::Y, Vec3::Y],
+                3 => vec![Vec3::ZERO; 3],
+                _ => vec![
+                    vec3(0.0, -2.0, -2.0),
+                    vec3(0.0, 2.0, -2.0),
+                    vec3(0.0, 0.0, 2.0),
+                ],
+            };
+            let mut indices = if kind == 4 { vec![] } else { vec![0, 1, 2] };
+            if kind == 1 {
+                indices.reverse();
+            }
+            if kind == 5 {
+                indices.extend([0, 1, 999]);
+            }
+            if kind == 6 {
+                vertices.extend([Vec3::splat(f32::NAN); 3]);
+                indices.extend([3, 4, 5]);
+            }
+            let shape = Shape::TriMesh { vertices, indices };
+            let extra = case >= 16;
+            let rotation = if case >= 8 {
+                Quat::from_rotation_x(0.4)
+            } else {
+                Quat::IDENTITY
+            };
+            let offset = if extra { Vec3::X * 2.0 } else { Vec3::ZERO };
+            let initial = if kind == 7 { -0.005 } else { -0.05 };
+            let speed = if case % 4 == 1 { -10.0 } else { 10.0 };
+            let builder = || {
+                let b = if extra {
+                    BodyBuilder::kinematic(Shape::Sphere { radius: 0.001 })
+                        .part_at(shape.clone(), -offset)
+                        .compound_transform_mode(crate::body::CompoundTransformMode::BodyLocal)
+                } else {
+                    BodyBuilder::kinematic(shape.clone())
+                };
+                b.kinematic_trimesh(true)
+                    .position(offset + Vec3::X * initial)
+                    .rotation(rotation)
+                    .linear_velocity(Vec3::X * speed)
+            };
+            let mut records = Vec::new();
+            for (path, reference) in [true, false].into_iter().enumerate() {
+                MOVING_MESH_REFERENCE.with(|f| f.set(reference));
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let mut wall = world.add_builder(builder());
+                if case % 4 == 0 {
+                    world.add_builder(
+                        BodyBuilder::r#static(Shape::Box {
+                            half_extents: vec3(0.005, 2.0, 2.0),
+                        })
+                        .position(Vec3::X * 0.08),
+                    );
+                }
+                world
+                    .add_fluid(FluidDesc {
+                        initial_positions: Some(vec![Vec3::ZERO]),
+                        radius: 0.01,
+                        spacing: 0.1,
+                        viscosity: 0.0,
+                        collision_mode: FluidCollisionMode::SweptMeshes,
+                        boundary_motion_mode: FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                let mut bits = Vec::new();
+                for step in 0..5 {
+                    if step == 1 {
+                        let mut pose = world.body(wall).unwrap().transform;
+                        pose.position += Vec3::Y * 10.0;
+                        world.body_mut(wall).unwrap().set_transform(pose);
+                    }
+                    if step == 2 {
+                        world.remove_body(wall).unwrap();
+                    }
+                    if step == 3 {
+                        wall = world.add_builder(builder());
+                    }
+                    // Revisit the same particle trajectory after public body edits.
+                    let f = &mut world.fluids_mut()[0];
+                    f.positions[0] = Vec3::ZERO;
+                    f.velocities[0] = Vec3::ZERO;
+                    world.step(1.0 / 60.0);
+                    let f = &world.fluids()[0];
+                    for v in f
+                        .positions
+                        .iter()
+                        .chain(&f.velocities)
+                        .chain(&f.predicted)
+                        .chain(&f.delta)
+                    {
+                        bits.extend(v.to_array().map(f32::to_bits));
+                    }
+                    bits.extend(f.densities.iter().chain(&f.lambdas).map(|v| v.to_bits()));
+                    for c in &f.contacts {
+                        bits.push(u32::from(c.is_some()));
+                        if let Some(c) = c {
+                            hits[path] += 1;
+                            bits.push(c.body);
+                            for v in [c.point, c.normal, c.velocity] {
+                                bits.extend(v.to_array().map(f32::to_bits));
+                            }
+                        }
+                    }
+                    bits.push(f.revision() as u32);
+                }
+                records.push(bits);
+            }
+            assert_eq!(records[0], records[1], "case={case}");
+        }
+        MOVING_MESH_REFERENCE.with(|f| f.set(false));
+        assert!(hits[0] > 20, "non-vacuous contact count: {hits:?}");
+        assert_eq!(hits[0], hits[1]);
+    }
+
+    #[test]
+    fn moving_mesh_scale_feature_budget() {
+        let (_, work, _, _) = moving_mesh_scale_step(2048, true);
+        assert!(
+            work[1] < 10_000,
+            "moving mesh feature budget exceeded: {work:?}"
+        );
     }
 
     fn moving_scan_fixture(count: usize, separation: bool) -> PhysicsWorld {
