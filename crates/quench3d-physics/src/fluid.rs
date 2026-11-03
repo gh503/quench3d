@@ -26,6 +26,7 @@ const EPS: f32 = 1e-6;
 
 #[cfg(test)]
 thread_local! {
+    static MESH_PROJECTION_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_MESH_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MOVING_MESH_BOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MOVING_MESH_WORK: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
@@ -3268,6 +3269,12 @@ fn closest_mesh_feature(
         }
     };
     for tri in indices.as_chunks::<3>().0 {
+        #[cfg(test)]
+        MESH_PROJECTION_WORK.with(|n| {
+            let mut w = n.get();
+            w[0] += 1;
+            n.set(w);
+        });
         let (Some(a), Some(b), Some(c)) = (
             vertices.get(tri[0] as usize),
             vertices.get(tri[1] as usize),
@@ -3276,9 +3283,21 @@ fn closest_mesh_feature(
             continue;
         };
         let points = [*a, *b, *c].map(|v| world.transform_point(v));
+        #[cfg(test)]
+        MESH_PROJECTION_WORK.with(|n| {
+            let mut w = n.get();
+            w[1] += 1;
+            n.set(w);
+        });
         if !points.iter().all(|v| v.is_finite()) {
             continue;
         }
+        #[cfg(test)]
+        MESH_PROJECTION_WORK.with(|n| {
+            let mut w = n.get();
+            w[2] += 1;
+            n.set(w);
+        });
         let v = points.map(|v| v.to_array().map(f64::from));
         let n = cross(sub(v[1], v[0]), sub(v[2], v[0]));
         let n2 = dot(n, n);
@@ -3360,6 +3379,12 @@ fn collide_position(
                         if !face && distance > 0.0 {
                             if distance < f64::from(radius) {
                                 p = point + normal * radius;
+                                #[cfg(test)]
+                                MESH_PROJECTION_WORK.with(|n| {
+                                    let mut w = n.get();
+                                    w[3] += 1;
+                                    n.set(w);
+                                });
                                 contact = Some(Contact {
                                     point,
                                     normal,
@@ -6898,6 +6923,64 @@ mod tests {
             bits.extend(v.to_array().map(f32::to_bits));
         }
         (bits, MOVING_MESH_WORK.with(|n| n.get()), ms, pushes)
+    }
+
+    #[test]
+    #[ignore = "fixed 18 full-step current-correctness projection measurements"]
+    fn moving_mesh_projection_scale_baseline() {
+        MOVING_MESH_REFERENCE.with(|f| f.set(false));
+        for round in 0..3 {
+            for separation in [false, true] {
+                let mut reference = None;
+                for count in [1, 128, 2048] {
+                    MESH_PROJECTION_WORK.with(|n| n.set([0; 4]));
+                    let (bits, sweep, ms, pushes) = moving_mesh_scale_step(count, separation);
+                    if let Some(expected) = &reference {
+                        assert_eq!(&bits, expected);
+                    } else {
+                        reference = Some(bits);
+                    }
+                    let work = MESH_PROJECTION_WORK.with(|n| n.get());
+                    assert!(work[2] > 0, "closest-feature path must actually execute");
+                    eprintln!("MESH_PROJECTION_BASE round={round} triangles={count} separation={separation} ms={ms:.6} visits={} transforms={} features={} radial_contacts={} sweep_transforms={} sweep_features={} moving_hits=32 pushes={pushes}", work[0], work[1], work[2], work[3], sweep[0], sweep[1]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "known unmet projection budget; cache withdrawn after single-triangle regression"]
+    fn moving_mesh_projection_feature_budget() {
+        MOVING_MESH_REFERENCE.with(|f| f.set(false));
+        MESH_PROJECTION_WORK.with(|n| n.set([0; 4]));
+        let _ = moving_mesh_scale_step(2048, true);
+        let work = MESH_PROJECTION_WORK.with(|n| n.get());
+        assert!(
+            work[2] < 10_000,
+            "closest-feature queries {} exceed 10000 budget; visits={} transforms={}",
+            work[2],
+            work[0],
+            work[1]
+        );
+    }
+
+    #[test]
+    fn moving_mesh_projection_scale_state_matches() {
+        MOVING_MESH_REFERENCE.with(|f| f.set(false));
+        for separation in [false, true] {
+            MESH_PROJECTION_WORK.with(|n| n.set([0; 4]));
+            let (small, _, _, small_pushes) = moving_mesh_scale_step(1, separation);
+            let small_work = MESH_PROJECTION_WORK.with(|n| n.get());
+            MESH_PROJECTION_WORK.with(|n| n.set([0; 4]));
+            let (large, _, _, large_pushes) = moving_mesh_scale_step(128, separation);
+            let large_work = MESH_PROJECTION_WORK.with(|n| n.get());
+            assert_eq!(small, large);
+            assert_eq!(small_pushes, large_pushes);
+            assert!(small_work[2] > 0);
+            assert_eq!(large_work[2], small_work[2] * 128);
+            assert_eq!(small_work[3], 0); // Face-interior fixture, not radial-contact coverage.
+            assert_eq!(large_work[3], 0);
+        }
     }
 
     #[test]
