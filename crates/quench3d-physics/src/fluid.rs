@@ -103,6 +103,16 @@ fn trace_overlap_phase(phase: &'static str, positions: &[Vec3], neighbors: &[Vec
 }
 
 #[cfg(test)]
+fn separation_cost_add(site: usize, amount: u64) {
+    SEPARATION_COST.with(|cost| {
+        if let Some(mut counts) = cost.get() {
+            counts[site] += amount;
+            cost.set(Some(counts));
+        }
+    });
+}
+
+#[cfg(test)]
 thread_local! {
     static OVERLAP_TRACE: std::cell::RefCell<Option<OverlapTrace>> = const { std::cell::RefCell::new(None) };
     static SEPARATION_SEGMENT_TRACE: std::cell::RefCell<Option<Vec<SeparationSegmentEntry>>> = const { std::cell::RefCell::new(None) };
@@ -112,6 +122,7 @@ thread_local! {
     static MOVING_MESH_WORK: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
     static MOVING_SCAN_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_SHELL_CARRY: std::cell::Cell<Option<(Vec3, Vec3)>> = const { std::cell::Cell::new(None) };
+    static SEPARATION_COST: std::cell::Cell<Option<[u64; 4]>> = const { std::cell::Cell::new(None) };
     static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MESH_CONTINUITY_TRACE: std::cell::RefCell<Option<Vec<DensityTraceEntry>>> = const { std::cell::RefCell::new(None) };
     static MESH_DENSITY_TRACE: std::cell::RefCell<Option<Vec<DensityTraceEntry>>> = const { std::cell::RefCell::new(None) };
@@ -1291,6 +1302,8 @@ impl Fluid {
                 let dir = if dist > 0.0 { delta / dist } else { Vec3::X };
                 let push = (min_dist - dist) * 0.5;
                 #[cfg(test)]
+                separation_cost_add(0, 1);
+                #[cfg(test)]
                 SEPARATION_PUSHES.with(|count| count.set(count.get() + 1));
                 #[cfg(test)]
                 MESH_CORRECTION_TRACE.with(|trace| {
@@ -1332,6 +1345,8 @@ impl Fluid {
                         let delta = a - b;
                         let distance = delta.length();
                         if distance.is_finite() && distance > 0.0 && distance < min_dist {
+                            #[cfg(test)]
+                            separation_cost_add(3, 1);
                             let correction = delta / distance * ((min_dist - distance) * 0.5);
                             predicted[i] = sweep_separation_slide(
                                 a, correction, bodies, radius, &self.desc, context,
@@ -1352,6 +1367,8 @@ impl Fluid {
                     self.desc.collision_mode,
                     FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
                 ) {
+                    #[cfg(test)]
+                    separation_cost_add(1, 2);
                     predicted[i] = sweep_liquid_correction(
                         predicted[i],
                         predicted[i] + dir * push,
@@ -3153,6 +3170,8 @@ fn sweep_separation_slide(
     context: SweepQueryContext<'_>,
 ) -> (Vec3, bool) {
     let end = start + correction;
+    #[cfg(test)]
+    separation_cost_add(1, 1);
     let (hit, contact) = sweep_liquid_correction(start, end, bodies, radius, desc, context);
     #[cfg(test)]
     SEPARATION_SEGMENT_TRACE.with(|trace| {
@@ -3170,6 +3189,8 @@ fn sweep_separation_slide(
     if !tangent.is_finite() || tangent.length_squared() == 0.0 {
         return (hit, true);
     }
+    #[cfg(test)]
+    separation_cost_add(2, 1);
     let result = sweep_liquid_correction(hit, hit + tangent, bodies, radius, desc, context).0;
     #[cfg(test)]
     SEPARATION_SEGMENT_TRACE.with(|trace| {
@@ -9506,6 +9527,129 @@ mod tests {
         }
         assert_eq!(worlds_run, 8);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    #[ignore = "fixed independent work-count replay; production timing uses separation_cost example"]
+    fn separation_cost_work_replay() {
+        let mut worlds = 0;
+        for side in [5usize, 10] {
+            for geometry in 0..3 {
+                let mut controls = Vec::new();
+                for mode in [
+                    FluidSeparationMode::Legacy,
+                    FluidSeparationMode::BoundaryConstrained,
+                ] {
+                    let mut world = PhysicsWorld::with_gravity(if geometry == 0 {
+                        Vec3::ZERO
+                    } else {
+                        vec3(0.0, -9.81, 0.0)
+                    });
+                    world.set_fixed_dt(1.0 / 60.0);
+                    let half = side as f32 * 0.05 + 0.25;
+                    let height = 2.0 * half;
+                    if geometry != 0 {
+                        let mut walls =
+                            vec![(vec3(0.0, -0.05, 0.0), vec3(half + 0.1, 0.05, half + 0.1))];
+                        if geometry == 2 {
+                            walls.extend([
+                                (
+                                    vec3(0.0, height + 0.05, 0.0),
+                                    vec3(half + 0.1, 0.05, half + 0.1),
+                                ),
+                                (
+                                    vec3(-half - 0.05, height * 0.5, 0.0),
+                                    vec3(0.05, height * 0.5 + 0.1, half + 0.1),
+                                ),
+                                (
+                                    vec3(half + 0.05, height * 0.5, 0.0),
+                                    vec3(0.05, height * 0.5 + 0.1, half + 0.1),
+                                ),
+                                (
+                                    vec3(0.0, height * 0.5, -half - 0.05),
+                                    vec3(half + 0.1, height * 0.5 + 0.1, 0.05),
+                                ),
+                                (
+                                    vec3(0.0, height * 0.5, half + 0.05),
+                                    vec3(half + 0.1, height * 0.5 + 0.1, 0.05),
+                                ),
+                            ]);
+                        }
+                        for (p, h) in walls {
+                            world.add_builder(
+                                BodyBuilder::r#static(Shape::Box { half_extents: h }).position(p),
+                            );
+                        }
+                    }
+                    let mut positions = Vec::new();
+                    for z in 0..side {
+                        for y in 0..side {
+                            for x in 0..side {
+                                positions.push(vec3(
+                                    (x as f32 - (side - 1) as f32 * 0.5) * 0.1,
+                                    0.04 + y as f32 * 0.1,
+                                    (z as f32 - (side - 1) as f32 * 0.5) * 0.1,
+                                ));
+                            }
+                        }
+                    }
+                    world
+                        .add_fluid(FluidDesc {
+                            initial_positions: Some(positions),
+                            radius: 0.04,
+                            spacing: 0.1,
+                            max_particles: side.pow(3),
+                            initial_velocity: if geometry == 2 {
+                                vec3(0.15, 0.0, -0.1)
+                            } else {
+                                Vec3::ZERO
+                            },
+                            particle_collision: true,
+                            collision_mode: FluidCollisionMode::SweptMeshes,
+                            separation_mode: mode,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    for _ in 0..8 {
+                        world.step(1.0 / 60.0);
+                    }
+                    SEPARATION_COST.with(|c| c.set(Some([0; 4])));
+                    let mut bits = Vec::new();
+                    for _ in 0..32 {
+                        world.step(1.0 / 60.0);
+                        let f = &world.fluids()[0];
+                        assert_eq!(f.particles().len(), side.pow(3));
+                        assert!(f
+                            .particles()
+                            .iter()
+                            .chain(f.velocities())
+                            .all(|p| p.is_finite()));
+                        for p in f.particles().iter().chain(f.velocities()) {
+                            bits.extend(p.to_array().map(f32::to_bits));
+                        }
+                    }
+                    let counts = SEPARATION_COST.with(|c| c.take().unwrap());
+                    let f = &world.fluids()[0];
+                    let checksum = f
+                        .particles()
+                        .iter()
+                        .flat_map(|p| p.to_array())
+                        .fold(0u64, |a, v| {
+                            a.wrapping_mul(31).wrapping_add(u64::from(v.to_bits()))
+                        });
+                    println!("ROUND169_WORK particles={} geometry={geometry} mode={mode:?} measured_steps=32 pairs={} initial_sweeps={} slide_sweeps={} residual_pairs={} checksum={checksum}",side.pow(3),counts[0],counts[1],counts[2],counts[3]);
+                    controls.push(bits);
+                    worlds += 1;
+                }
+                if geometry == 0 {
+                    assert_eq!(
+                        controls[0], controls[1],
+                        "free-space trajectory exact control"
+                    );
+                }
+            }
+        }
+        assert_eq!(worlds, 12);
     }
 
     #[test]
