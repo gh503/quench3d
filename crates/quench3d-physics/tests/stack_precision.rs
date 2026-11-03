@@ -252,6 +252,137 @@ fn audit() -> Vec<Summary> {
     summaries
 }
 #[test]
+fn speculative_stack_existing_configuration_audit() {
+    for layers in [4usize, 12] {
+        let mut zero_reference = Vec::new();
+        for setting in 0..3 {
+            let margin = if setting == 2 { 0.005 } else { 0.0 };
+            let mut world = PhysicsWorld::new();
+            world.set_fixed_dt(1.0 / 60.0);
+            if setting != 0 {
+                world.config.speculative_margin = margin;
+            }
+            let floor = Obb {
+                center: [0.0, -0.25, 0.0],
+                axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                half: [4.0, 0.25, 4.0],
+            };
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Box {
+                    half_extents: vec3(4.0, 0.25, 4.0),
+                })
+                .position(vec3(0.0, -0.25, 0.0)),
+            );
+            let handles: Vec<_> = (0..layers)
+                .map(|i| {
+                    world.add_builder(
+                        BodyBuilder::dynamic(Shape::Box {
+                            half_extents: Vec3::splat(0.25),
+                        })
+                        .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
+                        .mass(1.0),
+                    )
+                })
+                .collect();
+            let mut bits = Vec::new();
+            let mut early = 0.0f64;
+            let mut adjacent = 0.0f64;
+            let mut all = 0.0f64;
+            let mut floor_depth = 0.0f64;
+            let mut contacts = 0;
+            for step in 1..=240 {
+                world.step(1.0 / 60.0);
+                assert_eq!(world.step_count, step as u64);
+                let poses: Vec<_> = handles.iter().map(|h| Obb::read(&world, *h)).collect();
+                for (i, a) in poses.iter().enumerate() {
+                    floor_depth = floor_depth.max((-a.separation(floor)).max(0.0));
+                    for (j, b) in poses.iter().enumerate().skip(i + 1) {
+                        let d = (-a.separation(*b)).max(0.0);
+                        all = all.max(d);
+                        if j == i + 1 {
+                            adjacent = adjacent.max(d);
+                            if step <= 16 {
+                                early = early.max(d);
+                            }
+                        }
+                    }
+                }
+                contacts += world.contacts().len();
+                for h in &handles {
+                    let b = world.body(*h).unwrap();
+                    let q = b.rotation();
+                    assert!(
+                        b.position().is_finite()
+                            && b.linear_velocity.is_finite()
+                            && b.angular_velocity.is_finite()
+                    );
+                    for v in b
+                        .position()
+                        .to_array()
+                        .into_iter()
+                        .chain([q.x, q.y, q.z, q.w])
+                        .chain(b.linear_velocity.to_array())
+                        .chain(b.angular_velocity.to_array())
+                    {
+                        bits.push(v.to_bits());
+                    }
+                    bits.push(u32::from(b.is_sleeping()));
+                }
+                if step <= 16 && setting != 1 {
+                    println!("ROUND173_EARLY layers={layers} margin={margin} step={step} contacts={} early_pairmax={early:.12} bottom_y={} top_y={}",world.contacts().len(),poses[0].center[1],poses[layers-1].center[1]);
+                }
+            }
+            assert!(contacts > 0);
+            println!("ROUND173_STACK layers={layers} setting={setting} margin={margin} steps=240 early16={early:.12} adjacent={adjacent:.12} allpairs={all:.12} floor={floor_depth:.12} contacts={contacts}");
+            if setting == 0 {
+                zero_reference = bits;
+            } else if setting == 1 {
+                assert_eq!(
+                    zero_reference, bits,
+                    "default/explicitmargin0 all240stepfullpublicstate"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "unmet: positive-gap speculative box pair omitted by uninflated broadphase proxies"]
+fn speculative_box_gap_does_not_create_false_overlap_impulse() {
+    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+    world.config.speculative_margin = 0.005;
+    world.set_fixed_dt(1.0 / 60.0);
+    world.add_builder(BodyBuilder::r#static(Shape::Box {
+        half_extents: Vec3::splat(0.25),
+    }));
+    let handle = world.add_builder(
+        BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.25),
+        })
+        .position(vec3(0.0, 0.502, 0.0))
+        .linear_velocity(vec3(0.0, -0.06, 0.0))
+        .mass(1.0),
+    );
+    world.step(1.0 / 60.0);
+    let b = world.body(handle).unwrap();
+    let contact = world
+        .contacts()
+        .first()
+        .expect("positive gap inside margin generates speculative contact");
+    println!(
+        "ROUND173_GAP position={:?} velocity={:?} contact={contact:?}",
+        b.position(),
+        b.linear_velocity
+    );
+    // Physical gap .002 allows closing .12m/s; prescribed .06m/s consumes
+    // only .001 in this step and requires no normal impulse or false stop.
+    assert!(
+        (b.linear_velocity.y + 0.06).abs() < 1e-6 && contact.impulse.abs() < 1e-6,
+        "positive physical gap must not act as penetration"
+    );
+}
+
+#[test]
 fn independent_obb_oracle_known_geometry() {
     let cube = Obb {
         center: [0.0; 3],

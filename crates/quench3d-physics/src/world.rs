@@ -4481,6 +4481,30 @@ mod tests {
     use super::*;
     use crate::body::BodyBuilder;
 
+    #[test]
+    #[ignore = "unmet: two inflated boxes retain one margin as false positive penetration"]
+    fn speculative_box_pair_reports_original_signed_gap() {
+        let shape = Shape::Box {
+            half_extents: Vec3::splat(0.25),
+        };
+        let a = BodyBuilder::r#static(shape.clone()).build();
+        let b = BodyBuilder::dynamic(shape)
+            .position(vec3(0.0, 0.502, 0.0))
+            .mass(1.0)
+            .build();
+        let manifold =
+            collide_bodies(&a, &b, 0.005).expect("direct narrowphase bypasses broadphase");
+        let gap = f64::from(b.position().y) - f64::from(a.position().y) - 0.5;
+        println!("ROUND173_DIRECT gap={gap:.12} points={:?}", manifold.points);
+        assert!(
+            manifold
+                .points
+                .iter()
+                .all(|p| (f64::from(p.penetration) + gap).abs() < 1e-6),
+            "reported signed depth must be negative actual gap, not leftover inflation"
+        );
+    }
+
     fn sphere(r: f32) -> Shape {
         Shape::Sphere { radius: r }
     }
