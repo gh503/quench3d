@@ -132,6 +132,7 @@ thread_local! {
     static SWEEP_BOUNDS_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SWEEP_INDEX_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWEEP_INDEX_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANDIDATE_HEAP_SITES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static SWEEP_BOUNDS_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SWEEP_WORK: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
     static MESH_SWEEP_WORK: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
@@ -399,6 +400,12 @@ impl SweepBodyIndex {
             #[cfg(test)]
             SWEEP_INDEX_VISITS.with(|n| n.set(n.get() + 1));
             bounds.min.x <= segment.max.x
+        });
+        #[cfg(test)]
+        CANDIDATE_HEAP_SITES.with(|site| {
+            if let Some(n) = site.get() {
+                site.set(Some(n + 1));
+            }
         });
         let mut slots = self.fallback.clone();
         #[cfg(test)]
@@ -9554,6 +9561,108 @@ mod tests {
         }
         assert_eq!(worlds_run, 8);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn candidate_storage_matches_independent_full_scan() {
+        let mut seed = 0x71828182u32;
+        for n in [0usize, 1, 2, 6, 32, 33, 64, 2048] {
+            for variant in 0..3 {
+                let mut index = SweepBodyIndex {
+                    ordered: Vec::new(),
+                    fallback: Vec::new(),
+                    scale: 1.0,
+                };
+                for slot in 0..n {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let x = (seed % 100) as f32 * 0.02 - 1.0;
+                    let id = if variant == 2 { slot / 2 } else { slot };
+                    if variant == 1 || slot % 5 == 0 {
+                        index.fallback.push(id);
+                    } else {
+                        index.ordered.push((
+                            id,
+                            Aabb {
+                                min: vec3(x, -1.0, -1.0),
+                                max: vec3(x + 0.2, 1.0, 1.0),
+                            },
+                        ));
+                    }
+                }
+                index
+                    .ordered
+                    .sort_by(|a, b| a.1.min.x.total_cmp(&b.1.min.x).then(a.0.cmp(&b.0)));
+                for (start, end, radius) in [
+                    (Vec3::ZERO, Vec3::X, 0.04),
+                    (Vec3::splat(-3.0), Vec3::splat(3.0), 0.04),
+                    (Vec3::splat(99.0), Vec3::splat(100.0), 0.04),
+                    (Vec3::splat(f32::NAN), Vec3::X, 0.04),
+                    (Vec3::ZERO, Vec3::splat(f32::INFINITY), 0.04),
+                    (Vec3::ZERO, Vec3::X, -1.0),
+                    (Vec3::ZERO, Vec3::X, f32::INFINITY),
+                ] {
+                    // Independent full scan: no interval-prefix search and no Aabb::intersects.
+                    let expected = if !start.is_finite() || !end.is_finite() {
+                        None
+                    } else {
+                        let scale = index.scale.max(start.abs().max(end.abs()).max_element());
+                        let margin = radius + 64.0 * f32::EPSILON * scale;
+                        let lo = start.min(end) - Vec3::splat(margin);
+                        let hi = start.max(end) + Vec3::splat(margin);
+                        if !margin.is_finite()
+                            || margin < 0.0
+                            || !lo.is_finite()
+                            || !hi.is_finite()
+                            || !(0..3).all(|axis| lo[axis] <= hi[axis])
+                        {
+                            None
+                        } else {
+                            let mut result = index.fallback.clone();
+                            for &(id, bounds) in &index.ordered {
+                                if (0..3).all(|axis| {
+                                    bounds.min[axis] <= hi[axis] && bounds.max[axis] >= lo[axis]
+                                }) {
+                                    result.push(id);
+                                }
+                            }
+                            result.sort_unstable();
+                            Some(result)
+                        }
+                    };
+                    CANDIDATE_HEAP_SITES.with(|site| site.set(Some(0)));
+                    let actual = index.candidates(start, end, radius);
+                    let sites = CANDIDATE_HEAP_SITES.with(|site| site.take().unwrap());
+                    assert_eq!(
+                        actual.as_deref(),
+                        expected.as_deref(),
+                        "n={n} variant={variant}"
+                    );
+                    assert_eq!(sites, usize::from(expected.is_some()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "unmet: inline candidate storage experiment rejected by preregistered performance threshold"]
+    fn candidate_small_storage_has_no_heap_fallback() {
+        let bounds = Aabb {
+            min: Vec3::splat(-1.0),
+            max: Vec3::splat(1.0),
+        };
+        let index = SweepBodyIndex {
+            ordered: (0..6).map(|i| (i, bounds)).collect(),
+            fallback: Vec::new(),
+            scale: 1.0,
+        };
+        CANDIDATE_HEAP_SITES.with(|n| n.set(Some(0)));
+        let slots = index.candidates(Vec3::ZERO, Vec3::X, 0.04).unwrap();
+        let sites = CANDIDATE_HEAP_SITES.with(|n| n.take().unwrap());
+        assert_eq!(slots.as_slice(), &[0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            sites, 0,
+            "candidate Vec-backed storage/heap fallback site proxy, not allocator count"
+        );
     }
 
     #[test]
