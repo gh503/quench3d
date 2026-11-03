@@ -1149,6 +1149,8 @@ pub enum FluidBoundaryMotionModeDoc {
     Legacy,
     /// First translating kinematic primary-sphere contact, requiring swept_meshes.
     TranslatingKinematicSpheres,
+    /// First translating kinematic sphere/box contact, requiring swept_meshes.
+    TranslatingKinematicPrimitives,
 }
 
 /// Initial liquid-particle collision policy.
@@ -4440,14 +4442,18 @@ impl SceneDoc {
         // 粒子流体：参数非法会让"加不进去/晶格爆炸"，必须当场报；粒子上限截断只警告。
         for (i, f) in self.fluids.iter().enumerate() {
             let p = format!("fluids[{i}]");
-            if f.boundary_motion_mode
-                == Some(FluidBoundaryMotionModeDoc::TranslatingKinematicSpheres)
-                && f.collision_mode != Some(FluidCollisionModeDoc::SweptMeshes)
+            if matches!(
+                f.boundary_motion_mode,
+                Some(
+                    FluidBoundaryMotionModeDoc::TranslatingKinematicSpheres
+                        | FluidBoundaryMotionModeDoc::TranslatingKinematicPrimitives
+                )
+            ) && f.collision_mode != Some(FluidCollisionModeDoc::SweptMeshes)
             {
                 cam_diags.push(Diagnostic::error_code(
                     ErrorCode::OutOfRange,
                     format!("{p}.boundary_motion_mode"),
-                    "translating_kinematic_spheres requires collision_mode swept_meshes",
+                    "translating kinematic boundary motion requires collision_mode swept_meshes",
                 ));
             }
             if let Some(points) = &f.initial_positions {

@@ -2353,6 +2353,9 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 _ => quench3d::physics::FluidCollisionMode::Legacy,
             },
             boundary_motion_mode: match f.boundary_motion_mode {
+                Some(
+                    crate::scene_doc::FluidBoundaryMotionModeDoc::TranslatingKinematicPrimitives,
+                ) => quench3d::physics::FluidBoundaryMotionMode::TranslatingKinematicPrimitives,
                 Some(crate::scene_doc::FluidBoundaryMotionModeDoc::TranslatingKinematicSpheres) => {
                     quench3d::physics::FluidBoundaryMotionMode::TranslatingKinematicSpheres
                 }
@@ -6951,6 +6954,35 @@ mod tests {
             SceneDoc::from_json(r#"{"fluids":[{"size":[1,1,1],"collision_mode":"unknown"}]}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn moving_box_fluid_scene_policy() {
+        for mode in [
+            "legacy",
+            "translating_kinematic_spheres",
+            "translating_kinematic_primitives",
+        ] {
+            let json = format!(
+                r#"{{"gravity":[0,0,0],"objects":[{{"body":"kinematic","position":[-0.25,0,0],"velocity":[30,0,0],"shape":{{"type":"box","size":[0.02,0.4,0.4]}}}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[0,0,0]],"radius":0.01,"spacing":0.1,"collision_mode":"swept_meshes","boundary_motion_mode":"{mode}"}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc.validate().is_empty());
+            let mut build = build_world(&doc).unwrap();
+            build.world.step(1.0 / 60.0);
+            let expected = if mode == "translating_kinematic_primitives" {
+                0.27
+            } else {
+                0.0
+            };
+            assert!((build.world.fluids()[0].particles()[0].x - expected).abs() < 1e-5);
+        }
+        for collision in ["legacy", "swept_spheres", "swept_primitives"] {
+            let json = format!(
+                r#"{{"fluids":[{{"size":[1,1,1],"collision_mode":"{collision}","boundary_motion_mode":"translating_kinematic_primitives"}}]}}"#
+            );
+            assert!(!SceneDoc::from_json(&json).unwrap().validate().is_empty());
+        }
     }
 
     #[test]
