@@ -799,6 +799,7 @@ pub struct BodyBuilder {
     sensor: bool,
     ccd: bool,
     ccd_precise: bool,
+    kinematic_trimesh: bool,
 }
 
 impl BodyBuilder {
@@ -830,6 +831,7 @@ impl BodyBuilder {
             sensor: false,
             ccd: false,
             ccd_precise: false,
+            kinematic_trimesh: false,
         }
     }
 
@@ -1071,13 +1073,28 @@ impl BodyBuilder {
         self
     }
 
+    /// Opt into kinematic triangle meshes for discrete collision and queries.
+    ///
+    /// Only requested kinematic bodies are eligible. Planes remain static, even
+    /// in compounds. Defaults to false; moving-mesh CCD and fluid sweeps are not
+    /// provided by this option. This is currently a Rust builder API only.
+    pub fn kinematic_trimesh(mut self, enabled: bool) -> Self {
+        self.kinematic_trimesh = enabled;
+        self
+    }
+
     /// 构建刚体。
     pub fn build(self) -> RigidBody {
         let mut body_type = self.body_type;
-        // 半空间/三角网格只能是静态体；**任一部件**是这类形状就整体静态
-        // （一个无限半空间挂在动态体上没有意义）。
-        if self.shape.is_static_only() || self.extra_parts.iter().any(|p| p.shape.is_static_only())
-        {
+        // Preserve historical coercion unless a requested kinematic mesh opts in.
+        // Infinite planes remain static regardless of the option or part position.
+        let forces_static = |shape: &Shape| {
+            shape.is_static_only()
+                && !(self.kinematic_trimesh
+                    && self.body_type == BodyType::Kinematic
+                    && matches!(shape, Shape::TriMesh { .. }))
+        };
+        if forces_static(&self.shape) || self.extra_parts.iter().any(|p| forces_static(&p.shape)) {
             body_type = BodyType::Static;
         }
         let (mut mass, mut inertia, center) =
@@ -1230,6 +1247,62 @@ mod tests {
         assert_eq!(b.body_type, BodyType::Static);
         assert_eq!(b.inv_mass(), 0.0);
         assert_eq!(b.apply_inv_inertia_world(Vec3::Y), Vec3::ZERO);
+    }
+
+    #[test]
+    fn kinematic_mesh_requires_explicit_opt_in() {
+        let mesh = || Shape::TriMesh {
+            vertices: vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+            indices: vec![0, 1, 2],
+        };
+        assert_eq!(
+            BodyBuilder::kinematic(mesh()).build().body_type,
+            BodyType::Static
+        );
+        assert_eq!(
+            BodyBuilder::kinematic(mesh())
+                .kinematic_trimesh(false)
+                .build()
+                .body_type,
+            BodyType::Static
+        );
+        let body = BodyBuilder::kinematic(mesh())
+            .kinematic_trimesh(true)
+            .build();
+        assert_eq!(body.body_type, BodyType::Kinematic);
+        assert_eq!(body.inv_mass(), 0.0);
+        assert_eq!(body.apply_inv_inertia_world(Vec3::Y), Vec3::ZERO);
+        assert_eq!(
+            BodyBuilder::dynamic(mesh())
+                .kinematic_trimesh(true)
+                .build()
+                .body_type,
+            BodyType::Static
+        );
+        for primary_plane in [false, true] {
+            let (primary, extra) = if primary_plane {
+                (Shape::Plane { normal: Vec3::Y }, mesh())
+            } else {
+                (mesh(), Shape::Plane { normal: Vec3::Y })
+            };
+            assert_eq!(
+                BodyBuilder::kinematic(primary)
+                    .part_at(extra, Vec3::ZERO)
+                    .kinematic_trimesh(true)
+                    .build()
+                    .body_type,
+                BodyType::Static
+            );
+        }
+        let compound = BodyBuilder::kinematic(Shape::Box {
+            half_extents: Vec3::splat(0.1),
+        })
+        .part_at(mesh(), Vec3::Y)
+        .compound_transform_mode(CompoundTransformMode::BodyLocal)
+        .kinematic_trimesh(true)
+        .build();
+        assert_eq!(compound.body_type, BodyType::Kinematic);
+        assert_eq!(compound.inv_mass(), 0.0);
     }
 
     #[test]

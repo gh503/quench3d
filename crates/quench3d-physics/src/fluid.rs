@@ -5865,6 +5865,94 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires future moving-mesh fluid sweeps and explicit kinematic mesh opt-in"]
+    fn translating_mesh_public_entry_matrix() {
+        // New capability: current primitive motion policy does not sweep meshes.
+        // Sixteen fixed trajectories, with historical motion and sensor controls.
+        let mut failures = Vec::new();
+        for sign in [-1.0f32, 1.0] {
+            for reverse in [false, true] {
+                for y in [0.1f32, 0.0, -0.02, 0.7] {
+                    let particle = vec3(0.0, y, 0.0);
+                    let velocity = Vec3::X * (30.0 * sign);
+                    let mut states = Vec::new();
+                    for mode in [
+                        FluidBoundaryMotionMode::Legacy,
+                        FluidBoundaryMotionMode::TranslatingKinematicPrimitives,
+                    ] {
+                        for sensor in [false, true] {
+                            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                            let handle = world.add_builder(
+                                BodyBuilder::kinematic(Shape::TriMesh {
+                                    vertices: vec![
+                                        vec3(0.0, 0.0, -0.5),
+                                        vec3(0.0, 0.5, -0.5),
+                                        vec3(0.0, 0.0, 0.5),
+                                    ],
+                                    indices: if reverse {
+                                        vec![0, 2, 1]
+                                    } else {
+                                        vec![0, 1, 2]
+                                    },
+                                })
+                                .position(Vec3::X * (-0.25 * sign))
+                                .linear_velocity(velocity)
+                                .sensor(sensor),
+                            );
+                            world
+                                .add_fluid(FluidDesc {
+                                    initial_positions: Some(vec![particle]),
+                                    initial_velocity: Vec3::ZERO,
+                                    radius: 0.01,
+                                    spacing: 0.1,
+                                    viscosity: 0.0,
+                                    collision_mode: FluidCollisionMode::SweptMeshes,
+                                    boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                    boundary_motion_mode: mode,
+                                    ..FluidDesc::default()
+                                })
+                                .unwrap();
+                            let before = world.body(handle).unwrap().transform;
+                            assert_eq!(
+                                world.body(handle).unwrap().body_type,
+                                crate::body::BodyType::Kinematic,
+                                "kinematic mesh must remain kinematic before testing fluid motion"
+                            );
+                            assert_eq!(world.body(handle).unwrap().linear_velocity, velocity);
+                            assert_eq!(world.fluids()[0].velocities()[0], Vec3::ZERO);
+                            world.step(1.0 / 60.0);
+                            let body = world.body(handle).unwrap();
+                            assert_eq!(body.prev_transform, before);
+                            assert_eq!(body.angular_velocity, Vec3::ZERO);
+                            assert_eq!(body.transform.rotation, before.rotation);
+                            assert!((body.position() - Vec3::X * (0.25 * sign)).length() < 1e-6);
+                            let f = &world.fluids()[0];
+                            states.push((f.particles()[0], f.velocities()[0]));
+                        }
+                    }
+                    assert_eq!(states[0], (particle, Vec3::ZERO), "historical motion");
+                    assert_eq!(states[1], (particle, Vec3::ZERO), "historical sensor");
+                    assert_eq!(states[3], (particle, Vec3::ZERO), "motion sensor");
+                    if y == 0.0 || y == 0.1 {
+                        // Relative entry t=(.25-.01)/.5=.48; carry .5*(1-t)=.26.
+                        if (states[2].0 - vec3(sign * 0.26, y, 0.0)).length() > 2e-6
+                            || (states[2].1 - velocity).length() > 2e-4
+                        {
+                            failures.push((sign, reverse, y, states[2]));
+                        }
+                    } else {
+                        assert_eq!(
+                            states[2], states[3],
+                            "near miss sign={sign} reverse={reverse} y={y}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "moving mesh entry gaps: {failures:?}");
+    }
+
+    #[test]
     fn translating_box_public_entry_matrix() {
         // New capability audit: the existing sphere-only policy cannot sweep boxes.
         let mut failures = Vec::new();

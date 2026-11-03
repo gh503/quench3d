@@ -4855,6 +4855,121 @@ mod tests {
         );
     }
 
+    fn kinematic_entry_mesh() -> Shape {
+        Shape::TriMesh {
+            vertices: vec![
+                Vec3::new(0.0, -0.2, -0.2),
+                Vec3::new(0.0, 0.2, -0.2),
+                Vec3::new(0.0, 0.0, 0.2),
+            ],
+            indices: vec![0, 1, 2],
+        }
+    }
+
+    #[test]
+    fn kinematic_mesh_public_motion_and_queries_refresh() {
+        for extra in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let offset = if extra { Vec3::Z } else { Vec3::ZERO };
+            let builder = if extra {
+                BodyBuilder::kinematic(Shape::Box {
+                    half_extents: Vec3::splat(0.01),
+                })
+                .part_at(kinematic_entry_mesh(), -offset)
+                .compound_transform_mode(crate::CompoundTransformMode::BodyLocal)
+            } else {
+                BodyBuilder::kinematic(kinematic_entry_mesh())
+            };
+            let h = world.add_builder(
+                builder
+                    .kinematic_trimesh(true)
+                    .position(offset)
+                    .linear_velocity(Vec3::Y * 30.0),
+            );
+            for step in 0..3 {
+                let before = world.body(h).unwrap().transform;
+                world.step_substeps(1.0 / 60.0, 1);
+                let b = world.body(h).unwrap();
+                assert_eq!(b.body_type, BodyType::Kinematic);
+                assert_eq!(b.prev_transform, before);
+                assert_eq!(b.inv_mass(), 0.0);
+                let y = (step + 1) as f32 * 0.5;
+                assert!((b.position() - offset - Vec3::Y * y).length() < 1e-6);
+                assert!(world
+                    .raycast(Vec3::new(-1.0, y, 0.0), Vec3::X, 2.0)
+                    .is_some());
+                assert!(world
+                    .raycast(Vec3::new(-1.0, y - 0.5, 0.0), Vec3::X, 2.0)
+                    .is_none());
+            }
+        }
+        let mut states = Vec::new();
+        for explicit in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let mut builder =
+                BodyBuilder::kinematic(kinematic_entry_mesh()).linear_velocity(Vec3::X);
+            if explicit {
+                builder = builder.kinematic_trimesh(false);
+            }
+            let h = world.add_builder(builder);
+            let mut bits = Vec::new();
+            for _ in 0..3 {
+                world.step_substeps(1.0 / 60.0, 1);
+                let b = world.body(h).unwrap();
+                assert_eq!(b.body_type, BodyType::Static);
+                bits.extend(b.position().to_array().map(f32::to_bits));
+                bits.extend(b.linear_velocity().to_array().map(f32::to_bits));
+            }
+            states.push(bits);
+        }
+        assert_eq!(states[0], states[1]);
+    }
+
+    #[test]
+    fn kinematic_mesh_discrete_contact_pushes_sphere() {
+        for extra in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let offset = if extra { Vec3::Y } else { Vec3::ZERO };
+            let builder = if extra {
+                BodyBuilder::kinematic(Shape::Box {
+                    half_extents: Vec3::splat(0.01),
+                })
+                .part_at(kinematic_entry_mesh(), -offset)
+                .compound_transform_mode(crate::CompoundTransformMode::BodyLocal)
+            } else {
+                BodyBuilder::kinematic(kinematic_entry_mesh())
+            };
+            let wall = world.add_builder(
+                builder
+                    .kinematic_trimesh(true)
+                    .position(offset)
+                    .linear_velocity(Vec3::X * 0.3),
+            );
+            let sphere = world.add_builder(
+                BodyBuilder::dynamic(Shape::Sphere { radius: 0.05 })
+                    .position(Vec3::X * 0.05)
+                    .friction(0.0)
+                    .restitution(0.0),
+            );
+            for _ in 0..3 {
+                world.step_substeps(1.0 / 60.0, 1);
+            }
+            let body = world.body(sphere).unwrap();
+            assert!(
+                body.position().x > 0.05,
+                "extra={extra} position={:?}",
+                body.position()
+            );
+            assert!(
+                body.linear_velocity().x > 0.0,
+                "extra={extra} velocity={:?}",
+                body.linear_velocity()
+            );
+            assert!(body.position().is_finite() && body.linear_velocity().is_finite());
+            assert!((world.body(wall).unwrap().position().x - 0.015).abs() < 1e-6);
+        }
+    }
+
     fn round126_rotated_compound() -> BodyBuilder {
         BodyBuilder::r#static(Shape::Sphere { radius: 0.1 })
             .compound_transform_mode(crate::CompoundTransformMode::BodyLocal)
