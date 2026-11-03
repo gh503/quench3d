@@ -150,6 +150,42 @@ fn fluid_collision_mode_survives_scene_load_save() {
 }
 
 #[test]
+fn fluid_separation_mode_survives_standard_scene_load_save() {
+    use quench3d::physics::FluidSeparationMode;
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let source = r#"{"gravity":[0,0,0],"objects":[{"body":"static","position":[0,-0.05,0],"shape":{"type":"box","size":[1.2,0.1,1.2]}},{"body":"static","position":[0,0.5,0.55],"shape":{"type":"box","size":[1.2,1.2,0.1]}}],"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0.056195434,0.04,0.45950133],[0.077126235,0.057065815,0.46]],"radius":0.04,"spacing":0.1,"max_particles":2,"particle_collision":true,"collision_mode":"swept_meshes","separation_mode":"boundary_constrained"},{"size":[0.1,0.1,0.1],"initial_positions":[[3,1,0]]}]}"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, source).unwrap();
+    assert_eq!(
+        engine.world.fluids()[0].desc().separation_mode,
+        FluidSeparationMode::BoundaryConstrained
+    );
+    assert_eq!(
+        engine.world.fluids()[1].desc().separation_mode,
+        FluidSeparationMode::Legacy
+    );
+    engine.world.step(1.0 / 60.0);
+    let expected = engine.world.fluids()[0].particles().to_vec();
+    assert!((expected[0] - expected[1]).length() > 0.075);
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    assert_eq!(saved.json.matches("separation_mode").count(), 1);
+    assert_eq!(saved.json.matches("boundary_constrained").count(), 1);
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    assert_eq!(
+        engine.world.fluids()[0].desc().separation_mode,
+        FluidSeparationMode::BoundaryConstrained
+    );
+    assert_eq!(
+        engine.world.fluids()[1].desc().separation_mode,
+        FluidSeparationMode::Legacy
+    );
+    engine.world.step(1.0 / 60.0);
+    assert_eq!(engine.world.fluids()[0].particles(), expected);
+}
+
+#[test]
 fn fluid_boundary_velocity_mode_survives_scene_load_save() {
     use quench3d::physics::FluidBoundaryVelocityMode;
     let Some(mut engine) = headless_engine() else {

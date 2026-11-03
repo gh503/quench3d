@@ -944,6 +944,10 @@ pub fn json_schema() -> Value {
         d["properties"]["emit_spread"] = json!({ "type": "number", "minimum": 0 });
         d["properties"]["foam"] = json!({ "type": "boolean" });
         d["properties"]["particle_collision"] = json!({ "type": "boolean" });
+        d["properties"]["separation_mode"] = json!({
+            "type": "string", "enum": ["legacy", "boundary_constrained"],
+            "description": "Omitted/legacy preserves historical pair separation. boundary_constrained requires particle_collision=true and swept_primitives or swept_meshes; bounded correction sweeps at most two contact segments and one residual pair correction. No full non-overlap, incompressibility or performance guarantee. Enabled through scene JSON; no editor selector."
+        });
         d["properties"]["contact_friction"] = json!({ "type": "number", "minimum": 0, "maximum": 1 });
         d["properties"]["flow_coupling"] = json!({
             "type": "number", "minimum": 0, "maximum": 100,
@@ -960,6 +964,12 @@ pub fn json_schema() -> Value {
         d["allOf"] = json!([{
             "if": {"required": ["boundary_motion_mode"], "properties": {"boundary_motion_mode": {"enum": ["translating_kinematic_spheres", "translating_kinematic_primitives", "translating_kinematic_meshes"]}}},
             "then": {"required": ["collision_mode"], "properties": {"collision_mode": {"const": "swept_meshes"}}}
+        }, {
+            "if": {"required": ["separation_mode"], "properties": {"separation_mode": {"const": "boundary_constrained"}}},
+            "then": {"required": ["particle_collision", "collision_mode"], "properties": {
+                "particle_collision": {"const": true},
+                "collision_mode": {"enum": ["swept_primitives", "swept_meshes"]}
+            }}
         }]);
         d["properties"]["boundary_velocity_mode"] = json!({
             "type": "string", "enum": ["legacy", "body_motion"],
@@ -1917,6 +1927,34 @@ mod tests {
     }
 
     /// 机器可读 JSON Schema 必须与 `scene_doc.rs` 的结构体/枚举逐字段一致。
+    #[test]
+    fn fluid_separation_schema_matches_scene_constraints() {
+        let schema = json_schema();
+        let fluid = &schema["$defs"]["fluid"];
+        assert_eq!(
+            fluid["properties"]["separation_mode"]["enum"],
+            json!(["legacy", "boundary_constrained"])
+        );
+        let constraint = &fluid["allOf"][1];
+        assert_eq!(constraint["if"]["required"], json!(["separation_mode"]));
+        assert_eq!(
+            constraint["if"]["properties"]["separation_mode"]["const"],
+            "boundary_constrained"
+        );
+        assert_eq!(
+            constraint["then"]["required"],
+            json!(["particle_collision", "collision_mode"])
+        );
+        assert_eq!(
+            constraint["then"]["properties"]["particle_collision"]["const"],
+            true
+        );
+        assert_eq!(
+            constraint["then"]["properties"]["collision_mode"]["enum"],
+            json!(["swept_primitives", "swept_meshes"])
+        );
+    }
+
     #[test]
     fn json_schema_matches_the_source_structs() {
         let src = include_str!("scene_doc.rs");

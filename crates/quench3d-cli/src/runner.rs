@@ -2374,6 +2374,12 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             max_particles: f.max_particles,
             foam: f.foam,
             particle_collision: f.particle_collision,
+            separation_mode: match f.separation_mode {
+                Some(crate::scene_doc::FluidSeparationModeDoc::BoundaryConstrained) => {
+                    quench3d::physics::FluidSeparationMode::BoundaryConstrained
+                }
+                _ => quench3d::physics::FluidSeparationMode::Legacy,
+            },
             contact_friction: f.contact_friction.unwrap_or(0.0),
             // 场景里的气泡字段必须真的接进流体；此前只建了可视化占位，
             // 模拟里 `bubbles` 仍是默认 false，报告永远为 0。
@@ -6964,6 +6970,115 @@ mod tests {
             SceneDoc::from_json(r#"{"fluids":[{"size":[1,1,1],"collision_mode":"unknown"}]}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn fluid_separation_scene_policy_and_corner_behavior() {
+        use quench3d::physics::{BodyBuilder, FluidDesc, FluidSeparationMode, PhysicsWorld, Shape};
+        let source = r#"{"gravity":[0,0,0],"objects":[{"body":"static","position":[0,-0.05,0],"shape":{"type":"box","size":[1.2,0.1,1.2]}},{"body":"static","position":[0,0.5,0.55],"shape":{"type":"box","size":[1.2,1.2,0.1]}}],"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0.056195434,0.04,0.45950133],[0.077126235,0.057065815,0.46]],"radius":0.04,"spacing":0.1,"max_particles":2,"particle_collision":true,"collision_mode":"swept_meshes","separation_mode":"boundary_constrained"}]}"#;
+        let doc = SceneDoc::from_json(source).expect("valid opt-in separation JSON must load");
+        assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+        let mut loaded = build_world(&doc).unwrap().world;
+        assert_eq!(
+            loaded.fluids()[0].desc().separation_mode,
+            FluidSeparationMode::BoundaryConstrained
+        );
+        let mut direct = PhysicsWorld::with_gravity(Vec3::ZERO);
+        for (position, half_extents) in [
+            (Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.6, 0.05, 0.6)),
+            (Vec3::new(0.0, 0.5, 0.55), Vec3::new(0.6, 0.6, 0.05)),
+        ] {
+            direct
+                .add_builder(BodyBuilder::r#static(Shape::Box { half_extents }).position(position));
+        }
+        direct
+            .add_fluid(FluidDesc {
+                initial_positions: Some(vec![
+                    Vec3::new(0.056195434, 0.04, 0.45950133),
+                    Vec3::new(0.077126235, 0.057065815, 0.46),
+                ]),
+                radius: 0.04,
+                spacing: 0.1,
+                max_particles: 2,
+                particle_collision: true,
+                collision_mode: quench3d::physics::FluidCollisionMode::SweptMeshes,
+                separation_mode: FluidSeparationMode::BoundaryConstrained,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+        loaded.step(1.0 / 60.0);
+        direct.step(1.0 / 60.0);
+        assert_eq!(
+            loaded.fluids()[0].particles(),
+            direct.fluids()[0].particles()
+        );
+        assert_eq!(
+            loaded.fluids()[0].velocities(),
+            direct.fluids()[0].velocities()
+        );
+        let p = loaded.fluids()[0].particles();
+        println!(
+            "ROUND167_SCENE corner_distance={:.12} mode={:?}",
+            (p[0] - p[1]).length(),
+            loaded.fluids()[0].desc().separation_mode
+        );
+        assert!(
+            (p[0] - p[1]).length() > 0.075,
+            "actual opt-in corner progress: {p:?}"
+        );
+        let omitted = source.replace(",\"separation_mode\":\"boundary_constrained\"", "");
+        let explicit = source.replace("boundary_constrained", "legacy");
+        let omitted_doc = SceneDoc::from_json(&omitted).unwrap();
+        assert!(!serde_json::to_string(&omitted_doc)
+            .unwrap()
+            .contains("separation_mode"));
+        let serialized = serde_json::to_string(&doc).unwrap();
+        let reloaded = build_world(&SceneDoc::from_json(&serialized).unwrap())
+            .unwrap()
+            .world;
+        assert_eq!(
+            reloaded.fluids()[0].desc().separation_mode,
+            FluidSeparationMode::BoundaryConstrained
+        );
+        assert!(
+            serde_json::to_string(&SceneDoc::from_json(&explicit).unwrap())
+                .unwrap()
+                .contains("\"separation_mode\":\"legacy\"")
+        );
+        let primitives =
+            SceneDoc::from_json(&source.replace("swept_meshes", "swept_primitives")).unwrap();
+        assert!(primitives.validate().is_empty());
+        assert_eq!(
+            build_world(&primitives).unwrap().world.fluids()[0]
+                .desc()
+                .separation_mode,
+            FluidSeparationMode::BoundaryConstrained
+        );
+        let mut a = build_world(&omitted_doc).unwrap().world;
+        let mut b = build_world(&SceneDoc::from_json(&explicit).unwrap())
+            .unwrap()
+            .world;
+        for _ in 0..120 {
+            a.step(1.0 / 60.0);
+            b.step(1.0 / 60.0);
+            assert_eq!(a.fluids()[0].particles(), b.fluids()[0].particles());
+            assert_eq!(a.fluids()[0].velocities(), b.fluids()[0].velocities());
+        }
+        for invalid in [
+            source.replace(
+                "\"particle_collision\":true",
+                "\"particle_collision\":false",
+            ),
+            source.replace("swept_meshes", "legacy"),
+        ] {
+            let doc = SceneDoc::from_json(&invalid).unwrap();
+            assert!(
+                !doc.validate().is_empty(),
+                "invalid new mode must reject before GPU"
+            );
+            assert!(build_world(&doc).is_err());
+        }
+        assert!(SceneDoc::from_json(&source.replace("boundary_constrained", "unknown")).is_err());
     }
 
     #[test]

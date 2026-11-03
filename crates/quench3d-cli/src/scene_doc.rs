@@ -1170,6 +1170,16 @@ pub enum FluidCollisionModeDoc {
     SweptMeshes,
 }
 
+/// Optional boundary-aware liquid particle-pair correction policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FluidSeparationModeDoc {
+    /// Preserve the historical single-pass equal-half separation.
+    Legacy,
+    /// Bounded tangential correction and one residual pair correction.
+    BoundaryConstrained,
+}
+
 /// 粒子流体（CPU PBF）。
 ///
 /// 这是**粒子**流体，与 [`WaterDoc`] 的解析水域是两套东西：水域给刚体浮力，
@@ -1252,6 +1262,9 @@ pub struct FluidDoc {
     /// 粒子间最小分离（缺省 false = 只靠 PBF 密度约束）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub particle_collision: bool,
+    /// Omitted preserves Legacy; boundary_constrained requires pair collision and swept primitives/meshes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separation_mode: Option<FluidSeparationModeDoc>,
     /// 流体-刚体接触摩擦系数 0~1，缺省 0 = 关闭。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_friction: Option<f32>,
@@ -4449,6 +4462,22 @@ impl SceneDoc {
         // 粒子流体：参数非法会让"加不进去/晶格爆炸"，必须当场报；粒子上限截断只警告。
         for (i, f) in self.fluids.iter().enumerate() {
             let p = format!("fluids[{i}]");
+            if f.separation_mode == Some(FluidSeparationModeDoc::BoundaryConstrained)
+                && (!f.particle_collision
+                    || !matches!(
+                        f.collision_mode,
+                        Some(
+                            FluidCollisionModeDoc::SweptPrimitives
+                                | FluidCollisionModeDoc::SweptMeshes
+                        )
+                    ))
+            {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.separation_mode"),
+                    "boundary_constrained requires particle_collision true and collision_mode swept_primitives or swept_meshes",
+                ));
+            }
             if matches!(
                 f.boundary_motion_mode,
                 Some(
