@@ -26,6 +26,8 @@ const EPS: f32 = 1e-6;
 
 #[cfg(test)]
 type DensityTraceEntry = (usize, Vec3, Vec3, Vec3);
+#[cfg(test)]
+type SeparationSegmentEntry = (Vec3, Vec3, Vec3);
 
 // Round165 attribution is deliberately test-only: no release fields, branches or math.
 #[cfg(test)]
@@ -103,6 +105,7 @@ fn trace_overlap_phase(phase: &'static str, positions: &[Vec3], neighbors: &[Vec
 #[cfg(test)]
 thread_local! {
     static OVERLAP_TRACE: std::cell::RefCell<Option<OverlapTrace>> = const { std::cell::RefCell::new(None) };
+    static SEPARATION_SEGMENT_TRACE: std::cell::RefCell<Option<Vec<SeparationSegmentEntry>>> = const { std::cell::RefCell::new(None) };
     static MESH_PROJECTION_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_MESH_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MOVING_MESH_BOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -3151,6 +3154,13 @@ fn sweep_separation_slide(
 ) -> (Vec3, bool) {
     let end = start + correction;
     let (hit, contact) = sweep_liquid_correction(start, end, bodies, radius, desc, context);
+    #[cfg(test)]
+    SEPARATION_SEGMENT_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            assert!(trace.len() < 4096);
+            trace.push((start, end, hit));
+        }
+    });
     let Some(contact) = contact else {
         return (hit, false);
     };
@@ -3160,10 +3170,15 @@ fn sweep_separation_slide(
     if !tangent.is_finite() || tangent.length_squared() == 0.0 {
         return (hit, true);
     }
-    (
-        sweep_liquid_correction(hit, hit + tangent, bodies, radius, desc, context).0,
-        true,
-    )
+    let result = sweep_liquid_correction(hit, hit + tangent, bodies, radius, desc, context).0;
+    #[cfg(test)]
+    SEPARATION_SEGMENT_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            assert!(trace.len() < 4096);
+            trace.push((hit, hit + tangent, result));
+        }
+    });
+    (result, true)
 }
 
 /// Sweep a liquid movement segment against static spheres, and optionally boxes.
@@ -9491,6 +9506,305 @@ mod tests {
         }
         assert_eq!(worlds_run, 8);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn boundary_constrained_mesh_correction_audit() {
+        // Independent f64 point/triangle distance: projected barycentrics plus
+        // three clamped edge distances, with no production geometry calls.
+        fn distance(p: Vec3, tri: [Vec3; 3]) -> f64 {
+            let v = |p: Vec3| [f64::from(p.x), f64::from(p.y), f64::from(p.z)];
+            let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+            let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            let [a, b, c] = tri.map(v);
+            let p = v(p);
+            let ab = sub(b, a);
+            let ac = sub(c, a);
+            let ap = sub(p, a);
+            let aa = dot(ab, ab);
+            let bb = dot(ab, ac);
+            let cc = dot(ac, ac);
+            let denom = aa * cc - bb * bb;
+            let u = (cc * dot(ap, ab) - bb * dot(ap, ac)) / denom;
+            let w = (aa * dot(ap, ac) - bb * dot(ap, ab)) / denom;
+            let mut best = f64::INFINITY;
+            if u >= 0.0 && w >= 0.0 && u + w <= 1.0 {
+                let q = [
+                    a[0] + u * ab[0] + w * ac[0],
+                    a[1] + u * ab[1] + w * ac[1],
+                    a[2] + u * ab[2] + w * ac[2],
+                ];
+                best = dot(sub(p, q), sub(p, q));
+            }
+            for (a, b) in [(a, b), (b, c), (c, a)] {
+                let edge = sub(b, a);
+                let t = (dot(sub(p, a), edge) / dot(edge, edge)).clamp(0.0, 1.0);
+                let d = [
+                    p[0] - a[0] - t * edge[0],
+                    p[1] - a[1] - t * edge[1],
+                    p[2] - a[2] - t * edge[2],
+                ];
+                best = best.min(dot(d, d));
+            }
+            best.sqrt()
+        }
+        let floor = [
+            vec3(-4.0, 0.0, -4.0),
+            vec3(4.0, 0.0, -4.0),
+            vec3(0.0, 0.0, 4.0),
+        ];
+        let mut worlds = 0;
+        let mut total = [0usize; 3];
+        for dense in [false, true] {
+            for sign in [-1.0f32, 1.0] {
+                for moving in [false, true] {
+                    if dense && !moving {
+                        continue;
+                    }
+                    for reverse in [false, true] {
+                        if dense && reverse {
+                            continue;
+                        }
+                        let mut first_distances = Vec::new();
+                        let mut mode_states = Vec::new();
+                        for separation_mode in [
+                            FluidSeparationMode::Legacy,
+                            FluidSeparationMode::BoundaryConstrained,
+                        ] {
+                            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                            let wall = [
+                                vec3(-4.0, -4.0, 0.0),
+                                vec3(4.0, -4.0, 0.0),
+                                vec3(0.0, 4.0, 0.0),
+                            ];
+                            let mesh = |vertices: [Vec3; 3]| Shape::TriMesh {
+                                vertices: vertices.to_vec(),
+                                indices: if reverse {
+                                    vec![2, 1, 0]
+                                } else {
+                                    vec![0, 1, 2]
+                                },
+                            };
+                            let floor_builder = BodyBuilder::r#static(mesh(floor));
+                            if !reverse {
+                                world.add_builder(BodyBuilder::r#static(mesh(floor)));
+                            }
+                            // Starts .0005 outside contact, moves .001 inward: real temporal impact.
+                            let wall_start = sign * if dense { 0.0075 } else { 0.5005 };
+                            let builder = if moving {
+                                BodyBuilder::kinematic(mesh(wall)).kinematic_trimesh(true)
+                            } else {
+                                BodyBuilder::r#static(mesh(wall))
+                            };
+                            let handle = world.add_builder(
+                                builder
+                                    .position(Vec3::Z * wall_start)
+                                    .linear_velocity(if moving {
+                                        Vec3::Z * (-sign * 0.06)
+                                    } else {
+                                        Vec3::ZERO
+                                    }),
+                            );
+                            if reverse {
+                                world.add_builder(floor_builder);
+                            }
+                            let radius = if dense { 0.003 } else { 0.04 };
+                            let positions = if dense {
+                                (0..12)
+                                    .map(|i| {
+                                        vec3(
+                                            (i % 3) as f32 * 0.0015,
+                                            0.003 + (i / 3) as f32 * 0.0015,
+                                            sign * 0.004,
+                                        )
+                                    })
+                                    .collect()
+                            } else {
+                                vec![
+                                    vec3(0.056195434, 0.04, sign * 0.45950133),
+                                    vec3(0.077126235, 0.057065815, sign * 0.46),
+                                ]
+                            };
+                            let mut positions: Vec<Vec3> = positions;
+                            if reverse {
+                                positions.reverse();
+                            }
+                            world
+                                .add_fluid(FluidDesc {
+                                    initial_positions: Some(positions),
+                                    radius,
+                                    spacing: 0.1,
+                                    max_particles: 12,
+                                    particle_collision: true,
+                                    separation_mode,
+                                    collision_mode: FluidCollisionMode::SweptMeshes,
+                                    boundary_motion_mode: if moving {
+                                        FluidBoundaryMotionMode::TranslatingKinematicMeshes
+                                    } else {
+                                        FluidBoundaryMotionMode::Legacy
+                                    },
+                                    boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                    viscosity: 0.0,
+                                    ..FluidDesc::default()
+                                })
+                                .unwrap();
+                            let mut counts = [0usize; 3];
+                            let mut minimum = f64::INFINITY;
+                            let mut states = Vec::new();
+                            for step in 0..8 {
+                                if moving {
+                                    let velocity = if step < 3 {
+                                        -sign * 0.06
+                                    } else if step < 5 {
+                                        0.0
+                                    } else {
+                                        sign * 0.06
+                                    };
+                                    world
+                                        .body_mut(handle)
+                                        .unwrap()
+                                        .set_linear_velocity(Vec3::Z * velocity);
+                                }
+                                let before = world.body(handle).unwrap().position();
+                                let velocity = world.body(handle).unwrap().linear_velocity;
+                                SEPARATION_PUSHES.with(|n| n.set(0));
+                                MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+                                MESH_DENSITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+                                MESH_CONTINUITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+                                SEPARATION_SEGMENT_TRACE
+                                    .with(|t| *t.borrow_mut() = Some(Vec::new()));
+                                world.step(1.0 / 60.0);
+                                let density =
+                                    MESH_DENSITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
+                                let trace =
+                                    MESH_CONTINUITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
+                                let segments = SEPARATION_SEGMENT_TRACE
+                                    .with(|t| t.borrow_mut().take().unwrap());
+                                let impacts = MOVING_SCAN_WORK.with(|n| n.get()[3]);
+                                counts[0] += impacts;
+                                counts[1] += density.iter().filter(|(_, a, b, _)| a != b).count();
+                                counts[2] += SEPARATION_PUSHES.with(|n| n.get());
+                                let face = world.body(handle).unwrap().position().z;
+                                assert!(
+                                    (world.body(handle).unwrap().position()
+                                        - before
+                                        - velocity / 60.0)
+                                        .length()
+                                        < 1e-6
+                                );
+                                let triangles = [floor, wall.map(|p| p + Vec3::Z * face)];
+                                let fluid = &world.fluids()[0];
+                                assert_eq!(world.step_count, step + 1);
+                                for (p, v) in fluid.particles().iter().zip(fluid.velocities()) {
+                                    assert!(
+                                        p.is_finite()
+                                            && v.is_finite()
+                                            && v.length() <= MAX_SPEED + 1e-4
+                                    );
+                                    assert!(p.y>=radius-2e-6 && (face-p.z)*sign>=radius-2e-6,"dense={dense} moving={moving} sign={sign} reverse={reverse} mode={separation_mode:?} step={step} p={p:?} face={face}");
+                                    for triangle in triangles {
+                                        assert!(
+                                            distance(*p, triangle) >= f64::from(radius) - 2e-6,
+                                            "triangle clearance p={p:?}"
+                                        );
+                                    }
+                                }
+                                if separation_mode == FluidSeparationMode::Legacy {
+                                    assert!(segments.is_empty());
+                                }
+                                for (a, _, b) in segments {
+                                    for p in [a, b] {
+                                        assert!(
+                                            p.is_finite()
+                                                && p.y >= radius - 2e-6
+                                                && (face - p.z) * sign >= radius - 2e-6,
+                                            "per-sweep clearance step={step} p={p:?} face={face}"
+                                        );
+                                        for triangle in triangles {
+                                            assert!(
+                                                distance(p, triangle) >= f64::from(radius) - 2e-6
+                                            );
+                                        }
+                                    }
+                                }
+                                // Every correction occurs at the current frozen wall pose.
+                                // Inside finite faces by metres: no legitimate edge bypass.
+                                for (i, a, _, b) in trace {
+                                    assert!(
+                                        a.x.abs() < 1.0
+                                            && a.y < 1.0
+                                            && a.z.abs() < 1.0
+                                            && b.x.abs() < 1.0
+                                            && b.y < 1.0
+                                            && b.z.abs() < 1.0
+                                    );
+                                    assert!(
+                                        (face - a.z) * sign >= -2e-6
+                                            && (face - b.z) * sign >= -2e-6,
+                                        "current wall correction crossed i={i} {a:?}->{b:?}"
+                                    );
+                                }
+                                let mut state = Vec::new();
+                                for p in fluid
+                                    .positions
+                                    .iter()
+                                    .chain(&fluid.velocities)
+                                    .chain(&fluid.predicted)
+                                    .chain(&fluid.delta)
+                                {
+                                    state.extend(p.to_array().map(f32::to_bits));
+                                }
+                                state.extend(
+                                    fluid
+                                        .densities
+                                        .iter()
+                                        .chain(&fluid.lambdas)
+                                        .map(|v| v.to_bits()),
+                                );
+                                states.push(state);
+                                minimum = minimum.min(overlap_minimum(fluid.particles()).0);
+                                if step == 0 {
+                                    first_distances.push(overlap_minimum(fluid.particles()).0);
+                                    if moving {
+                                        assert!(impacts > 0, "real initial moving impact");
+                                    }
+                                }
+                            }
+                            assert!(counts[2] > 0, "actual pair correction required {counts:?}");
+                            if dense {
+                                assert!(
+                                    counts.iter().all(|n| *n > 0),
+                                    "density/impact/pair nonvacuity {counts:?}"
+                                );
+                            }
+                            for (sum, n) in total.iter_mut().zip(counts) {
+                                *sum += n;
+                            }
+                            println!("ROUND168_MESH dense={dense} moving={moving} sign={sign} reverse={reverse} mode={separation_mode:?} steps=8 minpair={minimum:.12} counts={counts:?}");
+                            mode_states.push(states);
+                            worlds += 1;
+                        }
+                        if dense {
+                            assert_eq!(
+                                mode_states[0], mode_states[1],
+                                "normal-only dense mesh correction stays bitwise equal"
+                            );
+                        }
+                        if !dense {
+                            assert!(
+                                first_distances[1] > first_distances[0] + 0.005,
+                                "meshcorner progress {first_distances:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(worlds, 20);
+        println!(
+            "ROUND168_TOTAL worlds={worlds} steps={} counts={total:?}",
+            worlds * 8
+        );
     }
 
     #[test]
