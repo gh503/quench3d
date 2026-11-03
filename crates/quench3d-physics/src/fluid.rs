@@ -5771,6 +5771,100 @@ mod tests {
     }
 
     #[test]
+    fn translating_box_edge_corner_analytic_audit() {
+        // 16 fixed trajectories: two edge orientations and two corner sides,
+        // mirrored travel, primary/BodyLocal box. Analytic circle sections
+        // distinguish rounded contact from the earlier inflated-AABB entry.
+        let half = 0.1f32;
+        let radius = 0.02f32;
+        for sign in [-1.0f32, 1.0] {
+            for extra in [false, true] {
+                for (y, z) in [(0.11f32, 0.0f32), (0.0, 0.11), (0.11, 0.11), (-0.11, 0.11)] {
+                    let dy = f64::from(y.abs().max(half)) - f64::from(half);
+                    let dz = f64::from(z.abs().max(half)) - f64::from(half);
+                    let x = (f64::from(radius).powi(2) - dy * dy - dz * dz).sqrt();
+                    let entry = f64::from(half) + x;
+                    let toi = (0.25 - entry) / 0.5;
+                    let start = vec3(sign * 0.25, y, z);
+                    let end = vec3(sign * -0.25, y, z);
+                    let (actual_t, point, normal) =
+                        sweep_rounded_box(start, end, Vec3::splat(half), radius).unwrap();
+                    assert!((actual_t - toi).abs() < 1e-7);
+                    assert!(actual_t > (0.25 - f64::from(half + radius)) / 0.5 + 0.001);
+                    let expected_normal = vec3(
+                        sign * (x / f64::from(radius)) as f32,
+                        y.signum() * (dy / f64::from(radius)) as f32,
+                        z.signum() * (dz / f64::from(radius)) as f32,
+                    );
+                    assert!((normal - expected_normal).length() < 2e-6);
+                    assert!(
+                        (point - vec3(sign * half, y.clamp(-half, half), z.clamp(-half, half)))
+                            .length()
+                            < 2e-6
+                    );
+
+                    let offset = if extra { Vec3::Y } else { Vec3::ZERO };
+                    let shape = Shape::Box {
+                        half_extents: Vec3::splat(half),
+                    };
+                    let builder = if extra {
+                        BodyBuilder::kinematic(Shape::Sphere { radius: 0.01 })
+                            .compound_transform_mode(crate::body::CompoundTransformMode::BodyLocal)
+                            .part_at(shape, -offset)
+                    } else {
+                        BodyBuilder::kinematic(shape)
+                    };
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let handle = world.add_builder(
+                        builder
+                            .position(offset - Vec3::X * (sign * 0.25))
+                            .linear_velocity(Vec3::X * (sign * 30.0)),
+                    );
+                    let particle = vec3(0.0, y, z);
+                    world
+                        .add_fluid(FluidDesc {
+                            initial_positions: Some(vec![particle]),
+                            radius,
+                            spacing: 0.1,
+                            viscosity: 0.0,
+                            collision_mode: FluidCollisionMode::SweptMeshes,
+                            boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                            boundary_motion_mode:
+                                FluidBoundaryMotionMode::TranslatingKinematicPrimitives,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    let before = world.body(handle).unwrap().transform;
+                    world.step(1.0 / 60.0);
+                    let body = world.body(handle).unwrap();
+                    assert_eq!(body.prev_transform, before);
+                    assert_eq!(body.angular_velocity, Vec3::ZERO);
+                    assert_eq!(body.transform.rotation, before.rotation);
+                    assert!((body.position() - offset - Vec3::X * (sign * 0.25)).length() < 1e-6);
+                    let expected_position = vec3(sign * (0.25 + entry) as f32, y, z);
+                    let fluid = &world.fluids()[0];
+                    assert!(
+                        (fluid.particles()[0] - expected_position).length() < 3e-6,
+                        "position sign={sign} extra={extra} yz={y},{z}: {:?}",
+                        fluid.particles()[0]
+                    );
+                    // Remove inward relative normal speed, retain 80% tangent.
+                    // Oblique contacts must not be mistaken for velocity=(30,0,0).
+                    let carried_speed = sign * (0.5 * (1.0 - toi) * 60.0) as f32;
+                    let relative_x = carried_speed - sign * 30.0;
+                    let tangential =
+                        Vec3::X * relative_x - expected_normal * (relative_x * expected_normal.x);
+                    let expected_velocity = Vec3::X * (sign * 30.0) + tangential * 0.8;
+                    assert!((fluid.velocities()[0] - expected_velocity).length() < 5e-4,
+                        "velocity sign={sign} extra={extra} yz={y},{z}: actual={:?} expected={expected_velocity:?}", fluid.velocities()[0]);
+                    let contact = fluid.contacts[0].expect("rounded feature contact");
+                    assert!((contact.normal - expected_normal).length() < 3e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn translating_box_public_entry_matrix() {
         // New capability audit: the existing sphere-only policy cannot sweep boxes.
         let mut failures = Vec::new();
