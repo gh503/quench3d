@@ -558,6 +558,16 @@ fn add_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                 ui.close();
             }
         }
+        ui.separator();
+        if ui
+            .button("粒子流体")
+            .on_hover_text("添加会随重力流动的粒子水块；水域用于解析浮力")
+            .clicked()
+        {
+            doc.add_particle_fluid(engine);
+            doc.record_edit(engine);
+            ui.close();
+        }
     });
 }
 

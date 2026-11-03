@@ -1478,6 +1478,64 @@ impl Doc {
         self.status = format!("已建默认场景（{} 个物体）", engine.scene.len());
     }
 
+    /// 在原点上方添加一块粒子流体；只在用户操作时创建物理与表面代理。
+    pub fn add_particle_fluid(&mut self, engine: &mut Engine) {
+        let desc = quench3d_physics::FluidDesc {
+            center: Vec3::new(0.0, 1.0, 0.0),
+            half_extents: Vec3::splat(0.5),
+            spacing: 0.15,
+            radius: 0.06,
+            max_particles: 2000,
+            ..Default::default()
+        };
+        let Some(fluid) = engine.world.add_fluid(desc) else {
+            self.status = "添加粒子流体失败".to_string();
+            return;
+        };
+        // FluidDoc 的 serde 缺省与场景读取共用；不要另外复制完整参数表。
+        let spec = serde_json::from_value(serde_json::json!({
+            "center": [0.0, 1.0, 0.0], "size": [1.0, 1.0, 1.0],
+            "spacing": 0.15, "radius": 0.06, "max_particles": 2000,
+            "surface_mesh": true
+        }))
+        .expect("编辑器内置粒子流体配置有效");
+        self.base_doc
+            .get_or_insert_with(Default::default)
+            .fluids
+            .push(spec);
+        // 连续表面刷新会改写网格，所以每个流体使用独立的占位句柄。
+        let mesh = engine.assets.mesh(
+            &mut engine.renderer,
+            &engine.gpu,
+            &format!("$editor_fluid_surface_{fluid}"),
+            &MeshData::default(),
+        );
+        let material = engine.assets.material(
+            &mut engine.renderer,
+            &engine.gpu,
+            "$fluid_surface_mesh",
+            MaterialDesc {
+                base_color: Vec4::new(0.10, 0.34, 0.58, 0.55),
+                roughness: 0.08,
+                alpha_blend: true,
+                double_sided: true,
+                ..Default::default()
+            },
+        );
+        engine
+            .scene
+            .add_fluid_mesh(mesh, material, fluid, 32, 0.45, &format!("流体表面{fluid}"));
+        engine
+            .scene
+            .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
+        engine.renderer.options.water.enabled = true;
+        engine.paused = true;
+        self.status = format!(
+            "已添加粒子流体（{} 颗粒子）",
+            engine.world.fluids()[fluid].particles().len()
+        );
+    }
+
     /// 加一个图元（默认颜色）。
     pub fn spawn(&mut self, engine: &mut Engine, kind: Primitive) -> usize {
         let color = Vec4::new(0.35, 0.62, 0.92, 1.0);

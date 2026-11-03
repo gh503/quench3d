@@ -47,6 +47,123 @@ fn headless_engine() -> Option<Engine> {
     ))
 }
 
+/// 添加菜单必须真实创建粒子、表面代理，并支持标准存盘与历史。
+#[test]
+fn add_menu_particle_fluid_survives_save_reload_and_history() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.build_default_scene(&mut engine);
+    doc.reset_history(&engine);
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut run = |engine: &mut Engine, doc: &mut Doc, events| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, doc, &mut view, &mut gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let click = |pos| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]
+    };
+    run(&mut engine, &mut doc, vec![]);
+    let shapes = run(&mut engine, &mut doc, vec![]);
+    let add = text_shape_rect(&shapes, "添加")
+        .expect("添加菜单可见")
+        .center();
+    run(&mut engine, &mut doc, click(add));
+    let shapes = run(&mut engine, &mut doc, vec![]);
+    let fluid = text_shape_rect(&shapes, "粒子流体")
+        .expect("添加菜单必须提供粒子流体入口")
+        .center();
+    run(&mut engine, &mut doc, click(fluid));
+    assert_eq!(engine.world.fluids().len(), 1);
+    let points = engine.world.fluids()[0].particles().to_vec();
+    assert!(!points.is_empty() && points.len() < 2000);
+    assert!(engine.paused);
+    assert!(engine
+        .scene
+        .objects
+        .iter()
+        .any(|o| o.fluid_surface.is_some_and(|v| v.fluid == 0 && v.mesh)));
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let parsed = quench3d_cli::scene_doc::SceneDoc::from_json(&saved.json).unwrap();
+    let spec = &parsed.fluids[0];
+    assert_eq!(spec.center, Some([0.0, 1.0, 0.0]));
+    assert_eq!(spec.size, [1.0; 3]);
+    assert_eq!(spec.spacing, 0.15);
+    assert_eq!(spec.radius, Some(0.06));
+    assert_eq!(spec.max_particles, 2000);
+    assert!(spec.surface_mesh);
+    assert!(spec.initial_positions.is_none());
+    doc.undo(&mut engine);
+    assert!(engine.world.fluids().is_empty());
+    doc.redo(&mut engine);
+    assert_eq!(engine.world.fluids()[0].particles(), points.as_slice());
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    assert_eq!(engine.world.fluids().len(), 1);
+    assert_eq!(engine.world.fluids()[0].particles(), points.as_slice());
+    assert_eq!(engine.world.fluids()[0].desc().spacing, 0.15);
+    assert!(engine
+        .scene
+        .objects
+        .iter()
+        .any(|o| o.fluid_surface.is_some_and(|v| v.mesh)));
+    run(&mut engine, &mut doc, vec![]);
+    let shapes = run(&mut engine, &mut doc, vec![]);
+    let add = text_shape_rect(&shapes, "添加").unwrap().center();
+    run(&mut engine, &mut doc, click(add));
+    let shapes = run(&mut engine, &mut doc, vec![]);
+    let second = text_shape_rect(&shapes, "粒子流体").unwrap().center();
+    run(&mut engine, &mut doc, click(second));
+    assert_eq!(engine.world.fluids().len(), 2);
+    assert_eq!(engine.world.fluids()[0].particles(), points.as_slice());
+    assert_eq!(engine.world.fluids()[1].particles(), points.as_slice());
+    let surfaces: Vec<_> = (0..2)
+        .map(|fluid| {
+            engine
+                .scene
+                .objects
+                .iter()
+                .find(|o| o.fluid_surface.is_some_and(|v| v.fluid == fluid && v.mesh))
+                .expect("每块流体必须有自己的连续表面")
+        })
+        .collect();
+    assert_ne!(
+        surfaces[0].mesh, surfaces[1].mesh,
+        "表面刷新不能覆盖另一块流体的可变网格"
+    );
+}
+
 /// 一个不依赖磁盘/GPU 的播放实例：只给动画面板读播放器与状态机字段。
 /// 片段列表为空，所以 `refresh_animations` 不会碰任何物体。
 fn fake_animation_instance() -> ModelAnimationInstance {
