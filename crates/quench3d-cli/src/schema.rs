@@ -932,7 +932,7 @@ pub fn json_schema() -> Value {
         });
         d["properties"]["collision_mode"] = json!({
             "type": "string", "enum": ["legacy", "swept_spheres", "swept_primitives"],
-            "description": "Default legacy keeps discrete projection. swept_spheres sweeps static sphere parts; swept_primitives also sweeps static boxes using rounded particle clearance. Only initial liquid motion is swept; moving boundaries, other shapes, secondary particles and later PBF corrections are excluded. Initial overlaps use discrete projection; first contact stops the remaining motion."
+            "description": "Default legacy keeps discrete projection. swept_spheres sweeps initial motion against static spheres. swept_primitives sweeps initial motion and PBF density corrections against static spheres and boxes using rounded particle clearance; inward motion from the outer clearance shell is held at contact. Centers inside solids use discrete projection. Moving boundaries, other shapes, secondary particles and particle-separation corrections are excluded; first contact stops remaining motion."
         });
         d["properties"]["boundary_velocity_mode"] = json!({
             "type": "string", "enum": ["legacy", "body_motion"],

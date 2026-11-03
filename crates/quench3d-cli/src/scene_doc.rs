@@ -1149,7 +1149,7 @@ pub enum FluidCollisionModeDoc {
     Legacy,
     /// Sweep initial motion against static sphere parts only.
     SweptSpheres,
-    /// Sweep initial motion against static sphere and box parts.
+    /// Sweep initial motion and PBF density corrections against static spheres and boxes.
     SweptPrimitives,
 }
 

@@ -38,7 +38,7 @@ pub enum FluidBoundaryVelocityMode {
     BodyMotion,
 }
 
-/// Initial liquid-particle movement collision policy.
+/// Liquid-particle movement collision policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FluidCollisionMode {
     /// Preserve historical discrete projection.
@@ -46,7 +46,8 @@ pub enum FluidCollisionMode {
     Legacy,
     /// Sweep initial particle motion against static sphere parts.
     SweptSpheres,
-    /// Sweep initial motion against static sphere and box parts.
+    /// Sweep initial motion and PBF density corrections against static spheres and boxes.
+    /// Inward motion from the particle-clearance shell is held at contact.
     SweptPrimitives,
 }
 
@@ -85,7 +86,7 @@ pub struct FluidDesc {
     pub flow_coupling: f32,
     /// Boundary velocity policy; Legacy preserves existing scenes.
     pub boundary_velocity_mode: FluidBoundaryVelocityMode,
-    /// Initial liquid-particle sweep policy; defaults to historical projection.
+    /// Liquid-particle sweep policy; defaults to historical projection.
     pub collision_mode: FluidCollisionMode,
     /// 初始速度（米/秒），缺省 0；给水柱一个喷射方向。
     pub initial_velocity: Vec3,
@@ -1035,13 +1036,33 @@ impl Fluid {
             }
             for (i, d) in self.delta.iter().enumerate() {
                 let prev = self.predicted[i];
-                let (p, contact) = collide_position(
-                    prev,
-                    prev + *d,
-                    &*bodies,
-                    radius,
-                    self.desc.boundary_velocity_mode,
-                );
+                let (p, contact) =
+                    if self.desc.collision_mode == FluidCollisionMode::SweptPrimitives {
+                        let (end, swept) = sweep_static_spheres(
+                            prev,
+                            prev + *d,
+                            &*bodies,
+                            radius,
+                            self.desc.boundary_velocity_mode,
+                            true,
+                        );
+                        let (p, projected) = collide_position(
+                            prev,
+                            end,
+                            &*bodies,
+                            radius,
+                            self.desc.boundary_velocity_mode,
+                        );
+                        (p, projected.or(swept))
+                    } else {
+                        collide_position(
+                            prev,
+                            prev + *d,
+                            &*bodies,
+                            radius,
+                            self.desc.boundary_velocity_mode,
+                        )
+                    };
                 self.predicted[i] = p;
                 if contact.is_some() {
                     self.contacts[i] = contact;
@@ -1968,8 +1989,9 @@ fn sweep_rounded_box(start: Vec3, end: Vec3, half: Vec3, radius: f32) -> Option<
     None
 }
 
-/// Sweep initial liquid movement against static spheres, and optionally boxes. Later
-/// density corrections and initially overlapping particles retain discrete projection.
+/// Sweep a liquid movement segment against static spheres, and optionally boxes.
+/// The primitive mode also holds inward clearance-shell motion at the start;
+/// centers already inside solids retain discrete projection.
 fn sweep_static_spheres(
     start: Vec3,
     end: Vec3,
@@ -1997,6 +2019,55 @@ fn sweep_static_spheres(
         }
         for (shape, local) in body.parts() {
             if boxes {
+                // A rounded contact can lie a fraction of an ulp inside the
+                // particle-clearance shell. Block only inward motion while the
+                // center remains outside the solid; do not add a numerical skin.
+                let world = body.part_world_transform(&local);
+                let local_start = world.inverse_transform_point(start);
+                let local_end = world.inverse_transform_point(end);
+                let local_point = match shape {
+                    crate::shape::Shape::Box { half_extents } => {
+                        Some(local_start.clamp(-half_extents.abs(), half_extents.abs()))
+                    }
+                    crate::shape::Shape::Sphere { radius: r } if local_start.length() > r.abs() => {
+                        Some(local_start.normalize_or_zero() * r.abs())
+                    }
+                    _ => None,
+                };
+                if let Some(point) = local_point {
+                    let gap = sub(wide(local_start), wide(point));
+                    let distance_squared = dot(gap, gap);
+                    if distance_squared > 0.0
+                        && distance_squared < f64::from(radius).powi(2)
+                        && dot(gap, sub(wide(local_end), wide(local_start))) < 0.0
+                        && 0.0 < earliest
+                    {
+                        let normal = world
+                            .rotation
+                            .mul_vec3(Vec3::new(
+                                (gap[0] / distance_squared.sqrt()) as f32,
+                                (gap[1] / distance_squared.sqrt()) as f32,
+                                (gap[2] / distance_squared.sqrt()) as f32,
+                            ))
+                            .normalize_or_zero();
+                        let point = world.transform_point(point);
+                        earliest = 0.0;
+                        result = (
+                            start,
+                            Some(Contact {
+                                normal,
+                                point,
+                                body: index as u32,
+                                velocity: if mode == FluidBoundaryVelocityMode::BodyMotion {
+                                    Vec3::ZERO
+                                } else {
+                                    body.velocity_at_point(point)
+                                },
+                            }),
+                        );
+                        continue;
+                    }
+                }
                 if let crate::shape::Shape::Box { half_extents } = shape {
                     let world = body.part_world_transform(&local);
                     if let Some((t, point, normal)) = sweep_rounded_box(
@@ -2446,6 +2517,125 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn swept_primitives_clearance_shell_is_one_sided() {
+        for sphere in [false, true] {
+            for (start, velocity) in [
+                (vec3(-0.140625, 0.0, 0.0), Vec3::X * 6.0),
+                (vec3(-0.140625, 0.0, 0.0), -Vec3::X * 6.0),
+                (vec3(-0.140625, 0.0, 0.0), Vec3::Y * 6.0),
+                (Vec3::ZERO, Vec3::X * 18.0),
+            ] {
+                let mut states = Vec::new();
+                for mode in [
+                    FluidCollisionMode::Legacy,
+                    FluidCollisionMode::SweptSpheres,
+                    FluidCollisionMode::SweptPrimitives,
+                ] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    world.add_builder(BodyBuilder::r#static(if sphere {
+                        Shape::Sphere { radius: 0.125 }
+                    } else {
+                        Shape::Box {
+                            half_extents: Vec3::splat(0.125),
+                        }
+                    }));
+                    world
+                        .add_fluid(FluidDesc {
+                            initial_positions: Some(vec![start]),
+                            initial_velocity: velocity,
+                            radius: 0.03125,
+                            spacing: 0.1,
+                            collision_mode: mode,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    world.step(1.0 / 60.0);
+                    states.push((
+                        world.fluids()[0].particles()[0],
+                        world.fluids()[0].velocities()[0],
+                    ));
+                }
+                if start.x < 0.0 && velocity.x > 0.0 {
+                    assert!(states[2].0.x <= start.x);
+                    assert!(states[2].1.x <= 0.0);
+                } else {
+                    assert_eq!(states[0], states[2]);
+                    assert_eq!(states[1], states[2]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn swept_primitives_compressed_particles_remain_on_entry_side() {
+        // Fixed 16 cases. Collinear particles cannot legitimately go around a sphere;
+        // the box face extends far beyond every recorded transverse coordinate.
+        let mut failures = Vec::new();
+        let mut summaries = Vec::new();
+        for sphere in [false, true] {
+            for half in [0.005f32, 0.02] {
+                for iterations in [1, 4] {
+                    for speed in [0.0f32, 2.0] {
+                        let radius = 0.003;
+                        let initial: Vec<_> = (0..12)
+                            .map(|i| vec3(-half - radius - 0.001 - i as f32 * 0.003, 0.0, 0.0))
+                            .collect();
+                        let mut traces = Vec::new();
+                        for obstacle in [false, true] {
+                            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                            if obstacle {
+                                world.add_builder(BodyBuilder::r#static(if sphere {
+                                    Shape::Sphere { radius: half }
+                                } else {
+                                    Shape::Box {
+                                        half_extents: vec3(half, 2.0, 2.0),
+                                    }
+                                }));
+                            }
+                            let desc = FluidDesc {
+                                initial_positions: Some(initial.clone()),
+                                initial_velocity: Vec3::X * speed,
+                                spacing: 0.1,
+                                radius,
+                                iterations,
+                                viscosity: 0.0,
+                                collision_mode: FluidCollisionMode::SweptPrimitives,
+                                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                ..FluidDesc::default()
+                            };
+                            assert!(desc.is_valid());
+                            world.add_fluid(desc).unwrap();
+                            let mut max_x = f32::NEG_INFINITY;
+                            for step in 0..8 {
+                                world.step(1.0 / 60.0);
+                                let fluid = &world.fluids()[0];
+                                for (i, p) in fluid.particles().iter().enumerate() {
+                                    assert!(p.is_finite());
+                                    assert_eq!(p.y, 0.0, "transverse escape");
+                                    assert_eq!(p.z, 0.0, "transverse escape");
+                                    max_x = max_x.max(p.x);
+                                    if obstacle && p.x > -half - radius + 1e-5 {
+                                        failures
+                                            .push((sphere, half, iterations, speed, step, i, p.x));
+                                    }
+                                }
+                            }
+                            traces.push(max_x);
+                        }
+                        assert!(traces[0] > 0.0, "control did not challenge obstacle");
+                        summaries.push((sphere, half, iterations, speed, traces));
+                    }
+                }
+            }
+        }
+        println!("fixed_cases=16 summaries={summaries:?} failures={failures:?}");
+        assert!(
+            failures.is_empty(),
+            "compressed particle penetration: {failures:?}"
+        );
     }
 
     #[test]
