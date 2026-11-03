@@ -33,6 +33,9 @@ thread_local! {
     static SWEEP_INDEX_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SWEEP_BOUNDS_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SWEEP_WORK: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
+    static MESH_SWEEP_WORK: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
+    static MESH_SWEEP_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MESH_SWEEP_BOUNDS_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SWEEP_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 /// 单个粒子的速度上限（m/s）：防止参数失控时飞出宇宙。
@@ -65,9 +68,72 @@ pub enum FluidCollisionMode {
     SweptMeshes,
 }
 
+struct CachedSweepTriangle {
+    points: [Vec3; 3],
+    bounds: Aabb,
+}
+
+struct MeshSweepCache {
+    bodies: Vec<Vec<Option<Vec<CachedSweepTriangle>>>>,
+}
+
+impl MeshSweepCache {
+    fn build(bodies: &[BodySlot]) -> Self {
+        Self {
+            bodies: bodies
+                .iter()
+                .map(|slot| {
+                    let Some(body) = &slot.body else {
+                        return Vec::new();
+                    };
+                    if body.sensor || body.body_type != crate::body::BodyType::Static {
+                        return Vec::new();
+                    }
+                    body.parts()
+                        .map(|(shape, local)| {
+                            let crate::shape::Shape::TriMesh { vertices, indices } = shape else {
+                                return None;
+                            };
+                            let world = body.part_world_transform(&local);
+                            Some(
+                                indices
+                                    .as_chunks::<3>()
+                                    .0
+                                    .iter()
+                                    .filter_map(|tri| {
+                                        let points = [
+                                            *vertices.get(tri[0] as usize)?,
+                                            *vertices.get(tri[1] as usize)?,
+                                            *vertices.get(tri[2] as usize)?,
+                                        ]
+                                        .map(|p| world.transform_point(p));
+                                        #[cfg(test)]
+                                        MESH_SWEEP_WORK.with(|n| {
+                                            let mut work = n.get();
+                                            work[0] += 1;
+                                            n.set(work);
+                                        });
+                                        points.iter().all(|p| p.is_finite()).then(|| {
+                                            CachedSweepTriangle {
+                                                bounds: Aabb::from_points(&points),
+                                                points,
+                                            }
+                                        })
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SweepQueryContext<'a> {
     meshes: bool,
+    mesh_cache: Option<&'a MeshSweepCache>,
     bounds: Option<&'a [Option<Aabb>]>,
     index: Option<&'a SweepBodyIndex>,
 }
@@ -980,6 +1046,7 @@ impl Fluid {
         bodies: &[BodySlot],
         bounds: Option<&[Option<Aabb>]>,
         index: Option<&SweepBodyIndex>,
+        mesh_cache: Option<&MeshSweepCache>,
     ) {
         let min_dist = 2.0 * radius;
         if min_dist <= 0.0 {
@@ -1016,6 +1083,7 @@ impl Fluid {
                         self.desc.boundary_velocity_mode,
                         true,
                         SweepQueryContext {
+                            mesh_cache,
                             bounds,
                             index,
                             meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
@@ -1030,6 +1098,7 @@ impl Fluid {
                         self.desc.boundary_velocity_mode,
                         true,
                         SweepQueryContext {
+                            mesh_cache,
                             bounds,
                             index,
                             meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
@@ -1143,6 +1212,17 @@ impl Fluid {
             None
         };
 
+        #[cfg(test)]
+        let mesh_cache_enabled = !MESH_SWEEP_REFERENCE.with(|flag| flag.get());
+        #[cfg(not(test))]
+        let mesh_cache_enabled = true;
+        let mesh_cache =
+            if mesh_cache_enabled && self.desc.collision_mode == FluidCollisionMode::SweptMeshes {
+                Some(MeshSweepCache::build(bodies))
+            } else {
+                None
+            };
+
         // Only the explicit mode captures the actual temporal segment, before
         // neighbor construction and later density corrections change its endpoint.
         let swept_contacts = if self.desc.collision_mode != FluidCollisionMode::Legacy {
@@ -1163,6 +1243,7 @@ impl Fluid {
                                     | FluidCollisionMode::SweptMeshes
                             ),
                             SweepQueryContext {
+                                mesh_cache: mesh_cache.as_ref(),
                                 meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
                                 bounds: sweep_bounds.as_deref(),
                                 index: sweep_index.as_ref(),
@@ -1245,6 +1326,7 @@ impl Fluid {
                         self.desc.boundary_velocity_mode,
                         true,
                         SweepQueryContext {
+                            mesh_cache: mesh_cache.as_ref(),
                             meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
                             bounds: sweep_bounds.as_deref(),
                             index: sweep_index.as_ref(),
@@ -1279,6 +1361,7 @@ impl Fluid {
                 &*bodies,
                 sweep_bounds.as_deref(),
                 sweep_index.as_ref(),
+                mesh_cache.as_ref(),
             );
         }
         // 统计用的是**求解后**的密度（报告里"密度比"才有意义）。
@@ -2355,6 +2438,7 @@ fn sweep_static_spheres(
     context: SweepQueryContext<'_>,
 ) -> (Vec3, Option<Contact>) {
     let SweepQueryContext {
+        mesh_cache,
         meshes,
         bounds: cached_bounds,
         index,
@@ -2423,21 +2507,67 @@ fn sweep_static_spheres(
                 }
             }
         }
-        for (shape, local) in body.parts() {
+        for (part_index, (shape, local)) in body.parts().enumerate() {
             if meshes {
                 if let crate::shape::Shape::TriMesh { vertices, indices } = shape {
+                    let cached =
+                        mesh_cache.and_then(|cache| cache.bodies[index][part_index].as_ref());
                     let world = body.part_world_transform(&local);
-                    for tri in indices.as_chunks::<3>().0 {
-                        let Some(a) = vertices.get(tri[0] as usize) else {
-                            continue;
+                    let mut uncached = indices.as_chunks::<3>().0.iter().filter_map(|tri| {
+                        let points = [
+                            *vertices.get(tri[0] as usize)?,
+                            *vertices.get(tri[1] as usize)?,
+                            *vertices.get(tri[2] as usize)?,
+                        ]
+                        .map(|p| world.transform_point(p));
+                        #[cfg(test)]
+                        MESH_SWEEP_WORK.with(|n| {
+                            let mut work = n.get();
+                            work[0] += 1;
+                            n.set(work);
+                        });
+                        Some(points)
+                    });
+                    let mut cached_iter = cached.into_iter().flatten().filter_map(|triangle| {
+                        #[cfg(test)]
+                        MESH_SWEEP_BOUNDS_CHECKS.with(|n| n.set(n.get() + 1));
+                        let bounds = triangle.bounds;
+                        let scale = bounds
+                            .min
+                            .abs()
+                            .max(bounds.max.abs())
+                            .max(start.abs())
+                            .max(end.abs())
+                            .max_element()
+                            .max(1.0);
+                        let margin = radius + 64.0 * f32::EPSILON * scale;
+                        let segment = Aabb {
+                            min: start.min(end) - Vec3::splat(margin),
+                            max: start.max(end) + Vec3::splat(margin),
                         };
-                        let Some(b) = vertices.get(tri[1] as usize) else {
-                            continue;
-                        };
-                        let Some(c) = vertices.get(tri[2] as usize) else {
-                            continue;
-                        };
-                        let points = [*a, *b, *c].map(|p| world.transform_point(p));
+                        if bounds.is_valid()
+                            && margin.is_finite()
+                            && margin >= 0.0
+                            && segment.is_valid()
+                            && !bounds.intersects(&segment)
+                        {
+                            None
+                        } else {
+                            Some(triangle.points)
+                        }
+                    });
+                    let points: &mut dyn Iterator<Item = [Vec3; 3]> = if cached.is_some() {
+                        &mut cached_iter
+                    } else {
+                        &mut uncached
+                    };
+                    for points in points {
+                        #[cfg(test)]
+                        MESH_SWEEP_WORK.with(|n| {
+                            let mut work = n.get();
+                            work[1] += 1;
+                            n.set(work);
+                        });
                         if let Some((t, point, normal)) = sweep_triangle(start, end, points, radius)
                         {
                             if t < earliest {
@@ -3178,6 +3308,263 @@ mod tests {
             builds > 0 && builds <= 128,
             "static bounds builds={builds}, budget=128"
         );
+    }
+
+    fn mesh_sweep_perf_fixture(triangles: usize, separation: bool, wall: bool) -> PhysicsWorld {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let mut vertices = Vec::new();
+        for i in 0..triangles {
+            let offset = if i == 0 {
+                Vec3::ZERO
+            } else {
+                vec3(10.0 + (i % 32) as f32, 10.0 + (i / 32) as f32, 10.0)
+            };
+            vertices.extend([
+                vec3(0.0, -2.0, -2.0) + offset,
+                vec3(0.0, 2.0, -2.0) + offset,
+                vec3(0.0, 0.0, 2.0) + offset,
+            ]);
+        }
+        if wall {
+            let indices = (0..vertices.len() as u32).collect();
+            world.add_builder(BodyBuilder::r#static(Shape::TriMesh { vertices, indices }));
+        }
+        world
+            .add_fluid(FluidDesc {
+                initial_positions: Some(
+                    (0..32)
+                        .map(|i| {
+                            vec3(
+                                -0.004 - (i % 16) as f32 * 0.003,
+                                (i / 16) as f32 * 0.3 - 0.15,
+                                0.0,
+                            )
+                        })
+                        .collect(),
+                ),
+                initial_velocity: Vec3::X * 2.0,
+                spacing: 0.1,
+                radius: 0.003,
+                iterations: 4,
+                viscosity: 0.0,
+                particle_collision: separation,
+                collision_mode: FluidCollisionMode::SweptMeshes,
+                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+        world
+    }
+
+    #[test]
+    fn mesh_sweep_cache_geometry_and_edits_match_full_scan() {
+        use crate::body::{CompoundTransformMode, ShapePart};
+        let mut totals = [0usize; 2];
+        for case in 0..32 {
+            let mode = if case % 4 == 0 {
+                CompoundTransformMode::Legacy
+            } else {
+                CompoundTransformMode::BodyLocal
+            };
+            let pose = Transform {
+                position: Vec3::splat(if case >= 16 { 1000.0 } else { 0.0 }),
+                rotation: Quat::from_rotation_z(case as f32 * 0.13),
+                scale: Vec3::ONE,
+            };
+            let local = Transform {
+                position: Vec3::Y * 0.7,
+                rotation: Quat::from_rotation_x(0.37),
+                scale: Vec3::ONE,
+            };
+            let expected = if mode == CompoundTransformMode::BodyLocal {
+                pose.mul_transform(&local)
+            } else {
+                local.mul_transform(&pose)
+            };
+            let mut vertices = match case % 4 {
+                0 | 1 => vec![
+                    vec3(0.0, -2.0, -2.0),
+                    vec3(0.0, 2.0, -2.0),
+                    vec3(0.0, 0.0, 2.0),
+                ],
+                2 => vec![-Vec3::Y, -Vec3::Y, Vec3::Y],
+                _ => vec![Vec3::ZERO; 3],
+            };
+            for i in 0..8 {
+                vertices.extend([
+                    vec3(0.0, 10.0 + i as f32, 0.0),
+                    vec3(0.0, 11.0 + i as f32, 0.0),
+                    vec3(0.0, 10.0 + i as f32, 1.0),
+                ]);
+            }
+            let mut indices: Vec<u32> = (0..vertices.len() as u32).collect();
+            if case % 2 == 1 {
+                indices.reverse();
+            }
+            if case % 8 == 4 {
+                indices.extend([0, 1, 99999]);
+            }
+            if case % 8 == 5 {
+                indices.clear();
+            }
+            if case % 8 == 6 {
+                let n = vertices.len() as u32;
+                vertices.extend([Vec3::splat(f32::NAN); 3]);
+                indices.extend([n, n + 1, n + 2]);
+            }
+            let shape = Shape::TriMesh { vertices, indices };
+            let mut snapshots = Vec::new();
+            for (path, reference) in [true, false].into_iter().enumerate() {
+                MESH_SWEEP_REFERENCE.with(|n| n.set(reference));
+                MESH_SWEEP_WORK.with(|n| n.set([0; 2]));
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let builder = || {
+                    BodyBuilder::r#static(Shape::Sphere { radius: 0.01 })
+                        .position(pose.position)
+                        .rotation(pose.rotation)
+                        .part(ShapePart::at(shape.clone(), local.position, local.rotation))
+                        .compound_transform_mode(mode)
+                };
+                let mut wall = world.add_builder(builder());
+                world
+                    .add_fluid(FluidDesc {
+                        initial_positions: Some(vec![expected.transform_point(vec3(
+                            -0.25,
+                            if case % 8 == 1 { 2.1 } else { 0.0 },
+                            0.0,
+                        ))]),
+                        initial_velocity: expected.rotation * Vec3::X * 30.0,
+                        radius: 0.01,
+                        spacing: 0.1,
+                        viscosity: 0.0,
+                        collision_mode: FluidCollisionMode::SweptMeshes,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                let mut bits = Vec::new();
+                for step in 0..5 {
+                    if case % 8 == 0 {
+                        if step == 1 {
+                            let mut moved = pose;
+                            moved.position += Vec3::Y * 20.0;
+                            world.body_mut(wall).unwrap().set_transform(moved);
+                        }
+                        if step == 2 {
+                            world.remove_body(wall).unwrap();
+                        }
+                        if step == 3 {
+                            wall = world.add_builder(builder());
+                        }
+                        let fluid = &mut world.fluids_mut()[0];
+                        fluid.positions[0] = expected.transform_point(Vec3::X * -0.25);
+                        fluid.velocities[0] = expected.rotation * Vec3::X * 30.0;
+                    }
+                    world.step(1.0 / 60.0);
+                    let f = &world.fluids()[0];
+                    for v in f
+                        .positions
+                        .iter()
+                        .chain(&f.velocities)
+                        .chain(&f.predicted)
+                        .chain(&f.delta)
+                    {
+                        bits.extend(v.to_array().map(f32::to_bits));
+                    }
+                    bits.extend(f.densities.iter().chain(&f.lambdas).map(|v| v.to_bits()));
+                    for c in &f.contacts {
+                        bits.push(u32::from(c.is_some()));
+                        if let Some(c) = c {
+                            bits.push(c.body);
+                            for v in [c.point, c.normal, c.velocity] {
+                                bits.extend(v.to_array().map(f32::to_bits));
+                            }
+                        }
+                    }
+                    bits.push(f.revision() as u32);
+                }
+                totals[path] += MESH_SWEEP_WORK.with(|n| n.get()[1]);
+                snapshots.push(bits);
+            }
+            assert_eq!(snapshots[0], snapshots[1], "case={case}");
+        }
+        MESH_SWEEP_REFERENCE.with(|n| n.set(false));
+        assert!(totals[1] < totals[0], "{totals:?}");
+    }
+
+    #[test]
+    fn mesh_sweep_sparse_feature_budget() {
+        let mut world = mesh_sweep_perf_fixture(2048, true, true);
+        MESH_SWEEP_WORK.with(|n| n.set([0; 2]));
+        world.step(1.0 / 60.0);
+        let work = MESH_SWEEP_WORK.with(|n| n.get());
+        assert!(work[1] < 10_000, "sparse mesh feature budget: {work:?}");
+    }
+
+    #[test]
+    #[ignore = "fixed release mesh performance plan, not a wall-clock CI budget"]
+    fn mesh_sweep_sparse_performance_plan() {
+        for separation in [false, true] {
+            let mut control = mesh_sweep_perf_fixture(1, separation, false);
+            control.step(1.0 / 60.0);
+            assert!(control.fluids()[0].particles().iter().any(|p| p.x > 0.0));
+        }
+        let mut references = [Vec::new(), Vec::new()];
+        for round in 0..3 {
+            let sizes = if round % 2 == 0 {
+                [1, 128, 2048]
+            } else {
+                [2048, 128, 1]
+            };
+            for triangles in sizes {
+                for separation in [false, true] {
+                    for reference_path in if round % 2 == 0 {
+                        [true, false]
+                    } else {
+                        [false, true]
+                    } {
+                        MESH_SWEEP_REFERENCE.with(|n| n.set(reference_path));
+                        let mut world = mesh_sweep_perf_fixture(triangles, separation, true);
+                        MESH_SWEEP_WORK.with(|n| n.set([0; 2]));
+                        MESH_SWEEP_BOUNDS_CHECKS.with(|n| n.set(0));
+                        SEPARATION_PUSHES.with(|n| n.set(0));
+                        let timer = std::time::Instant::now();
+                        world.step(1.0 / 60.0);
+                        let us = timer.elapsed().as_secs_f64() * 1e6;
+                        let work = MESH_SWEEP_WORK.with(|n| n.get());
+                        let pushes = SEPARATION_PUSHES.with(|n| n.get());
+                        let bounds_checks = MESH_SWEEP_BOUNDS_CHECKS.with(|n| n.get());
+                        if triangles == 2048 {
+                            assert_eq!(work[1] < 10_000, !reference_path);
+                        }
+                        let fluid = &world.fluids()[0];
+                        let max_x = fluid
+                            .particles()
+                            .iter()
+                            .map(|p| p.x)
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        assert!(
+                            max_x <= -0.003 + 1e-5,
+                            "triangles={triangles} separation={separation} max_x={max_x}"
+                        );
+                        assert_eq!(pushes > 0, separation);
+                        let bits: Vec<_> = fluid
+                            .particles()
+                            .iter()
+                            .chain(fluid.velocities())
+                            .flat_map(|v| v.to_array().map(f32::to_bits))
+                            .collect();
+                        let reference = &mut references[usize::from(separation)];
+                        if reference.is_empty() {
+                            *reference = bits;
+                        } else {
+                            assert_eq!(*reference, bits);
+                        }
+                        println!("round={round} triangles={triangles} particles=32 separation={separation} reference={reference_path} bounds_checks={bounds_checks} full_step_us={us:.3} triangle_transforms={} feature_queries={} pair_pushes={pushes} max_x={max_x}", work[0], work[1]);
+                    }
+                }
+            }
+        }
+        MESH_SWEEP_REFERENCE.with(|n| n.set(false));
     }
 
     #[test]
@@ -4068,7 +4455,7 @@ mod tests {
             .unwrap();
             fluid.predicted = initial.clone();
             fluid.neighbors = neighbors.clone();
-            fluid.separate_particles(radius, &[], None, None);
+            fluid.separate_particles(radius, &[], None, None, None);
             assert_eq!(
                 fluid
                     .predicted
