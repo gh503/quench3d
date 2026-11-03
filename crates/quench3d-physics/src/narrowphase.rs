@@ -51,6 +51,30 @@ fn build_manifold(candidates: impl AsRef<[ContactPoint]>) -> Option<ContactManif
     Some(ContactManifold { points })
 }
 
+fn build_speculative_box_manifold(
+    candidates: impl AsRef<[ContactPoint]>,
+    margin: f32,
+) -> Option<ContactManifold> {
+    let mut points: SmallVec<ContactPoint, MAX_CANDIDATES> = SmallVec::new();
+    points.extend_from_slice(candidates.as_ref());
+    points.retain(|p| {
+        p.position.is_finite()
+            && p.normal.is_finite()
+            && p.penetration.is_finite()
+            && p.penetration >= -margin
+            && p.normal.length_squared() > 0.5
+    });
+    if points.is_empty() {
+        return None;
+    }
+    let points: SmallVec<ContactPoint, MAX_POINTS> = if points.len() > MAX_POINTS {
+        select_spread(&points, MAX_POINTS)
+    } else {
+        points.iter().copied().collect()
+    };
+    Some(ContactManifold { points })
+}
+
 /// 选取最多 `max` 个「最深 + 空间分散」的接触点（确定性）。
 fn select_spread(points: &[ContactPoint], max: usize) -> SmallVec<ContactPoint, MAX_POINTS> {
     let mut chosen: SmallVec<usize, MAX_POINTS> = SmallVec::new();
@@ -579,6 +603,197 @@ fn box_box(he_a: Vec3, ta: &Transform, he_b: Vec3, tb: &Transform) -> Option<Con
         });
     }
     build_manifold(&points)
+}
+
+/// Positive-margin boxes use original surfaces and signed geometric separation.
+pub(crate) fn collide_boxes_speculative(
+    he_a: Vec3,
+    ta: &Transform,
+    he_b: Vec3,
+    tb: &Transform,
+    margin: f32,
+) -> Option<ContactManifold> {
+    let he_a = he_a.abs();
+    let he_b = he_b.abs();
+    let axes_a = [
+        ta.rotation.mul_vec3(Vec3::X),
+        ta.rotation.mul_vec3(Vec3::Y),
+        ta.rotation.mul_vec3(Vec3::Z),
+    ];
+    let axes_b = [
+        tb.rotation.mul_vec3(Vec3::X),
+        tb.rotation.mul_vec3(Vec3::Y),
+        tb.rotation.mul_vec3(Vec3::Z),
+    ];
+    let ca = ta.position;
+    let cb = tb.position;
+    let d = cb - ca;
+
+    let mut best_face_overlap = f32::INFINITY;
+    let mut best_face_from_a = true;
+    let mut best_face_idx = 0usize;
+    for i in 0..3 {
+        let l = axes_a[i];
+        let overlap =
+            proj_radius(&axes_a, he_a, l) + proj_radius(&axes_b, he_b, l) - d.dot(l).abs();
+        if overlap < -margin {
+            return None;
+        }
+        if overlap < best_face_overlap {
+            best_face_overlap = overlap;
+            best_face_from_a = true;
+            best_face_idx = i;
+        }
+    }
+    for j in 0..3 {
+        let l = axes_b[j];
+        let overlap =
+            proj_radius(&axes_a, he_a, l) + proj_radius(&axes_b, he_b, l) - d.dot(l).abs();
+        if overlap < -margin {
+            return None;
+        }
+        if overlap < best_face_overlap {
+            best_face_overlap = overlap;
+            best_face_from_a = false;
+            best_face_idx = j;
+        }
+    }
+
+    let mut best_edge_overlap = f32::INFINITY;
+    let mut best_edge_axis = Vec3::ZERO;
+    let mut best_edge_pair = (0usize, 0usize);
+    for i in 0..3 {
+        for j in 0..3 {
+            let l = axes_a[i].cross(axes_b[j]);
+            if l.length_squared() < 1e-6 {
+                continue; // 平行边，跳过
+            }
+            let l = l.normalize_or_zero();
+            let overlap =
+                proj_radius(&axes_a, he_a, l) + proj_radius(&axes_b, he_b, l) - d.dot(l).abs();
+            if overlap < -margin {
+                return None;
+            }
+            if overlap < best_edge_overlap {
+                best_edge_overlap = overlap;
+                best_edge_axis = l;
+                best_edge_pair = (i, j);
+            }
+        }
+    }
+
+    // 面轴优先（数值更稳，且能产出多点流形）。
+    let prefer_edge = best_edge_overlap < best_face_overlap
+        && best_edge_overlap < best_face_overlap - 1e-3 * best_face_overlap.abs().max(1e-4);
+
+    if prefer_edge {
+        let l = best_edge_axis;
+        let n = if d.dot(l) >= 0.0 { l } else { -l };
+        let (i, j) = best_edge_pair;
+        let k1 = (i + 1) % 3;
+        let k2 = (i + 2) % 3;
+        let ea_c = ca
+            + axes_a[k1] * (axes_a[k1].dot(n).signum() * he_a[k1])
+            + axes_a[k2] * (axes_a[k2].dot(n).signum() * he_a[k2]);
+        let l1 = (j + 1) % 3;
+        let l2 = (j + 2) % 3;
+        let eb_c = cb
+            + axes_b[l1] * (-axes_b[l1].dot(n).signum() * he_b[l1])
+            + axes_b[l2] * (-axes_b[l2].dot(n).signum() * he_b[l2]);
+        let (pa, pb) = closest_points_segments(
+            ea_c - axes_a[i] * he_a[i],
+            ea_c + axes_a[i] * he_a[i],
+            eb_c - axes_b[j] * he_b[j],
+            eb_c + axes_b[j] * he_b[j],
+        );
+        let position = (pa + pb) * 0.5;
+        return build_speculative_box_manifold(
+            [ContactPoint {
+                position,
+                normal: n,
+                penetration: best_edge_overlap,
+                feature_id: 0,
+            }],
+            margin,
+        );
+    }
+
+    // ---- 参考面 / 入射面裁剪 ----
+    let (ref_axes, ref_he, ref_pos, inc_axes, inc_he, inc_pos, ref_idx, flip) = if best_face_from_a
+    {
+        (axes_a, he_a, ca, axes_b, he_b, cb, best_face_idx, false)
+    } else {
+        (axes_b, he_b, cb, axes_a, he_a, ca, best_face_idx, true)
+    };
+    let d_ref = inc_pos - ref_pos;
+    let sign = if d_ref.dot(ref_axes[ref_idx]) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let n_ref = ref_axes[ref_idx] * sign;
+    let ref_face_center = ref_pos + n_ref * ref_he[ref_idx];
+
+    // 入射面：法线与 n_ref 最同向的面（即最「朝向」参考盒的面）。
+    let mut inc_idx = 0usize;
+    let mut best_dot = 0.0f32;
+    for (k, axis) in inc_axes.iter().enumerate() {
+        let dd = axis.dot(n_ref);
+        if dd.abs() > best_dot.abs() {
+            best_dot = dd;
+            inc_idx = k;
+        }
+    }
+    if best_dot.abs() < 1e-6 {
+        return None;
+    }
+    let inc_dir = inc_axes[inc_idx] * best_dot.signum();
+    // 入射面取朝向参考盒的那一面（与 n_ref 反向）。
+    let inc_face_center = inc_pos - inc_dir * inc_he[inc_idx];
+    let k1 = (inc_idx + 1) % 3;
+    let k2 = (inc_idx + 2) % 3;
+    let mut poly: SmallVec<Vec3, POLY_CAPACITY> = SmallVec::new();
+    for &s1 in &[-1.0f32, 1.0] {
+        for &s2 in &[-1.0f32, 1.0] {
+            poly.push(
+                inc_face_center
+                    + inc_axes[k1] * (s1 * inc_he[k1])
+                    + inc_axes[k2] * (s2 * inc_he[k2]),
+            );
+        }
+    }
+    // 用参考面的 4 个侧面裁剪。
+    for k in 0..3 {
+        if k == ref_idx {
+            continue;
+        }
+        let axis = ref_axes[k];
+        let center = ref_face_center.dot(axis);
+        poly = clip_polygon(&poly, axis, center + ref_he[k]);
+        if poly.is_empty() {
+            return None;
+        }
+        poly = clip_polygon(&poly, -axis, -center + ref_he[k]);
+        if poly.is_empty() {
+            return None;
+        }
+    }
+
+    let normal = if flip { -n_ref } else { n_ref };
+    let mut points: SmallVec<ContactPoint, POLY_CAPACITY> = SmallVec::new();
+    for p in poly.iter().copied() {
+        let sep = n_ref.dot(p - ref_face_center);
+        if sep > margin {
+            continue;
+        }
+        points.push(ContactPoint {
+            position: p - n_ref * (sep * 0.5),
+            normal,
+            penetration: -sep,
+            feature_id: 0,
+        });
+    }
+    build_speculative_box_manifold(&points, margin)
 }
 
 /// 两条线段之间的最近点对（Ericson《Real-Time Collision Detection》）。

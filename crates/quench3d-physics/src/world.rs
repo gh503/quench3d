@@ -2411,6 +2411,17 @@ impl PhysicsWorld {
             } else {
                 aabb
             };
+            // Collision proxies only: body/query bounds retain original geometry.
+            let margin = self.config.speculative_margin;
+            let aabb = if !global && aabb.is_valid() && margin.is_finite() && margin > 0.0 {
+                let skin = Vec3::splat(margin);
+                Aabb {
+                    min: aabb.min - skin,
+                    max: aabb.max + skin,
+                }
+            } else {
+                aabb
+            };
             self.proxies.push(Proxy {
                 index: i as u32,
                 aabb,
@@ -4267,6 +4278,9 @@ fn feature_id_of(a: &RigidBody, b: &RigidBody, world: Vec3) -> u32 {
 }
 
 fn collide_bodies(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactManifold> {
+    if margin.is_finite() && margin > 0.0 {
+        return collide_bodies_speculative(a, b, margin);
+    }
     let mut m = collide_bodies_raw(a, b, margin)?;
     if margin > 0.0 {
         // 膨胀窄相把"分离 margin 以内"也算成接触，穿透量要减回去：
@@ -4279,6 +4293,73 @@ fn collide_bodies(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactMa
         p.feature_id = feature_id_of(a, b, p.position);
     }
     Some(m)
+}
+
+fn collide_bodies_speculative(
+    a: &RigidBody,
+    b: &RigidBody,
+    margin: f32,
+) -> Option<ContactManifold> {
+    let collide = |sa: &Shape, ta: &Transform, sb: &Shape, tb: &Transform| {
+        if (a.ccd_precise
+            && matches!(sa, Shape::Sphere { .. })
+            && matches!(sb, Shape::TriMesh { .. }))
+            || (b.ccd_precise
+                && matches!(sb, Shape::Sphere { .. })
+                && matches!(sa, Shape::TriMesh { .. }))
+        {
+            narrowphase::collide_shapes_precise_sphere_mesh(sa, ta, sb, tb)
+        } else {
+            narrowphase::collide_shapes(sa, ta, sb, tb)
+        }
+    };
+    let mut points: SmallVec<ContactPoint, { ContactManifold::MAX_POINTS }> = SmallVec::new();
+    for (sa, ta) in a.parts() {
+        let wa = a.part_world_transform(&ta);
+        for (sb, tb) in b.parts() {
+            let wb = b.part_world_transform(&tb);
+            // Boxes query original surfaces. Other shape pairs retain their
+            // historical inflation/depth adjustment; this does not fix them.
+            let hit = if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
+                (sa, sb)
+            {
+                narrowphase::collide_boxes_speculative(*ha, &wa, *hb, &wb, margin)
+            } else {
+                collide(&sa.inflated(margin), &wa, &sb.inflated(margin), &wb).map(|mut m| {
+                    for p in m.points.iter_mut() {
+                        p.penetration -= margin;
+                    }
+                    m
+                })
+            };
+            if let Some(mut m) = hit {
+                for p in m.points.iter_mut() {
+                    p.feature_id = feature_id_of(a, b, p.position);
+                }
+                points.extend_from_slice(&m.points);
+            }
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    if points.len() > MAX_COMPOUND_POINTS {
+        let mut order: Vec<usize> = (0..points.len()).collect();
+        // 稳定排序：深度相同就按下标（部件顺序）——保证确定性
+        order.sort_by(|&i, &j| {
+            points[j]
+                .penetration
+                .partial_cmp(&points[i].penetration)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then(i.cmp(&j))
+        });
+        order.truncate(MAX_COMPOUND_POINTS);
+        order.sort_unstable();
+        let kept: SmallVec<ContactPoint, { ContactManifold::MAX_POINTS }> =
+            order.iter().map(|&i| points[i]).collect();
+        return Some(ContactManifold { points: kept });
+    }
+    Some(ContactManifold { points })
 }
 
 fn collide_bodies_raw(a: &RigidBody, b: &RigidBody, margin: f32) -> Option<ContactManifold> {
@@ -4482,7 +4563,77 @@ mod tests {
     use crate::body::BodyBuilder;
 
     #[test]
-    #[ignore = "unmet: two inflated boxes retain one margin as false positive penetration"]
+    fn speculative_boxes_original_surface_matrix() {
+        for angle in [0.0f32, 0.37] {
+            for reverse in [false, true] {
+                for compound in [false, true] {
+                    let rotation = Quat::from_axis_angle(Vec3::Z, angle);
+                    let axis = rotation.mul_vec3(Vec3::Y);
+                    let shape = Shape::Box {
+                        half_extents: Vec3::splat(0.25),
+                    };
+                    let make = |dynamic: bool, p: Vec3| {
+                        let builder = if dynamic {
+                            BodyBuilder::dynamic(if compound {
+                                Shape::Sphere { radius: 0.001 }
+                            } else {
+                                shape.clone()
+                            })
+                        } else {
+                            BodyBuilder::r#static(shape.clone())
+                        };
+                        let builder = if dynamic && compound {
+                            builder
+                                .part_at(shape.clone(), -Vec3::Y * 0.4)
+                                .compound_transform_mode(
+                                    crate::body::CompoundTransformMode::BodyLocal,
+                                )
+                                .position(p + axis * 0.4)
+                        } else {
+                            builder.position(p)
+                        };
+                        builder.rotation(rotation).build()
+                    };
+                    let a = make(false, Vec3::ZERO);
+                    let b = make(true, axis * 0.502);
+                    let (a, b) = if reverse { (&b, &a) } else { (&a, &b) };
+                    let manifold =
+                        collide_bodies(a, b, 0.005).expect("within margin original faces");
+                    assert!(!manifold.points.is_empty());
+                    for point in manifold.points.iter() {
+                        assert!(
+                            (point.penetration + 0.002).abs() < 2e-6,
+                            "angle={angle} reverse={reverse} compound={compound} {point:?}"
+                        );
+                        assert!(point.normal.dot(if reverse { -axis } else { axis }) > 0.9999);
+                        assert!(
+                            (point.position.dot(axis) - 0.251).abs() < 2e-6,
+                            "point belongs between originalfaces"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn speculative_plane_pair_retains_legacy_narrowphase() {
+        let a = BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build();
+        let b = BodyBuilder::dynamic(Shape::Box {
+            half_extents: Vec3::splat(0.25),
+        })
+        .position(Vec3::Y * 0.252)
+        .build();
+        let mut expected = collide_bodies_raw(&a, &b, 0.005).unwrap();
+        for p in expected.points.iter_mut() {
+            p.penetration -= 0.005;
+            p.feature_id = feature_id_of(&a, &b, p.position);
+        }
+        let actual = collide_bodies(&a, &b, 0.005).unwrap();
+        assert_eq!(&actual.points[..], &expected.points[..]);
+    }
+
+    #[test]
     fn speculative_box_pair_reports_original_signed_gap() {
         let shape = Shape::Box {
             half_extents: Vec3::splat(0.25),

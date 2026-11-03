@@ -347,7 +347,6 @@ fn speculative_stack_existing_configuration_audit() {
 }
 
 #[test]
-#[ignore = "unmet: positive-gap speculative box pair omitted by uninflated broadphase proxies"]
 fn speculative_box_gap_does_not_create_false_overlap_impulse() {
     let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
     world.config.speculative_margin = 0.005;
