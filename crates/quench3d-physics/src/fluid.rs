@@ -33,6 +33,7 @@ thread_local! {
     static MOVING_SCAN_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_SHELL_CARRY: std::cell::Cell<Option<(Vec3, Vec3)>> = const { std::cell::Cell::new(None) };
     static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MESH_CORRECTION_TRACE: std::cell::RefCell<Option<Vec<(usize, Vec3, Vec3)>>> = const { std::cell::RefCell::new(None) };
     static SWEEP_CACHE_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWEEP_BOUNDS_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SWEEP_INDEX_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1182,17 +1183,23 @@ impl Fluid {
                 let push = (min_dist - dist) * 0.5;
                 #[cfg(test)]
                 SEPARATION_PUSHES.with(|count| count.set(count.get() + 1));
+                #[cfg(test)]
+                MESH_CORRECTION_TRACE.with(|trace| {
+                    if let Some(trace) = trace.borrow_mut().as_mut() {
+                        trace.push((i, predicted[i], predicted[i] + dir * push));
+                        trace.push((j, predicted[j], predicted[j] - dir * push));
+                    }
+                });
                 if matches!(
                     self.desc.collision_mode,
                     FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
                 ) {
-                    predicted[i] = sweep_static_spheres(
+                    predicted[i] = sweep_pair_correction(
                         predicted[i],
                         predicted[i] + dir * push,
                         bodies,
                         radius,
-                        self.desc.boundary_velocity_mode,
-                        true,
+                        &self.desc,
                         SweepQueryContext {
                             mesh_cache,
                             bounds,
@@ -1201,13 +1208,12 @@ impl Fluid {
                         },
                     )
                     .0;
-                    predicted[j] = sweep_static_spheres(
+                    predicted[j] = sweep_pair_correction(
                         predicted[j],
                         predicted[j] - dir * push,
                         bodies,
                         radius,
-                        self.desc.boundary_velocity_mode,
-                        true,
+                        &self.desc,
                         SweepQueryContext {
                             mesh_cache,
                             bounds,
@@ -2898,6 +2904,91 @@ fn sweep_translating_spheres(
 /// Sweep a liquid movement segment against static spheres, and optionally boxes.
 /// The primitive mode also holds inward clearance-shell motion at the start;
 /// centers already inside solids retain discrete projection.
+fn sweep_pair_correction(
+    start: Vec3,
+    end: Vec3,
+    bodies: &[BodySlot],
+    radius: f32,
+    desc: &FluidDesc,
+    context: SweepQueryContext<'_>,
+) -> (Vec3, Option<Contact>) {
+    if desc.boundary_motion_mode != FluidBoundaryMotionMode::TranslatingKinematicMeshes {
+        return sweep_static_spheres(
+            start,
+            end,
+            bodies,
+            radius,
+            desc.boundary_velocity_mode,
+            true,
+            context,
+        );
+    }
+    let (mut earliest, mut result) = sweep_static_spheres_timed(
+        start,
+        end,
+        bodies,
+        radius,
+        desc.boundary_velocity_mode,
+        true,
+        context,
+    );
+    // Current geometry only: pair separation must not replay boundary time.
+    // Equal times retain original body order; within a body, part/triangle order.
+    for (index, slot) in bodies.iter().enumerate() {
+        let Some(body) = &slot.body else { continue };
+        if body.sensor
+            || body.body_type != crate::body::BodyType::Kinematic
+            || body.angular_velocity != Vec3::ZERO
+            || body.prev_transform.rotation != body.transform.rotation
+        {
+            continue;
+        }
+        for (part, (shape, local)) in body.parts().enumerate() {
+            if part != 0
+                && body.compound_transform_mode() != crate::body::CompoundTransformMode::BodyLocal
+            {
+                continue;
+            }
+            let crate::shape::Shape::TriMesh { vertices, indices } = shape else {
+                continue;
+            };
+            let world = body.part_world_transform(&local);
+            for tri in indices.as_chunks::<3>().0 {
+                let (Some(a), Some(b), Some(c)) = (
+                    vertices.get(tri[0] as usize),
+                    vertices.get(tri[1] as usize),
+                    vertices.get(tri[2] as usize),
+                ) else {
+                    continue;
+                };
+                let points = [*a, *b, *c].map(|p| world.transform_point(p));
+                if let Some((t, point, normal)) = sweep_triangle(start, end, points, radius) {
+                    if t < earliest
+                        || (t == earliest
+                            && result.1.as_ref().is_some_and(|c| index < c.body as usize))
+                    {
+                        earliest = t;
+                        result = (
+                            if t == 0.0 {
+                                start
+                            } else {
+                                point + normal * radius
+                            },
+                            Some(Contact {
+                                point,
+                                normal,
+                                body: index as u32,
+                                velocity: body.velocity_at_point(point),
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 fn sweep_static_spheres(
     start: Vec3,
     end: Vec3,
@@ -2907,6 +2998,18 @@ fn sweep_static_spheres(
     boxes: bool,
     context: SweepQueryContext<'_>,
 ) -> (Vec3, Option<Contact>) {
+    sweep_static_spheres_timed(start, end, bodies, radius, mode, boxes, context).1
+}
+
+fn sweep_static_spheres_timed(
+    start: Vec3,
+    end: Vec3,
+    bodies: &[BodySlot],
+    radius: f32,
+    mode: FluidBoundaryVelocityMode,
+    boxes: bool,
+    context: SweepQueryContext<'_>,
+) -> (f64, (Vec3, Option<Contact>)) {
     let SweepQueryContext {
         mesh_cache,
         meshes,
@@ -2919,7 +3022,7 @@ fn sweep_static_spheres(
     let delta = sub(wide(end), wide(start));
     let aa = dot(delta, delta);
     if !aa.is_finite() || aa <= 0.0 {
-        return (end, None);
+        return (f64::INFINITY, (end, None));
     }
     let mut earliest = f64::INFINITY;
     let mut result = (end, None);
@@ -3225,7 +3328,7 @@ fn sweep_static_spheres(
             );
         }
     }
-    result
+    (earliest, result)
 }
 
 // Closest finite feature in world space. Strict face interiors retain the
@@ -5137,6 +5240,229 @@ mod tests {
         for state in &states[1..] {
             assert_eq!(&states[0], state);
         }
+    }
+
+    #[test]
+    fn moving_mesh_pair_correction_bypass_and_static_order() {
+        let run = |y: f32, sensor: bool, reverse: bool, wall: Option<f32>, mode| {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let mesh = BodyBuilder::kinematic(Shape::TriMesh {
+                vertices: vec![
+                    vec3(0.0, -2.0, -2.0),
+                    vec3(0.0, 2.0, -2.0),
+                    vec3(0.0, 0.0, 2.0),
+                ],
+                indices: if reverse {
+                    vec![2, 1, 0]
+                } else {
+                    vec![0, 1, 2]
+                },
+            })
+            .kinematic_trimesh(true)
+            .position(Vec3::X * -0.001)
+            .linear_velocity(Vec3::X * 0.06)
+            .sensor(sensor)
+            .build();
+            let obstacle = wall.map(|x| {
+                BodyBuilder::r#static(Shape::Box {
+                    half_extents: vec3(0.0005, 2.0, 2.0),
+                })
+                .position(Vec3::X * x)
+                .build()
+            });
+            if reverse {
+                if let Some(b) = obstacle.clone() {
+                    world.add_body(b);
+                }
+            }
+            world.add_body(mesh);
+            if !reverse {
+                if let Some(b) = obstacle {
+                    world.add_body(b);
+                }
+            }
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(
+                        (0..12)
+                            .map(|i| vec3(0.004 + i as f32 * 0.003, y, 0.0))
+                            .collect(),
+                    ),
+                    radius: 0.003,
+                    spacing: 0.1,
+                    iterations: 1,
+                    particle_collision: true,
+                    viscosity: 0.0,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    boundary_motion_mode: mode,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            let f = &world.fluids()[0];
+            (f.positions.clone(), f.velocities.clone())
+        };
+        let mode = FluidBoundaryMotionMode::TranslatingKinematicMeshes;
+        // The same separation paths far outside the finite triangle must bypass.
+        for reverse in [false, true] {
+            let solid = run(3.0, false, reverse, None, mode);
+            assert_eq!(solid, run(3.0, true, reverse, None, mode));
+            assert_eq!(
+                solid,
+                run(3.0, false, reverse, None, FluidBoundaryMotionMode::Legacy)
+            );
+        }
+        // Obstacles on either side of the mesh, reversed body and triangle order.
+        for x in [-0.006, 0.002] {
+            let a = run(0.0, false, false, Some(x), mode);
+            let b = run(0.0, false, true, Some(x), mode);
+            assert_eq!(a, b);
+            assert!(a.0.iter().all(|p| p.is_finite() && p.x >= 0.00299));
+        }
+    }
+
+    #[test]
+    fn moving_mesh_pair_corrections_respect_finite_faces() {
+        let mut failures = Vec::new();
+        let mut summaries = Vec::new();
+        for sign in [-1.0f32, 1.0] {
+            for extra in [false, true] {
+                for iterations in [1, 4] {
+                    for radius in [0.003f32, 0.006] {
+                        for (sensor, mode) in [
+                            (false, FluidBoundaryMotionMode::TranslatingKinematicMeshes),
+                            (true, FluidBoundaryMotionMode::TranslatingKinematicMeshes),
+                            (false, FluidBoundaryMotionMode::Legacy),
+                        ] {
+                            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                            let mesh = Shape::TriMesh {
+                                vertices: vec![
+                                    vec3(0.0, -2.0, -2.0),
+                                    vec3(0.0, 2.0, -2.0),
+                                    vec3(0.0, 0.0, 2.0),
+                                ],
+                                indices: vec![0, 1, 2],
+                            };
+                            let offset = if extra { Vec3::Y * 4.0 } else { Vec3::ZERO };
+                            let builder = if extra {
+                                BodyBuilder::kinematic(Shape::Sphere { radius: 0.001 })
+                                    .part_at(mesh, -offset)
+                                    .compound_transform_mode(
+                                        crate::body::CompoundTransformMode::BodyLocal,
+                                    )
+                            } else {
+                                BodyBuilder::kinematic(mesh)
+                            };
+                            let handle = world.add_builder(
+                                builder
+                                    .kinematic_trimesh(true)
+                                    .sensor(sensor)
+                                    .position(offset + Vec3::X * (sign * 0.001))
+                                    .linear_velocity(Vec3::X * (-sign * 0.06)),
+                            );
+                            let before = world.body(handle).unwrap().transform;
+                            let initial: Vec<_> = (0..12)
+                                .map(|i| {
+                                    vec3(-sign * (radius + 0.001 + i as f32 * radius), 0.0, 0.0)
+                                })
+                                .collect();
+                            world
+                                .add_fluid(FluidDesc {
+                                    initial_positions: Some(initial),
+                                    radius,
+                                    spacing: 0.1,
+                                    iterations,
+                                    particle_collision: true,
+                                    viscosity: 0.0,
+                                    collision_mode: FluidCollisionMode::SweptMeshes,
+                                    boundary_motion_mode: mode,
+                                    boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                    ..FluidDesc::default()
+                                })
+                                .unwrap();
+                            SEPARATION_PUSHES.with(|n| n.set(0));
+                            MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+                            MESH_CORRECTION_TRACE.with(|n| *n.borrow_mut() = Some(Vec::new()));
+                            world.step(1.0 / 60.0);
+                            let trace =
+                                MESH_CORRECTION_TRACE.with(|n| n.borrow_mut().take().unwrap());
+                            let body = world.body(handle).unwrap();
+                            assert_eq!(body.body_type, crate::body::BodyType::Kinematic);
+                            assert_eq!(body.prev_transform, before);
+                            assert!((body.transform.position.x).abs() < 1e-8);
+                            assert_eq!(body.linear_velocity, Vec3::X * (-sign * 0.06));
+                            assert_eq!(body.angular_velocity, Vec3::ZERO);
+                            assert_eq!(
+                                MOVING_SCAN_WORK.with(|n| n.get()[3]),
+                                0,
+                                "initial temporal sweep must not hit"
+                            );
+                            let pushes = SEPARATION_PUSHES.with(|n| n.get());
+                            assert!(pushes > 0);
+                            let crossed: Vec<_> = trace
+                                .iter()
+                                .filter(|(_, a, b)| {
+                                    // Every segment is on the X axis, through the strict interior
+                                    // of this finite triangle, >1m from every finite edge.
+                                    assert_eq!(a.y, 0.0);
+                                    assert_eq!(a.z, 0.0);
+                                    assert_eq!(b.y, 0.0);
+                                    assert_eq!(b.z, 0.0);
+                                    a.x * sign < 0.0 && b.x * sign > 0.0
+                                })
+                                .collect();
+                            let positions = world.fluids()[0].particles();
+                            let escaped: Vec<_> = positions
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, p)| p.x * sign > radius + 1e-6)
+                                .map(|(i, p)| (i, p.x))
+                                .collect();
+                            if !sensor
+                                && mode == FluidBoundaryMotionMode::TranslatingKinematicMeshes
+                                && !escaped.is_empty()
+                            {
+                                for (particle, _) in &escaped {
+                                    let path: Vec<_> =
+                                        trace.iter().filter(|(i, _, _)| i == particle).collect();
+                                    assert!(path.first().is_some_and(|(_, a, _)| a.x * sign < 0.0));
+                                    assert!(path.iter().any(|(_, a, b)| a.x * sign <= 0.0 && b.x * sign > 0.0),
+                                        "escaped particle must cross the finite face, allowing a prior push to land exactly on it: {path:?}");
+                                    for pair in path.windows(2) {
+                                        assert_eq!(
+                                            pair[0].2, pair[1].1,
+                                            "unbroken correction history"
+                                        );
+                                    }
+                                    assert_eq!(path.last().unwrap().2, positions[*particle]);
+                                    println!(
+                                        "escaped_particle={particle} correction_path={path:?}"
+                                    );
+                                }
+                                println!("escaped_pair_segments sign={sign} extra={extra} iterations={iterations} radius={radius} segments={crossed:?}");
+                                failures.push((sign, extra, iterations, radius, escaped.clone()));
+                            }
+                            summaries.push((
+                                sign,
+                                extra,
+                                iterations,
+                                radius,
+                                sensor,
+                                mode,
+                                pushes,
+                                crossed.len(),
+                                escaped,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        println!("fixed16_cases_48worlds summaries={summaries:?} failures={failures:?}");
+        assert!(
+            failures.is_empty(),
+            "pair corrections tunneled through current finite mesh: {failures:?}"
+        );
     }
 
     #[test]
