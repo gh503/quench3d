@@ -1223,7 +1223,15 @@ impl Fluid {
         }
         // 分离可能把粒子推进墙；重新投影一次（不做速度/摩擦）。
         for p in &mut self.predicted {
-            *p = collide_position(*p, *p, bodies, radius, self.desc.boundary_velocity_mode).0;
+            *p = collide_position(
+                *p,
+                *p,
+                bodies,
+                radius,
+                self.desc.boundary_velocity_mode,
+                self.desc.boundary_motion_mode,
+            )
+            .0;
         }
     }
 
@@ -1479,6 +1487,7 @@ impl Fluid {
                         &*bodies,
                         radius,
                         self.desc.boundary_velocity_mode,
+                        self.desc.boundary_motion_mode,
                     );
                     (p, projected.or(swept))
                 } else {
@@ -1488,6 +1497,7 @@ impl Fluid {
                         &*bodies,
                         radius,
                         self.desc.boundary_velocity_mode,
+                        self.desc.boundary_motion_mode,
                     )
                 };
                 self.predicted[i] = p;
@@ -1880,6 +1890,7 @@ impl Fluid {
                 bodies,
                 b.radius.max(0.005),
                 self.desc.boundary_velocity_mode,
+                FluidBoundaryMotionMode::Legacy,
             );
             b.position = corrected;
             if let Some(contact) = contact {
@@ -2109,6 +2120,7 @@ impl Fluid {
                 bodies,
                 radius,
                 self.desc.boundary_velocity_mode,
+                FluidBoundaryMotionMode::Legacy,
             );
             f.position = corrected;
             if let Some(contact) = contact {
@@ -3215,6 +3227,94 @@ fn sweep_static_spheres(
     result
 }
 
+// Closest finite feature in world space. Strict face interiors retain the
+// historical face crossing rule; edges, vertices and degenerate triangles do not.
+fn closest_mesh_feature(
+    p: Vec3,
+    vertices: &[Vec3],
+    indices: &[u32],
+    world: quench3d_math::Transform,
+) -> Option<(Vec3, Vec3, f64, bool)> {
+    type V = [f64; 3];
+    fn sub(a: V, b: V) -> V {
+        std::array::from_fn(|i| a[i] - b[i])
+    }
+    fn add(a: V, b: V) -> V {
+        std::array::from_fn(|i| a[i] + b[i])
+    }
+    fn mul(a: V, t: f64) -> V {
+        a.map(|x| x * t)
+    }
+    fn dot(a: V, b: V) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    fn cross(a: V, b: V) -> V {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+    if !p.is_finite() {
+        return None;
+    }
+    let p = p.to_array().map(f64::from);
+    let mut best: Option<(V, f64, bool)> = None;
+    let mut consider = |q: V, face: bool| {
+        let gap = sub(p, q);
+        let d2 = dot(gap, gap);
+        if d2.is_finite() && best.is_none_or(|(_, old, _)| d2 < old) {
+            best = Some((q, d2, face));
+        }
+    };
+    for tri in indices.as_chunks::<3>().0 {
+        let (Some(a), Some(b), Some(c)) = (
+            vertices.get(tri[0] as usize),
+            vertices.get(tri[1] as usize),
+            vertices.get(tri[2] as usize),
+        ) else {
+            continue;
+        };
+        let points = [*a, *b, *c].map(|v| world.transform_point(v));
+        if !points.iter().all(|v| v.is_finite()) {
+            continue;
+        }
+        let v = points.map(|v| v.to_array().map(f64::from));
+        let n = cross(sub(v[1], v[0]), sub(v[2], v[0]));
+        let n2 = dot(n, n);
+        if n2 > 0.0 {
+            let q = sub(p, mul(n, dot(sub(p, v[0]), n) / n2));
+            if (0..3).all(|i| dot(cross(sub(v[(i + 1) % 3], v[i]), sub(q, v[i])), n) > 0.0) {
+                consider(q, true);
+            }
+        }
+        for i in 0..3 {
+            let edge = sub(v[(i + 1) % 3], v[i]);
+            let len2 = dot(edge, edge);
+            let t = if len2 > 0.0 {
+                (dot(sub(p, v[i]), edge) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            consider(add(v[i], mul(edge, t)), false);
+        }
+    }
+    best.map(|(q, d2, face)| {
+        let distance = d2.sqrt();
+        let normal = if distance > 0.0 {
+            mul(sub(p, q), 1.0 / distance)
+        } else {
+            [0.0; 3]
+        };
+        (
+            Vec3::from_array(q.map(|x| x as f32)),
+            Vec3::from_array(normal.map(|x| x as f32)),
+            distance,
+            face,
+        )
+    })
+}
+
 /// 把粒子投影到所有刚体边界之外；返回修正后的位置与最后一个接触。
 fn collide_position(
     prev: Vec3,
@@ -3222,6 +3322,7 @@ fn collide_position(
     bodies: &[BodySlot],
     radius: f32,
     mode: FluidBoundaryVelocityMode,
+    motion: FluidBoundaryMotionMode,
 ) -> (Vec3, Option<Contact>) {
     let mut contact = None;
     // 位移可能比半径大（快速下落/薄网格）：AABB 拒绝测试要把整段位移算进去，
@@ -3242,8 +3343,36 @@ fn collide_position(
         {
             continue;
         }
-        for (shape, local) in body.parts() {
+        for (part, (shape, local)) in body.parts().enumerate() {
             let world = body.part_world_transform(&local);
+            if motion == FluidBoundaryMotionMode::TranslatingKinematicMeshes
+                && body.body_type == crate::body::BodyType::Kinematic
+                && body.angular_velocity == Vec3::ZERO
+                && body.prev_transform.rotation == body.transform.rotation
+                && (part == 0
+                    || body.compound_transform_mode()
+                        == crate::body::CompoundTransformMode::BodyLocal)
+            {
+                if let crate::shape::Shape::TriMesh { vertices, indices } = shape {
+                    if let Some((point, normal, distance, face)) =
+                        closest_mesh_feature(p, vertices, indices, world)
+                    {
+                        if !face && distance > 0.0 {
+                            if distance < f64::from(radius) {
+                                p = point + normal * radius;
+                                contact = Some(Contact {
+                                    point,
+                                    normal,
+                                    velocity: body.velocity_at_point(point),
+                                    body: body_index as u32,
+                                });
+                            }
+                            // A finite edge/vertex has no infinite face half-space.
+                            continue;
+                        }
+                    }
+                }
+            }
             let lp = world.inverse_transform_point(p);
             let Some((surf, n_local)) = shape.closest_surface(lp) else {
                 continue;
@@ -6064,6 +6193,204 @@ mod tests {
                         "velocity sign={sign} extra={extra} yz={y},{z}: actual={:?} expected={expected_velocity:?}", fluid.velocities()[0]);
                     let contact = fluid.contacts[0].expect("rounded feature contact");
                     assert!((contact.normal - expected_normal).length() < 3e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mesh_feature_projection_scope_and_degeneracy() {
+        let vertices = vec![Vec3::ZERO, Vec3::Y, Vec3::Z];
+        let feature =
+            |p, v: &[Vec3]| closest_mesh_feature(p, v, &[0, 1, 2], Transform::IDENTITY).unwrap();
+        assert!(feature(vec3(0.005, 0.3, 0.3), &vertices).3);
+        assert!(!feature(vec3(0.005, -0.005, 0.3), &vertices).3);
+        assert_eq!(feature(vec3(0.0, 0.3, 0.3), &vertices).2, 0.0);
+        for v in [vec![Vec3::ZERO; 3], vec![Vec3::ZERO, Vec3::Y, Vec3::Y]] {
+            let (point, normal, distance, face) = feature(Vec3::X * 0.005, &v);
+            assert_eq!(point, Vec3::ZERO);
+            assert_eq!(normal, Vec3::X);
+            assert!((distance - 0.005).abs() < 1e-9);
+            assert!(!face);
+        }
+        assert!(
+            closest_mesh_feature(Vec3::ZERO, &vertices, &[0, 1, 99], Transform::IDENTITY).is_none()
+        );
+        let run = |motion, static_body, omega, start, velocity| {
+            let mesh = Shape::TriMesh {
+                vertices: vertices.clone(),
+                indices: vec![0, 1, 2],
+            };
+            let builder = if static_body {
+                BodyBuilder::r#static(mesh)
+            } else {
+                BodyBuilder::kinematic(mesh).kinematic_trimesh(true)
+            };
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(builder.angular_velocity(omega));
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(vec![start]),
+                    initial_velocity: velocity,
+                    radius: 0.02,
+                    spacing: 0.1,
+                    viscosity: 0.0,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    boundary_motion_mode: motion,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            let f = &world.fluids()[0];
+            (f.particles()[0], f.velocities()[0])
+        };
+        let new = FluidBoundaryMotionMode::TranslatingKinematicMeshes;
+        let old = FluidBoundaryMotionMode::TranslatingKinematicPrimitives;
+        let edge = vec3(0.005, -0.005, 0.3);
+        let projected = run(new, false, Vec3::ZERO, edge, Vec3::ZERO).0;
+        let expected = vec3(0.02 / 2.0f32.sqrt(), -0.02 / 2.0f32.sqrt(), 0.3);
+        assert!((projected - expected).length() < 1e-6);
+        // Static meshes, rotating boundaries and face interiors keep old arithmetic.
+        for (static_body, omega, start, velocity) in [
+            (true, Vec3::ZERO, edge, Vec3::ZERO),
+            (false, Vec3::Y, edge, Vec3::ZERO),
+            (false, Vec3::ZERO, vec3(0.005, 0.3, 0.3), Vec3::ZERO),
+            (false, Vec3::ZERO, vec3(0.0, 0.3, 0.3), Vec3::ZERO),
+            (false, Vec3::ZERO, vec3(-0.03, 0.3, 0.3), Vec3::X * 3.0),
+        ] {
+            assert_eq!(
+                run(new, static_body, omega, start, velocity),
+                run(old, static_body, omega, start, velocity)
+            );
+        }
+        // A departing or tangential particle outside clearance is not projected to a face.
+        for velocity in [Vec3::X, Vec3::Z] {
+            let start = vec3(0.025, -0.01, 0.3);
+            let p = run(new, false, Vec3::ZERO, start, velocity).0;
+            assert!((p - (start + velocity / 60.0)).length() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn translating_mesh_edge_vertex_analytic_audit() {
+        // 16 trajectories, each with and without the moving-triangle cache.
+        // Circle sections give an independent entry time outside the finite face.
+        let triangle = [Vec3::ZERO, Vec3::Y, Vec3::Z];
+        let radius = 0.02f32;
+        for sign in [-1.0f32, 1.0] {
+            for extra in [false, true] {
+                for (y, z, nearest_y, nearest_z) in [
+                    (-0.01f32, 0.3f32, 0.0f32, 0.3f32),
+                    (0.3, -0.01, 0.3, 0.0),
+                    (-0.01, -0.01, 0.0, 0.0),
+                    (1.01, -0.01, 1.0, 0.0),
+                ] {
+                    let dy = f64::from(y) - f64::from(nearest_y);
+                    let dz = f64::from(z) - f64::from(nearest_z);
+                    let x = (f64::from(radius).powi(2) - dy * dy - dz * dz).sqrt();
+                    let toi = (0.25 - x) / 0.5;
+                    let expected_normal = vec3(
+                        sign * (x / f64::from(radius)) as f32,
+                        (dy / f64::from(radius)) as f32,
+                        (dz / f64::from(radius)) as f32,
+                    );
+                    let nearest = vec3(0.0, nearest_y, nearest_z);
+                    let (actual_t, point, normal) = sweep_triangle(
+                        vec3(sign * 0.25, y, z),
+                        vec3(sign * -0.25, y, z),
+                        triangle,
+                        radius,
+                    )
+                    .expect("finite triangle edge/vertex entry");
+                    assert!((actual_t - toi).abs() < 1e-7);
+                    assert!(actual_t > (0.25 - f64::from(radius)) / 0.5 + 0.001);
+                    assert!((point - nearest).length() < 2e-6);
+                    assert!((normal - expected_normal).length() < 2e-6);
+                    let mut records = Vec::new();
+                    for reference in [true, false] {
+                        MOVING_MESH_REFERENCE.with(|flag| flag.set(reference));
+                        let offset = if extra { Vec3::Y * 2.0 } else { Vec3::ZERO };
+                        let mesh = Shape::TriMesh {
+                            vertices: triangle.to_vec(),
+                            indices: vec![0, 1, 2],
+                        };
+                        let builder = if extra {
+                            BodyBuilder::kinematic(Shape::Sphere { radius: 0.01 })
+                                .compound_transform_mode(
+                                    crate::body::CompoundTransformMode::BodyLocal,
+                                )
+                                .part_at(mesh, -offset)
+                        } else {
+                            BodyBuilder::kinematic(mesh)
+                        };
+                        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                        let velocity = Vec3::X * (sign * 30.0);
+                        let handle = world.add_builder(
+                            builder
+                                .kinematic_trimesh(true)
+                                .position(offset - Vec3::X * (sign * 0.25))
+                                .linear_velocity(velocity),
+                        );
+                        world
+                            .add_fluid(FluidDesc {
+                                initial_positions: Some(vec![vec3(0.0, y, z)]),
+                                radius,
+                                spacing: 0.1,
+                                viscosity: 0.0,
+                                collision_mode: FluidCollisionMode::SweptMeshes,
+                                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                boundary_motion_mode:
+                                    FluidBoundaryMotionMode::TranslatingKinematicMeshes,
+                                ..FluidDesc::default()
+                            })
+                            .unwrap();
+                        let body = world.body(handle).unwrap();
+                        let before = body.transform;
+                        assert_eq!(body.body_type, crate::body::BodyType::Kinematic);
+                        assert_eq!(body.linear_velocity, velocity);
+                        assert_eq!(body.angular_velocity, Vec3::ZERO);
+                        world.step(1.0 / 60.0);
+                        let body = world.body(handle).unwrap();
+                        assert_eq!(body.prev_transform, before);
+                        assert_eq!(body.transform.rotation, before.rotation);
+                        assert!(
+                            (body.position() - offset - Vec3::X * (sign * 0.25)).length() < 1e-6
+                        );
+                        let f = &world.fluids()[0];
+                        let expected_position = vec3(sign * (0.25 + x) as f32, y, z);
+                        assert!((f.particles()[0] - expected_position).length() < 3e-6,
+                            "carry sign={sign} extra={extra} yz={y},{z} reference={reference}: {:?}", f.particles()[0]);
+                        // Existing contact response removes inward relative normal
+                        // speed and retains 80% of relative tangential speed.
+                        let relative_x = sign * (0.5 * (1.0 - toi) * 60.0) as f32 - sign * 30.0;
+                        let tangent = Vec3::X * relative_x
+                            - expected_normal * (relative_x * expected_normal.x);
+                        let expected_velocity = velocity + tangent * 0.8;
+                        assert!(
+                            (f.velocities()[0] - expected_velocity).length() < 5e-4,
+                            "response sign={sign} extra={extra} yz={y},{z}: {:?}",
+                            f.velocities()[0]
+                        );
+                        let contact = f.contacts[0].expect("oblique moving mesh contact");
+                        assert!((contact.normal - expected_normal).length() < 3e-5);
+                        assert!(
+                            (contact.point - (nearest + Vec3::X * (sign * 0.25))).length() < 3e-6
+                        );
+                        assert!((contact.velocity - velocity).length() < 1e-5);
+                        let mut bits = vec![contact.body];
+                        for v in [
+                            f.particles()[0],
+                            f.velocities()[0],
+                            contact.point,
+                            contact.normal,
+                            contact.velocity,
+                        ] {
+                            bits.extend(v.to_array().map(f32::to_bits));
+                        }
+                        records.push(bits);
+                    }
+                    MOVING_MESH_REFERENCE.with(|flag| flag.set(false));
+                    assert_eq!(records[0], records[1], "cache changed edge/vertex response");
                 }
             }
         }
