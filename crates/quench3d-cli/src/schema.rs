@@ -490,7 +490,7 @@ pub fn scene_grammar() -> Value {
             "heightfield": {
                 "heights": "行主序的二维数组（heights[行][列]，行沿 Z、列沿 X），至少 2×2；网格以形状原点为中心，值是相对原点的高度",
                 "cell_size": "格子边长（米），缺省 1.0",
-                "body": "**【只能 static】**：物理上是静态三角网（没有质量属性），写 dynamic/kinematic 会被校验拦下",
+                "body": "默认 static；显式 kinematic_trimesh=true 允许 kinematic 离散碰撞与查询，dynamic 仍被拒绝，不保证运动网格 CCD 或流体扫掠",
                 "note": "格点数（行×列）上限 65536；窄相逐三角形，地形大就切块"
             },
             "plane": { "normal": "[x,y,z]，缺省 [0,1,0]" },
@@ -533,7 +533,8 @@ pub fn scene_grammar() -> Value {
             "sensor": "true = 触发区：照常报进入/离开，但不产生冲量（别的物体穿过去）；需要 body 不为 none",
             "ccd": "true = 连续碰撞检测（中心射线 + 盒子 8 角射线；有角速度的盒子再做 8 角点旋转扫掠，按最早命中时间同时缩放线/角速度）；只对 dynamic 生效",
             "ccd_precise": "true = 用距离保守推进预测碰撞时间（隐含 ccd=true），主形状支持凸体/平面/三角网；复合凸部件的旋转还需 compound_transform_mode=body_local，不保证精确连续轨迹，每个部件对最多 64 次距离迭代",
-            "compound_transform_mode": "legacy（缺省）保留历史部件变换；body_local 显式按刚体局部坐标组合部件，统一接触、查询、水域与流体边界；同时开启 ccd_precise 可扫掠旋转凸部件与凸体/平面/静态三角网格部件；静态网格逐三角形查询，高度场部件在场景加载时转换为静态三角网格并走同一路径；运动网格不支持",
+            "kinematic_trimesh": "true 显式允许 kinematic 高度场离散碰撞/查询；默认 false 保留静态限制，不开放 dynamic、运动平面或运动网格 CCD",
+            "compound_transform_mode": "legacy（缺省）保留历史部件变换；body_local 显式按刚体局部坐标组合部件，统一接触、查询、水域与流体边界；同时开启 ccd_precise 可扫掠旋转凸部件与凸体/平面/静态三角网格部件；静态网格逐三角形查询，高度场部件转换为三角网格；kinematic_trimesh=true 可显式启用运动学高度场的离散碰撞与查询，但运动网格 CCD 不支持",
             "note": "linear/angular_damping、gravity_scale、mass、allow_sleep、angular_velocity 只对 body=dynamic 生效"
         },
         "model": {
@@ -799,11 +800,29 @@ pub fn json_schema() -> Value {
             "ccd",
             "ccd_precise",
             "compound_transform_mode",
+            "kinematic_trimesh",
         ]),
     );
     defs.get_mut("object").expect("object schema exists")["properties"]
         ["compound_transform_mode"] =
         json!({"type": "string", "enum": ["legacy", "body_local"], "default": "legacy"});
+    defs.get_mut("object").expect("object schema exists")["properties"]["kinematic_trimesh"] = json!({"type": "boolean", "default": false, "description": "Explicitly permit kinematic heightfield meshes for discrete collision and queries; dynamic meshes and kinematic planes remain unsupported. Does not enable moving-mesh CCD or fluid sweeps."});
+    defs.get_mut("object").expect("object schema exists")["allOf"] = json!([
+        {
+            "if": {"required":["body"], "properties":{"body":{"const":"kinematic"}}, "anyOf":[
+                {"required":["shape"],"properties":{"shape":{"required":["type"],"properties":{"type":{"const":"heightfield"}}}}},
+                {"required":["shapes"],"properties":{"shapes":{"contains":{"required":["shape"],"properties":{"shape":{"required":["type"],"properties":{"type":{"const":"heightfield"}}}}}}}}
+            ]},
+            "then":{"required":["kinematic_trimesh"],"properties":{"kinematic_trimesh":{"const":true}}}
+        },
+        {
+            "if":{"required":["body","kinematic_trimesh"],"properties":{"body":{"const":"kinematic"},"kinematic_trimesh":{"const":true}}},
+            "then":{"not":{"anyOf":[
+                {"required":["shape"],"properties":{"shape":{"required":["type"],"properties":{"type":{"const":"plane"}}}}},
+                {"required":["shapes"],"properties":{"shapes":{"contains":{"required":["shape"],"properties":{"shape":{"required":["type"],"properties":{"type":{"const":"plane"}}}}}}}}
+            ]}}
+        }
+    ]);
     defs.insert(
         "material".into(),
         def(&[
@@ -1538,7 +1557,7 @@ pub fn system_prompt() -> String {
   - shape: { type: "box"|"sphere"|"capsule"|"cylinder"|"cone"|"rounded_box"|"heightfield"|"plane"|"convex",
              size: [x,y,z]（box / rounded_box 的**边长**）, radius, half_height, normal, points,
              radius（rounded_box 必填：圆角半径，≤ 最短边长的一半）,
-             heights: [[…]]（heightfield：行主序，行沿 Z、列沿 X，至少 2×2；只能 static）,
+             heights: [[…]]（heightfield：行主序，行沿 Z、列沿 X，至少 2×2；默认 static，kinematic 需 kinematic_trimesh=true）,
              cell_size（heightfield 的格子边长，缺省 1.0） }
   - parent: 父物体的 name（可选）。给了之后 position/rotation_deg 是**相对父物体**的
             （父物体动，子物体跟着动；只继承位置与朝向，不继承缩放；

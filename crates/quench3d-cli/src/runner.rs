@@ -2547,6 +2547,7 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
         if o.ccd_precise == Some(true) {
             builder = builder.ccd_precise(true);
         }
+        builder = builder.kinematic_trimesh(o.kinematic_trimesh.unwrap_or(false));
         if let Some(mode) = o.compound_transform_mode {
             builder = builder.compound_transform_mode(match mode {
                 crate::scene_doc::CompoundTransformModeDoc::Legacy => {
@@ -7086,6 +7087,60 @@ mod tests {
             serde_json::to_string(&FluidBoundaryVelocityModeDoc::BodyMotion).unwrap(),
             "\"body_motion\""
         );
+    }
+
+    #[test]
+    fn kinematic_heightfield_scene_moves_only_with_explicit_opt_in() {
+        for compound in [false, true] {
+            let geometry = if compound {
+                r#""compound_transform_mode":"body_local","shapes":[{"shape":{"type":"box","size":[0.1,0.1,0.1]}},{"shape":{"type":"heightfield","heights":[[0,0],[0,0]]},"position":[0,2,0]}]"#
+            } else {
+                r#""shape":{"type":"heightfield","heights":[[0,0],[0,0]]}"#
+            };
+            for flag in [
+                "",
+                ",\"kinematic_trimesh\":false",
+                ",\"kinematic_trimesh\":true",
+            ] {
+                let json = format!(
+                    r#"{{"gravity":[0,0,0],"objects":[{{"name":"terrain","body":"kinematic","velocity":[60,0,0],{geometry}{flag}}}]}}"#
+                );
+                let doc = SceneDoc::from_json(&json).unwrap();
+                if !flag.ends_with("true") {
+                    assert!(SceneDoc::has_errors(&doc.validate()));
+                    if flag.is_empty() {
+                        assert!(!serde_json::to_string(&doc)
+                            .unwrap()
+                            .contains("kinematic_trimesh"));
+                    }
+                    continue;
+                }
+                assert!(
+                    !SceneDoc::has_errors(&doc.validate()),
+                    "{:?}",
+                    doc.validate()
+                );
+                let mut build = build_world(&doc).unwrap();
+                let handle = build.handles["terrain"];
+                for _ in 0..3 {
+                    let before = build.world.body(handle).unwrap().transform;
+                    assert_eq!(
+                        build.world.body(handle).unwrap().body_type,
+                        quench3d::physics::BodyType::Kinematic
+                    );
+                    build.world.step(1.0 / 60.0);
+                    let body = build.world.body(handle).unwrap();
+                    assert_eq!(body.transform.rotation, before.rotation);
+                    assert!((body.position().x - before.position.x - 1.0).abs() < 1e-6);
+                    let height = if compound { 2.0 } else { 0.0 };
+                    let position = body.position();
+                    let ray = Vec3::new(position.x, height + 1.0, 0.0);
+                    assert!(build.world.raycast(ray, -Vec3::Y, 1.5).is_some());
+                    let old_ray = Vec3::new(before.position.x, height + 1.0, 0.0);
+                    assert!(build.world.raycast(old_ray, -Vec3::Y, 1.5).is_none());
+                }
+            }
+        }
     }
 
     #[test]

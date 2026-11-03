@@ -839,6 +839,7 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         sensor: o.sensor.or(t.sensor),
         ccd: o.ccd.or(t.ccd),
         ccd_precise: o.ccd_precise.or(t.ccd_precise),
+        kinematic_trimesh: o.kinematic_trimesh.or(t.kinematic_trimesh),
         compound_transform_mode: o.compound_transform_mode.or(t.compound_transform_mode),
     }
 }
@@ -1552,7 +1553,7 @@ pub enum ShapeKind {
     /// 高度场（`heights` 行主序：行沿 Z、列沿 X；`cell_size` 缺省 1.0）。
     ///
     /// 网格在 XZ 平面以形状原点为中心，`heights[行][列]` 是相对原点的高度。
-    /// 物理上是**静态三角网**，所以只能 `body: "static"`（`dynamic`/`kinematic` 会被校验拦下）。
+    /// 默认只能 static；显式 `kinematic_trimesh=true` 允许 kinematic 离散碰撞，dynamic 仍被拒绝。
     HeightField,
     /// 平面（无限大，仅物理用）。
     Plane,
@@ -1861,6 +1862,10 @@ pub struct ObjectDoc {
     /// 采样点之间会漏的高速接触。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ccd_precise: Option<bool>,
+    /// Opt into kinematic heightfield meshes for discrete collision and queries.
+    /// Missing or false preserves static-only validation; this does not enable mesh CCD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinematic_trimesh: Option<bool>,
     /// Compound-part transform convention. Missing preserves historical behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compound_transform_mode: Option<CompoundTransformModeDoc>,
@@ -6148,12 +6153,15 @@ impl SceneDoc {
                 .parts()
                 .iter()
                 .any(|part| part.shape.kind == ShapeKind::Plane);
-            if has_plane && o.body == BodyKind::Dynamic {
+            if has_plane
+                && (o.body == BodyKind::Dynamic
+                    || (o.body == BodyKind::Kinematic && o.kinematic_trimesh == Some(true)))
+            {
                 out.push(
                     Diagnostic::error_code(
                         ErrorCode::InvalidValue,
                         format!("{p}.body"),
-                        "平面不能是动态刚体（无限大物体没有有限质量）",
+                        "平面不能是动态刚体或显式运动学网格部件（无限大物体仍须静态）",
                     )
                     .with_hint("把 body 改成 \"static\""),
                 );
@@ -6162,15 +6170,19 @@ impl SceneDoc {
                 .parts()
                 .iter()
                 .any(|part| part.shape.kind == ShapeKind::HeightField);
-            if has_heightfield && matches!(o.body, BodyKind::Dynamic | BodyKind::Kinematic) {
+            if has_heightfield
+                && (o.body == BodyKind::Dynamic
+                    || (o.body == BodyKind::Kinematic && o.kinematic_trimesh != Some(true)))
+            {
                 out.push(
                     Diagnostic::error_code(
                         ErrorCode::InvalidValue,
                         format!("{p}.body"),
-                        "高度场是静态三角网，只能是 static 刚体（它没有质量属性，硬写成动态会\
-                         被引擎静默降级成静态）",
+                        "高度场不能是动态刚体；运动学高度场必须显式启用 kinematic_trimesh",
                     )
-                    .with_hint("把 body 改成 \"static\"；要会动的地形请用 box 拼或等动态网格支持"),
+                    .with_hint(
+                        "使用 static；或使用 kinematic 并设置 kinematic_trimesh=true（仅离散碰撞）",
+                    ),
                 );
             }
             if o.body == BodyKind::None && o.velocity.is_some() {
@@ -12774,6 +12786,48 @@ mod tests {
             "objects[0].shape.size",
         );
         assert_eq!(codes, vec![crate::scene_doc::ErrorCode::OutOfRange]);
+    }
+
+    #[test]
+    fn kinematic_heightfield_explicit_scene_opt_in() {
+        let doc = SceneDoc::from_json(
+            r#"{"objects":[{"name":"moving mesh","body":"kinematic","kinematic_trimesh":true,"velocity":[1,0,0],"shape":{"type":"heightfield","heights":[[0,0],[0,0]]}}]}"#,
+        ).unwrap();
+        assert_eq!(doc.objects[0].kinematic_trimesh, Some(true));
+        let saved = serde_json::to_string(&doc).unwrap();
+        let restored = SceneDoc::from_json(&saved).unwrap();
+        assert_eq!(restored.objects[0].kinematic_trimesh, Some(true));
+        assert!(
+            !SceneDoc::has_errors(&restored.validate()),
+            "explicit kinematic mesh must be accepted: {:?}",
+            restored.validate()
+        );
+    }
+
+    #[test]
+    fn kinematic_heightfield_opt_in_keeps_plane_and_dynamic_restrictions() {
+        for body in ["dynamic", "kinematic"] {
+            for geometry in [
+                r#""shape":{"type":"plane"}"#,
+                r#""shapes":[{"shape":{"type":"box"}},{"shape":{"type":"plane"}}]"#,
+                r#""shapes":[{"shape":{"type":"plane"}},{"shape":{"type":"heightfield","heights":[[0,0],[0,0]]}}]"#,
+            ] {
+                let doc = SceneDoc::from_json(&format!(
+                    r#"{{"objects":[{{"body":"{body}","kinematic_trimesh":true,{geometry}}}]}}"#
+                ))
+                .unwrap();
+                assert!(SceneDoc::has_errors(&doc.validate()));
+            }
+        }
+        let old_plane =
+            SceneDoc::from_json(r#"{"objects":[{"body":"kinematic","shape":{"type":"plane"}}]}"#)
+                .unwrap();
+        assert!(!SceneDoc::has_errors(&old_plane.validate()));
+        let dynamic = SceneDoc::from_json(r#"{"objects":[{"body":"dynamic","kinematic_trimesh":true,"shape":{"type":"heightfield","heights":[[0,0],[0,0]]}}]}"#).unwrap();
+        assert!(SceneDoc::has_errors(&dynamic.validate()));
+        let template = SceneDoc::from_json(r#"{"templates":{"terrain":{"body":"kinematic","kinematic_trimesh":true,"shape":{"type":"heightfield","heights":[[0,0],[0,0]]}}},"objects":[{"name":"yes","template":"terrain"},{"name":"no","template":"terrain","kinematic_trimesh":false}]}"#).unwrap().expanded();
+        assert_eq!(template.objects[0].kinematic_trimesh, Some(true));
+        assert_eq!(template.objects[1].kinematic_trimesh, Some(false));
     }
 
     #[test]

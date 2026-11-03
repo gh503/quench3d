@@ -419,8 +419,16 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
                 // 复合形状：逐部件导出（局部位姿原样写回去）
                 let mut list = Vec::new();
                 let mut bad = false;
-                for (part_shape, local) in b.parts() {
-                    match shape_doc_from_shape(part_shape, object.transform.scale) {
+                for (part_index, (part_shape, local)) in b.parts().enumerate() {
+                    match shape_doc_from_shape(part_shape, object.transform.scale).or_else(|| {
+                        base_heightfield_part_for(
+                            &base,
+                            &name,
+                            part_index,
+                            b.part_count(),
+                            part_shape,
+                        )
+                    }) {
                         Some(doc) => list.push(quench3d_cli::scene_doc::ShapePartDoc {
                             shape: doc,
                             position: Some([local.position.x, local.position.y, local.position.z]),
@@ -437,7 +445,9 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
                     continue;
                 }
                 parts_doc = Some(list);
-                match shape_doc_from_shape(&b.shape, object.transform.scale) {
+                match shape_doc_from_shape(&b.shape, object.transform.scale).or_else(|| {
+                    base_heightfield_part_for(&base, &name, 0, b.part_count(), &b.shape)
+                }) {
                     Some(shape) => shape,
                     None => {
                         skipped.push(format!("{name}（三角网碰撞体）"));
@@ -655,6 +665,12 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             sensor: body.map(|b| b.sensor).filter(|s| *s),
             ccd: body.map(|b| b.ccd && !b.ccd_precise).filter(|c| *c),
             ccd_precise: body.map(|b| b.ccd_precise).filter(|c| *c),
+            kinematic_trimesh: body.and_then(|b| {
+                (b.body_type == quench3d::physics::BodyType::Kinematic
+                    && b.parts()
+                        .any(|(shape, _)| matches!(shape, Shape::TriMesh { .. })))
+                .then_some(true)
+            }),
             compound_transform_mode: body.and_then(|b| {
                 (b.compound_transform_mode() == quench3d::physics::CompoundTransformMode::BodyLocal)
                     .then_some(quench3d_cli::scene_doc::CompoundTransformModeDoc::BodyLocal)
@@ -1135,12 +1151,51 @@ pub(crate) fn apply_camera(engine: &mut Engine, camera: &CameraDoc) {
 /// 没有这条兜底，`载入带地形的场景 → 随手存一次` 就会把整块地形丢掉。
 ///
 /// 找不到同名物体（或它当时也没写 `shape`）就返回 `None`，调用方照旧报 skipped。
-/// **部件级**的三角网不在兜底范围（那是 `shapes[]` 里的一个部件，按名字整体套用会串形状）。
+/// 部件级高度场使用单独的部件索引和网格内容校验，不能按名字整体套用。
 pub fn base_shape_for(base: &SceneDoc, name: &str) -> Option<ShapeDoc> {
     base.objects
         .iter()
         .find(|o| o.name.as_deref() == Some(name))
         .and_then(|o| o.shape.clone())
+}
+
+// Recover only an unmodified heightfield with an unambiguous source part.
+// Runtime local transforms are exported separately; never invent a mesh source.
+fn base_heightfield_part_for(
+    base: &SceneDoc,
+    name: &str,
+    index: usize,
+    part_count: usize,
+    runtime: &Shape,
+) -> Option<ShapeDoc> {
+    let Shape::TriMesh { vertices, indices } = runtime else {
+        return None;
+    };
+    let expanded = base.expanded();
+    let mut sources = expanded
+        .objects
+        .iter()
+        .filter(|o| o.name.as_deref() == Some(name));
+    let source = sources.next()?;
+    if sources.next().is_some() {
+        return None;
+    }
+    let parts = source.parts();
+    if parts.len() != part_count {
+        return None;
+    }
+    let shape = &parts.get(index)?.shape;
+    if shape.kind != ShapeKind::HeightField {
+        return None;
+    }
+    let Shape::TriMesh {
+        vertices: original_vertices,
+        indices: original_indices,
+    } = quench3d_cli::runner::physics_shape(shape)
+    else {
+        return None;
+    };
+    (vertices == &original_vertices && indices == &original_indices).then(|| shape.clone())
 }
 
 /// 物理形状 → 场景文档形状（`size` 是**边长**，不是半长）。
@@ -1439,6 +1494,23 @@ pub fn roundtrip_probe() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heightfield_part_fallback_rejects_ambiguous_or_changed_meshes() {
+        let mut base = SceneDoc::from_json(r#"{"objects":[{"name":"terrain","shapes":[{"shape":{"type":"box"}},{"shape":{"type":"heightfield","heights":[[0,0],[0,0]]}}]}]}"#).unwrap();
+        let mesh = quench3d_cli::runner::physics_shape(&base.objects[0].parts()[1].shape);
+        assert!(base_heightfield_part_for(&base, "terrain", 1, 2, &mesh).is_some());
+        assert!(base_heightfield_part_for(&base, "terrain", 0, 2, &mesh).is_none());
+        assert!(base_heightfield_part_for(&base, "terrain", 1, 3, &mesh).is_none());
+        assert!(base_heightfield_part_for(&base, "unknown", 1, 2, &mesh).is_none());
+        let mut changed = mesh.clone();
+        if let Shape::TriMesh { vertices, .. } = &mut changed {
+            vertices[0].y += 1.0;
+        }
+        assert!(base_heightfield_part_for(&base, "terrain", 1, 2, &changed).is_none());
+        base.objects.push(base.objects[0].clone());
+        assert!(base_heightfield_part_for(&base, "terrain", 1, 2, &mesh).is_none());
+    }
 
     #[test]
     fn empty_scene_doc_gets_world_waters_on_save() {

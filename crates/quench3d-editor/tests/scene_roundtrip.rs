@@ -50,6 +50,57 @@ fn headless_engine() -> Option<Engine> {
 }
 
 #[test]
+fn kinematic_heightfield_parts_survive_scene_load_save() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let json = r#"{"gravity":[0,0,0],"objects":[
+      {"name":"primary terrain","body":"kinematic","kinematic_trimesh":true,"velocity":[1,0,0],"shape":{"type":"heightfield","heights":[[0,0],[0,0]]}},
+      {"name":"compound terrain","body":"kinematic","kinematic_trimesh":true,"compound_transform_mode":"body_local","position":[4,0,0],"velocity":[1,0,0],"shapes":[{"shape":{"type":"box","size":[0.1,0.1,0.1]}},{"shape":{"type":"heightfield","heights":[[0,0],[0,0]]},"position":[0,2,0]}]},
+      {"name":"plain","body":"static","position":[10,0,0],"shape":{"type":"box"}}
+    ]}"#;
+    scene_io::load_text_into_doc(&mut engine, &mut doc, json).unwrap();
+    let check = |engine: &mut Engine| {
+        for name in ["primary terrain", "compound terrain"] {
+            let handle = engine
+                .scene
+                .objects
+                .iter()
+                .find(|o| o.name == name && o.owner_part.is_none())
+                .unwrap()
+                .body
+                .unwrap();
+            let body = engine.world.body(handle).unwrap();
+            assert_eq!(body.body_type, quench3d::physics::BodyType::Kinematic);
+            let before = body.position();
+            engine.world.step(1.0 / 60.0);
+            let body = engine.world.body(handle).unwrap();
+            assert!((body.position().x - before.x - 1.0 / 60.0).abs() < 1e-6);
+        }
+    };
+    check(&mut engine);
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let saved_doc = SceneDoc::from_json(&saved.json).unwrap();
+    assert_eq!(
+        saved_doc.objects.len(),
+        3,
+        "heightfield object lost: {}",
+        saved.json
+    );
+    assert_eq!(saved.json.matches("kinematic_trimesh").count(), 2);
+    let compound = saved_doc
+        .objects
+        .iter()
+        .find(|o| o.name.as_deref() == Some("compound terrain"))
+        .unwrap();
+    assert_eq!(compound.parts()[1].shape.kind, ShapeKind::HeightField);
+    assert_eq!(compound.parts()[1].position, Some([0.0, 2.0, 0.0]));
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    check(&mut engine);
+}
+
+#[test]
 fn fluid_collision_mode_survives_scene_load_save() {
     use quench3d::physics::FluidCollisionMode;
     let Some(mut engine) = headless_engine() else {
