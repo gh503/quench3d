@@ -5502,6 +5502,99 @@ mod tests {
     }
 
     #[test]
+    fn moving_sphere_contact_continuity_audit() {
+        // 24 fixed trajectories, eight public steps each. Stop/reverse use the
+        // public setter; compare subsequent motion to its actual pre-change velocity.
+        for sign in [-1.0f32, 1.0] {
+            for extra in [false, true] {
+                for shell in [false, true] {
+                    for phase in 0..3 {
+                        let offset = if extra { Vec3::Y } else { Vec3::ZERO };
+                        let builder = if extra {
+                            BodyBuilder::kinematic(Shape::Box {
+                                half_extents: Vec3::splat(0.02),
+                            })
+                            .compound_transform_mode(crate::body::CompoundTransformMode::BodyLocal)
+                            .part_at(Shape::Sphere { radius: 0.1 }, -offset)
+                        } else {
+                            BodyBuilder::kinematic(Shape::Sphere { radius: 0.1 })
+                        };
+                        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                        let handle = world.add_builder(
+                            builder
+                                .position(
+                                    offset - Vec3::X * sign * if shell { 0.105 } else { 0.15 },
+                                )
+                                .linear_velocity(Vec3::X * (sign * 5.0)),
+                        );
+                        world
+                            .add_fluid(FluidDesc {
+                                initial_positions: Some(vec![Vec3::ZERO]),
+                                radius: 0.01,
+                                spacing: 0.1,
+                                viscosity: 0.0,
+                                collision_mode: FluidCollisionMode::SweptMeshes,
+                                boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                boundary_motion_mode:
+                                    FluidBoundaryMotionMode::TranslatingKinematicSpheres,
+                                ..FluidDesc::default()
+                            })
+                            .unwrap();
+                        let mut release_velocity = Vec3::ZERO;
+                        for step in 0..8 {
+                            if step == 4 {
+                                release_velocity = world.fluids()[0].velocities()[0];
+                                let speed = match phase {
+                                    0 => 5.0,
+                                    1 => 0.0,
+                                    _ => -5.0,
+                                };
+                                world
+                                    .body_mut(handle)
+                                    .unwrap()
+                                    .set_linear_velocity(Vec3::X * (sign * speed));
+                            }
+                            let body = world.body(handle).unwrap();
+                            let before = body.transform;
+                            let boundary_velocity = body.linear_velocity;
+                            let previous_particle = world.fluids()[0].particles()[0];
+                            assert_eq!(body.angular_velocity, Vec3::ZERO);
+                            world.step(1.0 / 60.0);
+                            let body = world.body(handle).unwrap();
+                            assert_eq!(body.prev_transform, before);
+                            assert_eq!(body.transform.rotation, before.rotation);
+                            assert!(
+                                (body.position() - before.position - boundary_velocity / 60.0)
+                                    .length()
+                                    < 1e-6
+                            );
+                            let center = body.position() - offset;
+                            let f = &world.fluids()[0];
+                            let p = f.particles()[0];
+                            let v = f.velocities()[0];
+                            assert!(p.is_finite() && v.is_finite());
+                            assert!(v.length() <= MAX_SPEED + 1e-5);
+                            assert!((p.x - center.x) * sign >= 0.11 - 2e-6,
+                                "gap: sign={sign} extra={extra} shell={shell} phase={phase} step={step} p={p:?} center={center:?}");
+                            assert!(v.x * sign > 4.99, "contact must impart forward motion");
+                            if step >= 4 && phase != 0 {
+                                assert!(
+                                    (v - release_velocity).length() < 2e-5,
+                                    "stop/reverse must not pull departing liquid back"
+                                );
+                                assert!(
+                                    (p - previous_particle - release_velocity / 60.0).length()
+                                        < 2e-6
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn moving_sphere_clearance_shell_entry() {
         let mut failures = Vec::new();
         for sign in [-1.0f32, 1.0] {
