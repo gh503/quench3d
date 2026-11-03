@@ -27,8 +27,82 @@ const EPS: f32 = 1e-6;
 #[cfg(test)]
 type DensityTraceEntry = (usize, Vec3, Vec3, Vec3);
 
+// Round165 attribution is deliberately test-only: no release fields, branches or math.
+#[cfg(test)]
+#[derive(Debug)]
+struct OverlapPhase {
+    step: usize,
+    phase: &'static str,
+    positions: [Vec3; 2],
+    minimum: (f64, usize, usize),
+    candidate: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct OverlapPair {
+    step: usize,
+    pair: [usize; 2],
+    before: [Vec3; 2],
+    intended: [Vec3; 2],
+    after: [Vec3; 2],
+    target_after: [Vec3; 2],
+    boundary_limited: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct OverlapTrace {
+    step: usize,
+    target: [usize; 2],
+    phases: Vec<OverlapPhase>,
+    pairs: Vec<OverlapPair>,
+}
+
+#[cfg(test)]
+fn overlap_distance(a: Vec3, b: Vec3) -> f64 {
+    ((f64::from(a.x) - f64::from(b.x)).powi(2)
+        + (f64::from(a.y) - f64::from(b.y)).powi(2)
+        + (f64::from(a.z) - f64::from(b.z)).powi(2))
+    .sqrt()
+}
+
+#[cfg(test)]
+fn overlap_minimum(positions: &[Vec3]) -> (f64, usize, usize) {
+    let mut result = (f64::INFINITY, 0, 0);
+    for (i, &p) in positions.iter().enumerate() {
+        for (j, &q) in positions.iter().enumerate().skip(i + 1) {
+            let distance = overlap_distance(p, q);
+            if distance < result.0 {
+                result = (distance, i, j);
+            }
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+fn trace_overlap_phase(phase: &'static str, positions: &[Vec3], neighbors: &[Vec<u32>]) {
+    OVERLAP_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            let [i, j] = trace.target;
+            assert!(trace.phases.len() < 2048, "bounded phase trace");
+            trace.phases.push(OverlapPhase {
+                step: trace.step,
+                phase,
+                positions: [positions[i], positions[j]],
+                minimum: overlap_minimum(positions),
+                candidate: neighbors
+                    .get(i)
+                    .is_some_and(|row| row.contains(&(j as u32))),
+            });
+        }
+    });
+}
+
 #[cfg(test)]
 thread_local! {
+    static OVERLAP_TRACE: std::cell::RefCell<Option<OverlapTrace>> = const { std::cell::RefCell::new(None) };
     static MESH_PROJECTION_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_MESH_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MOVING_MESH_BOUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1178,6 +1252,12 @@ impl Fluid {
                 if j <= i || j >= n {
                     continue;
                 }
+                #[cfg(test)]
+                if OVERLAP_TRACE
+                    .with(|trace| trace.borrow().as_ref().is_some_and(|t| t.target == [i, j]))
+                {
+                    trace_overlap_phase("target_pair_visit", predicted, neighbors);
+                }
                 let delta = predicted[i] - predicted[j];
                 let dist = delta.length();
                 if !dist.is_finite() || dist >= min_dist {
@@ -1234,6 +1314,31 @@ impl Fluid {
                     predicted[j] -= dir * push;
                 }
                 #[cfg(test)]
+                OVERLAP_TRACE.with(|trace| {
+                    if let Some(trace) = trace.borrow_mut().as_mut() {
+                        if trace.target.contains(&i) || trace.target.contains(&j) {
+                            let intended = [
+                                continuity_before.0 + dir * push,
+                                continuity_before.1 - dir * push,
+                            ];
+                            let after = [predicted[i], predicted[j]];
+                            assert!(trace.pairs.len() < 60_000, "bounded target pair trace");
+                            trace.pairs.push(OverlapPair {
+                                step: trace.step,
+                                pair: [i, j],
+                                before: [continuity_before.0, continuity_before.1],
+                                intended,
+                                after,
+                                target_after: [
+                                    predicted[trace.target[0]],
+                                    predicted[trace.target[1]],
+                                ],
+                                boundary_limited: intended != after,
+                            });
+                        }
+                    }
+                });
+                #[cfg(test)]
                 MESH_CONTINUITY_TRACE.with(|trace| {
                     if let Some(trace) = trace.borrow_mut().as_mut() {
                         trace.push((
@@ -1252,6 +1357,12 @@ impl Fluid {
                 });
             }
         }
+        #[cfg(test)]
+        trace_overlap_phase(
+            "separation_post_before_final_wall",
+            &self.predicted,
+            &self.neighbors,
+        );
         // 分离可能把粒子推进墙；重新投影一次（不做速度/摩擦）。
         #[cfg(test)]
         let continuity_before = MESH_CONTINUITY_TRACE
@@ -1267,6 +1378,8 @@ impl Fluid {
             )
             .0;
         }
+        #[cfg(test)]
+        trace_overlap_phase("final_wall_post", &self.predicted, &self.neighbors);
         #[cfg(test)]
         if let Some(before) = continuity_before {
             MESH_CONTINUITY_TRACE.with(|trace| {
@@ -1397,6 +1510,8 @@ impl Fluid {
             None
         };
 
+        #[cfg(test)]
+        trace_overlap_phase("prediction_pre_sweep", &self.predicted, &self.neighbors);
         // Only the explicit mode captures the actual temporal segment, before
         // neighbor construction and later density corrections change its endpoint.
         let swept_contacts = if self.desc.collision_mode != FluidCollisionMode::Legacy {
@@ -1481,6 +1596,8 @@ impl Fluid {
         // 粒子不会先陷进地面再被一次性弹出来（那是"炸开"的主要来源）。
         let iters = self.desc.iterations.max(1);
         for _ in 0..iters {
+            #[cfg(test)]
+            trace_overlap_phase("density_pre", &self.predicted, &self.neighbors);
             self.update_density_lambda(mass, rho0, h, h2, poly6, spiky, w0);
             self.delta.clear();
             self.delta.resize(n, Vec3::ZERO);
@@ -1560,7 +1677,11 @@ impl Fluid {
                     self.contacts[i] = contact;
                 }
             }
+            #[cfg(test)]
+            trace_overlap_phase("density_post", &self.predicted, &self.neighbors);
         }
+        #[cfg(test)]
+        trace_overlap_phase("separation_pre", &self.predicted, &self.neighbors);
         if self.desc.particle_collision {
             self.separate_particles(
                 radius,
@@ -9274,6 +9395,183 @@ mod tests {
         }
         assert_eq!(worlds_run, 8);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Pins the measured limitation of the existing single-pass solver, rather than
+    /// asserting a hard non-overlap guarantee that this API does not make.
+    #[test]
+    fn closed_container_worst_pair_phase_attribution() {
+        fn fixture() -> PhysicsWorld {
+            let mut world = PhysicsWorld::with_gravity(vec3(0.0, -9.81, 0.0));
+            world.set_fixed_dt(1.0 / 60.0);
+            for (position, half_extents) in [
+                (vec3(0.0, -0.05, 0.0), vec3(0.6, 0.05, 0.6)),
+                (vec3(0.0, 1.05, 0.0), vec3(0.6, 0.05, 0.6)),
+                (vec3(-0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+                (vec3(0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+                (vec3(0.0, 0.5, -0.55), vec3(0.6, 0.6, 0.05)),
+                (vec3(0.0, 0.5, 0.55), vec3(0.6, 0.6, 0.05)),
+            ] {
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::Box { half_extents }).position(position),
+                );
+            }
+            let desc = FluidDesc {
+                center: vec3(0.0, 0.5, 0.0),
+                half_extents: Vec3::splat(0.2),
+                spacing: 0.1,
+                radius: 0.04,
+                max_particles: 2000,
+                initial_velocity: vec3(0.15, 0.0, -0.1),
+                collision_mode: FluidCollisionMode::SweptMeshes,
+                particle_collision: true,
+                ..FluidDesc::default()
+            };
+            assert_eq!(desc.estimated_particles(), 125);
+            assert_eq!(desc.iterations, 4);
+            world.add_fluid(desc).unwrap();
+            world
+        }
+        let dt = 1.0 / 60.0;
+        let mut control = fixture();
+        let mut worst = (f64::INFINITY, 0, 0, 0);
+        let mut trajectory = Vec::new();
+        for step in 1usize..=120 {
+            control.step(dt);
+            assert_eq!(control.step_count, step as u64);
+            let positions = control.fluids()[0].particles();
+            let (distance, i, j) = overlap_minimum(positions);
+            if distance < worst.0 {
+                worst = (distance, step, i, j);
+            }
+            trajectory.push(positions.to_vec());
+        }
+        println!(
+            "ROUND165_WORST distance={:.12} step={} pair=({}, {}) diameter={:.12}",
+            worst.0,
+            worst.1,
+            worst.2,
+            worst.3,
+            f64::from(0.08f32)
+        );
+        assert!(
+            (worst.0 - 0.027011102).abs() < 1e-8,
+            "same frozen Round164 reproduction: {worst:?}"
+        );
+        OVERLAP_TRACE.with(|trace| {
+            *trace.borrow_mut() = Some(OverlapTrace {
+                step: 0,
+                target: [worst.2, worst.3],
+                phases: Vec::new(),
+                pairs: Vec::new(),
+            })
+        });
+        let mut replay = fixture();
+        for step in 1..=120 {
+            OVERLAP_TRACE.with(|trace| trace.borrow_mut().as_mut().unwrap().step = step);
+            replay.step(dt);
+            assert_eq!(
+                replay.fluids()[0].particles(),
+                trajectory[step - 1],
+                "tracing preserves exact trajectory step={step}"
+            );
+        }
+        let trace = OVERLAP_TRACE.with(|trace| trace.borrow_mut().take().unwrap());
+        assert_eq!(
+            trace
+                .phases
+                .iter()
+                .filter(|p| p.phase == "density_pre")
+                .count(),
+            480
+        );
+        assert_eq!(
+            trace
+                .phases
+                .iter()
+                .filter(|p| p.phase == "density_post")
+                .count(),
+            480
+        );
+        assert_eq!(
+            trace
+                .phases
+                .iter()
+                .filter(|p| p.phase == "final_wall_post")
+                .count(),
+            120
+        );
+        let detailed = std::env::var_os("Q3D_TRACE_OVERLAP").is_some();
+        for phase in trace
+            .phases
+            .iter()
+            .filter(|p| detailed || p.step == worst.1)
+        {
+            println!(
+                "ROUND165_PHASE {phase:?} target_distance={:.12}",
+                overlap_distance(phase.positions[0], phase.positions[1])
+            );
+        }
+        for pair in trace.pairs.iter().filter(|p| detailed || p.step == worst.1) {
+            println!("ROUND165_PAIR {pair:?} target_distance={:.12} own_before={:.12} own_intended={:.12} own_after={:.12}", overlap_distance(pair.target_after[0], pair.target_after[1]), overlap_distance(pair.before[0], pair.before[1]), overlap_distance(pair.intended[0], pair.intended[1]), overlap_distance(pair.after[0], pair.after[1]));
+        }
+        let phases: Vec<_> = trace.phases.iter().filter(|p| p.step == worst.1).collect();
+        let pre = phases.iter().find(|p| p.phase == "separation_pre").unwrap();
+        let post = phases
+            .iter()
+            .find(|p| p.phase == "separation_post_before_final_wall")
+            .unwrap();
+        let wall = phases
+            .iter()
+            .find(|p| p.phase == "final_wall_post")
+            .unwrap();
+        println!("ROUND165_ATTRIBUTION candidate={} pre_min={:?} post_min={:?} final_min={:?} target_pair_pushes={} boundary_limited_pushes={}", pre.candidate, pre.minimum, post.minimum, wall.minimum, trace.pairs.iter().filter(|p| p.step == worst.1 && p.pair == trace.target).count(), trace.pairs.iter().filter(|p| p.step == worst.1 && p.boundary_limited).count());
+        // Actual cause: both equal-half corrections cross a different container
+        // face. Segment sweeps stop at first contact; they do not promise sliding
+        // or redistribution of the blocked half to the other particle.
+        let own = trace
+            .pairs
+            .iter()
+            .find(|p| p.step == worst.1 && p.pair == trace.target)
+            .unwrap();
+        assert!(
+            pre.candidate,
+            "this pair was in the frozen prediction neighborhood"
+        );
+        assert!(
+            own.boundary_limited,
+            "offending phase must remain boundary-limited pair sweep"
+        );
+        assert!(
+            own.intended[0].y < 0.04,
+            "particle 112 ideal half-push crosses floor"
+        );
+        assert!(
+            own.intended[1].z > 0.46,
+            "particle 122 ideal half-push crosses +Z wall"
+        );
+        assert!(
+            (overlap_distance(own.intended[0], own.intended[1]) - f64::from(0.08f32)).abs() < 1e-7
+        );
+        assert!(
+            own.after[0].y >= 0.04 - 1e-6 && own.after[1].z <= 0.46 + 1e-6,
+            "boundary-limited pair correction preserves container clearance"
+        );
+        assert_eq!(
+            post.positions, wall.positions,
+            "final wall projection does not manufacture this overlap"
+        );
+        let density: Vec<_> = phases
+            .iter()
+            .filter(|p| p.phase == "density_pre" || p.phase == "density_post")
+            .collect();
+        assert!(
+            density.iter().all(|p| p.positions == pre.positions),
+            "density did not manufacture the worst-step overlap"
+        );
+        assert_eq!(wall.minimum.1, worst.2);
+        assert_eq!(wall.minimum.2, worst.3);
+        assert_eq!(wall.minimum.0, worst.0);
     }
 
     fn settled_world() -> PhysicsWorld {
