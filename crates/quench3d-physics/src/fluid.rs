@@ -123,6 +123,7 @@ thread_local! {
     static MOVING_SCAN_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_SHELL_CARRY: std::cell::Cell<Option<(Vec3, Vec3)>> = const { std::cell::Cell::new(None) };
     static SEPARATION_COST: std::cell::Cell<Option<[u64; 4]>> = const { std::cell::Cell::new(None) };
+    static SEPARATION_REDUNDANCY: std::cell::Cell<Option<[u64; 6]>> = const { std::cell::Cell::new(None) };
     static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MESH_CONTINUITY_TRACE: std::cell::RefCell<Option<Vec<DensityTraceEntry>>> = const { std::cell::RefCell::new(None) };
     static MESH_DENSITY_TRACE: std::cell::RefCell<Option<Vec<DensityTraceEntry>>> = const { std::cell::RefCell::new(None) };
@@ -3171,6 +3172,14 @@ fn sweep_separation_slide(
 ) -> (Vec3, bool) {
     let end = start + correction;
     #[cfg(test)]
+    SEPARATION_REDUNDANCY.with(|work| {
+        if let Some(mut n) = work.get() {
+            n[0] += 1;
+            n[1] += u64::from(end == start);
+            work.set(Some(n));
+        }
+    });
+    #[cfg(test)]
     separation_cost_add(1, 1);
     let (hit, contact) = sweep_liquid_correction(start, end, bodies, radius, desc, context);
     #[cfg(test)]
@@ -3186,6 +3195,14 @@ fn sweep_separation_slide(
     let remaining = end - hit;
     let inward = remaining.dot(contact.normal).min(0.0);
     let tangent = remaining - contact.normal * inward;
+    #[cfg(test)]
+    SEPARATION_REDUNDANCY.with(|work| {
+        if let Some(mut n) = work.get() {
+            n[2] += u64::from(tangent.length_squared() == 0.0);
+            n[3] += u64::from(hit + tangent == hit);
+            work.set(Some(n));
+        }
+    });
     if !tangent.is_finite() || tangent.length_squared() == 0.0 {
         return (hit, true);
     }
@@ -3329,6 +3346,16 @@ fn sweep_static_spheres_timed(
     let mut result = (end, None);
     let candidates = index.and_then(|index| index.candidates(start, end, radius));
     let count = candidates.as_ref().map_or(bodies.len(), Vec::len);
+    #[cfg(test)]
+    SEPARATION_REDUNDANCY.with(|work| {
+        if let Some(mut n) = work.get() {
+            // All static sweep sites, including prediction/density/final contacts:
+            // broad-phase slots enumerated, not proven redundant candidates.
+            n[4] += 1;
+            n[5] += count as u64;
+            work.set(Some(n));
+        }
+    });
     for ordinal in 0..count {
         let index = candidates.as_ref().map_or(ordinal, |slots| slots[ordinal]);
         let slot = &bodies[index];
@@ -9614,6 +9641,7 @@ mod tests {
                         world.step(1.0 / 60.0);
                     }
                     SEPARATION_COST.with(|c| c.set(Some([0; 4])));
+                    SEPARATION_REDUNDANCY.with(|c| c.set(Some([0; 6])));
                     let mut bits = Vec::new();
                     for _ in 0..32 {
                         world.step(1.0 / 60.0);
@@ -9629,6 +9657,15 @@ mod tests {
                         }
                     }
                     let counts = SEPARATION_COST.with(|c| c.take().unwrap());
+                    let redundancy = SEPARATION_REDUNDANCY.with(|c| c.take().unwrap());
+                    if mode == FluidSeparationMode::Legacy {
+                        assert_eq!(redundancy[0], 0);
+                    } else {
+                        assert_eq!(redundancy[0], counts[1]);
+                    }
+                    assert!(redundancy[1] <= redundancy[0]);
+                    assert!(redundancy[2] <= redundancy[0]);
+                    println!("ROUND170_REDUNDANCY particles={} geometry={geometry} mode={mode:?} helper_calls={} zero_actual_initial={} zero_tangent_guard={} zero_actual_tangent={} all_static_calls={} enumerated_slots={}",side.pow(3),redundancy[0],redundancy[1],redundancy[2],redundancy[3],redundancy[4],redundancy[5]);
                     let f = &world.fluids()[0];
                     let checksum = f
                         .particles()
