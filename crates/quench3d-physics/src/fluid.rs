@@ -154,6 +154,17 @@ pub enum FluidCollisionMode {
     SweptMeshes,
 }
 
+/// Particle-pair separation policy, independent of density iteration count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FluidSeparationMode {
+    /// Preserve the historical equal-half, single-pass correction arithmetic.
+    #[default]
+    Legacy,
+    /// Opt in to bounded boundary-constrained pair corrections.
+    /// Requires particle collision and swept primitive or mesh collision.
+    BoundaryConstrained,
+}
+
 /// Temporal motion policy for rigid liquid boundaries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FluidBoundaryMotionMode {
@@ -462,9 +473,12 @@ pub struct FluidDesc {
     /// 粒子间最小分离（缺省 false = 只靠 PBF 密度约束，旧场景逐位不变）。
     ///
     /// 打开后，每步 PBF 位置迭代结束后把距离小于 `2 * radius` 的邻居沿连线推开
-    /// （各一半），再重新投影到刚体边界。PBF 本身已防止压缩，这一层额外保证
-    /// 自由表面/低迭代次数下粒子不会互相重叠；代价是每步一次邻居遍历。
+    /// （各一半），再重新投影到刚体边界。默认每步一次确定邻居遍历，
+    /// 后续粒子对及边界限制可能留下重叠，不保证完全分离或不可压缩。
     pub particle_collision: bool,
+    /// Rust API opt-in policy for particle separation; defaults to Legacy.
+    /// Scene serialization currently exposes only the historical policy.
+    pub separation_mode: FluidSeparationMode,
     /// 流体-刚体接触摩擦系数（0~1，缺省 0 = 关闭，旧场景逐位不变）。
     ///
     /// 只作用于粒子碰到动态/静态刚体时的**切向**相对速度；法向冲量仍按原逻辑
@@ -552,6 +566,7 @@ impl Default for FluidDesc {
             foam_rate: 120.0,
             max_foam: 256,
             particle_collision: false,
+            separation_mode: FluidSeparationMode::Legacy,
             contact_friction: 0.0,
             bubbles: false,
             bubble_rate: 20.0,
@@ -576,6 +591,12 @@ impl FluidDesc {
         let he = self.half_extents;
         (self.boundary_motion_mode == FluidBoundaryMotionMode::Legacy
             || self.collision_mode == FluidCollisionMode::SweptMeshes)
+            && (self.separation_mode == FluidSeparationMode::Legacy
+                || (self.particle_collision
+                    && matches!(
+                        self.collision_mode,
+                        FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
+                    )))
             && self.center.is_finite()
             && self.initial_positions.as_ref().is_none_or(|points| {
                 !points.is_empty()
@@ -1277,7 +1298,54 @@ impl Fluid {
                 });
                 #[cfg(test)]
                 let continuity_before = (predicted[i], predicted[j]);
-                if matches!(
+                if self.desc.separation_mode == FluidSeparationMode::BoundaryConstrained {
+                    let context = SweepQueryContext {
+                        mesh_cache,
+                        bounds,
+                        index,
+                        meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
+                    };
+                    let (a, blocked_a) = sweep_separation_slide(
+                        predicted[i],
+                        dir * push,
+                        bodies,
+                        radius,
+                        &self.desc,
+                        context,
+                    );
+                    let (b, blocked_b) = sweep_separation_slide(
+                        predicted[j],
+                        -dir * push,
+                        bodies,
+                        radius,
+                        &self.desc,
+                        context,
+                    );
+                    predicted[i] = a;
+                    predicted[j] = b;
+                    // One bounded residual correction only when a boundary blocked
+                    // the first correction. Free-space arithmetic stays identical.
+                    if blocked_a || blocked_b {
+                        let delta = a - b;
+                        let distance = delta.length();
+                        if distance.is_finite() && distance > 0.0 && distance < min_dist {
+                            let correction = delta / distance * ((min_dist - distance) * 0.5);
+                            predicted[i] = sweep_separation_slide(
+                                a, correction, bodies, radius, &self.desc, context,
+                            )
+                            .0;
+                            predicted[j] = sweep_separation_slide(
+                                b,
+                                -correction,
+                                bodies,
+                                radius,
+                                &self.desc,
+                                context,
+                            )
+                            .0;
+                        }
+                    }
+                } else if matches!(
                     self.desc.collision_mode,
                     FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
                 ) {
@@ -3068,6 +3136,34 @@ fn sweep_translating_spheres(
     } else {
         (carry, Some(contact))
     }
+}
+
+/// Opt-in pair correction only: initial sweep plus at most one sliding sweep.
+/// Discard inward normal motion and re-sweep every tangential residual, so this
+/// cannot teleport through another wall. At the second contact, stop conservatively.
+fn sweep_separation_slide(
+    start: Vec3,
+    correction: Vec3,
+    bodies: &[BodySlot],
+    radius: f32,
+    desc: &FluidDesc,
+    context: SweepQueryContext<'_>,
+) -> (Vec3, bool) {
+    let end = start + correction;
+    let (hit, contact) = sweep_liquid_correction(start, end, bodies, radius, desc, context);
+    let Some(contact) = contact else {
+        return (hit, false);
+    };
+    let remaining = end - hit;
+    let inward = remaining.dot(contact.normal).min(0.0);
+    let tangent = remaining - contact.normal * inward;
+    if !tangent.is_finite() || tangent.length_squared() == 0.0 {
+        return (hit, true);
+    }
+    (
+        sweep_liquid_correction(hit, hit + tangent, bodies, radius, desc, context).0,
+        true,
+    )
 }
 
 /// Sweep a liquid movement segment against static spheres, and optionally boxes.
@@ -9395,6 +9491,259 @@ mod tests {
         }
         assert_eq!(worlds_run, 8);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn boundary_constrained_separation_corner_progress() {
+        fn run(mode: FluidSeparationMode) -> Vec<Vec3> {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            for (position, half_extents) in [
+                (vec3(0.0, -0.05, 0.0), vec3(0.6, 0.05, 0.6)),
+                (vec3(0.0, 0.5, 0.55), vec3(0.6, 0.6, 0.05)),
+            ] {
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::Box { half_extents }).position(position),
+                );
+            }
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(vec![
+                        vec3(0.056195434, 0.04, 0.45950133),
+                        vec3(0.077126235, 0.057065815, 0.46),
+                    ]),
+                    radius: 0.04,
+                    spacing: 0.1,
+                    max_particles: 2,
+                    particle_collision: true,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    separation_mode: mode,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            world.fluids()[0].particles().to_vec()
+        }
+        let legacy = run(FluidSeparationMode::Legacy);
+        let constrained = run(FluidSeparationMode::BoundaryConstrained);
+        let before = overlap_distance(legacy[0], legacy[1]);
+        let after = overlap_distance(constrained[0], constrained[1]);
+        println!("ROUND166_CORNER legacy={before:.12} constrained={after:.12} legacy_positions={legacy:?} constrained_positions={constrained:?}");
+        for p in &constrained {
+            assert!(p.is_finite() && p.y >= 0.04 - 1e-6 && p.z <= 0.46 + 1e-6);
+        }
+        assert!(after > before + 0.005, "opt-in must make measurable safe progress at the attributed corner: {before} -> {after}");
+    }
+
+    #[test]
+    fn boundary_constrained_separation_controls() {
+        assert_eq!(
+            FluidDesc::default().separation_mode,
+            FluidSeparationMode::Legacy
+        );
+        for collision_mode in [
+            FluidCollisionMode::Legacy,
+            FluidCollisionMode::SweptSpheres,
+            FluidCollisionMode::SweptPrimitives,
+            FluidCollisionMode::SweptMeshes,
+        ] {
+            for particle_collision in [false, true] {
+                let desc = FluidDesc {
+                    separation_mode: FluidSeparationMode::BoundaryConstrained,
+                    collision_mode,
+                    particle_collision,
+                    ..FluidDesc::default()
+                };
+                assert_eq!(
+                    desc.is_valid(),
+                    particle_collision
+                        && matches!(
+                            collision_mode,
+                            FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
+                        )
+                );
+                assert!(FluidDesc {
+                    separation_mode: FluidSeparationMode::Legacy,
+                    ..desc
+                }
+                .is_valid());
+            }
+        }
+        for sign in [-1.0, 1.0] {
+            for reverse in [false, true] {
+                for collision_mode in [
+                    FluidCollisionMode::SweptPrimitives,
+                    FluidCollisionMode::SweptMeshes,
+                ] {
+                    let mut distances = Vec::new();
+                    for separation_mode in [
+                        FluidSeparationMode::Legacy,
+                        FluidSeparationMode::BoundaryConstrained,
+                    ] {
+                        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                        let mut walls = vec![
+                            (vec3(0.0, -0.05, 0.0), vec3(0.6, 0.05, 0.6)),
+                            (vec3(0.0, 0.5, sign * 0.55), vec3(0.6, 0.6, 0.05)),
+                        ];
+                        let mut positions = vec![
+                            vec3(0.056195434, 0.04, sign * 0.45950133),
+                            vec3(0.077126235, 0.057065815, sign * 0.46),
+                        ];
+                        if reverse {
+                            walls.reverse();
+                            positions.reverse();
+                        }
+                        for (p, h) in walls {
+                            world.add_builder(
+                                BodyBuilder::r#static(Shape::Box { half_extents: h }).position(p),
+                            );
+                        }
+                        world
+                            .add_fluid(FluidDesc {
+                                initial_positions: Some(positions),
+                                radius: 0.04,
+                                spacing: 0.1,
+                                max_particles: 2,
+                                particle_collision: true,
+                                collision_mode,
+                                separation_mode,
+                                ..FluidDesc::default()
+                            })
+                            .unwrap();
+                        world.step(1.0 / 60.0);
+                        let p = world.fluids()[0].particles();
+                        for p in p {
+                            assert!(
+                                p.is_finite() && p.y >= 0.04 - 1e-6 && sign * p.z <= 0.46 + 1e-6
+                            );
+                        }
+                        distances.push(overlap_distance(p[0], p[1]));
+                    }
+                    assert!(distances[1] > distances[0]+0.005, "sign={sign} reverse={reverse} mode={collision_mode:?} distances={distances:?}");
+                }
+            }
+        }
+        // No boundaries: opt-in and old policy use identical first-push arithmetic.
+        let mut free = Vec::new();
+        for separation_mode in [
+            FluidSeparationMode::Legacy,
+            FluidSeparationMode::BoundaryConstrained,
+        ] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(vec![Vec3::ZERO, vec3(0.01, 0.02, 0.0)]),
+                    radius: 0.04,
+                    spacing: 0.1,
+                    max_particles: 2,
+                    particle_collision: true,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    separation_mode,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            world.step(1.0 / 60.0);
+            free.push((
+                world.fluids()[0].particles().to_vec(),
+                world.fluids()[0].velocities().to_vec(),
+            ));
+        }
+        assert_eq!(free[0], free[1]);
+        // General curved obstacle and very thin wall: a safe correction must remain
+        // outside both, even when pair separation requests motion through them.
+        for sphere in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let shape = if sphere {
+                Shape::Sphere { radius: 0.2 }
+            } else {
+                Shape::Box {
+                    half_extents: vec3(0.001, 1.0, 1.0),
+                }
+            };
+            world.add_builder(BodyBuilder::r#static(shape));
+            let x = if sphere { 0.24 } else { 0.041 };
+            world
+                .add_fluid(FluidDesc {
+                    initial_positions: Some(vec![vec3(x, 0.0, 0.0), vec3(x + 0.01, 0.02, 0.0)]),
+                    radius: 0.04,
+                    spacing: 0.1,
+                    max_particles: 2,
+                    particle_collision: true,
+                    collision_mode: FluidCollisionMode::SweptMeshes,
+                    separation_mode: FluidSeparationMode::BoundaryConstrained,
+                    ..FluidDesc::default()
+                })
+                .unwrap();
+            for _ in 0..8 {
+                world.step(1.0 / 60.0);
+                for p in world.fluids()[0].particles() {
+                    assert!(p.is_finite());
+                    if sphere {
+                        assert!(overlap_distance(*p, Vec3::ZERO) >= 0.24 - 1e-6);
+                    } else {
+                        assert!(p.x >= 0.041 - 1e-6, "thin wall tunneled: {p:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_constrained_separation_closed_container_120_steps() {
+        let mut world = PhysicsWorld::with_gravity(vec3(0.0, -9.81, 0.0));
+        world.set_fixed_dt(1.0 / 60.0);
+        for (p, h) in [
+            (vec3(0.0, -0.05, 0.0), vec3(0.6, 0.05, 0.6)),
+            (vec3(0.0, 1.05, 0.0), vec3(0.6, 0.05, 0.6)),
+            (vec3(-0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+            (vec3(0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+            (vec3(0.0, 0.5, -0.55), vec3(0.6, 0.6, 0.05)),
+            (vec3(0.0, 0.5, 0.55), vec3(0.6, 0.6, 0.05)),
+        ] {
+            world.add_builder(BodyBuilder::r#static(Shape::Box { half_extents: h }).position(p));
+        }
+        world
+            .add_fluid(FluidDesc {
+                center: vec3(0.0, 0.5, 0.0),
+                half_extents: Vec3::splat(0.2),
+                spacing: 0.1,
+                radius: 0.04,
+                max_particles: 2000,
+                initial_velocity: vec3(0.15, 0.0, -0.1),
+                particle_collision: true,
+                collision_mode: FluidCollisionMode::SweptMeshes,
+                separation_mode: FluidSeparationMode::BoundaryConstrained,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+        let mut minimum = f64::INFINITY;
+        let mut density_nonzero = 0;
+        let mut contacts = 0;
+        SEPARATION_PUSHES.with(|n| n.set(0));
+        for step in 1..=120 {
+            MESH_DENSITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+            world.step(1.0 / 60.0);
+            let density = MESH_DENSITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
+            assert_eq!(density.len(), 125 * 4);
+            density_nonzero += density.iter().filter(|(_, a, b, _)| a != b).count();
+            assert_eq!(world.step_count, step);
+            let f = &world.fluids()[0];
+            assert_eq!(f.particles().len(), 125);
+            minimum = minimum.min(overlap_minimum(f.particles()).0);
+            contacts += f.contacts.iter().filter(|c| c.is_some()).count();
+            for (p, v) in f.particles().iter().zip(f.velocities()) {
+                assert!(p.is_finite() && v.is_finite() && v.length() <= MAX_SPEED + 1e-4);
+                assert!(
+                    p.x.abs() <= 0.46 + 1e-4
+                        && p.z.abs() <= 0.46 + 1e-4
+                        && p.y >= 0.04 - 1e-4
+                        && p.y <= 0.96 + 1e-4,
+                    "step={step} p={p:?}"
+                );
+            }
+        }
+        let pushes = SEPARATION_PUSHES.with(|n| n.get());
+        assert!(pushes > 0 && density_nonzero > 0 && contacts > 0);
+        println!("ROUND166_LONGRUN steps=120 particles=125 min_pair={minimum:.12} pair_pushes={pushes} density_nonzero={density_nonzero} contacts={contacts}");
     }
 
     /// Pins the measured limitation of the existing single-pass solver, rather than
