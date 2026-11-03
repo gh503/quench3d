@@ -1478,8 +1478,20 @@ impl Doc {
         self.status = format!("已建默认场景（{} 个物体）", engine.scene.len());
     }
 
+    /// 添加前必须能逐项对应已有流体的来源配置；空的新文档可从零开始。
+    pub fn can_add_particle_fluid(&self, engine: &Engine) -> bool {
+        self.base_doc.as_ref().map_or_else(
+            || engine.world.fluid_count() == 0,
+            |base| base.fluids.len() == engine.world.fluid_count(),
+        )
+    }
+
     /// 在原点上方添加一块粒子流体；只在用户操作时创建物理与表面代理。
-    pub fn add_particle_fluid(&mut self, engine: &mut Engine) {
+    pub fn add_particle_fluid(&mut self, engine: &mut Engine) -> bool {
+        if !self.can_add_particle_fluid(engine) {
+            self.status = "缺少完整流体来源配置，无法安全添加".to_string();
+            return false;
+        }
         let desc = quench3d_physics::FluidDesc {
             center: Vec3::new(0.0, 1.0, 0.0),
             half_extents: Vec3::splat(0.5),
@@ -1490,7 +1502,7 @@ impl Doc {
         };
         let Some(fluid) = engine.world.add_fluid(desc) else {
             self.status = "添加粒子流体失败".to_string();
-            return;
+            return false;
         };
         // FluidDoc 的 serde 缺省与场景读取共用；不要另外复制完整参数表。
         let spec = serde_json::from_value(serde_json::json!({
@@ -1535,6 +1547,7 @@ impl Doc {
             "已添加粒子流体（{} 颗粒子）",
             engine.world.fluids()[fluid].particles().len()
         );
+        true
     }
 
     /// 只有完整的场景配置才能按物理下标安全地删除并保存。

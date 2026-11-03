@@ -559,13 +559,16 @@ fn add_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
             }
         }
         ui.separator();
+        let can_add_fluid = doc.can_add_particle_fluid(engine);
         if ui
-            .button("粒子流体")
+            .add_enabled(can_add_fluid, egui::Button::new("粒子流体"))
             .on_hover_text("添加会随重力流动的粒子水块；水域用于解析浮力")
+            .on_disabled_hover_text("缺少完整流体来源配置，无法安全添加")
             .clicked()
         {
-            doc.add_particle_fluid(engine);
-            doc.record_edit(engine);
+            if doc.add_particle_fluid(engine) {
+                doc.record_edit(engine);
+            }
             ui.close();
         }
     });

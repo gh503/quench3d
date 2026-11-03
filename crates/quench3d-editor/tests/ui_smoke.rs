@@ -47,6 +47,168 @@ fn headless_engine() -> Option<Engine> {
     ))
 }
 
+/// 无底稿的运行态流体不能被菜单添加错配；拒绝也不能悄悄多记历史。
+#[test]
+fn add_menu_particle_fluid_rejects_unknown_runtime_origin_without_mutation() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.spawn(&mut engine, quench3d_editor::doc::Primitive::Cube);
+    doc.reset_history(&engine);
+    doc.spawn(&mut engine, quench3d_editor::doc::Primitive::Sphere);
+    doc.record_edit(&engine);
+    engine
+        .world
+        .add_fluid(quench3d_physics::FluidDesc::default())
+        .unwrap();
+    engine.paused = false;
+    engine.renderer.options.water.enabled = false;
+    let positions = engine.world.fluids()[0].particles().to_vec();
+    let before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let objects = engine.scene.len();
+    let selected = doc.selected;
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut time = 0.0;
+    let mut run = |engine: &mut Engine, doc: &mut Doc, events| {
+        time += 1.0;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, doc, &mut view, &mut gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let click = |pos| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]
+    };
+    run(&mut engine, &mut doc, vec![]);
+    let shapes = run(&mut engine, &mut doc, vec![]);
+    let add = text_shape_rect(&shapes, "添加").unwrap().center();
+    run(&mut engine, &mut doc, click(add));
+    let shapes = run(&mut engine, &mut doc, vec![]);
+    let menu_shapes: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), "粒子流体")
+                .is_some_and(|rect| rect.center().x < 900.0)
+        })
+        .collect();
+    let fluid = text_shape_rect(&menu_shapes, "粒子流体")
+        .expect("菜单入口可见")
+        .center();
+    run(
+        &mut engine,
+        &mut doc,
+        vec![egui::Event::PointerMoved(fluid)],
+    );
+    run(&mut engine, &mut doc, vec![]);
+    let tooltip = run(&mut engine, &mut doc, vec![]);
+    assert!(
+        shapes_contain_text(&tooltip, "缺少完整流体来源配置，无法安全添加"),
+        "disabled Add must explain the missing origin to the user"
+    );
+    run(&mut engine, &mut doc, click(fluid));
+    assert_eq!(
+        engine.world.fluid_count(),
+        1,
+        "unknown runtime fluid must block Add before world mutation"
+    );
+    assert_eq!(engine.world.fluids()[0].particles(), positions);
+    assert_eq!(engine.scene.len(), objects);
+    assert_eq!(doc.selected, selected);
+    assert!(doc.base_doc().is_none());
+    assert!(!engine.paused);
+    assert!(!engine.renderer.options.water.enabled);
+    assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+    assert!(!doc.add_particle_fluid(&mut engine));
+    assert!(doc.status.contains("缺少完整流体来源配置"));
+    assert_eq!(engine.world.fluid_count(), 1);
+    assert_eq!(engine.world.fluids()[0].particles(), positions);
+    assert!(doc.base_doc().is_none());
+    // 菜单拒绝后第一步撤销应直接回到先前的单物体状态。
+    doc.undo(&mut engine);
+    assert_eq!(
+        engine.scene.len(),
+        objects - 1,
+        "rejected Add must not insert a history step"
+    );
+}
+
+/// 只接受可对应的底稿；空的新文档仍可直接添加。
+#[test]
+fn particle_fluid_add_origin_guard_covers_empty_and_mismatched_documents() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    assert!(doc.can_add_particle_fluid(&engine));
+    assert!(doc.add_particle_fluid(&mut engine));
+    assert_eq!(engine.world.fluid_count(), 1);
+    assert_eq!(doc.base_doc().unwrap().fluids.len(), 1);
+    assert!(doc.can_add_particle_fluid(&engine));
+    for configured in [0, 2] {
+        let spec = doc.base_doc().unwrap().fluids[0].clone();
+        doc.base_doc_mut().unwrap().fluids = vec![spec.clone(); configured];
+        let before = serde_json::to_value(doc.base_doc().unwrap()).unwrap();
+        let positions = engine.world.fluids()[0].particles().to_vec();
+        let velocities = engine.world.fluids()[0].velocities().to_vec();
+        let revision = engine.world.fluids()[0].revision();
+        let objects = engine.scene.len();
+        engine.paused = false;
+        engine.renderer.options.water.enabled = false;
+        assert!(!doc.can_add_particle_fluid(&engine));
+        assert!(!doc.add_particle_fluid(&mut engine));
+        assert!(doc.status.contains("缺少完整流体来源配置"));
+        assert_eq!(engine.world.fluid_count(), 1);
+        assert_eq!(engine.world.fluids()[0].particles(), positions);
+        assert_eq!(engine.world.fluids()[0].velocities(), velocities);
+        assert_eq!(engine.world.fluids()[0].revision(), revision);
+        assert_eq!(engine.scene.len(), objects);
+        assert!(!engine.paused);
+        assert!(!engine.renderer.options.water.enabled);
+        assert_eq!(
+            serde_json::to_value(doc.base_doc().unwrap()).unwrap(),
+            before
+        );
+        doc.base_doc_mut().unwrap().fluids = vec![spec];
+    }
+    // 完整标准加载的零流体底稿也允许开始添加。
+    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"fluids":[]}"#).unwrap();
+    assert!(doc.can_add_particle_fluid(&engine));
+    assert!(doc.add_particle_fluid(&mut engine));
+    assert_eq!(engine.world.fluid_count(), 1);
+    assert_eq!(doc.base_doc().unwrap().fluids.len(), 1);
+}
+
 /// 添加菜单必须真实创建粒子、表面代理，并支持标准存盘与历史。
 #[test]
 fn add_menu_particle_fluid_survives_save_reload_and_history() {
