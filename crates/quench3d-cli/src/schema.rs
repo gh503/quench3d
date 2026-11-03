@@ -934,6 +934,14 @@ pub fn json_schema() -> Value {
             "type": "string", "enum": ["legacy", "swept_spheres", "swept_primitives", "swept_meshes"],
             "description": "Default legacy keeps discrete projection. swept_spheres sweeps initial motion against static spheres. swept_primitives sweeps initial motion, PBF density corrections and optional pair-separation movements against static spheres and boxes using rounded particle clearance; inward motion from the outer clearance shell is held at contact. swept_meshes additionally sweeps static triangle meshes (faces, edges, vertices and degenerate segments/points) in all three phases. Centers inside solids or exactly on a zero-thickness feature use discrete projection. Moving boundaries, other shapes and secondary particles are excluded; first contact stops remaining motion."
         });
+        d["properties"]["boundary_motion_mode"] = json!({
+            "type": "string", "enum": ["legacy", "translating_kinematic_spheres"],
+            "description": "Default legacy leaves moving-boundary sweeps disabled. translating_kinematic_spheres requires swept_meshes: first impact against a purely translating kinematic primary sphere uses actual substep start/end poses, carries contact with remaining boundary translation, and clips both approach and carry against static spheres/boxes/meshes. Initial motion only; angular motion, extra sphere parts, dynamic boundaries, starting overlaps, recursive moving impacts and secondary particles are excluded. Static clipping can leave incompatible moving/static overlaps unresolved."
+        });
+        d["allOf"] = json!([{
+            "if": {"required": ["boundary_motion_mode"], "properties": {"boundary_motion_mode": {"const": "translating_kinematic_spheres"}}},
+            "then": {"required": ["collision_mode"], "properties": {"collision_mode": {"const": "swept_meshes"}}}
+        }]);
         d["properties"]["boundary_velocity_mode"] = json!({
             "type": "string", "enum": ["legacy", "body_motion"],
             "description": "Default legacy uses stored boundary velocities; body_motion treats Static boundaries as stationary in liquid-particle contact response. Passive foam and bubble response is unchanged."

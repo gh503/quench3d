@@ -1141,6 +1141,16 @@ pub enum FluidBoundaryVelocityModeDoc {
     BodyMotion,
 }
 
+/// Temporal liquid boundary motion policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FluidBoundaryMotionModeDoc {
+    /// Preserve historical boundary motion handling.
+    Legacy,
+    /// First translating kinematic primary-sphere contact, requiring swept_meshes.
+    TranslatingKinematicSpheres,
+}
+
 /// Initial liquid-particle collision policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1222,6 +1232,9 @@ pub struct FluidDoc {
     /// Optional initial-motion sweep; omitted keeps historical projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collision_mode: Option<FluidCollisionModeDoc>,
+    /// First translating kinematic primary-sphere impact; requires swept_meshes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_motion_mode: Option<FluidBoundaryMotionModeDoc>,
     /// 密度约束迭代次数 1~8，缺省 4。
     #[serde(default = "default_fluid_iterations")]
     pub iterations: u32,
@@ -4427,6 +4440,16 @@ impl SceneDoc {
         // 粒子流体：参数非法会让"加不进去/晶格爆炸"，必须当场报；粒子上限截断只警告。
         for (i, f) in self.fluids.iter().enumerate() {
             let p = format!("fluids[{i}]");
+            if f.boundary_motion_mode
+                == Some(FluidBoundaryMotionModeDoc::TranslatingKinematicSpheres)
+                && f.collision_mode != Some(FluidCollisionModeDoc::SweptMeshes)
+            {
+                cam_diags.push(Diagnostic::error_code(
+                    ErrorCode::OutOfRange,
+                    format!("{p}.boundary_motion_mode"),
+                    "translating_kinematic_spheres requires collision_mode swept_meshes",
+                ));
+            }
             if let Some(points) = &f.initial_positions {
                 if points.is_empty()
                     || points.len() > f.max_particles

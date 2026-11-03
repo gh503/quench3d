@@ -2352,6 +2352,12 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
                 }
                 _ => quench3d::physics::FluidCollisionMode::Legacy,
             },
+            boundary_motion_mode: match f.boundary_motion_mode {
+                Some(crate::scene_doc::FluidBoundaryMotionModeDoc::TranslatingKinematicSpheres) => {
+                    quench3d::physics::FluidBoundaryMotionMode::TranslatingKinematicSpheres
+                }
+                _ => quench3d::physics::FluidBoundaryMotionMode::Legacy,
+            },
             boundary_velocity_mode: match f.boundary_velocity_mode {
                 Some(crate::scene_doc::FluidBoundaryVelocityModeDoc::BodyMotion) => {
                     quench3d::physics::FluidBoundaryVelocityMode::BodyMotion
@@ -6945,6 +6951,44 @@ mod tests {
             SceneDoc::from_json(r#"{"fluids":[{"size":[1,1,1],"collision_mode":"unknown"}]}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn moving_sphere_fluid_scene_policy() {
+        for field in [
+            "",
+            ",\"boundary_motion_mode\":\"legacy\"",
+            ",\"boundary_motion_mode\":\"translating_kinematic_spheres\"",
+        ] {
+            let json = format!(
+                r#"{{"gravity":[0,0,0],"objects":[{{"body":"kinematic","position":[-0.25,0,0],"velocity":[30,0,0],"shape":{{"type":"sphere","radius":0.1}}}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[0,0,0]],"radius":0.01,"spacing":0.1,"collision_mode":"swept_meshes"{field}}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+            let mut build = build_world(&doc).unwrap();
+            build.world.step(1.0 / 60.0);
+            let expected = if field.contains("translating") {
+                0.36
+            } else {
+                0.0
+            };
+            assert!((build.world.fluids()[0].particles()[0].x - expected).abs() < 1e-5);
+            if field.is_empty() {
+                assert!(!serde_json::to_string(&doc)
+                    .unwrap()
+                    .contains("boundary_motion_mode"));
+            }
+        }
+        for collision in ["legacy", "swept_spheres", "swept_primitives"] {
+            let json = format!(
+                r#"{{"fluids":[{{"size":[1,1,1],"collision_mode":"{collision}","boundary_motion_mode":"translating_kinematic_spheres"}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc
+                .validate()
+                .iter()
+                .any(|d| format!("{d:?}").contains("boundary_motion_mode")));
+        }
     }
 
     #[test]
