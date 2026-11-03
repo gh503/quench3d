@@ -2341,6 +2341,9 @@ pub fn build_world(doc: &SceneDoc) -> Result<WorldBuild, RunError> {
             drag: f.drag,
             flow_coupling: f.flow_coupling.unwrap_or(0.0),
             collision_mode: match f.collision_mode {
+                Some(crate::scene_doc::FluidCollisionModeDoc::SweptMeshes) => {
+                    quench3d::physics::FluidCollisionMode::SweptMeshes
+                }
                 Some(crate::scene_doc::FluidCollisionModeDoc::SweptPrimitives) => {
                     quench3d::physics::FluidCollisionMode::SweptPrimitives
                 }
@@ -6909,6 +6912,7 @@ mod tests {
             (",\"collision_mode\":\"legacy\"", 0.25),
             (",\"collision_mode\":\"swept_spheres\"", -0.11),
             (",\"collision_mode\":\"swept_primitives\"", -0.11),
+            (",\"collision_mode\":\"swept_meshes\"", -0.11),
         ] {
             let json = format!(
                 r#"{{"gravity":[0,0,0],"objects":[{{"body":"static","shape":{{"type":"sphere","radius":0.1}}}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[-0.25,0,0]],"velocity":[30,0,0],"radius":0.01,"spacing":0.1{field}}}]}}"#
@@ -6929,17 +6933,36 @@ mod tests {
             let box_doc = SceneDoc::from_json(&box_json).unwrap();
             let mut boxed = build_world(&box_doc).unwrap();
             boxed.world.step(1.0 / 60.0);
-            let expected_box = if field.contains("swept_primitives") {
-                -0.11
-            } else {
-                0.25
-            };
+            let expected_box =
+                if field.contains("swept_primitives") || field.contains("swept_meshes") {
+                    -0.11
+                } else {
+                    0.25
+                };
             assert!((boxed.world.fluids()[0].particles()[0].x - expected_box).abs() < 1e-6);
         }
         assert!(
             SceneDoc::from_json(r#"{"fluids":[{"size":[1,1,1],"collision_mode":"unknown"}]}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn swept_mesh_fluid_scene_stops_on_heightfield() {
+        for mode in ["legacy", "swept_primitives", "swept_meshes"] {
+            let json = format!(
+                r#"{{"gravity":[0,0,0],"objects":[{{"body":"static","shape":{{"type":"heightfield","cell_size":2,"heights":[[0,0],[0,0]]}}}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[0,0.25,0]],"velocity":[0,-30,0],"radius":0.01,"spacing":0.1,"collision_mode":"{mode}"}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+            let mut build = build_world(&doc).unwrap();
+            build.world.step(1.0 / 60.0);
+            let expected = if mode == "swept_meshes" { 0.01 } else { -0.25 };
+            assert!(
+                (build.world.fluids()[0].particles()[0].y - expected).abs() < 1e-6,
+                "{mode}"
+            );
+        }
     }
 
     #[test]

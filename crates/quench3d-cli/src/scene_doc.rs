@@ -1151,6 +1151,8 @@ pub enum FluidCollisionModeDoc {
     SweptSpheres,
     /// Sweep initial motion, PBF density corrections and pair separation against static spheres and boxes.
     SweptPrimitives,
+    /// Sweep initial motion, density corrections and pair separation against static sphere, box and mesh parts.
+    SweptMeshes,
 }
 
 /// 粒子流体（CPU PBF）。

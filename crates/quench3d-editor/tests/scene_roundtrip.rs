@@ -56,7 +56,7 @@ fn fluid_collision_mode_survives_scene_load_save() {
         return;
     };
     let mut doc = Doc::new();
-    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0,1,0]]},{"size":[0.1,0.1,0.1],"initial_positions":[[2,1,0]],"collision_mode":"swept_spheres"},{"size":[0.1,0.1,0.1],"initial_positions":[[4,1,0]],"collision_mode":"swept_primitives"}]}"#).unwrap();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"fluids":[{"size":[0.1,0.1,0.1],"initial_positions":[[0,1,0]]},{"size":[0.1,0.1,0.1],"initial_positions":[[2,1,0]],"collision_mode":"swept_spheres"},{"size":[0.1,0.1,0.1],"initial_positions":[[4,1,0]],"collision_mode":"swept_primitives"},{"size":[0.1,0.1,0.1],"initial_positions":[[6,1,0]],"collision_mode":"swept_meshes"}]}"#).unwrap();
     let check = |engine: &Engine| {
         assert_eq!(
             engine.world.fluids()[0].desc().collision_mode,
@@ -70,10 +70,14 @@ fn fluid_collision_mode_survives_scene_load_save() {
             engine.world.fluids()[2].desc().collision_mode,
             FluidCollisionMode::SweptPrimitives
         );
+        assert_eq!(
+            engine.world.fluids()[3].desc().collision_mode,
+            FluidCollisionMode::SweptMeshes
+        );
     };
     check(&engine);
     let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
-    assert_eq!(saved.json.matches("collision_mode").count(), 2);
+    assert_eq!(saved.json.matches("collision_mode").count(), 3);
     scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
     check(&engine);
 }

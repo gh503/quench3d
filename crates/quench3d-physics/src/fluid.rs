@@ -61,10 +61,13 @@ pub enum FluidCollisionMode {
     /// Sweep initial motion, PBF density corrections and pair separation against static spheres and boxes.
     /// Inward motion from the particle-clearance shell is held at contact.
     SweptPrimitives,
+    /// Sweep liquid segments against static spheres, boxes and triangle meshes.
+    SweptMeshes,
 }
 
 #[derive(Clone, Copy)]
 struct SweepQueryContext<'a> {
+    meshes: bool,
     bounds: Option<&'a [Option<Aabb>]>,
     index: Option<&'a SweepBodyIndex>,
 }
@@ -1001,7 +1004,10 @@ impl Fluid {
                 let push = (min_dist - dist) * 0.5;
                 #[cfg(test)]
                 SEPARATION_PUSHES.with(|count| count.set(count.get() + 1));
-                if self.desc.collision_mode == FluidCollisionMode::SweptPrimitives {
+                if matches!(
+                    self.desc.collision_mode,
+                    FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
+                ) {
                     predicted[i] = sweep_static_spheres(
                         predicted[i],
                         predicted[i] + dir * push,
@@ -1009,7 +1015,11 @@ impl Fluid {
                         radius,
                         self.desc.boundary_velocity_mode,
                         true,
-                        SweepQueryContext { bounds, index },
+                        SweepQueryContext {
+                            bounds,
+                            index,
+                            meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
+                        },
                     )
                     .0;
                     predicted[j] = sweep_static_spheres(
@@ -1019,7 +1029,11 @@ impl Fluid {
                         radius,
                         self.desc.boundary_velocity_mode,
                         true,
-                        SweepQueryContext { bounds, index },
+                        SweepQueryContext {
+                            bounds,
+                            index,
+                            meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
+                        },
                     )
                     .0;
                 } else {
@@ -1075,31 +1089,34 @@ impl Fluid {
         let cache_enabled = true;
         // Owned, slot-aligned bounds live only for this fluid step. All sweeps
         // precede body coupling, and none of those phases mutate body transforms.
-        let sweep_bounds =
-            if cache_enabled && self.desc.collision_mode == FluidCollisionMode::SweptPrimitives {
-                Some(
-                    bodies
-                        .iter()
-                        .map(|slot| {
-                            let body = slot.body.as_ref()?;
-                            if body.sensor
-                                || body.body_type != crate::body::BodyType::Static
-                                || !(body.part_count() == 1
-                                    || body.compound_transform_mode()
-                                        == crate::body::CompoundTransformMode::BodyLocal)
-                            {
-                                return None;
-                            }
-                            #[cfg(test)]
-                            SWEEP_BOUNDS_BUILDS.with(|count| count.set(count.get() + 1));
-                            let bounds = body.world_aabb();
-                            bounds.is_valid().then_some(bounds)
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                None
-            };
+        let sweep_bounds = if cache_enabled
+            && matches!(
+                self.desc.collision_mode,
+                FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
+            ) {
+            Some(
+                bodies
+                    .iter()
+                    .map(|slot| {
+                        let body = slot.body.as_ref()?;
+                        if body.sensor
+                            || body.body_type != crate::body::BodyType::Static
+                            || !(body.part_count() == 1
+                                || body.compound_transform_mode()
+                                    == crate::body::CompoundTransformMode::BodyLocal)
+                        {
+                            return None;
+                        }
+                        #[cfg(test)]
+                        SWEEP_BOUNDS_BUILDS.with(|count| count.set(count.get() + 1));
+                        let bounds = body.world_aabb();
+                        bounds.is_valid().then_some(bounds)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
 
         #[cfg(test)]
         let index_enabled = !SWEEP_INDEX_REFERENCE.with(|flag| flag.get());
@@ -1140,8 +1157,13 @@ impl Fluid {
                             bodies,
                             self.desc.radius,
                             self.desc.boundary_velocity_mode,
-                            self.desc.collision_mode == FluidCollisionMode::SweptPrimitives,
+                            matches!(
+                                self.desc.collision_mode,
+                                FluidCollisionMode::SweptPrimitives
+                                    | FluidCollisionMode::SweptMeshes
+                            ),
                             SweepQueryContext {
+                                meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
                                 bounds: sweep_bounds.as_deref(),
                                 index: sweep_index.as_ref(),
                             },
@@ -1211,37 +1233,40 @@ impl Fluid {
             }
             for (i, d) in self.delta.iter().enumerate() {
                 let prev = self.predicted[i];
-                let (p, contact) =
-                    if self.desc.collision_mode == FluidCollisionMode::SweptPrimitives {
-                        let (end, swept) = sweep_static_spheres(
-                            prev,
-                            prev + *d,
-                            &*bodies,
-                            radius,
-                            self.desc.boundary_velocity_mode,
-                            true,
-                            SweepQueryContext {
-                                bounds: sweep_bounds.as_deref(),
-                                index: sweep_index.as_ref(),
-                            },
-                        );
-                        let (p, projected) = collide_position(
-                            prev,
-                            end,
-                            &*bodies,
-                            radius,
-                            self.desc.boundary_velocity_mode,
-                        );
-                        (p, projected.or(swept))
-                    } else {
-                        collide_position(
-                            prev,
-                            prev + *d,
-                            &*bodies,
-                            radius,
-                            self.desc.boundary_velocity_mode,
-                        )
-                    };
+                let (p, contact) = if matches!(
+                    self.desc.collision_mode,
+                    FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
+                ) {
+                    let (end, swept) = sweep_static_spheres(
+                        prev,
+                        prev + *d,
+                        &*bodies,
+                        radius,
+                        self.desc.boundary_velocity_mode,
+                        true,
+                        SweepQueryContext {
+                            meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
+                            bounds: sweep_bounds.as_deref(),
+                            index: sweep_index.as_ref(),
+                        },
+                    );
+                    let (p, projected) = collide_position(
+                        prev,
+                        end,
+                        &*bodies,
+                        radius,
+                        self.desc.boundary_velocity_mode,
+                    );
+                    (p, projected.or(swept))
+                } else {
+                    collide_position(
+                        prev,
+                        prev + *d,
+                        &*bodies,
+                        radius,
+                        self.desc.boundary_velocity_mode,
+                    )
+                };
                 self.predicted[i] = p;
                 if contact.is_some() {
                     self.contacts[i] = contact;
@@ -2080,6 +2105,150 @@ fn calibrated_mass(desc: &FluidDesc) -> f32 {
     }
 }
 
+/// Sphere/triangle entry from face, edge-cylinder and vertex-sphere features.
+/// Widen before arithmetic; this is finite precision, not an exact predicate.
+fn sweep_triangle(
+    start: Vec3,
+    end: Vec3,
+    tri: [Vec3; 3],
+    radius: f32,
+) -> Option<(f64, Vec3, Vec3)> {
+    type V = [f64; 3];
+    fn sub(a: V, b: V) -> V {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+    fn add(a: V, b: V) -> V {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+    fn mul(a: V, t: f64) -> V {
+        a.map(|x| x * t)
+    }
+    fn dot(a: V, b: V) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    fn cross(a: V, b: V) -> V {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+    fn vec(a: V) -> Vec3 {
+        Vec3::new(a[0] as f32, a[1] as f32, a[2] as f32)
+    }
+    fn entry(a: f64, b: f64, c: f64) -> Option<f64> {
+        let disc = b * b - a * c;
+        if a <= 0.0 || !disc.is_finite() || disc <= 0.0 {
+            return None;
+        }
+        let q = -b - disc.sqrt().copysign(b);
+        let mut roots = [q / a, if q != 0.0 { c / q } else { 0.0 }];
+        roots.sort_by(f64::total_cmp);
+        roots
+            .into_iter()
+            .find(|t| t.is_finite() && (0.0..=1.0).contains(t) && b + a * t < 0.0)
+    }
+    if !start.is_finite()
+        || !end.is_finite()
+        || !tri.iter().all(|p| p.is_finite())
+        || !(radius > 0.0 && radius.is_finite())
+    {
+        return None;
+    }
+    let s = start.to_array().map(f64::from);
+    let d = sub(end.to_array().map(f64::from), s);
+    let pts = tri.map(|p| p.to_array().map(f64::from));
+    let r = f64::from(radius);
+    let raw = cross(sub(pts[1], pts[0]), sub(pts[2], pts[0]));
+    let area2 = dot(raw, raw);
+    let inside = |p: V| {
+        (0..3).all(|i| dot(cross(sub(pts[(i + 1) % 3], pts[i]), sub(p, pts[i])), raw) >= 0.0)
+    };
+    let mut nearest = pts[0];
+    let mut nearest2 = dot(sub(s, nearest), sub(s, nearest));
+    let mut consider_nearest = |p: V| {
+        let d2 = dot(sub(s, p), sub(s, p));
+        if d2 < nearest2 {
+            nearest2 = d2;
+            nearest = p;
+        }
+    };
+    if area2 > 0.0 {
+        let projected = sub(s, mul(raw, dot(sub(s, pts[0]), raw) / area2));
+        if inside(projected) {
+            consider_nearest(projected);
+        }
+    }
+    for i in 0..3 {
+        let a = pts[i];
+        let edge = sub(pts[(i + 1) % 3], a);
+        let len2 = dot(edge, edge);
+        let u = if len2 > 0.0 {
+            (dot(sub(s, a), edge) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        consider_nearest(add(a, mul(edge, u)));
+    }
+    if nearest2 < r * r {
+        let gap = sub(s, nearest);
+        return if nearest2 > 0.0 && dot(gap, d) < 0.0 {
+            Some((0.0, vec(nearest), vec(mul(gap, 1.0 / nearest2.sqrt()))))
+        } else {
+            None
+        };
+    }
+    let mut result = None;
+    let mut earliest = f64::INFINITY;
+    let mut candidate = |t: f64, point: V| {
+        if !t.is_finite() || !(0.0..=1.0).contains(&t) || t >= earliest {
+            return;
+        }
+        let gap = sub(add(s, mul(d, t)), point);
+        let len = dot(gap, gap).sqrt();
+        if len > 0.0 && len.is_finite() && dot(gap, d) < 0.0 {
+            earliest = t;
+            result = Some((t, vec(point), vec(mul(gap, 1.0 / len))));
+        }
+    };
+    if area2 > 0.0 {
+        let n = mul(raw, 1.0 / area2.sqrt());
+        for sign in [-1.0, 1.0] {
+            let n = mul(n, sign);
+            let speed = dot(d, n);
+            if speed < 0.0 {
+                let t = (r - dot(sub(s, pts[0]), n)) / speed;
+                let point = sub(add(s, mul(d, t)), mul(n, r));
+                if inside(point) {
+                    candidate(t, point);
+                }
+            }
+        }
+    }
+    for i in 0..3 {
+        let a = pts[i];
+        let edge = sub(pts[(i + 1) % 3], a);
+        let len2 = dot(edge, edge);
+        let offset = sub(s, a);
+        if len2 > 0.0 {
+            let along = dot(offset, edge) / len2;
+            let speed = dot(d, edge) / len2;
+            let p = sub(offset, mul(edge, along));
+            let v = sub(d, mul(edge, speed));
+            if let Some(t) = entry(dot(v, v), dot(p, v), dot(p, p) - r * r) {
+                let u = along + speed * t;
+                if (0.0..=1.0).contains(&u) {
+                    candidate(t, add(a, mul(edge, u)));
+                }
+            }
+        }
+        if let Some(t) = entry(dot(d, d), dot(offset, d), dot(offset, offset) - r * r) {
+            candidate(t, a);
+        }
+    }
+    result
+}
+
 /// Earliest entry into the exact rounded Minkowski sum of a box and a particle.
 /// Coordinate-plane breakpoints make squared point-to-box distance quadratic.
 fn sweep_rounded_box(start: Vec3, end: Vec3, half: Vec3, radius: f32) -> Option<(f64, Vec3, Vec3)> {
@@ -2186,6 +2355,7 @@ fn sweep_static_spheres(
     context: SweepQueryContext<'_>,
 ) -> (Vec3, Option<Contact>) {
     let SweepQueryContext {
+        meshes,
         bounds: cached_bounds,
         index,
     } = context;
@@ -2254,6 +2424,47 @@ fn sweep_static_spheres(
             }
         }
         for (shape, local) in body.parts() {
+            if meshes {
+                if let crate::shape::Shape::TriMesh { vertices, indices } = shape {
+                    let world = body.part_world_transform(&local);
+                    for tri in indices.as_chunks::<3>().0 {
+                        let Some(a) = vertices.get(tri[0] as usize) else {
+                            continue;
+                        };
+                        let Some(b) = vertices.get(tri[1] as usize) else {
+                            continue;
+                        };
+                        let Some(c) = vertices.get(tri[2] as usize) else {
+                            continue;
+                        };
+                        let points = [*a, *b, *c].map(|p| world.transform_point(p));
+                        if let Some((t, point, normal)) = sweep_triangle(start, end, points, radius)
+                        {
+                            if t < earliest {
+                                earliest = t;
+                                result = (
+                                    if t == 0.0 {
+                                        start
+                                    } else {
+                                        point + normal * radius
+                                    },
+                                    Some(Contact {
+                                        normal,
+                                        point,
+                                        body: index as u32,
+                                        velocity: if mode == FluidBoundaryVelocityMode::BodyMotion {
+                                            Vec3::ZERO
+                                        } else {
+                                            body.velocity_at_point(point)
+                                        },
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             #[cfg(test)]
             SWEEP_WORK.with(|counter| {
                 let mut n = counter.get();
@@ -4381,6 +4592,336 @@ mod tests {
         assert!(
             failures.is_empty(),
             "analytic finite-boundary differences: {failures:#?}"
+        );
+    }
+
+    #[test]
+    fn mesh_mode_preserves_primitives_and_selects_earliest() {
+        for sphere in [false, true] {
+            let mut states = Vec::new();
+            for mode in [
+                FluidCollisionMode::SweptPrimitives,
+                FluidCollisionMode::SweptMeshes,
+            ] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                world.add_builder(BodyBuilder::r#static(if sphere {
+                    Shape::Sphere { radius: 0.1 }
+                } else {
+                    Shape::Box {
+                        half_extents: Vec3::splat(0.1),
+                    }
+                }));
+                world
+                    .add_fluid(FluidDesc {
+                        collision_mode: mode,
+                        initial_positions: Some(vec![-Vec3::X * 0.25]),
+                        initial_velocity: Vec3::X * 30.0,
+                        radius: 0.01,
+                        spacing: 0.1,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                let mut bits = Vec::new();
+                for _ in 0..12 {
+                    world.step(1.0 / 60.0);
+                    let f = &world.fluids()[0];
+                    bits.push((
+                        f.particles()[0].to_array().map(f32::to_bits),
+                        f.velocities()[0].to_array().map(f32::to_bits),
+                    ));
+                }
+                states.push(bits);
+            }
+            assert_eq!(states[0], states[1]);
+        }
+        let mut states = Vec::new();
+        for reverse_bodies in [false, true] {
+            for reverse_triangles in [false, true] {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let vertices = [-0.05, 0.05]
+                    .into_iter()
+                    .flat_map(|x| [vec3(x, -1.0, -1.0), vec3(x, 1.0, -1.0), vec3(x, 0.0, 1.0)])
+                    .collect();
+                let mesh = Shape::TriMesh {
+                    vertices,
+                    indices: if reverse_triangles {
+                        vec![3, 4, 5, 0, 1, 2]
+                    } else {
+                        vec![0, 1, 2, 3, 4, 5]
+                    },
+                };
+                let mut shapes = vec![
+                    mesh,
+                    Shape::Sphere { radius: 0.02 },
+                    Shape::Box {
+                        half_extents: Vec3::splat(0.01),
+                    },
+                ];
+                if reverse_bodies {
+                    shapes.reverse();
+                }
+                for shape in shapes {
+                    world.add_builder(BodyBuilder::r#static(shape));
+                }
+                world
+                    .add_fluid(FluidDesc {
+                        collision_mode: FluidCollisionMode::SweptMeshes,
+                        initial_positions: Some(vec![-Vec3::X * 0.25]),
+                        initial_velocity: Vec3::X * 30.0,
+                        radius: 0.01,
+                        spacing: 0.1,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                world.step(1.0 / 60.0);
+                let f = &world.fluids()[0];
+                assert!((f.particles()[0].x + 0.06).abs() < 1e-6);
+                states.push((
+                    f.particles()[0].to_array().map(f32::to_bits),
+                    f.velocities()[0].to_array().map(f32::to_bits),
+                ));
+            }
+        }
+        assert!(states.iter().all(|s| s == &states[0]));
+    }
+
+    #[test]
+    fn triangle_sweep_features_and_degenerate_geometry() {
+        let tri = [
+            vec3(0.0, -0.5, -0.5),
+            vec3(0.0, 0.5, -0.5),
+            vec3(0.0, 0.5, 0.5),
+        ];
+        for points in [
+            tri,
+            [tri[2], tri[1], tri[0]],
+            [-Vec3::Y, -Vec3::Y, Vec3::Y],
+            [Vec3::ZERO; 3],
+        ] {
+            for direction in [-1.0, 1.0] {
+                let (t, _, n) = sweep_triangle(
+                    -Vec3::X * 0.25 * direction,
+                    Vec3::X * 0.25 * direction,
+                    points,
+                    0.01,
+                )
+                .unwrap();
+                assert!((t - (0.25 - f64::from(0.01f32)) / 0.5).abs() < 1e-12);
+                assert!((n + Vec3::X * direction).length() < 1e-6);
+            }
+        }
+        // Edge and vertex have a radial (not plane-only) entry.
+        for (y, z) in [(0.506f32, 0.0f32), (0.504f32, 0.504f32)] {
+            let (t, _, _) = sweep_triangle(vec3(-0.25, y, z), vec3(0.25, y, z), tri, 0.01).unwrap();
+            let dy = f64::from(y) - 0.5;
+            let dz = if z > 0.5 { f64::from(z) - 0.5 } else { 0.0 };
+            let expected = (0.25 - (f64::from(0.01f32).powi(2) - dy * dy - dz * dz).sqrt()) / 0.5;
+            assert!((t - expected).abs() < 1e-11, "{t} {expected}");
+        }
+        let point = [Vec3::ZERO; 3];
+        assert!(sweep_triangle(
+            vec3(-0.25, 0.03125, 0.0),
+            vec3(0.25, 0.03125, 0.0),
+            point,
+            0.03125
+        )
+        .is_none());
+        assert!(sweep_triangle(-Vec3::X * 0.005, -Vec3::X * 0.25, point, 0.01).is_none());
+        assert_eq!(
+            sweep_triangle(-Vec3::X * 0.005, Vec3::X * 0.25, point, 0.01)
+                .unwrap()
+                .0,
+            0.0
+        );
+        assert!(sweep_triangle(Vec3::ZERO, Vec3::X, point, 0.01).is_none());
+    }
+
+    #[test]
+    fn mesh_sweeps_cover_compounds_density_and_separation() {
+        use crate::body::{CompoundTransformMode::BodyLocal, ShapePart};
+        // A finite line/point can be legitimately bypassed by lateral separation.
+        // Use a broad face for the multi-particle no-crossing invariant.
+        for kind in 0..1 {
+            for separation in [false, true] {
+                let mut records = Vec::new();
+                for compound in [false, true] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let pose = Transform {
+                        position: vec3(0.3, 0.2, -0.1),
+                        rotation: Quat::from_rotation_z(0.4),
+                        scale: Vec3::ONE,
+                    };
+                    let local = Transform {
+                        position: Vec3::Y * 2.0,
+                        rotation: Quat::from_rotation_x(0.7),
+                        scale: Vec3::ONE,
+                    };
+                    let target = pose.mul_transform(&local);
+                    let vertices = match kind {
+                        0 => vec![
+                            vec3(0.0, -1.0, -1.0),
+                            vec3(0.0, 1.0, -1.0),
+                            vec3(0.0, 0.0, 1.0),
+                        ],
+                        1 => vec![-Vec3::Y, -Vec3::Y, Vec3::Y],
+                        _ => vec![Vec3::ZERO; 3],
+                    };
+                    let shape = Shape::TriMesh {
+                        vertices,
+                        indices: vec![0, 1, 2],
+                    };
+                    let builder = if compound {
+                        BodyBuilder::r#static(Shape::Sphere { radius: 0.01 })
+                            .position(pose.position)
+                            .rotation(pose.rotation)
+                            .part(ShapePart::at(shape, local.position, local.rotation))
+                            .compound_transform_mode(BodyLocal)
+                    } else {
+                        BodyBuilder::r#static(shape)
+                            .position(target.position)
+                            .rotation(target.rotation)
+                    };
+                    world.add_builder(builder);
+                    let initial: Vec<_> = (0..12)
+                        .map(|i| target.transform_point(vec3(-0.01 - i as f32 * 0.004, 0.0, 0.0)))
+                        .collect();
+                    world
+                        .add_fluid(FluidDesc {
+                            initial_positions: Some(initial),
+                            radius: 0.003,
+                            spacing: 0.1,
+                            collision_mode: FluidCollisionMode::SweptMeshes,
+                            particle_collision: separation,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    let mut trajectory = Vec::new();
+                    for _ in 0..8 {
+                        world.step(1.0 / 60.0);
+                        for p in world.fluids()[0].particles() {
+                            let q = target.inverse_transform_point(*p);
+                            assert!(
+                                q.x <= -0.003 + 1e-5,
+                                "kind={kind} separation={separation} compound={compound} q={q:?}"
+                            );
+                            trajectory.push(p.to_array().map(f32::to_bits));
+                        }
+                    }
+                    records.push(trajectory);
+                }
+                assert_eq!(records[0], records[1], "kind={kind} sep={separation}");
+            }
+        }
+    }
+
+    #[test]
+    fn mesh_sweep_degenerate_public_and_invalid_geometry() {
+        for vertices in [
+            vec![-Vec3::Y, -Vec3::Y, Vec3::Y],
+            vec![Vec3::ZERO; 3],
+            vec![],
+        ] {
+            for direction in [-1.0, 1.0] {
+                for mode in [
+                    FluidCollisionMode::Legacy,
+                    FluidCollisionMode::SweptPrimitives,
+                    FluidCollisionMode::SweptMeshes,
+                ] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    world.add_builder(BodyBuilder::r#static(Shape::TriMesh {
+                        vertices: vertices.clone(),
+                        indices: vec![99, 1, 2, 0, 1, 2, 0],
+                    }));
+                    world
+                        .add_fluid(FluidDesc {
+                            initial_positions: Some(vec![-Vec3::X * 0.25 * direction]),
+                            initial_velocity: Vec3::X * 30.0 * direction,
+                            radius: 0.01,
+                            spacing: 0.1,
+                            collision_mode: mode,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    world.step(1.0 / 60.0);
+                    let x = world.fluids()[0].particles()[0].x;
+                    let expected =
+                        if !vertices.is_empty() && mode == FluidCollisionMode::SweptMeshes {
+                            -0.01 * direction
+                        } else {
+                            0.25 * direction
+                        };
+                    assert!((x - expected).abs() < 1e-6, "{mode:?} {vertices:?} {x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finite_triangle_particle_segments_match_geometry() {
+        let mut failures = Vec::new();
+        for reversed in [false, true] {
+            for y in [0.0f32, 0.1, 0.52, 0.7] {
+                for direction in [-1.0f32, 1.0] {
+                    let start = vec3(-0.25 * direction, y, 0.0);
+                    let velocity = Vec3::X * (30.0 * direction);
+                    let mut states = Vec::new();
+                    for variant in 0..3 {
+                        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                        if variant != 0 {
+                            world.add_builder(
+                                BodyBuilder::r#static(Shape::TriMesh {
+                                    vertices: vec![
+                                        vec3(0.0, -0.5, -0.5),
+                                        vec3(0.0, 0.5, -0.5),
+                                        vec3(0.0, 0.5, 0.5),
+                                    ],
+                                    indices: if reversed {
+                                        vec![2, 1, 0]
+                                    } else {
+                                        vec![0, 1, 2]
+                                    },
+                                })
+                                .sensor(variant == 1),
+                            );
+                        }
+                        world
+                            .add_fluid(FluidDesc {
+                                collision_mode: FluidCollisionMode::SweptMeshes,
+                                initial_positions: Some(vec![start]),
+                                initial_velocity: velocity,
+                                radius: 0.01,
+                                spacing: 0.1,
+                                ..FluidDesc::default()
+                            })
+                            .unwrap();
+                        assert_eq!(world.fluids()[0].particles()[0], start);
+                        assert_eq!(world.fluids()[0].velocities()[0], velocity);
+                        assert!(velocity.length() < MAX_SPEED);
+                        world.step(1.0 / 60.0);
+                        states.push((
+                            world.fluids()[0].particles()[0],
+                            world.fluids()[0].velocities()[0],
+                        ));
+                    }
+                    assert_eq!(states[0], states[1], "sensor control");
+                    assert!((states[0].0.x - 0.25 * direction).abs() < 1e-6);
+                    // y>.51 is outside the radius-expanded finite triangle; y=0
+                    // lies on its diagonal edge and has the same analytic entry t=.48.
+                    if y > 0.51 {
+                        if states[0] != states[2] {
+                            failures.push(format!(
+                                "miss reversed={reversed} y={y} direction={direction} {states:?}"
+                            ));
+                        }
+                    } else if (states[2].0.x + 0.01 * direction).abs() > 1e-5 {
+                        failures.push(format!("cross reversed={reversed} y={y} direction={direction} expected t=.48 {states:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "finite triangle sweep differences: {failures:#?}"
         );
     }
 
