@@ -4520,10 +4520,16 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
                 .iter()
                 .map(|p| p.y)
                 .fold(f32::NEG_INFINITY, f32::max);
+            // 连续表面会原地改写网格，必须按流体独立缓存；平面仍可共用。
+            let surface_name = if spec.surface_mesh {
+                format!("$fluid_surface_{fi}")
+            } else {
+                "$water_surface".to_string()
+            };
             let surface_mesh = engine.assets.mesh(
                 &mut engine.renderer,
                 &engine.gpu,
-                "$water_surface",
+                &surface_name,
                 &water_surface_mesh(),
             );
             let surface_desc = MaterialDesc {
@@ -4542,7 +4548,7 @@ fn add_fluid_visuals(engine: &mut Engine, doc: &SceneDoc) {
                 surface_desc,
             );
             if spec.surface_mesh {
-                // 连续表面用世界坐标网格，和平面共用同一个占位网格句柄；
+                // 连续表面用独立的世界坐标网格；
                 // 材质关掉 `water_mask`，否则屏幕空间水面会把它当成一张无限平面。
                 let mesh_desc = MaterialDesc {
                     base_color: Vec4::new(0.10, 0.34, 0.58, 0.55),

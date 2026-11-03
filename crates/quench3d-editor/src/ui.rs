@@ -1878,6 +1878,40 @@ fn joint_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         });
 }
 
+fn particle_fluids_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
+    egui::CollapsingHeader::new("粒子流体")
+        .default_open(true)
+        .show(ui, |ui| {
+            if engine.world.fluids().is_empty() {
+                ui.label("当前没有粒子流体；请从「添加」菜单添加。");
+                return;
+            }
+            let aligned = doc.can_remove_particle_fluid(engine);
+            if !aligned {
+                ui.label("缺少流体场景配置，无法安全删除");
+            }
+            let mut remove = None;
+            for (index, fluid) in engine.world.fluids().iter().enumerate() {
+                ui.push_id(("particle-fluid", index), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("流体 {index} · {} 颗粒子", fluid.particles().len()));
+                        if ui
+                            .add_enabled(aligned, egui::Button::new(format!("删除流体 {index}")))
+                            .clicked()
+                        {
+                            remove = Some(index);
+                        }
+                    });
+                });
+            }
+            if let Some(index) = remove {
+                if doc.remove_particle_fluid(engine, index) {
+                    doc.record_edit(engine);
+                }
+            }
+        });
+}
+
 fn water_physics_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     let mut waters = engine.world.waters().to_vec();
     egui::CollapsingHeader::new("水域物理")
@@ -4755,6 +4789,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
                 .show(ui, |ui| {
             ui.heading("属性");
             ui.separator();
+            particle_fluids_section(ui, engine, doc);
             camera_section(ui, engine, doc);
             light_section(ui, engine, doc);
             models_section(ui, engine, doc);

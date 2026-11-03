@@ -967,6 +967,15 @@ impl PhysicsWorld {
         Some(self.fluids.len() - 1)
     }
 
+    /// 删除一个流体；后续流体下标前移一位，调用方须同步渲染绑定。
+    /// 越界返回 `None`，且不改变任何流体。
+    pub fn remove_fluid(&mut self, index: usize) -> Option<Fluid> {
+        if index >= self.fluids.len() {
+            return None;
+        }
+        Some(self.fluids.remove(index))
+    }
+
     /// 清空所有流体。
     pub fn clear_fluids(&mut self) {
         self.fluids.clear();

@@ -1504,10 +1504,11 @@ impl Doc {
             .fluids
             .push(spec);
         // 连续表面刷新会改写网格，所以每个流体使用独立的占位句柄。
+        let surface_name = self.unique_name(engine, "流体表面");
         let mesh = engine.assets.mesh(
             &mut engine.renderer,
             &engine.gpu,
-            &format!("$editor_fluid_surface_{fluid}"),
+            &format!("$editor_fluid_surface_{surface_name}"),
             &MeshData::default(),
         );
         let material = engine.assets.material(
@@ -1524,7 +1525,7 @@ impl Doc {
         );
         engine
             .scene
-            .add_fluid_mesh(mesh, material, fluid, 32, 0.45, &format!("流体表面{fluid}"));
+            .add_fluid_mesh(mesh, material, fluid, 32, 0.45, &surface_name);
         engine
             .scene
             .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
@@ -1534,6 +1535,82 @@ impl Doc {
             "已添加粒子流体（{} 颗粒子）",
             engine.world.fluids()[fluid].particles().len()
         );
+    }
+
+    /// 只有完整的场景配置才能按物理下标安全地删除并保存。
+    pub fn can_remove_particle_fluid(&self, engine: &Engine) -> bool {
+        self.base_doc
+            .as_ref()
+            .is_some_and(|base| base.fluids.len() == engine.world.fluid_count())
+    }
+
+    /// 删除流体及四类渲染代理，保留幸存流体的运行状态和网格句柄。
+    pub fn remove_particle_fluid(&mut self, engine: &mut Engine, index: usize) -> bool {
+        if !self.can_remove_particle_fluid(engine) {
+            self.status = "缺少流体场景配置，无法安全删除".to_string();
+            return false;
+        }
+        if engine.world.remove_fluid(index).is_none() {
+            return false;
+        }
+        self.base_doc
+            .as_mut()
+            .expect("已核对完整底稿")
+            .fluids
+            .remove(index);
+        for object in (0..engine.scene.objects.len()).rev() {
+            let proxy = &engine.scene.objects[object];
+            if proxy.fluid_particle.is_some_and(|v| v.fluid == index)
+                || proxy.fluid_surface.is_some_and(|v| v.fluid == index)
+                || proxy.fluid_foam.is_some_and(|v| v.fluid == index)
+                || proxy.fluid_bubble.is_some_and(|v| v.fluid == index)
+            {
+                engine.remove_object(object);
+                self.forget_object(object);
+                let remap = |selected: usize| {
+                    if selected == object {
+                        None
+                    } else {
+                        Some(selected - usize::from(selected > object))
+                    }
+                };
+                self.selected = self.selected.and_then(remap);
+                self.extra_selected = self
+                    .extra_selected
+                    .iter()
+                    .copied()
+                    .filter_map(remap)
+                    .collect();
+                self.hovered = self.hovered.and_then(remap);
+            }
+        }
+        for object in &mut engine.scene.objects {
+            if let Some(v) = object.fluid_particle.as_mut() {
+                if v.fluid > index {
+                    v.fluid -= 1;
+                }
+            }
+            if let Some(v) = object.fluid_surface.as_mut() {
+                if v.fluid > index {
+                    v.fluid -= 1;
+                    v.revision = u64::MAX;
+                }
+            }
+            if let Some(v) = object.fluid_foam.as_mut() {
+                if v.fluid > index {
+                    v.fluid -= 1;
+                }
+            }
+            if let Some(v) = object.fluid_bubble.as_mut() {
+                if v.fluid > index {
+                    v.fluid -= 1;
+                }
+            }
+        }
+        engine.renderer.options.water.enabled =
+            !engine.world.waters().is_empty() || engine.world.fluid_count() > 0;
+        self.status = format!("已删除粒子流体 {index}");
+        true
     }
 
     /// 加一个图元（默认颜色）。

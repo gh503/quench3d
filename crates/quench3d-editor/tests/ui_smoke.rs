@@ -102,7 +102,14 @@ fn add_menu_particle_fluid_survives_save_reload_and_history() {
         .center();
     run(&mut engine, &mut doc, click(add));
     let shapes = run(&mut engine, &mut doc, vec![]);
-    let fluid = text_shape_rect(&shapes, "粒子流体")
+    let menu_shapes: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), "粒子流体")
+                .is_some_and(|rect| rect.center().x < 900.0)
+        })
+        .collect();
+    let fluid = text_shape_rect(&menu_shapes, "粒子流体")
         .expect("添加菜单必须提供粒子流体入口")
         .center();
     run(&mut engine, &mut doc, click(fluid));
@@ -143,7 +150,14 @@ fn add_menu_particle_fluid_survives_save_reload_and_history() {
     let add = text_shape_rect(&shapes, "添加").unwrap().center();
     run(&mut engine, &mut doc, click(add));
     let shapes = run(&mut engine, &mut doc, vec![]);
-    let second = text_shape_rect(&shapes, "粒子流体").unwrap().center();
+    let menu_shapes: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), "粒子流体")
+                .is_some_and(|rect| rect.center().x < 900.0)
+        })
+        .collect();
+    let second = text_shape_rect(&menu_shapes, "粒子流体").unwrap().center();
     run(&mut engine, &mut doc, click(second));
     assert_eq!(engine.world.fluids().len(), 2);
     assert_eq!(engine.world.fluids()[0].particles(), points.as_slice());
@@ -162,6 +176,312 @@ fn add_menu_particle_fluid_survives_save_reload_and_history() {
         surfaces[0].mesh, surfaces[1].mesh,
         "表面刷新不能覆盖另一块流体的可变网格"
     );
+    // 同一菜单构造的三块流体，删中间再加，不能复用仍在使用的旧 index 命名网格。
+    doc.add_particle_fluid(&mut engine);
+    assert!(doc.remove_particle_fluid(&mut engine, 1));
+    let survivor = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.fluid_surface.is_some_and(|v| v.fluid == 1))
+        .unwrap()
+        .mesh;
+    doc.add_particle_fluid(&mut engine);
+    let added = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.fluid_surface.is_some_and(|v| v.fluid == 2))
+        .unwrap()
+        .mesh;
+    assert_ne!(
+        survivor, added,
+        "delete-middle then Add must allocate an independent mutable surface"
+    );
+}
+
+/// 真正点右侧列表删除中间块，验证物理、配置、代理及历史均指向幸存块。
+#[test]
+fn inspector_delete_middle_particle_fluid_preserves_mapping_and_history() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let json = serde_json::json!({
+        "format": "quench3d.scene", "version": 2,
+        "objects": [{"name":"keep", "shape":{"type":"box", "size":[1.0,1.0,1.0]}, "position":[9.0,3.0,0.0]}],
+        "waters": [{"size":[2.0,2.0], "level":-5.0}],
+        "fluids": ([-3.0,0.0,3.0].map(|x| serde_json::json!({
+            "center":[x,2.0,0.0], "size":[0.3,0.3,0.3], "spacing":0.15,
+            "surface_mesh":true, "max_particles":30
+        })))
+    }).to_string();
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &json).unwrap();
+    // 显式覆盖加载/运行时可能存在的四类绑定；辅助代理不作为普通对象导出。
+    for fluid in 0..3 {
+        for kind in 0..3 {
+            let source = engine.scene.find("keep").unwrap();
+            let material = engine.scene.objects[source].material;
+            let object = engine.scene.add_named(
+                engine.assets.unit_sphere,
+                material,
+                Transform::IDENTITY,
+                &format!("probe-{fluid}-{kind}"),
+            );
+            let proxy = &mut engine.scene.objects[object];
+            proxy.generated = true;
+            match kind {
+                0 => {
+                    proxy.fluid_particle = Some(quench3d::scene::FluidParticleVisual {
+                        fluid,
+                        particle: 0,
+                        radius: 0.05,
+                    })
+                }
+                1 => {
+                    proxy.fluid_foam = Some(quench3d::scene::FluidFoamVisual {
+                        fluid,
+                        index: 0,
+                        radius: 0.05,
+                    })
+                }
+                _ => {
+                    proxy.fluid_bubble = Some(quench3d::scene::FluidBubbleVisual {
+                        fluid,
+                        index: 0,
+                        radius: 0.05,
+                    })
+                }
+            }
+        }
+    }
+    let material = engine.scene.objects[engine.scene.find("keep").unwrap()].material;
+    let tail = engine.scene.add_named(
+        engine.assets.unit_cube,
+        material,
+        Transform::IDENTITY,
+        "selected-tail",
+    );
+    doc.select_only(Some(tail));
+    doc.extra_selected.push(engine.scene.find("keep").unwrap());
+    doc.hovered = Some(tail);
+    doc.reset_history(&engine);
+    let body_count = engine.world.body_count();
+    let positions: Vec<_> = engine
+        .world
+        .fluids()
+        .iter()
+        .map(|f| f.particles().to_vec())
+        .collect();
+    let meshes: Vec<_> = (0..3)
+        .map(|i| {
+            engine
+                .scene
+                .objects
+                .iter()
+                .find(|o| o.fluid_surface.is_some_and(|v| v.mesh && v.fluid == i))
+                .unwrap()
+                .mesh
+        })
+        .collect();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut run = |engine: &mut Engine, doc: &mut Doc, events| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 1800.0),
+                )),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, doc, &mut view, &mut gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    run(&mut engine, &mut doc, vec![]);
+    let shapes = run(&mut engine, &mut doc, vec![]);
+    let row = text_shape_rect(&shapes, "流体 1 · 27 颗粒子")
+        .expect("独立粒子流体列表必须显示中间块 index 与粒子数");
+    let button = text_shape_rect(&shapes, "删除流体 1").expect("右侧必须有中间块删除按钮");
+    assert!((row.center().y - button.center().y).abs() < 20.0);
+    let pos = button.center();
+    run(
+        &mut engine,
+        &mut doc,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ],
+    );
+    assert_eq!(engine.world.fluid_count(), 2);
+    assert_eq!(engine.world.body_count(), body_count);
+    assert_eq!(engine.world.waters().len(), 1);
+    assert_eq!(
+        engine.scene.objects[doc.selected.unwrap()].name,
+        "selected-tail"
+    );
+    assert_eq!(engine.scene.objects[doc.extra_selected[0]].name, "keep");
+    for kind in 0..3 {
+        assert!(engine.scene.find(&format!("probe-1-{kind}")).is_none());
+        let survivor =
+            &engine.scene.objects[engine.scene.find(&format!("probe-2-{kind}")).unwrap()];
+        match kind {
+            0 => assert_eq!(survivor.fluid_particle.unwrap().fluid, 1),
+            1 => assert_eq!(survivor.fluid_foam.unwrap().fluid, 1),
+            _ => assert_eq!(survivor.fluid_bubble.unwrap().fluid, 1),
+        }
+    }
+    for (new, old) in [(0, 0), (1, 2)] {
+        assert_eq!(engine.world.fluids()[new].particles(), positions[old]);
+        let surface = engine
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.fluid_surface.is_some_and(|v| v.mesh && v.fluid == new))
+            .unwrap();
+        assert_eq!(surface.mesh, meshes[old]);
+    }
+    assert_eq!(
+        engine
+            .scene
+            .objects
+            .iter()
+            .filter(|o| o.fluid_surface.is_some())
+            .count(),
+        2
+    );
+    engine
+        .scene
+        .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
+    for (new, old) in [(0, 0), (1, 2)] {
+        let (_, count, bounds) = engine.renderer.mesh_info(meshes[old]).unwrap();
+        assert!(count > 0);
+        assert!((bounds.center().x - engine.world.fluids()[new].desc().center.x).abs() < 0.3);
+    }
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let parsed = quench3d_cli::scene_doc::SceneDoc::from_json(&saved.json).unwrap();
+    assert_eq!(parsed.fluids.len(), 2);
+    assert_eq!(parsed.fluids[1].center, Some([3.0, 2.0, 0.0]));
+    assert!(parsed.fluids.iter().all(|f| f.initial_positions.is_none()));
+    doc.undo(&mut engine);
+    assert_eq!(engine.world.fluid_count(), 3);
+    doc.redo(&mut engine);
+    assert_eq!(engine.world.fluid_count(), 2);
+    engine.world.step(1.0 / 60.0);
+    assert!(engine.world.fluids().iter().all(|f| f
+        .particles()
+        .iter()
+        .chain(f.velocities())
+        .all(|p| p.is_finite())));
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    assert_eq!(engine.world.fluid_count(), 2);
+    assert_eq!(engine.world.fluids()[1].particles(), positions[2]);
+}
+
+#[test]
+fn particle_fluid_inspector_empty_and_missing_config_are_explicit() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut run = |engine: &mut Engine, doc: &mut Doc| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, doc, &mut view, &mut gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    run(&mut engine, &mut doc);
+    let shapes = run(&mut engine, &mut doc);
+    assert!(shapes_contain_text(&shapes, "请从「添加」菜单添加"));
+    engine
+        .world
+        .add_fluid(quench3d_physics::FluidDesc::default())
+        .unwrap();
+    let positions = engine.world.fluids()[0].particles().to_vec();
+    let shapes = run(&mut engine, &mut doc);
+    assert!(shapes_contain_text(
+        &shapes,
+        "缺少流体场景配置，无法安全删除"
+    ));
+    assert!(!doc.remove_particle_fluid(&mut engine, 0));
+    assert_eq!(engine.world.fluids()[0].particles(), positions);
+    assert!(doc.base_doc().is_none());
+}
+
+#[test]
+fn loaded_particle_fluid_meshes_keep_separate_current_bounds() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    scene_io::load_text_into_doc(
+        &mut engine,
+        &mut doc,
+        r#"{
+        "fluids":[
+            {"center":[-3,2,0],"size":[0.6,0.6,0.6],"spacing":0.15,"surface_mesh":true},
+            {"center":[3,2,0],"size":[0.9,0.6,0.6],"spacing":0.15,"surface_mesh":true}
+        ]
+    }"#,
+    )
+    .unwrap();
+    engine
+        .scene
+        .refresh_fluid_surfaces(&engine.world, &mut engine.renderer, &engine.gpu);
+    let meshes: Vec<_> = (0..2)
+        .map(|i| {
+            engine
+                .scene
+                .objects
+                .iter()
+                .find(|o| o.fluid_surface.is_some_and(|v| v.mesh && v.fluid == i))
+                .unwrap()
+                .mesh
+        })
+        .collect();
+    for (index, mesh) in meshes.iter().enumerate() {
+        let (_, count, bounds) = engine.renderer.mesh_info(*mesh).unwrap();
+        assert!(count > 0);
+        let center = engine.world.fluids()[index].desc().center;
+        assert!(
+            (bounds.center().x - center.x).abs() < 0.3,
+            "each uploaded surface must cover its own particle cloud: {index} {bounds:?}"
+        );
+    }
+    assert_ne!(meshes[0], meshes[1]);
 }
 
 /// 一个不依赖磁盘/GPU 的播放实例：只给动画面板读播放器与状态机字段。
