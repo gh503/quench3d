@@ -74,7 +74,7 @@ pub enum FluidBoundaryMotionMode {
     /// Preserve historical static-only sweeps.
     #[default]
     Legacy,
-    /// Carry the first contact with a purely translating kinematic primary sphere.
+    /// Carry the first contact with a translating kinematic primary or BodyLocal extra sphere.
     /// Requires SweptMeshes for both static safety segments.
     TranslatingKinematicSpheres,
 }
@@ -2493,58 +2493,72 @@ fn sweep_translating_spheres(
         {
             continue;
         }
-        let crate::shape::Shape::Sphere { radius } = &body.shape else {
-            continue;
-        };
-        let radius = radius.abs();
-        if !radius.is_finite() {
-            continue;
+        for (part, (shape, local)) in body.parts().enumerate() {
+            if part != 0
+                && body.compound_transform_mode() != crate::body::CompoundTransformMode::BodyLocal
+            {
+                continue;
+            }
+            let crate::shape::Shape::Sphere { radius } = shape else {
+                continue;
+            };
+            let radius = radius.abs();
+            if !radius.is_finite() {
+                continue;
+            }
+            let (c0, c1) = if part == 0 {
+                (body.prev_transform.position, body.transform.position)
+            } else {
+                (
+                    body.prev_transform.mul_transform(&local).position,
+                    body.transform.mul_transform(&local).position,
+                )
+            };
+            if c0 == c1 || !c0.is_finite() || !c1.is_finite() {
+                continue;
+            }
+            let s = start.to_array().map(f64::from);
+            let e = end.to_array().map(f64::from);
+            let a = c0.to_array().map(f64::from);
+            let b = c1.to_array().map(f64::from);
+            let p: [f64; 3] = std::array::from_fn(|i| s[i] - a[i]);
+            let d: [f64; 3] = std::array::from_fn(|i| e[i] - s[i] - (b[i] - a[i]));
+            let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+            let r = f64::from(radius) + f64::from(desc.radius);
+            let aa = dot(d, d);
+            let bb = dot(p, d);
+            let cc = dot(p, p) - r * r;
+            if !aa.is_finite() || aa <= 0.0 || cc < 0.0 || bb >= 0.0 {
+                continue;
+            }
+            let disc = bb * bb - aa * cc;
+            if !disc.is_finite() || disc <= 0.0 {
+                continue;
+            }
+            let q = -bb + disc.sqrt();
+            let t = cc / q;
+            if !t.is_finite() || !(0.0..=1.0).contains(&t) || t >= earliest {
+                continue;
+            }
+            let hit = Vec3::from_array(std::array::from_fn(|i| (s[i] + (e[i] - s[i]) * t) as f32));
+            let center =
+                Vec3::from_array(std::array::from_fn(|i| (a[i] + (b[i] - a[i]) * t) as f32));
+            let normal = (hit - center).normalize_or_zero();
+            if normal == Vec3::ZERO {
+                continue;
+            }
+            earliest = t;
+            moving = Some((
+                hit,
+                hit + (c1 - center),
+                Contact {
+                    point: c1 + normal * radius,
+                    normal,
+                    body: index as u32,
+                    velocity: (c1 - c0) / dt,
+                },
+            ));
         }
-        let c0 = body.prev_transform.position;
-        let c1 = body.transform.position;
-        if c0 == c1 || !c0.is_finite() || !c1.is_finite() {
-            continue;
-        }
-        let s = start.to_array().map(f64::from);
-        let e = end.to_array().map(f64::from);
-        let a = c0.to_array().map(f64::from);
-        let b = c1.to_array().map(f64::from);
-        let p: [f64; 3] = std::array::from_fn(|i| s[i] - a[i]);
-        let d: [f64; 3] = std::array::from_fn(|i| e[i] - s[i] - (b[i] - a[i]));
-        let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
-        let r = f64::from(radius) + f64::from(desc.radius);
-        let aa = dot(d, d);
-        let bb = dot(p, d);
-        let cc = dot(p, p) - r * r;
-        if !aa.is_finite() || aa <= 0.0 || cc < 0.0 || bb >= 0.0 {
-            continue;
-        }
-        let disc = bb * bb - aa * cc;
-        if !disc.is_finite() || disc <= 0.0 {
-            continue;
-        }
-        let q = -bb + disc.sqrt();
-        let t = cc / q;
-        if !t.is_finite() || !(0.0..=1.0).contains(&t) || t >= earliest {
-            continue;
-        }
-        let hit = Vec3::from_array(std::array::from_fn(|i| (s[i] + (e[i] - s[i]) * t) as f32));
-        let center = Vec3::from_array(std::array::from_fn(|i| (a[i] + (b[i] - a[i]) * t) as f32));
-        let normal = (hit - center).normalize_or_zero();
-        if normal == Vec3::ZERO {
-            continue;
-        }
-        earliest = t;
-        moving = Some((
-            hit,
-            hit + (c1 - center),
-            Contact {
-                point: c1 + normal * radius,
-                normal,
-                body: index as u32,
-                velocity: (c1 - c0) / dt,
-            },
-        ));
     }
     let Some((hit, carry, contact)) = moving else {
         return static_sweep(start, end);
@@ -5313,6 +5327,93 @@ mod tests {
             }
             .is_valid());
         }
+    }
+
+    #[test]
+    fn moving_body_local_extra_spheres_match_independent_boundaries() {
+        use crate::body::CompoundTransformMode::BodyLocal;
+        let mut failures = Vec::new();
+        for sign in [-1.0f32, 1.0] {
+            for case in 0..6 {
+                let center = Vec3::X * (-0.25 * sign);
+                let velocity = Vec3::X * (30.0 * sign);
+                let particle = if case == 1 {
+                    Vec3::Y * 0.12
+                } else {
+                    Vec3::ZERO
+                };
+                let mut records = Vec::new();
+                for independent in [true, false] {
+                    let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                    let builder = if independent {
+                        BodyBuilder::kinematic(Shape::Sphere { radius: 0.1 }).position(center)
+                    } else {
+                        let primary = if case == 2 {
+                            Shape::Box {
+                                half_extents: Vec3::splat(0.05),
+                            }
+                        } else {
+                            Shape::Sphere { radius: 0.05 }
+                        };
+                        let mut builder = BodyBuilder::kinematic(primary)
+                            .position(center + Vec3::Y * 2.0)
+                            .compound_transform_mode(BodyLocal);
+                        let near = Vec3::Y * -2.0;
+                        let far = near - Vec3::X * (0.15 * sign);
+                        if case == 3 {
+                            builder = builder.part_at(Shape::Sphere { radius: 0.1 }, far);
+                        }
+                        builder = builder.part_at(Shape::Sphere { radius: 0.1 }, near);
+                        if case == 4 {
+                            builder = builder.part_at(Shape::Sphere { radius: 0.1 }, far);
+                        }
+                        if case == 5 {
+                            // Constant nonidentity body orientation: local Y offset is
+                            // invariant but composition order is not (world center rotates otherwise).
+                            builder = builder.rotation(Quat::from_rotation_y(0.7));
+                        }
+                        builder
+                    }
+                    .linear_velocity(velocity);
+                    let handle = world.add_builder(builder);
+                    let initial = world.body(handle).unwrap().transform;
+                    assert_eq!(world.body(handle).unwrap().linear_velocity, velocity);
+                    assert_eq!(world.body(handle).unwrap().angular_velocity, Vec3::ZERO);
+                    world
+                        .add_fluid(FluidDesc {
+                            initial_positions: Some(vec![particle]),
+                            radius: 0.01,
+                            spacing: 0.1,
+                            viscosity: 0.0,
+                            collision_mode: FluidCollisionMode::SweptMeshes,
+                            boundary_motion_mode:
+                                FluidBoundaryMotionMode::TranslatingKinematicSpheres,
+                            boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                            ..FluidDesc::default()
+                        })
+                        .unwrap();
+                    world.step(1.0 / 60.0);
+                    let body = world.body(handle).unwrap();
+                    assert_eq!(body.prev_transform, initial);
+                    assert_eq!(body.transform.rotation, initial.rotation);
+                    assert!((body.position() - initial.position - velocity / 60.0).length() < 1e-6);
+                    records.push((
+                        world.fluids()[0].particles()[0],
+                        world.fluids()[0].velocities()[0],
+                    ));
+                }
+                if case != 1 {
+                    assert!(records[0].0.x * sign > 0.359);
+                }
+                if records[0] != records[1] {
+                    failures.push((sign, case, records));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "compound moving sphere differences: {failures:?}"
+        );
     }
 
     #[test]

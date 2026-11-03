@@ -6979,6 +6979,17 @@ mod tests {
                     .contains("boundary_motion_mode"));
             }
         }
+        for mode in ["body_local", "legacy"] {
+            let json = format!(
+                r#"{{"gravity":[0,0,0],"objects":[{{"body":"kinematic","position":[-0.25,2,0],"velocity":[30,0,0],"compound_transform_mode":"{mode}","shapes":[{{"shape":{{"type":"box","size":[0.1,0.1,0.1]}}}},{{"shape":{{"type":"sphere","radius":0.1}},"position":[0,-2,0]}}]}}],"fluids":[{{"size":[0.1,0.1,0.1],"initial_positions":[[0,0,0]],"radius":0.01,"spacing":0.1,"collision_mode":"swept_meshes","boundary_motion_mode":"translating_kinematic_spheres"}}]}}"#
+            );
+            let doc = SceneDoc::from_json(&json).unwrap();
+            assert!(doc.validate().is_empty());
+            let mut build = build_world(&doc).unwrap();
+            build.world.step(1.0 / 60.0);
+            let expected = if mode == "body_local" { 0.36 } else { 0.0 };
+            assert!((build.world.fluids()[0].particles()[0].x - expected).abs() < 1e-5);
+        }
         for collision in ["legacy", "swept_spheres", "swept_primitives"] {
             let json = format!(
                 r#"{{"fluids":[{{"size":[1,1,1],"collision_mode":"{collision}","boundary_motion_mode":"translating_kinematic_spheres"}}]}}"#

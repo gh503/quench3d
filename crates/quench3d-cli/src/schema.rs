@@ -936,7 +936,7 @@ pub fn json_schema() -> Value {
         });
         d["properties"]["boundary_motion_mode"] = json!({
             "type": "string", "enum": ["legacy", "translating_kinematic_spheres"],
-            "description": "Default legacy leaves moving-boundary sweeps disabled. translating_kinematic_spheres requires swept_meshes: first impact against a purely translating kinematic primary sphere uses actual substep start/end poses, carries contact with remaining boundary translation, and clips both approach and carry against static spheres/boxes/meshes. Initial motion only; angular motion, extra sphere parts, dynamic boundaries, starting overlaps, recursive moving impacts and secondary particles are excluded. Static clipping can leave incompatible moving/static overlaps unresolved."
+            "description": "Default legacy leaves moving-boundary sweeps disabled. translating_kinematic_spheres requires swept_meshes: first impact against a purely translating kinematic primary sphere or BodyLocal extra sphere uses actual substep start/end poses, carries contact with remaining boundary translation, and clips both approach and carry against static spheres/boxes/meshes. Initial motion only; angular motion, Legacy compound extra parts, dynamic boundaries, starting overlaps, recursive moving impacts and secondary particles are excluded. Static clipping can leave incompatible moving/static overlaps unresolved."
         });
         d["allOf"] = json!([{
             "if": {"required": ["boundary_motion_mode"], "properties": {"boundary_motion_mode": {"const": "translating_kinematic_spheres"}}},
