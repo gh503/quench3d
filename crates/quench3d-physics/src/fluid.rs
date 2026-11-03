@@ -25,6 +25,9 @@ use crate::world::BodySlot;
 const EPS: f32 = 1e-6;
 
 #[cfg(test)]
+type DensityTraceEntry = (usize, Vec3, Vec3, Vec3);
+
+#[cfg(test)]
 thread_local! {
     static MESH_PROJECTION_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_MESH_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -33,6 +36,7 @@ thread_local! {
     static MOVING_SCAN_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
     static MOVING_SHELL_CARRY: std::cell::Cell<Option<(Vec3, Vec3)>> = const { std::cell::Cell::new(None) };
     static SEPARATION_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MESH_DENSITY_TRACE: std::cell::RefCell<Option<Vec<DensityTraceEntry>>> = const { std::cell::RefCell::new(None) };
     static MESH_CORRECTION_TRACE: std::cell::RefCell<Option<Vec<(usize, Vec3, Vec3)>>> = const { std::cell::RefCell::new(None) };
     static SWEEP_CACHE_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWEEP_BOUNDS_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1194,7 +1198,7 @@ impl Fluid {
                     self.desc.collision_mode,
                     FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
                 ) {
-                    predicted[i] = sweep_pair_correction(
+                    predicted[i] = sweep_liquid_correction(
                         predicted[i],
                         predicted[i] + dir * push,
                         bodies,
@@ -1208,7 +1212,7 @@ impl Fluid {
                         },
                     )
                     .0;
-                    predicted[j] = sweep_pair_correction(
+                    predicted[j] = sweep_liquid_correction(
                         predicted[j],
                         predicted[j] - dir * push,
                         bodies,
@@ -1474,13 +1478,12 @@ impl Fluid {
                     self.desc.collision_mode,
                     FluidCollisionMode::SweptPrimitives | FluidCollisionMode::SweptMeshes
                 ) {
-                    let (end, swept) = sweep_static_spheres(
+                    let (end, swept) = sweep_liquid_correction(
                         prev,
                         prev + *d,
                         &*bodies,
                         radius,
-                        self.desc.boundary_velocity_mode,
-                        true,
+                        &self.desc,
                         SweepQueryContext {
                             mesh_cache: mesh_cache.as_ref(),
                             meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
@@ -1507,6 +1510,12 @@ impl Fluid {
                         self.desc.boundary_motion_mode,
                     )
                 };
+                #[cfg(test)]
+                MESH_DENSITY_TRACE.with(|trace| {
+                    if let Some(trace) = trace.borrow_mut().as_mut() {
+                        trace.push((i, prev, prev + *d, p));
+                    }
+                });
                 self.predicted[i] = p;
                 if contact.is_some() {
                     self.contacts[i] = contact;
@@ -2904,7 +2913,7 @@ fn sweep_translating_spheres(
 /// Sweep a liquid movement segment against static spheres, and optionally boxes.
 /// The primitive mode also holds inward clearance-shell motion at the start;
 /// centers already inside solids retain discrete projection.
-fn sweep_pair_correction(
+fn sweep_liquid_correction(
     start: Vec3,
     end: Vec3,
     bodies: &[BodySlot],
@@ -2932,7 +2941,7 @@ fn sweep_pair_correction(
         true,
         context,
     );
-    // Current geometry only: pair separation must not replay boundary time.
+    // Current geometry only: density and separation must not replay boundary time.
     // Equal times retain original body order; within a body, part/triangle order.
     for (index, slot) in bodies.iter().enumerate() {
         let Some(body) = &slot.body else { continue };
@@ -5319,6 +5328,260 @@ mod tests {
             assert_eq!(a, b);
             assert!(a.0.iter().all(|p| p.is_finite() && p.x >= 0.00299));
         }
+    }
+
+    #[test]
+    fn moving_mesh_density_bypass_and_obstacle_order() {
+        let run =
+            |y: f32, sensor: bool, mode, wall: Option<f32>, reverse: bool, stationary: bool| {
+                let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                let mesh = BodyBuilder::kinematic(Shape::TriMesh {
+                    vertices: vec![
+                        vec3(0.0, 0.0, -2.0),
+                        vec3(0.0, 0.0, 2.0),
+                        vec3(0.0, 2.0, 0.0),
+                    ],
+                    indices: if reverse {
+                        vec![2, 1, 0]
+                    } else {
+                        vec![0, 1, 2]
+                    },
+                })
+                .kinematic_trimesh(true)
+                .sensor(sensor)
+                .position(Vec3::X * if stationary { 0.0 } else { 0.001 })
+                .linear_velocity(Vec3::X * if stationary { 0.0 } else { -0.06 });
+                let add_wall = |world: &mut PhysicsWorld| {
+                    if let Some(x) = wall {
+                        world.add_builder(
+                            BodyBuilder::r#static(Shape::Box {
+                                half_extents: vec3(0.0001, 2.0, 2.0),
+                            })
+                            .position(Vec3::X * x),
+                        );
+                    }
+                };
+                if reverse {
+                    add_wall(&mut world);
+                }
+                world.add_builder(mesh);
+                if !reverse {
+                    add_wall(&mut world);
+                }
+                world
+                    .add_fluid(FluidDesc {
+                        initial_positions: Some(
+                            (0..12)
+                                .map(|i| vec3(-0.004 - i as f32 * 0.003, y, 0.0))
+                                .collect(),
+                        ),
+                        radius: 0.003,
+                        spacing: 0.1,
+                        iterations: 1,
+                        particle_collision: false,
+                        viscosity: 0.0,
+                        collision_mode: FluidCollisionMode::SweptMeshes,
+                        boundary_motion_mode: mode,
+                        boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                        ..FluidDesc::default()
+                    })
+                    .unwrap();
+                SEPARATION_PUSHES.with(|n| n.set(0));
+                MESH_DENSITY_TRACE.with(|n| *n.borrow_mut() = Some(Vec::new()));
+                world.step(1.0 / 60.0);
+                let trace = MESH_DENSITY_TRACE.with(|n| n.borrow_mut().take().unwrap());
+                assert_eq!(SEPARATION_PUSHES.with(|n| n.get()), 0);
+                assert!(trace.iter().any(|(_, a, b, _)| a != b));
+                let fluid = &world.fluids()[0];
+                (fluid.particles().to_vec(), fluid.velocities.clone(), trace)
+            };
+        let mode = FluidBoundaryMotionMode::TranslatingKinematicMeshes;
+        // Beyond the expanded finite edge: actual density crossings remain legal.
+        let bypass = run(-0.01, false, mode, None, false, false);
+        assert!(bypass
+            .2
+            .iter()
+            .any(|(_, a, b, c)| a.x < 0.0 && b.x > 0.0 && c.x > 0.0));
+        assert_eq!(bypass, run(-0.01, true, mode, None, false, false));
+        // Legacy retains its historical infinite-face crossing heuristic here.
+        let legacy = run(
+            -0.01,
+            false,
+            FluidBoundaryMotionMode::Legacy,
+            None,
+            false,
+            false,
+        );
+        assert!(legacy.0[0].x < 0.0);
+        assert_eq!(
+            legacy,
+            run(
+                -0.01,
+                false,
+                FluidBoundaryMotionMode::TranslatingKinematicPrimitives,
+                None,
+                false,
+                false
+            )
+        );
+        // Zero boundary velocity still requires a current-geometry correction sweep.
+        for wall in [None, Some(-0.0005), Some(0.006)] {
+            let baseline = run(-0.002, false, mode, wall, false, true);
+            let reversed = run(-0.002, false, mode, wall, true, true);
+            assert_eq!(baseline, reversed);
+            assert!(baseline.2[0].3.x < -0.0022);
+            if let Some(x) = wall {
+                if x < 0.0 {
+                    assert!(baseline.2[0].3.x <= x - 0.0031 + 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moving_mesh_density_corrections_audit() {
+        let mut failures = Vec::new();
+        let mut total_nonzero = 0;
+        let mut total_attempted = 0;
+        for sign in [-1.0f32, 1.0] {
+            for extra in [false, true] {
+                for iterations in [1, 4] {
+                    for edge in [false, true] {
+                        for (sensor, mode) in [
+                            (false, FluidBoundaryMotionMode::TranslatingKinematicMeshes),
+                            (true, FluidBoundaryMotionMode::TranslatingKinematicMeshes),
+                            (false, FluidBoundaryMotionMode::Legacy),
+                        ] {
+                            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+                            let mesh = Shape::TriMesh {
+                                vertices: vec![
+                                    vec3(0.0, 0.0, -2.0),
+                                    vec3(0.0, 0.0, 2.0),
+                                    vec3(0.0, 2.0, 0.0),
+                                ],
+                                indices: vec![0, 1, 2],
+                            };
+                            let offset = if extra { Vec3::Y * 4.0 } else { Vec3::ZERO };
+                            let builder = if extra {
+                                BodyBuilder::kinematic(Shape::Sphere { radius: 0.001 })
+                                    .part_at(mesh, -offset)
+                                    .compound_transform_mode(
+                                        crate::body::CompoundTransformMode::BodyLocal,
+                                    )
+                            } else {
+                                BodyBuilder::kinematic(mesh)
+                            };
+                            let handle = world.add_builder(
+                                builder
+                                    .kinematic_trimesh(true)
+                                    .sensor(sensor)
+                                    .position(offset + Vec3::X * (sign * 0.001))
+                                    .linear_velocity(Vec3::X * (-sign * 0.06)),
+                            );
+                            let before = world.body(handle).unwrap().transform;
+                            let radius = 0.003;
+                            let y = if edge { -0.002 } else { 0.5 };
+                            let initial: Vec<_> = (0..12)
+                                .map(|i| vec3(-sign * (radius + 0.001 + i as f32 * radius), y, 0.0))
+                                .collect();
+                            world
+                                .add_fluid(FluidDesc {
+                                    initial_positions: Some(initial.clone()),
+                                    radius,
+                                    spacing: 0.1,
+                                    iterations,
+                                    particle_collision: false,
+                                    viscosity: 0.0,
+                                    collision_mode: FluidCollisionMode::SweptMeshes,
+                                    boundary_motion_mode: mode,
+                                    boundary_velocity_mode: FluidBoundaryVelocityMode::BodyMotion,
+                                    ..FluidDesc::default()
+                                })
+                                .unwrap();
+                            SEPARATION_PUSHES.with(|n| n.set(0));
+                            MOVING_SCAN_WORK.with(|n| n.set([0; 4]));
+                            MESH_DENSITY_TRACE.with(|n| *n.borrow_mut() = Some(Vec::new()));
+                            world.step(1.0 / 60.0);
+                            let trace = MESH_DENSITY_TRACE.with(|n| n.borrow_mut().take().unwrap());
+                            assert_eq!(SEPARATION_PUSHES.with(|n| n.get()), 0);
+                            assert_eq!(MOVING_SCAN_WORK.with(|n| n.get()[3]), 0);
+                            let body = world.body(handle).unwrap();
+                            assert_eq!(body.body_type, crate::body::BodyType::Kinematic);
+                            assert_eq!(body.prev_transform, before);
+                            assert!(body.transform.position.x.abs() < 1e-8);
+                            assert_eq!(body.linear_velocity, Vec3::X * (-sign * 0.06));
+                            assert_eq!(body.angular_velocity, Vec3::ZERO);
+                            assert_eq!(trace.len(), 12 * iterations as usize);
+                            let nonzero = trace.iter().filter(|(_, a, b, _)| a != b).count();
+                            assert!(nonzero > 0, "must exercise real density corrections");
+                            total_nonzero += nonzero;
+                            let attempted = trace
+                                .iter()
+                                .filter(|(_, a, b, _)| a.x * sign < 0.0 && b.x * sign > 0.0)
+                                .count();
+                            total_attempted += attempted;
+                            let positions = world.fluids()[0].particles();
+                            if edge
+                                && !sensor
+                                && mode == FluidBoundaryMotionMode::TranslatingKinematicMeshes
+                            {
+                                // Independent finite-edge cylinder intersection: the segment
+                                // has y=-.002,z=0, strictly within the edge z in [-2,2].
+                                // Its closest distance .002 is LESS than particle radius .003;
+                                // crossing the plane here is not a legal rounded-edge bypass.
+                                let (_, a, b, corrected) = trace[0];
+                                assert_eq!(a.y, y);
+                                assert_eq!(b.y, y);
+                                assert_eq!(a.z, 0.0);
+                                assert_eq!(b.z, 0.0);
+                                let entry = ((radius as f64).powi(2) - (y as f64).powi(2)).sqrt();
+                                assert!(-(a.x as f64) * sign as f64 > entry);
+                                assert!((b.x as f64) * sign as f64 > entry);
+                                let t =
+                                    (-sign as f64 * entry - a.x as f64) / (b.x as f64 - a.x as f64);
+                                assert!(t > 0.0 && t < 1.0);
+                                println!("analytic_edge_entry sign={sign} extra={extra} iterations={iterations} particle=0 t={t} entry_x={} before={a:?} target={b:?} corrected={corrected:?}", -sign as f64 * entry);
+                                if corrected.x * sign > 0.0 {
+                                    failures.push((sign, extra, iterations, 0, corrected));
+                                }
+                            }
+                            for (i, position) in positions.iter().enumerate() {
+                                let path: Vec<_> =
+                                    trace.iter().filter(|(j, _, _, _)| *j == i).collect();
+                                assert_eq!(path[0].1, initial[i]);
+                                for pair in path.windows(2) {
+                                    assert_eq!(pair[0].3, pair[1].1);
+                                }
+                                assert_eq!(path.last().unwrap().3, *position);
+                                if !sensor
+                                    && mode == FluidBoundaryMotionMode::TranslatingKinematicMeshes
+                                    && !edge
+                                    && position.x * sign > radius + 1e-6
+                                {
+                                    assert!(path
+                                        .iter()
+                                        .any(|(_, a, b, _)| a.x * sign <= 0.0 && b.x * sign > 0.0));
+                                    // All correction points remain at the strict interior y=.5,z=0.
+                                    assert!(path.iter().all(|(_, a, b, c)| a.y == 0.5
+                                        && b.y == 0.5
+                                        && c.y == 0.5
+                                        && a.z == 0.0
+                                        && b.z == 0.0
+                                        && c.z == 0.0));
+                                    failures.push((sign, extra, iterations, i, *position));
+                                }
+                            }
+                            println!("density sign={sign} extra={extra} iterations={iterations} edge={edge} sensor={sensor} mode={mode:?} nonzero={nonzero} attempted_plane_crossings={attempted} final0={:?} trace={trace:?}", positions[0]);
+                        }
+                    }
+                }
+            }
+        }
+        println!("fixed16_cases_48worlds nonzero={total_nonzero} attempted_plane_crossings={total_attempted} failures={failures:?}");
+        assert!(
+            failures.is_empty(),
+            "density corrections crossed finite face: {failures:?}"
+        );
     }
 
     #[test]
