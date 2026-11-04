@@ -1,0 +1,996 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -566,7 +566,7 @@
+ pub(crate) struct ContactSolver {
+     /// 所有求解接触点。
+     pub contacts: Vec<SolverContact>,
+-    pub(crate) normal_memory: NormalDirectionMemory,
++    pub(crate) normal_memory: NormalSolveState,
+ }
+ 
+ impl ContactSolver {
+@@ -585,7 +585,7 @@
+         dt: f32,
+         precompute: bool,
+     ) {
+-        self.normal_memory = NormalDirectionMemory::default();
++        self.normal_memory.reset();
+         #[cfg(test)]
+         if CACHE_REFERENCE.get() == 1 || CACHE_REFERENCE.get() == 2 {
+             self.prepare_reference(
+@@ -979,7 +979,7 @@
+ 
+     /// 一轮速度迭代。
+     pub fn solve_velocity(&mut self, views: &mut [BodyView], global: bool) {
+-        solve_velocity_contacts_memory(&mut self.contacts, views, global, &mut self.normal_memory);
++        solve_velocity_contacts_state(&mut self.contacts, views, global, &mut self.normal_memory);
+     }
+ 
+     /// 松弛：只在仍然相互接近时补一点冲量，绝不抽走能量。
+@@ -1820,6 +1820,142 @@
+             c.feature_id,
+         ]);
+         out
++    }
++
++    #[test]
++    fn global_normal_cached_reference_round_bits_and_invalidation() {
++        let mut vs = vec![BodyView::frozen(); 5];
++        vs[0].is_static = true;
++        for v in &mut vs[1..4] {
++            v.inv_m = 1.0;
++            v.inv_i_world_mat = Mat3::IDENTITY;
++            v.lin = -Vec3::Y;
++        }
++        let mut cs = Vec::new();
++        for edge in 0..3 {
++            for (x, z) in [(-0.2, -0.2), (0.2, -0.2), (-0.2, 0.2), (0.2, 0.2)] {
++                let mut c = contact(edge, edge + 1, 0);
++                c.ra = vec3(x, 0.25, z);
++                c.rb = vec3(x, -0.25, z);
++                c.k_normal = 2.0;
++                c.normal_impulse = 0.0;
++                c.tangent_impulse = [-0.0, 0.0];
++                cs.push(c);
++            }
++        }
++        let mut reference_cs = cs.clone();
++        let mut reference_vs = vs.clone();
++        let mut state = NormalSolveState::default();
++        let mut memory = NormalDirectionMemory::default();
++        let mut warmed = None;
++        for step in 0..2 {
++            state.reset();
++            memory.clear();
++            if step == 1 {
++                vs[2].inv_m = 0.75;
++                vs[2].inv_i_world_mat = Mat3::from_cols(
++                    vec3(1.2, 0.1, 0.0),
++                    vec3(0.1, 0.9, 0.0),
++                    vec3(0.0, 0.0, 1.1),
++                );
++                reference_vs = vs.clone();
++                cs[4].normal = vec3(0.01, 1.0, 0.0).normalize();
++                reference_cs = cs.clone();
++            }
++            for round in 0..20 {
++                if round % 3 == 0 {
++                    let dv = vec3(0.03, -0.02, 0.01);
++                    vs[2].lin += dv;
++                    reference_vs[2].lin += dv;
++                    cs[round % 12].normal_impulse = 0.0;
++                    reference_cs[round % 12].normal_impulse = 0.0;
++                }
++                solve_velocity_contacts_state(&mut cs, &mut vs, true, &mut state);
++                solve_velocity_contacts_memory(
++                    &mut reference_cs,
++                    &mut reference_vs,
++                    true,
++                    &mut memory,
++                );
++                for (a, b) in vs.iter().zip(&reference_vs) {
++                    let bits = |v: &BodyView| {
++                        [v.lin.x, v.lin.y, v.lin.z, v.ang.x, v.ang.y, v.ang.z].map(f32::to_bits)
++                    };
++                    assert_eq!(bits(a), bits(b), "step={step} round={round}");
++                }
++                for (a, b) in cs.iter().zip(&reference_cs) {
++                    assert_eq!(a.normal_impulse.to_bits(), b.normal_impulse.to_bits());
++                    assert_eq!(
++                        a.tangent_impulse.map(f32::to_bits),
++                        b.tangent_impulse.map(f32::to_bits)
++                    );
++                }
++                assert_eq!(
++                    state
++                        .memory
++                        .p
++                        .iter()
++                        .map(|x| x.to_bits())
++                        .collect::<Vec<_>>(),
++                    memory.p.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
++                );
++                assert_eq!(
++                    state
++                        .memory
++                        .ap
++                        .iter()
++                        .map(|x| x.to_bits())
++                        .collect::<Vec<_>>(),
++                    memory.ap.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
++                );
++                assert_eq!(state.memory.curvature.to_bits(), memory.curvature.to_bits());
++                assert_eq!(state.memory.free, memory.free);
++                let caps = state.work.capacities();
++                if step == 0 && round == 3 {
++                    warmed = Some(caps);
++                }
++                if step == 0 && round > 3 {
++                    assert_eq!(Some(caps), warmed, "workspace capacity grew after warmup");
++                }
++            }
++        }
++        println!("ROUND195_REFERENCE 40rounds bits=true changedmask/joint_velocity/invalidation/holes=true workspacecapacitystable=true");
++    }
++
++    #[test]
++    fn global_normal_setup_once_per_substep() {
++        let mut vs = vec![BodyView::frozen(); 4];
++        vs[0].is_static = true;
++        for v in &mut vs[1..] {
++            v.inv_m = 1.0;
++            v.inv_i_world_mat = Mat3::IDENTITY;
++            v.lin = -Vec3::Y;
++        }
++        let mut cs = Vec::new();
++        for edge in 0..3 {
++            for (x, z) in [(-0.2, -0.2), (0.2, -0.2), (-0.2, 0.2), (0.2, 0.2)] {
++                let mut c = contact(edge, edge + 1, 0);
++                c.ra = vec3(x, 0.25, z);
++                c.rb = vec3(x, -0.25, z);
++                c.k_normal = 2.0;
++                c.normal_impulse = 0.0;
++                c.tangent_impulse = [0.0; 2];
++                c.friction = 0.0;
++                c.friction_tangent = [0.0; 2];
++                cs.push(c);
++            }
++        }
++        let mut state = NormalSolveState::default();
++        NORMAL_SETUP_COUNTS.with(|c| c.set([0; 4]));
++        for _ in 0..20 {
++            solve_velocity_contacts_state(&mut cs, &mut vs, true, &mut state);
++        }
++        let counts = NORMAL_SETUP_COUNTS.with(|c| c.get());
++        println!("ROUND195 actual_geometry_force_local_ap={counts:?}");
++        assert_eq!(counts[0], 1);
++        assert_eq!(counts[1], 1);
++        assert_eq!(counts[2], 3);
++        assert!(counts[3] <= 20);
+     }
+ 
+     #[test]
+@@ -2764,6 +2900,12 @@
+ }
+ 
+ fn normal_product(contacts: &[SolverContact], views: &[BodyView], p: &[f64]) -> Vec<f64> {
++    #[cfg(test)]
++    NORMAL_SETUP_COUNTS.with(|c| {
++        let mut n = c.get();
++        n[3] += 1;
++        c.set(n);
++    });
+     let mut force = vec![(Vec3::ZERO, Vec3::ZERO); views.len()];
+     for (c, value) in contacts.iter().zip(p) {
+         let impulse = c.normal * (*value as f32);
+@@ -2819,6 +2961,12 @@
+     residual: &[f64],
+     free: &[bool],
+ ) -> Vec<f64> {
++    #[cfg(test)]
++    NORMAL_SETUP_COUNTS.with(|c| {
++        let mut n = c.get();
++        n[0] += 1;
++        c.set(n);
++    });
+     let mut z: Vec<_> = cs
+         .iter()
+         .zip(residual)
+@@ -2923,6 +3071,12 @@
+                 lower[i] = coarse_cross(&columns[i], &columns[i - 1], cs, vs);
+             }
+         }
++        #[cfg(test)]
++        NORMAL_SETUP_COUNTS.with(|c| {
++            let mut n = c.get();
++            n[1] += 1;
++            c.set(n);
++        });
+         let scale = diagonal.iter().copied().fold(0.0, f64::max);
+         for i in 0..n {
+             if i > 0 {
+@@ -3014,6 +3168,14 @@
+     cs: &mut [SolverContact],
+     vs: &mut [BodyView],
+     memory: &mut NormalDirectionMemory,
++) {
++    global_normal_attempt_cached(cs, vs, memory, None);
++}
++fn global_normal_attempt_cached(
++    cs: &mut [SolverContact],
++    vs: &mut [BodyView],
++    memory: &mut NormalDirectionMemory,
++    cache: Option<&mut NormalGeometry>,
+ ) {
+     #[cfg(test)]
+     {
+@@ -3048,24 +3210,29 @@
+         .collect();
+     let residual: Vec<_> = gradient.iter().map(|x| -x).collect();
+     let diagonal: Vec<_> = cs.iter().map(|c| f64::from(c.k_normal)).collect();
+-    let mut preconditioned = chain_precondition(cs, vs, &residual, &free);
+-    for (z, local) in preconditioned
+-        .iter_mut()
+-        .zip(local_torque_correction(cs, vs, &residual, &free))
+-    {
+-        *z += local;
+-    }
++    let preconditioned = if let Some(cache) = cache {
++        cache.apply(cs, vs, &residual, &free).clone()
++    } else {
++        let mut preconditioned = chain_precondition(cs, vs, &residual, &free);
++        for (z, local) in preconditioned
++            .iter_mut()
++            .zip(local_torque_correction(cs, vs, &residual, &free))
++        {
++            *z += local;
++        }
++        preconditioned
++    };
+     let (p, retain) =
+         memory_feasible_direction(&lambda, &gradient, preconditioned, &diagonal, &free, memory);
+     let descent = p.iter().zip(&gradient).map(|(p, g)| p * g).sum::<f64>();
+     if !descent.is_finite() || descent >= 0.0 {
+-        *memory = NormalDirectionMemory::default();
++        memory.clear();
+         return;
+     }
+     let ap = normal_product(cs, vs, &p);
+     let curvature = p.iter().zip(&ap).map(|(p, a)| p * a).sum::<f64>();
+     if !curvature.is_finite() || curvature <= 0.0 {
+-        *memory = NormalDirectionMemory::default();
++        memory.clear();
+         return;
+     }
+     #[cfg(test)]
+@@ -3102,12 +3269,12 @@
+         }
+     }
+     if !alpha.is_finite() || alpha <= 0.0 {
+-        *memory = NormalDirectionMemory::default();
++        memory.clear();
+         return;
+     }
+     let next = projected_line_update(&lambda, &p, alpha);
+     if next.iter().any(|x| !x.is_finite()) {
+-        *memory = NormalDirectionMemory::default();
++        memory.clear();
+         return;
+     }
+     let hitbound = (0..p.len()).any(|i| p[i] < 0.0 && alpha == -lambda[i] / p[i]);
+@@ -3119,7 +3286,7 @@
+             free: free.clone(),
+         };
+     } else {
+-        *memory = NormalDirectionMemory::default();
++        memory.clear();
+     }
+     for (c, new) in cs.iter_mut().zip(next) {
+         let delta = new - c.normal_impulse;
+@@ -3467,6 +3634,12 @@
+             }
+         }
+         let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
++        #[cfg(test)]
++        NORMAL_SETUP_COUNTS.with(|c| {
++            let mut n = c.get();
++            n[2] += 1;
++            c.set(n);
++        });
+         let Some(inverse) = small_spd_inverse(matrix, rank, scale) else {
+             #[cfg(test)]
+             global_note("local_status=badpivot");
+@@ -3516,14 +3689,14 @@
+     memory: &mut NormalDirectionMemory,
+ ) -> (Vec<f64>, bool) {
+     if memory.free != free {
+-        *memory = NormalDirectionMemory::default();
++        memory.clear();
+     }
+     let candidate = remembered_direction(z.clone(), memory);
+     let clipped = (0..candidate.len()).any(|i| lambda[i] == 0.0 && candidate[i] < 0.0);
+     let descent = candidate.iter().zip(g).map(|(a, b)| a * b).sum::<f64>();
+     if clipped || candidate.iter().any(|x| !x.is_finite()) || !descent.is_finite() || descent >= 0.0
+     {
+-        *memory = NormalDirectionMemory::default();
++        memory.clear();
+         return (feasible_direction(lambda, g, z, diagonal), false);
+     }
+     (candidate, true)
+@@ -3546,3 +3719,593 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++thread_local! {static NORMAL_SETUP_COUNTS:std::cell::Cell<[usize;4]>=const {std::cell::Cell::new([0;4])};}
++
++#[derive(Default, Clone, Debug)]
++struct CachedForceChain {
++    columns: Vec<Vec<usize>>,
++    diagonal: Vec<f64>,
++    lower: Vec<f64>,
++    rhs: Vec<f64>,
++}
++#[derive(Clone, Debug)]
++struct CachedLocal {
++    points: Vec<usize>,
++    basis: Vec<Vec<f64>>,
++    inverse: [[f64; 3]; 3],
++    rank: usize,
++}
++#[derive(Default, Clone, Debug)]
++struct NormalGeometry {
++    ready: bool,
++    chains: Vec<CachedForceChain>,
++    locals: Vec<CachedLocal>,
++    z: Vec<f64>,
++    out: Vec<f64>,
++}
++impl NormalGeometry {
++    fn build(&mut self, cs: &[SolverContact], vs: &[BodyView]) {
++        #[cfg(test)]
++        NORMAL_SETUP_COUNTS.with(|c| {
++            let mut n = c.get();
++            n[0] += 1;
++            c.set(n);
++        });
++        self.chains.clear();
++        self.locals.clear();
++        let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
++            std::collections::BTreeMap::new();
++        for (i, c) in cs.iter().enumerate() {
++            groups.entry((c.a, c.b)).or_default().push(i);
++        }
++        let mut adjacency = vec![Vec::new(); vs.len()];
++        let edges: Vec<_> = groups.into_iter().collect();
++        for (i, ((a, b), _)) in edges.iter().enumerate() {
++            adjacency[*a].push(i);
++            adjacency[*b].push(i);
++        }
++        let roots: Vec<_> = vs
++            .iter()
++            .enumerate()
++            .filter(|(i, v)| v.is_static && adjacency[*i].len() == 1)
++            .map(|(i, _)| i)
++            .collect();
++        #[cfg(test)]
++        global_note(format!("roots={} freecount={}", roots.len(), 0));
++        for root in roots {
++            let mut node = root;
++            let mut previous = usize::MAX;
++            let mut columns = Vec::new();
++            let mut seen = vec![false; vs.len()];
++            let mut direction = None;
++            let mut valid = true;
++            loop {
++                if seen[node] {
++                    #[cfg(test)]
++                    global_note("coarse_status=cycle");
++                    valid = false;
++                    break;
++                }
++                seen[node] = true;
++                let next: Vec<_> = adjacency[node]
++                    .iter()
++                    .copied()
++                    .filter(|e| *e != previous)
++                    .collect();
++                if next.is_empty() {
++                    break;
++                }
++                if next.len() != 1 {
++                    #[cfg(test)]
++                    global_note("coarse_status=branch");
++                    valid = false;
++                    break;
++                }
++                let edge = next[0];
++                let ((a, b), points) = &edges[edge];
++                let other = if *a == node { *b } else { *a };
++                if vs[other].inv_m <= 0.0 {
++                    #[cfg(test)]
++                    global_note("coarse_status=frozenother");
++                    valid = false;
++                    break;
++                }
++                let n = cs[points[0]].normal * if *a == node { 1.0 } else { -1.0 };
++                if direction.is_some_and(|d: Vec3| d.dot(n) < 0.999)
++                    || points.iter().any(|i| cs[*i].normal != cs[points[0]].normal)
++                {
++                    #[cfg(test)]
++                    global_note(format!(
++                        "coarse_status=normal_mismatch adjacent_dot={} exactnormalneq={}",
++                        direction.map_or(1.0, |d: Vec3| d.dot(n)),
++                        points.iter().any(|i| cs[*i].normal != cs[points[0]].normal)
++                    ));
++                    valid = false;
++                    break;
++                }
++                direction = Some(n);
++                columns.push(points.clone());
++                previous = edge;
++                node = other;
++            }
++            if !valid || columns.is_empty() {
++                continue;
++            }
++            let n = columns.len();
++            let mut diagonal = vec![0.0; n];
++            let mut lower = vec![0.0; n];
++            for i in 0..n {
++                diagonal[i] = coarse_cross(&columns[i], &columns[i], cs, vs);
++                if i > 0 {
++                    lower[i] = coarse_cross(&columns[i], &columns[i - 1], cs, vs);
++                }
++            }
++            #[cfg(test)]
++            NORMAL_SETUP_COUNTS.with(|c| {
++                let mut n = c.get();
++                n[1] += 1;
++                c.set(n);
++            });
++            let scale = diagonal.iter().copied().fold(0.0, f64::max);
++            for i in 0..n {
++                if i > 0 {
++                    let off = lower[i];
++                    lower[i] /= diagonal[i - 1];
++                    diagonal[i] -= lower[i] * off;
++                }
++                if !diagonal[i].is_finite() || diagonal[i] <= 1e-9 * scale {
++                    #[cfg(test)]
++                    global_note(format!("coarse_status=pivot ratio={}", diagonal[i] / scale));
++                    valid = false;
++                    break;
++                }
++            }
++            if !valid {
++                continue;
++            }
++            #[cfg(test)]
++            global_note(format!(
++                "coarse_status=accepted chainlen={n} minpivotratio={}",
++                diagonal.iter().copied().fold(f64::INFINITY, f64::min) / scale
++            ));
++            self.chains.push(CachedForceChain {
++                columns,
++                diagonal,
++                lower,
++                rhs: vec![0.0; n],
++            });
++        }
++        let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
++            std::collections::BTreeMap::new();
++        for (i, c) in cs.iter().enumerate() {
++            groups.entry((c.a, c.b)).or_default().push(i);
++        }
++
++        for points in groups.values() {
++            if points.iter().any(|i| cs[*i].normal != cs[points[0]].normal) {
++                continue;
++            }
++            let basis = wrench_basis(cs, points);
++            let rank = basis.len().saturating_sub(1);
++            #[cfg(test)]
++            global_note(format!(
++                "local_pair={},{} local_rank={rank}",
++                cs[points[0]].a, cs[points[0]].b
++            ));
++            if rank == 0 {
++                continue;
++            }
++            let mut matrix = [[0.0; 3]; 3];
++            for a in 0..rank {
++                for b in 0..rank {
++                    matrix[a][b] = 0.5
++                        * (weighted_cross(points, &basis[a + 1], points, &basis[b + 1], cs, vs)
++                            + weighted_cross(points, &basis[b + 1], points, &basis[a + 1], cs, vs));
++                }
++            }
++            let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
++            #[cfg(test)]
++            NORMAL_SETUP_COUNTS.with(|c| {
++                let mut n = c.get();
++                n[2] += 1;
++                c.set(n);
++            });
++            let Some(inverse) = small_spd_inverse(matrix, rank, scale) else {
++                #[cfg(test)]
++                global_note("local_status=badpivot");
++                continue;
++            };
++            #[cfg(test)]
++            global_note("local_status=accepted");
++            self.locals.push(CachedLocal {
++                points: points.clone(),
++                basis,
++                inverse,
++                rank,
++            });
++        }
++        self.ready = true;
++    }
++    fn apply<'a>(
++        &'a mut self,
++        cs: &[SolverContact],
++        vs: &[BodyView],
++        r: &[f64],
++        free: &[bool],
++    ) -> &'a Vec<f64> {
++        if !self.ready {
++            self.build(cs, vs);
++        }
++        self.z.clear();
++        self.z.extend(cs.iter().zip(r).zip(free).map(|((c, r), f)| {
++            if *f {
++                r / f64::from(c.k_normal)
++            } else {
++                0.0
++            }
++        }));
++        for chain in &mut self.chains {
++            let CachedForceChain {
++                columns,
++                diagonal,
++                lower,
++                rhs,
++            } = chain;
++            let n = columns.len();
++            for i in 0..n {
++                rhs[i] = columns[i]
++                    .iter()
++                    .filter(|j| free[**j])
++                    .map(|j| r[*j])
++                    .sum::<f64>()
++                    / columns[i].len() as f64;
++                if i > 0 {
++                    rhs[i] -= lower[i] * rhs[i - 1];
++                }
++            }
++            for i in 0..n {
++                rhs[i] /= diagonal[i];
++            }
++            for i in (0..n.saturating_sub(1)).rev() {
++                rhs[i] -= lower[i + 1] * rhs[i + 1];
++            }
++            for i in 0..n {
++                for j in &columns[i] {
++                    if free[*j] {
++                        self.z[*j] += rhs[i] / columns[i].len() as f64;
++                    }
++                }
++            }
++        }
++        self.out.clear();
++        self.out.resize(cs.len(), 0.0);
++        for local in &self.locals {
++            let CachedLocal {
++                points,
++                basis,
++                inverse,
++                rank,
++            } = local;
++            let mut rhs = [0.0; 3];
++            for a in 0..*rank {
++                rhs[a] = points
++                    .iter()
++                    .enumerate()
++                    .filter(|(_, i)| free[**i])
++                    .map(|(j, i)| basis[a + 1][j] * r[*i])
++                    .sum();
++            }
++            let mut x = [0.0; 3];
++            for a in 0..*rank {
++                for b in 0..*rank {
++                    x[a] += inverse[a][b] * rhs[b];
++                }
++            }
++            for (j, i) in points.iter().enumerate() {
++                if free[*i] {
++                    for a in 0..*rank {
++                        self.out[*i] += basis[a + 1][j] * x[a];
++                    }
++                }
++            }
++        }
++        for (z, local) in self.z.iter_mut().zip(self.out.iter()) {
++            *z += local;
++        }
++        &self.z
++    }
++}
++#[derive(Default, Clone, Debug)]
++pub(crate) struct NormalSolveState {
++    memory: NormalDirectionMemory,
++    geometry: NormalGeometry,
++    work: NormalWork,
++}
++impl NormalSolveState {
++    pub(crate) fn reset(&mut self) {
++        self.memory.clear();
++        self.geometry.ready = false;
++    }
++}
++impl NormalDirectionMemory {
++    fn clear(&mut self) {
++        self.p.clear();
++        self.ap.clear();
++        self.free.clear();
++        self.curvature = 0.0;
++    }
++}
++pub(crate) fn solve_velocity_contacts_state(
++    cs: &mut [SolverContact],
++    vs: &mut [BodyView],
++    global: bool,
++    state: &mut NormalSolveState,
++) {
++    if global {
++        global_normal_attempt_work(
++            cs,
++            vs,
++            &mut state.memory,
++            &mut state.geometry,
++            &mut state.work,
++        );
++        for c in cs {
++            if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
++                global_rolling(c, a, b);
++            }
++        }
++    } else {
++        solve_velocity_contacts_memory(cs, vs, false, &mut state.memory);
++    }
++}
++
++#[derive(Default, Clone, Debug)]
++struct NormalWork {
++    lambda: Vec<f64>,
++    gradient: Vec<f64>,
++    free: Vec<bool>,
++    residual: Vec<f64>,
++    diagonal: Vec<f64>,
++    z: Vec<f64>,
++    p: Vec<f64>,
++    ap: Vec<f64>,
++    next: Vec<f32>,
++    force: Vec<(Vec3, Vec3)>,
++}
++fn normal_product_into(
++    contacts: &[SolverContact],
++    views: &[BodyView],
++    p: &[f64],
++    force: &mut Vec<(Vec3, Vec3)>,
++    out: &mut Vec<f64>,
++) {
++    #[cfg(test)]
++    NORMAL_SETUP_COUNTS.with(|c| {
++        let mut n = c.get();
++        n[3] += 1;
++        c.set(n);
++    });
++    force.clear();
++    force.resize(views.len(), (Vec3::ZERO, Vec3::ZERO));
++    for (c, value) in contacts.iter().zip(p) {
++        let impulse = c.normal * (*value as f32);
++        force[c.a].0 -= impulse;
++        force[c.a].1 -= c.ra.cross(impulse);
++        force[c.b].0 += impulse;
++        force[c.b].1 += c.rb.cross(impulse);
++    }
++    for (v, (lin, ang)) in views.iter().zip(force.iter_mut()) {
++        *lin *= v.inv_m;
++        *ang = v.inv_i_world(*ang);
++    }
++    out.clear();
++    out.extend(contacts.iter().map(|c| {
++        let (la, wa) = force[c.a];
++        let (lb, wb) = force[c.b];
++        f64::from(((lb + wb.cross(c.rb)) - (la + wa.cross(c.ra))).dot(c.normal))
++    }));
++}
++
++fn global_normal_attempt_work(
++    cs: &mut [SolverContact],
++    vs: &mut [BodyView],
++    memory: &mut NormalDirectionMemory,
++    cache: &mut NormalGeometry,
++    work: &mut NormalWork,
++) {
++    #[cfg(test)]
++    {
++        GLOBAL_TRACE.with(|t| {
++            let (step, r) = t.get();
++            t.set((step, r + 1));
++        });
++        global_observe(cs, vs, "before_friction");
++    }
++    for c in cs.iter_mut() {
++        if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
++            global_friction(c, a, b);
++        }
++    }
++    #[cfg(test)]
++    global_observe(cs, vs, "fresh_gradient");
++    let NormalWork {
++        lambda,
++        gradient,
++        free,
++        residual,
++        diagonal,
++        z,
++        p,
++        ap,
++        next,
++        force,
++        ..
++    } = work;
++    lambda.clear();
++    lambda.extend(cs.iter().map(|c| f64::from(c.normal_impulse)));
++    gradient.clear();
++    gradient.extend(cs.iter().map(|c| {
++        f64::from(
++            pair_relative_velocity(&vs[c.a], &vs[c.b], c.ra, c.rb).dot(c.normal)
++                - c.restitution_bias
++                - c.speculative_bias,
++        )
++    }));
++    free.clear();
++    free.extend(
++        lambda
++            .iter()
++            .zip(gradient.iter())
++            .map(|(l, g)| *l > 0.0 || *g < 0.0),
++    );
++    residual.clear();
++    residual.extend(gradient.iter().map(|x| -x));
++    diagonal.clear();
++    diagonal.extend(cs.iter().map(|c| f64::from(c.k_normal)));
++    z.clone_from(cache.apply(cs, vs, residual, free));
++    if memory.free != *free {
++        memory.clear();
++    }
++    p.clone_from(z);
++    if memory.p.len() == p.len() && memory.curvature.is_finite() && memory.curvature > 0.0 {
++        let beta = p.iter().zip(&memory.ap).map(|(a, b)| a * b).sum::<f64>() / memory.curvature;
++        for (i, x) in p.iter_mut().enumerate() {
++            *x -= beta * memory.p[i];
++        }
++    }
++    let clipped = (0..p.len()).any(|i| lambda[i] == 0.0 && p[i] < 0.0);
++    let d = p
++        .iter()
++        .zip(gradient.iter())
++        .map(|(a, b)| a * b)
++        .sum::<f64>();
++    let retain = !(clipped || p.iter().any(|x| !x.is_finite()) || !d.is_finite() || d >= 0.0);
++    if !retain {
++        memory.clear();
++        p.clone_from(z);
++        for i in 0..p.len() {
++            if lambda[i] == 0.0 && p[i] < 0.0 {
++                p[i] = 0.0;
++            }
++        }
++        if p.iter()
++            .zip(gradient.iter())
++            .map(|(p, g)| p * g)
++            .sum::<f64>()
++            >= 0.0
++            || p.iter().any(|x| !x.is_finite())
++        {
++            for i in 0..p.len() {
++                p[i] = if lambda[i] > 0.0 || gradient[i] < 0.0 {
++                    -gradient[i] / diagonal[i]
++                } else {
++                    0.0
++                };
++            }
++        }
++    }
++    let descent = p
++        .iter()
++        .zip(gradient.iter())
++        .map(|(p, g)| p * g)
++        .sum::<f64>();
++    if !descent.is_finite() || descent >= 0.0 {
++        memory.clear();
++        return;
++    }
++    normal_product_into(cs, vs, p, force, ap);
++    let curvature = p.iter().zip(ap.iter()).map(|(p, a)| p * a).sum::<f64>();
++    if !curvature.is_finite() || curvature <= 0.0 {
++        memory.clear();
++        return;
++    }
++    #[cfg(test)]
++    global_note(format!(
++        "descent={descent} curvature={curvature} alphaopt={} apcount=1",
++        -descent / curvature
++    ));
++    let mut alpha = -descent / curvature;
++    for i in 0..p.len() {
++        if p[i] < 0.0 {
++            alpha = alpha.min(-lambda[i] / p[i]);
++        }
++    }
++    #[cfg(test)]
++    global_note(format!(
++        "alpha={alpha} bound_limited={}",
++        alpha < -descent / curvature
++    ));
++    #[cfg(test)]
++    {
++        let limiting = (0..p.len())
++            .filter(|i| p[*i] < 0.0)
++            .min_by(|i, j| (-lambda[*i] / p[*i]).total_cmp(&(-lambda[*j] / p[*j])));
++        if let Some(i) = limiting {
++            global_note(format!(
++                "limiter={i} pair={},{} lambda={} p={} g={} ratio={}",
++                cs[i].a,
++                cs[i].b,
++                lambda[i],
++                p[i],
++                gradient[i],
++                alpha / (-descent / curvature)
++            ));
++        }
++    }
++    if !alpha.is_finite() || alpha <= 0.0 {
++        memory.clear();
++        return;
++    }
++    next.clear();
++    next.extend(lambda.iter().zip(p.iter()).map(|(l, p)| {
++        if *p < 0.0 && alpha == -*l / *p {
++            0.0
++        } else {
++            (l + alpha * p).max(0.0) as f32
++        }
++    }));
++    if next.iter().any(|x| !x.is_finite()) {
++        memory.clear();
++        return;
++    }
++    let hitbound = (0..p.len()).any(|i| p[i] < 0.0 && alpha == -lambda[i] / p[i]);
++    if retain && !hitbound {
++        memory.p.clone_from(p);
++        memory.ap.clone_from(ap);
++        memory.curvature = curvature;
++        memory.free.clone_from(free);
++    } else {
++        memory.clear();
++    }
++    for (c, new) in cs.iter_mut().zip(next.iter().copied()) {
++        let delta = new - c.normal_impulse;
++        c.normal_impulse = new;
++        if delta != 0.0 {
++            if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
++                pair_apply_impulse(a, b, c.ra, c.rb, c.normal * delta);
++            }
++        }
++    }
++    #[cfg(test)]
++    global_observe(cs, vs, "after_normal");
++}
++
++#[cfg(test)]
++impl NormalWork {
++    fn capacities(&self) -> [usize; 10] {
++        [
++            self.lambda.capacity(),
++            self.gradient.capacity(),
++            self.free.capacity(),
++            self.residual.capacity(),
++            self.diagonal.capacity(),
++            self.z.capacity(),
++            self.p.capacity(),
++            self.ap.capacity(),
++            self.next.capacity(),
++            self.force.capacity(),
++        ]
++    }
++}
+--- a/crates/quench3d-physics/src/parallel.rs
++++ b/crates/quench3d-physics/src/parallel.rs
+@@ -28,8 +28,8 @@
+ 
+ use crate::island::Islands;
+ use crate::solver::{
+-    relax_contacts, solve_position_contacts, solve_velocity_contacts_memory, BodyView,
+-    NormalDirectionMemory, SolverConfig, SolverContact,
++    relax_contacts, solve_position_contacts, solve_velocity_contacts_state, BodyView,
++    NormalSolveState, SolverConfig, SolverContact,
+ };
+ 
+ /// 至少这么多接触才值得开线程（太小的场景线程开销大于收益）。
+@@ -44,7 +44,7 @@
+     view_len: u32,
+     /// 接触数量。
+     contact_len: u32,
+-    memory: NormalDirectionMemory,
++    memory: NormalSolveState,
+ }
+ 
+ /// 并行求解的布局与缓冲（跨步复用，稳态零分配）。
+@@ -64,6 +64,7 @@
+     contact_global: Vec<u32>,
+     /// 每个岛的布局信息，按（线程, 原岛序）排列。
+     chunks: Vec<Chunk>,
++    spare_chunks: Vec<Chunk>,
+     /// 每个线程占用的 `chunks` 区间 `[start, end)`。
+     workers: Vec<(u32, u32)>,
+     /// 全局刚体槽位 → 本地视图下标（用 `stamp` 做时间戳，避免每岛清零）。
+@@ -160,7 +161,7 @@
+         self.contacts.clear();
+         self.view_global.clear();
+         self.contact_global.clear();
+-        self.chunks.clear();
++        self.spare_chunks.append(&mut self.chunks);
+         self.workers.clear();
+ 
+         // --- 1. 每个岛有多少接触（接触至少有一端是清醒体，否则 prepare 阶段就被拒了） ---
+@@ -292,11 +293,11 @@
+         // 岛内清醒体的局部下标：并发写回时要按全局槽位同步
+         let view_len = (self.views.len() - view_start) as u32;
+         let contact_len = (self.contacts.len() - contact_start) as u32;
+-        self.chunks.push(Chunk {
+-            view_len,
+-            contact_len,
+-            memory: NormalDirectionMemory::default(),
+-        });
++        let mut chunk = self.spare_chunks.pop().unwrap_or_default();
++        chunk.view_len = view_len;
++        chunk.contact_len = contact_len;
++        chunk.memory.reset();
++        self.chunks.push(chunk);
+     }
+ 
+     /// 把全局刚体槽位加进本地视图（已加过就返回既有下标）。
+@@ -368,7 +369,7 @@
+     /// 线程内部再按岛切分——全程安全 Rust，没有 `unsafe`。
+     fn run_workers<F>(&mut self, f: F)
+     where
+-        F: Fn(&mut [SolverContact], &mut [BodyView], &mut NormalDirectionMemory) + Send + Sync,
++        F: Fn(&mut [SolverContact], &mut [BodyView], &mut NormalSolveState) + Send + Sync,
+     {
+         if !self.enabled {
+             return;
+@@ -440,7 +441,7 @@
+     ) {
+         self.run_workers(move |cs, vs, memory| {
+             for _ in 0..iters {
+-                solve_velocity_contacts_memory(cs, vs, cfg.global_normal_projection, memory);
++                solve_velocity_contacts_state(cs, vs, cfg.global_normal_projection, memory);
+             }
+             relax_contacts(cs, vs, relax_iters, gain);
+             solve_position_contacts(cs, vs, dt, cfg, pos_iters);
+@@ -450,7 +451,7 @@
+     /// 并行跑一轮速度迭代。
+     pub fn solve_velocity(&mut self, global: bool) {
+         self.run_workers(move |cs, vs, memory| {
+-            solve_velocity_contacts_memory(cs, vs, global, memory)
++            solve_velocity_contacts_state(cs, vs, global, memory)
+         });
+     }
+ 
