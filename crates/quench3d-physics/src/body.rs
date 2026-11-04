@@ -453,6 +453,74 @@ pub struct RigidBody {
 }
 
 impl RigidBody {
+    pub(crate) fn replace_primitive_shape(&mut self, shape: Shape) -> bool {
+        let valid = match &shape {
+            Shape::Box { half_extents } => {
+                half_extents.is_finite() && half_extents.min_element() > 0.0
+            }
+            Shape::Sphere { radius } => radius.is_finite() && *radius > 0.0,
+            Shape::Cylinder {
+                radius,
+                half_height,
+            }
+            | Shape::Cone {
+                radius,
+                half_height,
+            } => {
+                radius.is_finite() && *radius > 0.0 && half_height.is_finite() && *half_height > 0.0
+            }
+            Shape::Capsule {
+                radius,
+                half_height,
+            } => {
+                radius.is_finite()
+                    && *radius > 0.0
+                    && half_height.is_finite()
+                    && *half_height >= 0.0
+            }
+            _ => false,
+        };
+        if !valid
+            || !self.extra_parts.is_empty()
+            || !matches!(
+                self.shape,
+                Shape::Box { .. }
+                    | Shape::Sphere { .. }
+                    | Shape::Cylinder { .. }
+                    | Shape::Cone { .. }
+                    | Shape::Capsule { .. }
+            )
+        {
+            return false;
+        }
+        let props = shape.mass_properties(1.0);
+        let inertia = props.inertia * (self.mass / props.mass);
+        if !(self.mass.is_finite()
+            && self.mass > 0.0
+            && props.mass.is_finite()
+            && props.mass > 0.0
+            && props.center.is_finite()
+            && inertia.is_finite()
+            && inertia.min_element() > 0.0)
+        {
+            return false;
+        }
+        self.shape = shape;
+        self.local_center = props.center;
+        self.inertia_local = inertia;
+        self.inv_inertia_local = if self.is_dynamic() {
+            Vec3::new(
+                safe_inv(inertia.x),
+                safe_inv(inertia.y),
+                safe_inv(inertia.z),
+            )
+        } else {
+            Vec3::ZERO
+        };
+        self.wake_up();
+        true
+    }
+
     /// 位姿。
     #[inline]
     pub fn transform(&self) -> Transform {

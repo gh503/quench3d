@@ -1877,6 +1877,68 @@ fn viewport_click_uses_window_coordinates() {
 }
 
 #[test]
+fn primitive_shape_panel_changes_radius_through_drag() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    doc.spawn(&mut engine, quench3d_editor::doc::Primitive::Sphere);
+    doc.reset_history(&engine);
+    let handle = engine.scene.objects[doc.selected.unwrap()].body.unwrap();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut run = |engine: &mut Engine, events| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 4000.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, &mut doc, &mut view, &mut gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    run(&mut engine, vec![]);
+    let shapes = run(&mut engine, vec![]);
+    let label = text_shape_rect(&shapes, "半径").expect("shape radius control shown");
+    let value = shapes
+        .iter()
+        .filter_map(|s| text_shape_rect(std::slice::from_ref(s), "0.5"))
+        .filter(|r| {
+            (r.center().y - label.center().y).abs() < 8.0 && r.center().x > label.center().x
+        })
+        .min_by(|a, b| a.min.x.total_cmp(&b.min.x))
+        .expect("radius value beside label");
+    let pos = value.center();
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    run(
+        &mut engine,
+        vec![egui::Event::PointerMoved(pos), button(pos, true)],
+    );
+    let moved = pos + egui::vec2(30.0, 0.0);
+    run(&mut engine, vec![egui::Event::PointerMoved(moved)]);
+    run(&mut engine, vec![button(moved, false)]);
+    assert!(
+        matches!(engine.world.body(handle).unwrap().shape, quench3d_physics::Shape::Sphere { radius } if radius > 0.5)
+    );
+    assert!(engine.paused);
+}
+
+#[test]
 fn fly_camera_panel_edits_fov_and_switches_orthographic() {
     let Some(mut engine) = headless_engine() else {
         return;

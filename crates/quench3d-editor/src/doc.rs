@@ -81,6 +81,73 @@ impl Primitive {
     }
 }
 
+/// 可编辑的独立刚体图元；尺寸以米为单位，高度为全高。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PrimitiveShape {
+    /// 长方体全尺寸。
+    Box {
+        /// 沿各轴的全尺寸（米）。
+        size: Vec3,
+    },
+    /// 球半径。
+    Sphere {
+        /// 半径（米）。
+        radius: f32,
+    },
+    /// 圆柱半径和全高。
+    Cylinder {
+        /// 半径（米）。
+        radius: f32,
+        /// 全高（米）。
+        height: f32,
+    },
+    /// 圆锥底面半径和全高。
+    Cone {
+        /// 底面半径（米）。
+        radius: f32,
+        /// 全高（米）。
+        height: f32,
+    },
+}
+
+impl PrimitiveShape {
+    fn shape(self) -> Shape {
+        match self {
+            Self::Box { size } => Shape::Box {
+                half_extents: size * 0.5,
+            },
+            Self::Sphere { radius } => Shape::Sphere { radius },
+            Self::Cylinder { radius, height } => Shape::Cylinder {
+                radius,
+                half_height: height * 0.5,
+            },
+            Self::Cone { radius, height } => Shape::Cone {
+                radius,
+                half_height: height * 0.5,
+            },
+        }
+    }
+
+    fn scale(self) -> Vec3 {
+        match self {
+            Self::Box { size } => size,
+            Self::Sphere { radius } => Vec3::splat(radius * 2.0),
+            Self::Cylinder { radius, height } | Self::Cone { radius, height } => {
+                Vec3::new(radius * 2.0, height, radius * 2.0)
+            }
+        }
+    }
+
+    fn primitive(self) -> Primitive {
+        match self {
+            Self::Box { .. } => Primitive::Cube,
+            Self::Sphere { .. } => Primitive::Sphere,
+            Self::Cylinder { .. } => Primitive::Cylinder,
+            Self::Cone { .. } => Primitive::Cone,
+        }
+    }
+}
+
 /// 物体在物理上是什么。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BodyKind {
@@ -1912,6 +1979,85 @@ impl Doc {
         self.select_only(None);
         self.capture_baseline(engine);
         self.status = "已清空场景".to_string();
+    }
+
+    /// 读取独立图元的物理尺寸；额外视觉缩放与自定义模型不允许被静默覆盖。
+    pub fn editable_shape(&self, engine: &Engine, index: usize) -> Result<PrimitiveShape, String> {
+        let object = engine.scene.objects.get(index).ok_or("没有选中物体")?;
+        if self.model_of_object(index).is_some()
+            || object.owner_part.is_some()
+            || object.generated
+            || object.fluid_surface.is_some()
+            || object.fluid_particle.is_some()
+            || engine.scene.is_particle_object(index)
+        {
+            return Err("模型、复合部件及生成物暂不支持形状编辑".into());
+        }
+        let body = object
+            .body
+            .and_then(|h| engine.world.body(h))
+            .ok_or("仅显示物体暂不支持形状编辑")?;
+        if !body.extra_parts().is_empty() {
+            return Err("复合刚体暂不支持形状编辑".into());
+        }
+        let spec = match body.shape {
+            Shape::Box { half_extents } => PrimitiveShape::Box {
+                size: half_extents * 2.0,
+            },
+            Shape::Sphere { radius } => PrimitiveShape::Sphere { radius },
+            Shape::Cylinder {
+                radius,
+                half_height,
+            } => PrimitiveShape::Cylinder {
+                radius,
+                height: half_height * 2.0,
+            },
+            Shape::Cone {
+                radius,
+                half_height,
+            } => PrimitiveShape::Cone {
+                radius,
+                height: half_height * 2.0,
+            },
+            Shape::Capsule { .. } => return Err("胶囊精确尺寸编辑尚未支持".into()),
+            _ => return Err("此形状暂不支持参数编辑".into()),
+        };
+        let expected = spec.scale();
+        if object.mesh != spec.primitive().mesh(&engine.assets)
+            || !object.transform.scale.is_finite()
+            || (object.transform.scale - expected).abs().max_element()
+                > 1e-5 * expected.abs().max_element().max(1.0)
+        {
+            return Err("自定义网格或额外视觉缩放暂不支持形状编辑".into());
+        }
+        Ok(spec)
+    }
+
+    /// 修改所选图元，保留刚体句柄与质量；历史由 UI 的一次操作记录。
+    pub fn set_selected_shape(
+        &mut self,
+        engine: &mut Engine,
+        spec: PrimitiveShape,
+    ) -> Result<bool, String> {
+        let index = self.selected.ok_or("没有选中物体")?;
+        let current = self.editable_shape(engine, index)?;
+        let scale = spec.scale();
+        if !scale.is_finite() || scale.min_element() <= 0.0 {
+            return Err("尺寸必须为有限正数".into());
+        }
+        if current == spec {
+            return Ok(false);
+        }
+        let handle = engine.scene.objects[index].body.ok_or("刚体不存在")?;
+        if !engine.world.replace_primitive_shape(handle, spec.shape()) {
+            return Err("无法修改此刚体的形状".into());
+        }
+        let object = &mut engine.scene.objects[index];
+        object.mesh = spec.primitive().mesh(&engine.assets);
+        object.transform.scale = scale;
+        engine.paused = true;
+        self.status = "已修改图元形状（质量保持不变）".into();
+        Ok(true)
     }
 
     /// 换刚体类型（动态 / 静态 / 仅显示）。

@@ -1101,6 +1101,25 @@ impl PhysicsWorld {
         woken
     }
 
+    /// Replace a standalone primitive while retaining its handle and mass.
+    pub fn replace_primitive_shape(&mut self, handle: BodyHandle, shape: Shape) -> bool {
+        let Some(slot) = self.bodies.get_mut(handle.index as usize) else {
+            return false;
+        };
+        if slot.generation != handle.generation {
+            return false;
+        }
+        let Some(body) = slot.body.as_mut() else {
+            return false;
+        };
+        if !body.replace_primitive_shape(shape) {
+            return false;
+        }
+        self.version = self.version.wrapping_add(1);
+        self.cache.clear();
+        true
+    }
+
     /// 可变访问刚体。
     ///
     /// 会让 [`PhysicsWorld::version`] +1：拿到 `&mut` 之后刚体可能被搬到任何地方，
@@ -7696,6 +7715,123 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn primitive_replacement_keeps_handle_mass_and_refreshes_queries() {
+        let mut world = PhysicsWorld::new();
+        let handle = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+                .mass(7.0)
+                .friction(0.83)
+                .linear_velocity(Vec3::X),
+        );
+        let before = world.body(handle).unwrap().clone();
+        let version = world.version();
+        assert!(world.replace_primitive_shape(
+            handle,
+            Shape::Box {
+                half_extents: Vec3::new(2.0, 1.0, 0.5)
+            }
+        ));
+        let after = world.body(handle).unwrap();
+        assert_eq!(after.mass(), before.mass());
+        assert_eq!(after.linear_velocity(), before.linear_velocity());
+        assert_eq!(after.friction, before.friction);
+        assert_ne!(after.inertia_local(), before.inertia_local());
+        assert_eq!(world.body_count(), 1);
+        assert!(world.version() > version);
+        assert!(world
+            .raycast(Vec3::new(3.0, 0.0, 0.0), -Vec3::X, 10.0)
+            .is_some());
+        assert!(!world.replace_primitive_shape(handle, Shape::Sphere { radius: f32::NAN }));
+        assert!(!world.replace_primitive_shape(handle, Shape::Plane { normal: Vec3::Y }));
+    }
+
+    #[test]
+    fn primitive_replacement_preserves_private_state_and_joint_endpoints() {
+        let mut world = PhysicsWorld::new();
+        let handle = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+                .mass(5.0)
+                .friction(0.7)
+                .static_friction(0.9)
+                .rolling_friction(0.1)
+                .sensor(true)
+                .ccd(true)
+                .ccd_precise(true)
+                .gravity_scale(0.4)
+                .linear_damping(0.2)
+                .angular_damping(0.3)
+                .user_data(123),
+        );
+        let anchor = world
+            .add_builder(BodyBuilder::r#static(Shape::Sphere { radius: 0.2 }).position(Vec3::X));
+        let joint = world.add_joint(Joint::Fixed {
+            a: handle,
+            b: anchor,
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: Vec3::ZERO,
+            local_frame_a: Quat::IDENTITY,
+            local_frame_b: Quat::IDENTITY,
+        });
+        world
+            .body_mut(handle)
+            .unwrap()
+            .apply_force(Vec3::new(1.0, 2.0, 3.0));
+        let before = world.body(handle).unwrap().clone();
+        let shape = Shape::Cone {
+            radius: 0.8,
+            half_height: 1.2,
+        };
+        assert!(world.replace_primitive_shape(handle, shape));
+        let after = world.body(handle).unwrap();
+        let mut normalized = after.clone();
+        normalized.shape = before.shape.clone();
+        normalized.local_center = before.local_center;
+        normalized.inertia_local = before.inertia_local;
+        normalized.inv_inertia_local = before.inv_inertia_local;
+        assert_eq!(
+            normalized, before,
+            "all fields except geometry-derived inertia/center must survive"
+        );
+        assert_eq!(world.joint(joint).unwrap().bodies(), (handle, anchor));
+        assert_eq!(world.body_count(), 2);
+        let snapshot = world.body(handle).unwrap().clone();
+        assert!(!world.replace_primitive_shape(handle, Shape::Sphere { radius: -1.0 }));
+        assert_eq!(world.body(handle).unwrap(), &snapshot);
+        let compound = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 })
+                .part_at(Shape::Sphere { radius: 0.2 }, Vec3::X),
+        );
+        assert!(!world.replace_primitive_shape(compound, Shape::Sphere { radius: 1.0 }));
+        assert!(world.replace_primitive_shape(
+            anchor,
+            Shape::Cylinder {
+                radius: 0.4,
+                half_height: 0.8
+            }
+        ));
+        assert_eq!(world.body(anchor).unwrap().inv_mass(), 0.0);
+        assert_eq!(world.body(anchor).unwrap().inv_inertia_local, Vec3::ZERO);
+    }
+
+    #[test]
+    fn primitive_replacement_clears_actual_contact_cache() {
+        let mut world = PhysicsWorld::new();
+        world.add_builder(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }));
+        let handle = world.add_builder(
+            BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 }).position(Vec3::new(0.0, 0.45, 0.0)),
+        );
+        world.step(1.0 / 60.0);
+        assert!(
+            world.cache.len() > 0,
+            "fixture must establish real cached contacts"
+        );
+        assert!(world.replace_primitive_shape(handle, Shape::Sphere { radius: 0.7 }));
+        assert_eq!(world.cache.len(), 0);
+        world.step(1.0 / 60.0);
+        assert!(world.body(handle).unwrap().position().is_finite());
     }
 
     #[test]

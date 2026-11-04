@@ -4775,6 +4775,91 @@ fn decals_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
     }
 }
 
+fn primitive_shape_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, index: usize) {
+    use crate::doc::PrimitiveShape;
+    egui::CollapsingHeader::new("几何形状")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut shape = match doc.editable_shape(engine, index) {
+                Ok(shape) => shape,
+                Err(reason) => {
+                    ui.label(egui::RichText::new(reason).small().weak());
+                    return;
+                }
+            };
+            let original = shape;
+            let kind = |shape: &PrimitiveShape| match shape {
+                PrimitiveShape::Box { .. } => 0,
+                PrimitiveShape::Sphere { .. } => 1,
+                PrimitiveShape::Cylinder { .. } => 2,
+                PrimitiveShape::Cone { .. } => 3,
+            };
+            let mut selected = kind(&shape);
+            const LABELS: [&str; 4] = ["盒体", "球", "圆柱", "圆锥"];
+            egui::ComboBox::from_id_salt(("primitive-shape", index))
+                .selected_text(LABELS[selected])
+                .show_ui(ui, |ui| {
+                    for (i, label) in LABELS.iter().enumerate() {
+                        ui.selectable_value(&mut selected, i, *label);
+                    }
+                });
+            if selected != kind(&shape) {
+                shape = match selected {
+                    0 => PrimitiveShape::Box { size: Vec3::ONE },
+                    1 => PrimitiveShape::Sphere { radius: 0.5 },
+                    2 => PrimitiveShape::Cylinder {
+                        radius: 0.5,
+                        height: 1.0,
+                    },
+                    _ => PrimitiveShape::Cone {
+                        radius: 0.5,
+                        height: 1.0,
+                    },
+                };
+            }
+            let dimension = |ui: &mut Ui, label: &str, value: &mut f32| {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    ui.add(
+                        egui::DragValue::new(value)
+                            .speed(0.01)
+                            .range(0.001..=10000.0),
+                    );
+                });
+            };
+            match &mut shape {
+                PrimitiveShape::Box { size } => {
+                    dimension(ui, "宽 X", &mut size.x);
+                    dimension(ui, "高 Y", &mut size.y);
+                    dimension(ui, "深 Z", &mut size.z);
+                }
+                PrimitiveShape::Sphere { radius } => dimension(ui, "半径", radius),
+                PrimitiveShape::Cylinder { radius, height }
+                | PrimitiveShape::Cone { radius, height } => {
+                    dimension(ui, "半径", radius);
+                    dimension(ui, "高度", height);
+                }
+            }
+            if shape != original {
+                match doc.set_selected_shape(engine, shape) {
+                    Ok(true) => {
+                        if ui.input(|i| i.pointer.any_down()) {
+                            doc.begin_history_transaction();
+                        }
+                        doc.record_edit(engine);
+                    }
+                    Ok(false) => {}
+                    Err(reason) => doc.status = reason,
+                }
+            }
+            ui.label(
+                egui::RichText::new("修改同步显示与碰撞；切换类型使用默认尺寸。")
+                    .small()
+                    .weak(),
+            );
+        });
+}
+
 fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
     let width = doc
         .layout
@@ -5091,6 +5176,7 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
                     });
             }
 
+            primitive_shape_section(ui, engine, doc, index);
             if let Some(kind) = body_kind_change {
                 doc.set_body_kind(engine, kind);
                 changed = true;
