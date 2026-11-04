@@ -211,6 +211,12 @@
 - [x] 粒子间最小分离（`fluids[].particle_collision`，缺省关闭）：每步 PBF 位置
   迭代后把距离小于直径的邻居沿连线推开（各半），再投影刚体边界；0 时旧路径逐位
   不变。回归：两颗几乎重合粒子在开关下分离到直径外。
+  这项勾选只表示已有逐对算子，不代表相连粒子或封闭容器同时满足直径分离。
+- [ ] 全图粒子与边界耦合分离：三粒子 ABC/CBA 的真实单遍结果约 0.065 m，
+  封闭容器 125 粒子 × 120 步的最小间距约 0.05428 m，均未满足固定 0.07990 m 目标。
+  [链压回证据](experiments/particle_chain_recompression.md)与
+  [封闭容器强目标](experiments/sealed_particle_separation.md)必须同时验收；
+  [固定预算全图半空间实验](experiments/particle_global_halfspace.md)目前只有 stub 红，尚未完成求解器。
 - [x] 粒子局部流场拖曳（`fluids[].flow_coupling`，1/s，缺省 0）：取刚体 AABB 内
   粒子平均速度，把浸没刚体 XZ 速度拖向它；AABB 内无粒子时跳过，0 时旧路径逐位
   不变。回归 `flowing_particles_drag_a_body_toward_the_local_flow`、
