@@ -51,6 +51,17 @@ impl Obb {
             half: [0.25; 3],
         }
     }
+    fn assert_finite(self) {
+        assert!(
+            self.center
+                .into_iter()
+                .chain(self.axes.into_iter().flatten())
+                .chain(self.half)
+                .chain(self.corners().into_iter().flatten())
+                .all(f64::is_finite),
+            "independent OBB must be finite: {self:?}"
+        );
+    }
     fn corners(self) -> [[f64; 3]; 8] {
         std::array::from_fn(|i| {
             std::array::from_fn(|axis| {
@@ -260,6 +271,16 @@ fn run_duration_velocity_fixture(
     steps: usize,
     velocity_iterations: usize,
 ) -> (f64, f64) {
+    let (pair, floor, _) = run_duration_global_fixture(layers, steps, velocity_iterations, false);
+    (pair, floor)
+}
+
+fn run_duration_global_fixture(
+    layers: usize,
+    steps: usize,
+    velocity_iterations: usize,
+    global: bool,
+) -> (f64, f64, usize) {
     let started = std::time::Instant::now();
     let floor = Obb {
         center: [0.0, -0.25, 0.0],
@@ -271,6 +292,7 @@ fn run_duration_velocity_fixture(
     world.set_fixed_dt(1.0 / 60.0);
     world.config.speculative_margin = 0.005;
     world.config.velocity_iterations = velocity_iterations;
+    world.config.global_normal_projection = global;
     world.config.position_iterations = 8;
     world.add_builder(
         BodyBuilder::r#static(Shape::Box {
@@ -324,7 +346,10 @@ fn run_duration_velocity_fixture(
             first_sleep = Some(step);
         }
         for (i, a) in poses.iter().enumerate() {
-            let fd = (-a.separation(floor)).max(0.0);
+            a.assert_finite();
+            let separation = a.separation(floor);
+            assert!(separation.is_finite(), "floor SAT must be finite");
+            let fd = (-separation).max(0.0);
             if fd > max_floor {
                 max_floor = fd;
                 floor_worst = step;
@@ -356,7 +381,9 @@ fn run_duration_velocity_fixture(
                 }
             }
             for (j, b) in poses.iter().enumerate().skip(i + 1) {
-                let d = (-a.separation(*b)).max(0.0);
+                let separation = a.separation(*b);
+                assert!(separation.is_finite(), "pair SAT must be finite");
+                let d = (-separation).max(0.0);
                 if d > max_pair {
                     max_pair = d;
                     pair_worst = step;
@@ -395,7 +422,43 @@ fn run_duration_velocity_fixture(
         "ROUND176_WALL layers={layers} total_seconds={:.6} diagnostic_only_not_benchmark",
         started.elapsed().as_secs_f64()
     );
-    (max_pair, max_floor)
+    (max_pair, max_floor, outside)
+}
+
+fn assert_supported_samples(outside: usize) {
+    assert_eq!(outside, 0, "formal precision fixture left the finite floor");
+}
+
+#[test]
+#[should_panic(expected = "independent OBB must be finite")]
+fn precision_oracle_rejects_nonfinite_geometry() {
+    Obb {
+        center: [f64::NAN, 0.0, 0.0],
+        axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        half: [0.25; 3],
+    }
+    .assert_finite();
+}
+
+#[test]
+#[should_panic(expected = "formal precision fixture left the finite floor")]
+fn precision_oracle_rejects_unsupported_samples() {
+    assert_supported_samples(1);
+}
+
+#[test]
+fn global_normal_projection_sustained_precision_target() {
+    let mut results = Vec::new();
+    for layers in [4, 12, 32] {
+        let (pair, floor, outside) = run_duration_global_fixture(layers, 1800, 20, true);
+        println!("ROUND181_GLOBAL layers={layers} pair={pair:.12} floor={floor:.12}");
+        results.push((layers, pair, floor, outside));
+    }
+    assert_supported_samples(results.iter().map(|r| r.3).sum());
+    assert!(
+        results.iter().all(|r| r.1 <= 0.00501 && r.2 <= 0.00501),
+        "global normal fixed precision unmet: {results:?}"
+    );
 }
 
 #[test]

@@ -41,7 +41,7 @@ fn digest(world: &PhysicsWorld) -> u64 {
 }
 
 /// 覆盖多种形状、关节与睡眠的混合场景。
-fn mixed_world() -> PhysicsWorld {
+pub(crate) fn mixed_world() -> PhysicsWorld {
     let mut w = PhysicsWorld::new();
     w.set_gravity(Vec3::new(0.0, -9.81, 0.0));
     w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());

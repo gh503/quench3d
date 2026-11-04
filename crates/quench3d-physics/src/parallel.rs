@@ -28,8 +28,8 @@
 
 use crate::island::Islands;
 use crate::solver::{
-    relax_contacts, solve_position_contacts, solve_velocity_contacts, BodyView, SolverConfig,
-    SolverContact,
+    relax_contacts, solve_position_contacts, solve_velocity_contacts_state, BodyView,
+    NormalSolveState, SolverConfig, SolverContact,
 };
 
 /// 至少这么多接触才值得开线程（太小的场景线程开销大于收益）。
@@ -38,12 +38,13 @@ const MIN_CONTACTS: usize = 96;
 const MAX_THREADS: usize = 16;
 
 /// 一个岛在本地布局里的两段长度。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Chunk {
     /// 本地视图数量（清醒体 + 冻结伙伴副本）。
     view_len: u32,
     /// 接触数量。
     contact_len: u32,
+    memory: NormalSolveState,
 }
 
 /// 并行求解的布局与缓冲（跨步复用，稳态零分配）。
@@ -63,6 +64,7 @@ pub(crate) struct ParallelLayout {
     contact_global: Vec<u32>,
     /// 每个岛的布局信息，按（线程, 原岛序）排列。
     chunks: Vec<Chunk>,
+    spare_chunks: Vec<Chunk>,
     /// 每个线程占用的 `chunks` 区间 `[start, end)`。
     workers: Vec<(u32, u32)>,
     /// 全局刚体槽位 → 本地视图下标（用 `stamp` 做时间戳，避免每岛清零）。
@@ -99,6 +101,7 @@ impl ParallelLayout {
     }
 
     /// 根据本步的 island 划分构建布局。返回是否启用并行。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn build(
         &mut self,
         islands: &Islands,
@@ -106,21 +109,48 @@ impl ParallelLayout {
         contacts: &[SolverContact],
         max_threads: usize,
     ) -> bool {
+        self.build_mode(islands, views, contacts, max_threads, false, true)
+    }
+
+    pub fn build_global(
+        &mut self,
+        islands: &Islands,
+        views: &[BodyView],
+        contacts: &[SolverContact],
+        max_threads: usize,
+        parallel: bool,
+    ) -> bool {
+        self.build_mode(islands, views, contacts, max_threads, true, parallel)
+    }
+    fn build_mode(
+        &mut self,
+        islands: &Islands,
+        views: &[BodyView],
+        contacts: &[SolverContact],
+        max_threads: usize,
+        force_layout: bool,
+        parallel: bool,
+    ) -> bool {
         self.enabled = false;
         let stats = islands.stats();
-        if !stats.parallelizable() || contacts.len() < MIN_CONTACTS {
+        if !force_layout && (!stats.parallelizable() || contacts.len() < MIN_CONTACTS) {
             return false;
         }
-        let hw = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
         let cap = if max_threads == 0 {
             MAX_THREADS
         } else {
             max_threads.min(MAX_THREADS)
         };
-        let threads = hw.min(cap).min(stats.multi_body_islands as usize).max(1);
-        if threads < 2 {
+        let threads = if parallel && stats.parallelizable() && contacts.len() >= MIN_CONTACTS {
+            #[cfg(not(target_arch = "wasm32"))]
+            let hw = query_parallelism_202().map(|n| n.get()).unwrap_or(1);
+            #[cfg(target_arch = "wasm32")]
+            let hw = 1;
+            hw.min(cap).min(stats.multi_body_islands as usize).max(1)
+        } else {
+            1
+        };
+        if !force_layout && threads < 2 {
             return false;
         }
         self.threads = threads;
@@ -130,7 +160,7 @@ impl ParallelLayout {
         self.contacts.clear();
         self.view_global.clear();
         self.contact_global.clear();
-        self.chunks.clear();
+        self.spare_chunks.append(&mut self.chunks);
         self.workers.clear();
 
         // --- 1. 每个岛有多少接触（接触至少有一端是清醒体，否则 prepare 阶段就被拒了） ---
@@ -262,10 +292,11 @@ impl ParallelLayout {
         // 岛内清醒体的局部下标：并发写回时要按全局槽位同步
         let view_len = (self.views.len() - view_start) as u32;
         let contact_len = (self.contacts.len() - contact_start) as u32;
-        self.chunks.push(Chunk {
-            view_len,
-            contact_len,
-        });
+        let mut chunk = self.spare_chunks.pop().unwrap_or_default();
+        chunk.view_len = view_len;
+        chunk.contact_len = contact_len;
+        chunk.memory.reset();
+        self.chunks.push(chunk);
     }
 
     /// 把全局刚体槽位加进本地视图（已加过就返回既有下标）。
@@ -337,23 +368,41 @@ impl ParallelLayout {
     /// 线程内部再按岛切分——全程安全 Rust，没有 `unsafe`。
     fn run_workers<F>(&mut self, f: F)
     where
-        F: Fn(&mut [SolverContact], &mut [BodyView]) + Send + Sync,
+        F: Fn(&mut [SolverContact], &mut [BodyView], &mut NormalSolveState) + Send + Sync,
     {
         if !self.enabled {
             return;
         }
+        let execution_threads = self.threads;
         let Self {
             views,
             contacts,
             chunks,
+            #[cfg(not(target_arch = "wasm32"))]
             workers,
             ..
         } = self;
+        if execution_threads < 2 {
+            let mut vv = &mut views[..];
+            let mut cc = &mut contacts[..];
+            for ch in chunks {
+                let (iv, ivr) = vv.split_at_mut(ch.view_len as usize);
+                vv = ivr;
+                let (ic, icr) = cc.split_at_mut(ch.contact_len as usize);
+                cc = icr;
+                f(ic, iv, &mut ch.memory);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::scope(|scope| {
             let mut vs: &mut [BodyView] = views;
             let mut cs: &mut [SolverContact] = contacts;
+            let mut remaining_chunks = &mut chunks[..];
             for &(cstart, cend) in workers.iter() {
-                let slice = &chunks[cstart as usize..cend as usize];
+                let (slice, rest) = remaining_chunks.split_at_mut((cend - cstart) as usize);
+                remaining_chunks = rest;
                 let vlen: usize = slice.iter().map(|c| c.view_len as usize).sum();
                 let clen: usize = slice.iter().map(|c| c.contact_len as usize).sum();
                 let (v, vr) = vs.split_at_mut(vlen);
@@ -369,7 +418,7 @@ impl ParallelLayout {
                         vv = ivr;
                         let (ic, icr) = cc.split_at_mut(ch.contact_len as usize);
                         cc = icr;
-                        f(ic, iv);
+                        f(ic, iv, &mut ch.memory);
                     }
                 });
             }
@@ -391,9 +440,9 @@ impl ParallelLayout {
         cfg: &SolverConfig,
         pos_iters: usize,
     ) {
-        self.run_workers(move |cs, vs| {
+        self.run_workers(move |cs, vs, memory| {
             for _ in 0..iters {
-                solve_velocity_contacts(cs, vs);
+                solve_velocity_contacts_state(cs, vs, cfg.global_normal_projection, memory);
             }
             relax_contacts(cs, vs, relax_iters, gain);
             solve_position_contacts(cs, vs, dt, cfg, pos_iters);
@@ -401,17 +450,52 @@ impl ParallelLayout {
     }
 
     /// 并行跑一轮速度迭代。
-    pub fn solve_velocity(&mut self) {
-        self.run_workers(solve_velocity_contacts);
+    pub fn solve_velocity(&mut self, global: bool) {
+        self.run_workers(move |cs, vs, memory| {
+            solve_velocity_contacts_state(cs, vs, global, memory)
+        });
     }
 
     /// 并行松弛。
     pub fn relax(&mut self, iterations: usize, gain: f32) {
-        self.run_workers(|cs, vs| relax_contacts(cs, vs, iterations, gain));
+        self.run_workers(|cs, vs, _| relax_contacts(cs, vs, iterations, gain));
     }
 
     /// 并行位置修正。
     pub fn solve_position(&mut self, dt: f32, cfg: &SolverConfig, iterations: usize) {
-        self.run_workers(|cs, vs| solve_position_contacts(cs, vs, dt, cfg, iterations));
+        self.run_workers(|cs, vs, _| solve_position_contacts(cs, vs, dt, cfg, iterations));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn query_parallelism_202() -> std::io::Result<std::num::NonZeroUsize> {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    let result = std::thread::available_parallelism();
+    #[cfg(test)]
+    QUERY202.with(|c| {
+        let (n, t) = c.get();
+        c.set((n + 1, t + started.elapsed().as_nanos()));
+    });
+    result
+}
+#[cfg(test)]
+thread_local! {static QUERY202:std::cell::Cell<(usize,u128)>=const{std::cell::Cell::new((0,0))};}
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod query_tests_202 {
+    use super::*;
+    #[test]
+    fn global_normal_no_hardware_query_without_eligibility() {
+        let mut layout = ParallelLayout::default();
+        let mut islands = Islands::default();
+        islands.begin(&[]);
+        islands.finish();
+        QUERY202.with(|c| c.set((0, 0)));
+        for _ in 0..120 {
+            layout.build_global(&islands, &[], &[], 0, false);
+        }
+        let (n, ns) = QUERY202.with(|c| c.get());
+        println!("ROUND202 actualqueries={n} query_elapsed_ns={ns} serialsteps=120");
+        assert_eq!(n, 0);
     }
 }

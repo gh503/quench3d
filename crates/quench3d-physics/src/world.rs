@@ -30,7 +30,6 @@ use crate::joints::{
     hinge_angle, Joint, JointEntry, JointHandle, JointImpulses, JointSolver, JointTelemetry,
 };
 use crate::narrowphase;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::parallel::ParallelLayout;
 use crate::query::{self, QueryFilter, ShapeDistance};
 use crate::shape::Shape;
@@ -588,7 +587,6 @@ pub struct PhysicsWorld {
     /// 确定性 island 划分（每步重算，缓冲复用）。
     islands: Islands,
     /// island 并行求解的布局与缓冲（native；wasm 走单线程路径）。
-    #[cfg(not(target_arch = "wasm32"))]
     parallel: ParallelLayout,
     /// 上一子步是否真的走了并行路径（供基准与诊断观察）。
     parallel_used: bool,
@@ -778,7 +776,6 @@ impl PhysicsWorld {
             free: Vec::new(),
             joints: Vec::new(),
             islands: Islands::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             parallel: ParallelLayout::new(),
             parallel_used: false,
             joint_free: Vec::new(),
@@ -2060,8 +2057,21 @@ impl PhysicsWorld {
         let iters = self.config.velocity_iterations.max(1);
         let pos_iters = self.config.position_iterations;
         let relax_iters = self.config.relaxation_iterations;
+        let use_global_layout = if self.config.global_normal_projection {
+            self.parallel.build_global(
+                &self.islands,
+                &views,
+                &self.contact_solver.contacts,
+                self.config.max_threads,
+                self.config.parallel,
+            );
+            true
+        } else {
+            false
+        };
         #[cfg(not(target_arch = "wasm32"))]
-        let use_parallel = self.config.parallel
+        let use_parallel = !use_global_layout
+            && self.config.parallel
             && self.parallel.build(
                 &self.islands,
                 &views,
@@ -2070,13 +2080,11 @@ impl PhysicsWorld {
             );
         #[cfg(target_arch = "wasm32")]
         let use_parallel = false;
-        self.parallel_used = use_parallel;
-        if use_parallel {
+        self.parallel_used = use_parallel || (use_global_layout && self.parallel.threads() > 1);
+        if use_parallel || use_global_layout {
             // 没有关节时（绝大多数纯刚体场景）：一次分发跑完全部迭代，
             // 每个岛内部保持「速度迭代 → 松弛 → 位置修正」的原顺序。
-            #[cfg(not(target_arch = "wasm32"))]
             let no_joints = self.scratch_joint_entries.is_empty();
-            #[cfg(not(target_arch = "wasm32"))]
             if no_joints {
                 self.parallel.sync_from(&views);
                 self.parallel
@@ -2087,17 +2095,16 @@ impl PhysicsWorld {
             }
             // 有关节时：每个迭代里「先全部接触（岛间并行）再全部关节（串行）」，
             // 与串行版的顺序完全一致。
-            #[cfg(not(target_arch = "wasm32"))]
             for _ in 0..iters {
                 if no_joints {
                     break;
                 }
                 self.parallel.sync_from(&views);
-                self.parallel.solve_velocity();
+                self.parallel
+                    .solve_velocity(self.config.global_normal_projection);
                 self.parallel.sync_to(&mut views);
                 self.joint_solver.solve_velocity(&mut views, dt);
             }
-            #[cfg(not(target_arch = "wasm32"))]
             if !no_joints {
                 self.parallel.sync_from(&views);
                 self.parallel.relax(relax_iters, 0.5);
@@ -2110,7 +2117,8 @@ impl PhysicsWorld {
             }
         } else {
             for _ in 0..iters {
-                self.contact_solver.solve_velocity(&mut views);
+                self.contact_solver
+                    .solve_velocity(&mut views, self.config.global_normal_projection);
                 self.joint_solver.solve_velocity(&mut views, dt);
             }
             #[cfg(test)]
@@ -2120,14 +2128,16 @@ impl PhysicsWorld {
             self.trace_stack_solver("relax", &views);
         }
         lap!(velocity_us);
+        #[cfg(test)]
+        crate::solver::global_phase_observe(&self.contact_solver.contacts, &views, "post_relax");
         // 8. 位置迭代（分裂冲量）
         // 并行路径两种情况都已经做过接触的位置修正，这里不能再做一遍
         // （否则有关节的场景会迭代两次位置约束）。
         #[cfg(not(target_arch = "wasm32"))]
-        let parallel_did_position = use_parallel;
+        let parallel_did_position = use_parallel || use_global_layout;
         #[cfg(target_arch = "wasm32")]
-        let parallel_did_position = false;
-        if !use_parallel || !parallel_did_position {
+        let parallel_did_position = use_global_layout;
+        if !parallel_did_position {
             self.contact_solver
                 .solve_position(&mut views, dt, &self.config, pos_iters);
         }
@@ -2141,6 +2151,8 @@ impl PhysicsWorld {
         lap!(position_us);
         #[cfg(test)]
         self.trace_stack_solver("position", &views);
+        #[cfg(test)]
+        crate::solver::global_phase_observe(&self.contact_solver.contacts, &views, "post_position");
         // 9. 写回速度与伪速度
         for (i, view) in views.iter().enumerate() {
             if let Some(b) = self.bodies[i].body.as_mut() {
@@ -4640,6 +4652,266 @@ impl PhysicsWorld {
 mod tests {
     use super::*;
     use crate::body::BodyBuilder;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn global_normal_shared_island_case(variant: usize) {
+        let hardware = std::thread::available_parallelism().unwrap().get();
+        println!("ROUND192 hardware={hardware} variant={variant}");
+        if hardware < 2 {
+            assert!(
+                std::env::var_os("Q_NORMAL_REQUIRE_PARALLEL").is_none(),
+                "actual parallel gate requires >=2 hardware threads"
+            );
+            eprintln!("native actual parallel fixture requires >=2 hardware threads; gate enforces this requirement");
+            return;
+        }
+        let mut worlds = Vec::new();
+        for parallel in [false, true] {
+            let mut w = PhysicsWorld::new();
+            w.set_fixed_dt(1.0 / 60.0);
+            w.config.parallel = parallel;
+            w.config.parallel_narrowphase = false;
+            w.config.max_threads = 2;
+            w.config.global_normal_projection = true;
+            w.config.sleep_enabled = false;
+            w.config.speculative_margin = 0.005;
+            w.config.velocity_iterations = 20;
+            w.config.position_iterations = 8;
+            w.add_builder(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }));
+            let mut handles = Vec::new();
+            for layer in 0..6 {
+                for col in 0..24 {
+                    handles.push(
+                        w.add_builder(
+                            BodyBuilder::dynamic(Shape::Box {
+                                half_extents: Vec3::splat(0.4),
+                            })
+                            .position(vec3(
+                                (col % 6) as f32 * 3.0,
+                                0.399 + layer as f32 * 0.799,
+                                (col / 6) as f32 * 3.0,
+                            ))
+                            .mass(1.0 + col as f32 * 0.025),
+                        ),
+                    );
+                }
+            }
+            if variant > 0 {
+                for col in 0..24 {
+                    for layer in 0..5 {
+                        w.add_joint(Joint::Distance {
+                            a: handles[layer * 24 + col],
+                            b: handles[(layer + 1) * 24 + col],
+                            local_anchor_a: Vec3::ZERO,
+                            local_anchor_b: Vec3::ZERO,
+                            rest_length: 0.799,
+                            stiffness: 0.0,
+                            damping: 0.0,
+                        });
+                    }
+                }
+            }
+            if variant == 2 {
+                w.add_joint(Joint::Distance {
+                    a: handles[0],
+                    b: handles[1],
+                    local_anchor_a: Vec3::ZERO,
+                    local_anchor_b: Vec3::ZERO,
+                    rest_length: 3.0,
+                    stiffness: 0.0,
+                    damping: 0.0,
+                });
+            }
+            worlds.push(w);
+        }
+        let mut parallel_steps = 0;
+        let mut maxthreads = 0;
+        for step in 1..=1800 {
+            for w in &mut worlds {
+                w.step(1.0 / 60.0);
+            }
+            let (a, b) = (&worlds[0], &worlds[1]);
+            assert_eq!(a.step_count, step);
+            assert_eq!(b.step_count, step);
+            assert_eq!(a.islands.stats(), b.islands.stats());
+            for (x, y) in a.bodies.iter().zip(&b.bodies) {
+                assert_eq!(x.generation, y.generation);
+            }
+            assert_eq!(a.events().len(), b.events().len());
+            for (x, y) in a.events().iter().zip(b.events()) {
+                assert_eq!(
+                    (x.step, x.kind, x.a, x.b, x.joint),
+                    (y.step, y.kind, y.a, y.b, y.joint)
+                );
+                assert_eq!(x.force.to_bits(), y.force.to_bits());
+                assert_eq!(x.torque.to_bits(), y.torque.to_bits());
+            }
+            parallel_steps += usize::from(b.parallel_used);
+            maxthreads = maxthreads.max(b.solver_threads());
+            assert_eq!(a.island_count(), b.island_count());
+            assert_eq!(format!("{:?}", a.events()), format!("{:?}", b.events()));
+            for slot in 0..a.bodies.len() {
+                assert_eq!(a.islands.island_of(slot), b.islands.island_of(slot));
+            }
+            for (i, (a, b)) in a.bodies.iter().zip(&b.bodies).enumerate() {
+                let (a, b) = (a.body.as_ref().unwrap(), b.body.as_ref().unwrap());
+                let bits = |v: &RigidBody| {
+                    let p = v.position();
+                    let q = v.rotation();
+                    let l = v.linear_velocity;
+                    let w = v.angular_velocity;
+                    [
+                        p.x, p.y, p.z, q.x, q.y, q.z, q.w, l.x, l.y, l.z, w.x, w.y, w.z,
+                    ]
+                    .map(f32::to_bits)
+                };
+                assert_eq!(a.is_sleeping(), b.is_sleeping());
+                assert_eq!(
+                    bits(a),
+                    bits(b),
+                    "variant={variant} step={step} body={i} actualparallel={} threads={}",
+                    worlds[1].parallel_used,
+                    worlds[1].solver_threads()
+                );
+            }
+            assert_eq!(
+                a.contact_solver.contacts.len(),
+                b.contact_solver.contacts.len()
+            );
+            for (c, d) in a
+                .contact_solver
+                .contacts
+                .iter()
+                .zip(&b.contact_solver.contacts)
+            {
+                let contact_bits = |c: &crate::solver::SolverContact| {
+                    let mut values = vec![
+                        c.k_normal,
+                        c.k_tangent[0],
+                        c.k_tangent[1],
+                        c.friction,
+                        c.friction_tangent[0],
+                        c.friction_tangent[1],
+                        c.rolling_friction,
+                        c.restitution_bias,
+                        c.speculative_bias,
+                        c.penetration,
+                        c.normal_impulse,
+                        c.tangent_impulse[0],
+                        c.tangent_impulse[1],
+                        c.pseudo_impulse,
+                    ];
+                    for v in [
+                        c.normal,
+                        c.ra,
+                        c.rb,
+                        c.local_a,
+                        c.local_b,
+                        c.tangent[0],
+                        c.tangent[1],
+                        c.normal_arm[0],
+                        c.normal_arm[1],
+                        c.tangent_arm[0][0],
+                        c.tangent_arm[0][1],
+                        c.tangent_arm[1][0],
+                        c.tangent_arm[1][1],
+                    ] {
+                        values.extend([v.x, v.y, v.z]);
+                    }
+                    values.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+                };
+                assert_eq!(contact_bits(c), contact_bits(d));
+                assert_eq!(
+                    (c.precomputed, c.friction_cone, c.feature_id),
+                    (d.precomputed, d.friction_cone, d.feature_id)
+                );
+                assert_eq!((c.a, c.b), (d.a, d.b));
+                assert_eq!(c.normal_impulse.to_bits(), d.normal_impulse.to_bits());
+                assert_eq!(
+                    c.tangent_impulse.map(f32::to_bits),
+                    d.tangent_impulse.map(f32::to_bits)
+                );
+                assert_eq!(c.pseudo_impulse.to_bits(), d.pseudo_impulse.to_bits());
+            }
+        }
+        println!("ROUND192_RESULT variant={variant} pairedsteps=1800 parallelsteps={parallel_steps} maxthreads={maxthreads}");
+        assert!(parallel_steps > 0 && maxthreads >= 2);
+    }
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn global_normal_shared_island_no_joints() {
+        global_normal_shared_island_case(0);
+    }
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn global_normal_shared_island_column_joints() {
+        global_normal_shared_island_case(1);
+    }
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn global_normal_shared_island_cross_joints() {
+        global_normal_shared_island_case(2);
+    }
+
+    #[test]
+    fn global_normal_12_layer_bounded_precision() {
+        let mut world = PhysicsWorld::new();
+        world.set_fixed_dt(1.0 / 60.0);
+        world.config.speculative_margin = 0.005;
+        world.config.velocity_iterations = 20;
+        world.config.position_iterations = 8;
+        world.config.global_normal_projection = true;
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: vec3(4.0, 0.25, 4.0),
+            })
+            .position(vec3(0.0, -0.25, 0.0)),
+        );
+        let handles: Vec<_> = (0..12)
+            .map(|i| {
+                world.add_builder(
+                    BodyBuilder::dynamic(Shape::Box {
+                        half_extents: Vec3::splat(0.25),
+                    })
+                    .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
+                    .mass(1.0),
+                )
+            })
+            .collect();
+        let floor = stack_oracle::Obb {
+            center: [0.0, -0.25, 0.0],
+            axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            half: [4.0, 0.25, 4.0],
+        };
+        let mut max_pair = 0.0f64;
+        let mut max_floor = 0.0f64;
+        for step in 1..=260 {
+            crate::solver::GLOBAL_TRACE.with(|t| t.set((step, 0)));
+            world.step(1.0 / 60.0);
+            let poses: Vec<_> = handles
+                .iter()
+                .map(|h| stack_oracle::Obb::read(&world, *h))
+                .collect();
+            for (i, a) in poses.iter().enumerate() {
+                max_floor = max_floor.max((-a.separation(floor)).max(0.0));
+                for b in poses.iter().skip(i + 1) {
+                    max_pair = max_pair.max((-a.separation(*b)).max(0.0));
+                }
+            }
+            if step == 233 {
+                println!(
+                    "ROUND189_STEP233 pair34={:.15}",
+                    -poses[3].separation(poses[4])
+                );
+            }
+            if (225..=245).contains(&step) {
+                println!("ROUND182_SAT step={step} pair01={} cumulative_pair={max_pair} cumulative_floor={max_floor}",-poses[3].separation(poses[4]));
+            }
+        }
+        assert!(max_pair <= 0.00501, "pair={max_pair}");
+        assert!(max_floor <= 0.00501, "floor={max_floor}");
+        println!("ROUND182_RESULT steps=260 layers=12 pair={max_pair} floor={max_floor} diagnostic_only=true");
+    }
 
     #[test]
     fn stack_solver_bounded_replay() {
@@ -8383,3 +8655,105 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod stack_oracle {
+    use super::*;
+    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+        (0..3).map(|i| a[i] * b[i]).sum()
+    }
+    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+    #[derive(Clone, Copy, Debug)]
+    pub(super) struct Obb {
+        pub(super) center: [f64; 3],
+        pub(super) axes: [[f64; 3]; 3],
+        pub(super) half: [f64; 3],
+    }
+    impl Obb {
+        pub(super) fn read(world: &PhysicsWorld, handle: crate::BodyHandle) -> Self {
+            let body = world.body(handle).unwrap();
+            let p = body.position();
+            let q = body.rotation();
+            let [x, y, z, w] = [q.x, q.y, q.z, q.w].map(f64::from);
+            let axes = [
+                [
+                    1.0 - 2.0 * (y * y + z * z),
+                    2.0 * (x * y + z * w),
+                    2.0 * (x * z - y * w),
+                ],
+                [
+                    2.0 * (x * y - z * w),
+                    1.0 - 2.0 * (x * x + z * z),
+                    2.0 * (y * z + x * w),
+                ],
+                [
+                    2.0 * (x * z + y * w),
+                    2.0 * (y * z - x * w),
+                    1.0 - 2.0 * (x * x + y * y),
+                ],
+            ];
+            Self {
+                center: [f64::from(p.x), f64::from(p.y), f64::from(p.z)],
+                axes,
+                half: [0.25; 3],
+            }
+        }
+        fn corners(self) -> [[f64; 3]; 8] {
+            std::array::from_fn(|i| {
+                std::array::from_fn(|axis| {
+                    self.center[axis]
+                        + (0..3)
+                            .map(|j| {
+                                (if i & (1 << j) == 0 {
+                                    -self.half[j]
+                                } else {
+                                    self.half[j]
+                                }) * self.axes[j][axis]
+                            })
+                            .sum::<f64>()
+                })
+            })
+        }
+        // Independent normalized SAT: signed positive gap=separated, negative=overlap.
+        // Corners/15axes use only public world pose, not engine narrowphase or AABBs.
+        pub(super) fn separation(self, other: Self) -> f64 {
+            let mut axes = self.axes.to_vec();
+            axes.extend(other.axes);
+            for a in self.axes {
+                for b in other.axes {
+                    axes.push(cross(a, b));
+                }
+            }
+            let (a, b) = (self.corners(), other.corners());
+            let mut separation = f64::NEG_INFINITY;
+            for axis in axes {
+                let length = dot(axis, axis).sqrt();
+                if length <= 1e-12 {
+                    continue;
+                }
+                let axis = axis.map(|x| x / length);
+                let range = |points: [[f64; 3]; 8]| {
+                    points
+                        .into_iter()
+                        .map(|p| dot(p, axis))
+                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                            (lo.min(v), hi.max(v))
+                        })
+                };
+                let (alo, ahi) = range(a);
+                let (blo, bhi) = range(b);
+                separation = separation.max((blo - ahi).max(alo - bhi));
+            }
+            separation
+        }
+    }
+}
+
+#[cfg(test)]
+mod default_bits_193;

@@ -30,7 +30,6 @@ mod gjk;
 mod island;
 mod joints;
 mod narrowphase;
-#[cfg(not(target_arch = "wasm32"))]
 mod parallel;
 mod query;
 mod query_index;

@@ -143,7 +143,12 @@ if [ "$SKIP_BUILD" = "0" ]; then
     cargo build --locked -p quench3d-cli -p quench3d-editor --bins
   fi
 fi
-bin_dir=$ROOT/target/$PROFILE
+target_dir=${CARGO_TARGET_DIR:-$ROOT/target}
+case "$target_dir" in
+  /*) ;;
+  *) target_dir="$ROOT/$target_dir" ;;
+esac
+bin_dir=$target_dir/$PROFILE
 for bin in quench3d quench3d-editor; do
   if [ ! -x "$bin_dir/$bin" ]; then
     echo "缺少可执行文件：$bin_dir/$bin（不要用 --skip-build）" >&2

@@ -42,6 +42,8 @@ mkdir -p "$LOG_DIR"
 # （STATUS_ACCESS_VIOLATION / 0xc0000005），进程直接死，Result::Err 接不住 ——
 # 这类测试因此必须显式 opt-in。判据见 docs/overnight_report.md §52。
 export QUENCH3D_GPU_TESTS="${QUENCH3D_GPU_TESTS:-1}"
+# Canonical/default and native island coverage require a multicore host.
+export Q_NORMAL_REQUIRE_PARALLEL=1
 
 fail=0
 step() { printf '\n== %s ==\n' "$1"; }
@@ -99,6 +101,26 @@ if cargo test --workspace --no-fail-fast >"$LOG_DIR/gate-test.log" 2>&1; then
 else
   bad tests
   grep -E '^(test result: FAILED|error)' -A 10 "$LOG_DIR/gate-test.log" | head -n 30
+fi
+
+step "默认路径逐帧黄金哈希（x86_64 Linux 基线；需要至少两核）"
+case "$LOG_DIR" in
+  /*) DEFAULT_BITS_DIR="$LOG_DIR/default-bits" ;;
+  *) DEFAULT_BITS_DIR="$PWD/$LOG_DIR/default-bits" ;;
+esac
+if Q193_MODE=generate Q193_OUTPUT="$DEFAULT_BITS_DIR" cargo test --release --locked -p quench3d-physics --lib default_false_canonical_193 -- --ignored --test-threads=1 >"$LOG_DIR/gate-default-bits.log" 2>&1 && python3 tools/check_default_bits.py "$DEFAULT_BITS_DIR" >>"$LOG_DIR/gate-default-bits.log" 2>&1; then
+  ok default-bits
+else
+  bad default-bits
+  tail -n 20 "$LOG_DIR/gate-default-bits.log"
+fi
+
+step "全局法向完整 world.step 成本（固定 5 次 AB/BA；12/32 层）"
+if cargo run --release --locked -p quench3d-physics --example global_normal_cost_195 >"$LOG_DIR/gate-normal-cost.log" 2>&1; then
+  ok normal-cost
+else
+  bad normal-cost
+  tail -n 15 "$LOG_DIR/gate-normal-cost.log"
 fi
 
 package_step() {

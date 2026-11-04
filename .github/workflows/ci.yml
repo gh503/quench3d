@@ -116,6 +116,22 @@ jobs:
           cargo test --locked -p quench3d-render --test backend_fallback --test fog_and_shadow_quality --test material_pipeline_traits --test point_lights --test post_pipeline --test shadow_cascades -- --nocapture
           cargo test --locked -p quench3d-editor --test hierarchy --test history --test model_instances --test scene_roundtrip -- --nocapture
 
+      # Frozen canonical payloads are x86_64 Linux; both gates require >=2 cores.
+      - name: 默认路径逐帧黄金哈希（Linux）
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          Q193_MODE: generate
+          Q_NORMAL_REQUIRE_PARALLEL: '1'
+        run: |
+          export Q193_OUTPUT="$PWD/target/tmp/ci-default-bits"
+          cargo test --release --locked -p quench3d-physics --lib default_false_canonical_193 -- --ignored --test-threads=1
+          python tools/check_default_bits.py target/tmp/ci-default-bits
+
+      - name: 全局法向固定成本门禁（Linux）
+        if: runner.os == 'Linux'
+        run: cargo run --release --locked -p quench3d-physics --example global_normal_cost_195
+
       # 命令行工具端到端冒烟：这是 agent 依赖的契约（退出码 + 单行 JSON）
       - name: CLI 冒烟测试
         shell: bash
