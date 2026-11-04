@@ -1,0 +1,406 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -561,6 +561,7 @@
+ pub(crate) struct ContactSolver {
+     /// 所有求解接触点。
+     pub contacts: Vec<SolverContact>,
++    pub(crate) normal_memory: NormalDirectionMemory,
+ }
+ 
+ impl ContactSolver {
+@@ -579,6 +580,7 @@
+         dt: f32,
+         precompute: bool,
+     ) {
++        self.normal_memory = NormalDirectionMemory::default();
+         #[cfg(test)]
+         if CACHE_REFERENCE.get() == 1 || CACHE_REFERENCE.get() == 2 {
+             self.prepare_reference(
+@@ -972,7 +974,7 @@
+ 
+     /// 一轮速度迭代。
+     pub fn solve_velocity(&mut self, views: &mut [BodyView], global: bool) {
+-        solve_velocity_contacts(&mut self.contacts, views, global);
++        solve_velocity_contacts_memory(&mut self.contacts, views, global, &mut self.normal_memory);
+     }
+ 
+     /// 松弛：只在仍然相互接近时补一点冲量，绝不抽走能量。
+@@ -1038,8 +1040,22 @@
+     views: &mut [BodyView],
+     global: bool,
+ ) {
++    solve_velocity_contacts_memory(
++        contacts,
++        views,
++        global,
++        &mut NormalDirectionMemory::default(),
++    );
++}
++
++pub(crate) fn solve_velocity_contacts_memory(
++    contacts: &mut [SolverContact],
++    views: &mut [BodyView],
++    global: bool,
++    memory: &mut NormalDirectionMemory,
++) {
+     if global {
+-        global_normal_round(contacts, views);
++        global_normal_round(contacts, views, memory);
+         return;
+     }
+     for c in contacts.iter_mut() {
+@@ -1799,6 +1815,70 @@
+             c.feature_id,
+         ]);
+         out
++    }
++
++    #[test]
++    fn normal_direction_memory_changed_rhs_restart() {
++        let mut memory = NormalDirectionMemory {
++            p: vec![1.0, 0.0],
++            ap: vec![4.0, 1.0],
++            curvature: 4.0,
++            free: vec![true, true],
++        };
++        let (p, retain) = memory_feasible_direction(
++            &[1.0, 1.0],
++            &[1.0, -1.0],
++            vec![-1.0, 1.0],
++            &[4.0, 3.0],
++            &[true, true],
++            &mut memory,
++        );
++        assert!(p[0] - p[1] < 0.0);
++        assert!(retain);
++        memory = NormalDirectionMemory {
++            p: vec![0.0, 1.0],
++            ap: vec![1.0, 3.0],
++            curvature: 3.0,
++            free: vec![true, true],
++        };
++        let (p, retain) = memory_feasible_direction(
++            &[0.0, 1.0],
++            &[-1.0, 1.0],
++            vec![-1.0, -1.0],
++            &[1.0, 1.0],
++            &[true, true],
++            &mut memory,
++        );
++        assert!(!retain);
++        assert!(p[0] >= 0.0);
++        assert!(p[0] * -1.0 + p[1] < 0.0);
++        assert!(memory.p.is_empty());
++    }
++
++    #[test]
++    fn normal_direction_memory_two_step_spd() {
++        let mut g = vec![-1.0, -2.0];
++        let mut memory = NormalDirectionMemory::default();
++        for _ in 0..2 {
++            let z = vec![-g[0] / 4.0, -g[1] / 3.0];
++            let p = remembered_direction(z, &memory);
++            let ap = vec![4.0 * p[0] + p[1], p[0] + 3.0 * p[1]];
++            let curvature = p.iter().zip(&ap).map(|(a, b)| a * b).sum::<f64>();
++            let alpha = -g.iter().zip(&p).map(|(a, b)| a * b).sum::<f64>() / curvature;
++            for i in 0..2 {
++                g[i] += alpha * ap[i];
++            }
++            memory = NormalDirectionMemory {
++                p,
++                ap,
++                curvature,
++                free: vec![true, true],
++            };
++        }
++        assert!(
++            g.iter().all(|x| x.abs() < 1e-12),
++            "two-step SPD residual={g:?}"
++        );
+     }
+ 
+     #[test]
+@@ -2637,7 +2717,11 @@
+     p
+ }
+ 
+-fn global_normal_round(cs: &mut [SolverContact], vs: &mut [BodyView]) {
++fn global_normal_round(
++    cs: &mut [SolverContact],
++    vs: &mut [BodyView],
++    memory: &mut NormalDirectionMemory,
++) {
+     #[cfg(test)]
+     {
+         GLOBAL_TRACE.with(|t| {
+@@ -2678,14 +2762,17 @@
+     {
+         *z += local;
+     }
+-    let p = feasible_direction(&lambda, &gradient, preconditioned, &diagonal);
++    let (p, retain) =
++        memory_feasible_direction(&lambda, &gradient, preconditioned, &diagonal, &free, memory);
+     let descent = p.iter().zip(&gradient).map(|(p, g)| p * g).sum::<f64>();
+     if !descent.is_finite() || descent >= 0.0 {
++        *memory = NormalDirectionMemory::default();
+         return;
+     }
+     let ap = normal_product(cs, vs, &p);
+-    let curvature = p.iter().zip(ap).map(|(p, a)| p * a).sum::<f64>();
++    let curvature = p.iter().zip(&ap).map(|(p, a)| p * a).sum::<f64>();
+     if !curvature.is_finite() || curvature <= 0.0 {
++        *memory = NormalDirectionMemory::default();
+         return;
+     }
+     #[cfg(test)]
+@@ -2724,6 +2811,17 @@
+     if !alpha.is_finite() || alpha <= 0.0 {
+         return;
+     }
++    let hitbound = (0..p.len()).any(|i| p[i] < 0.0 && alpha == -lambda[i] / p[i]);
++    if retain && !hitbound {
++        *memory = NormalDirectionMemory {
++            p: p.clone(),
++            ap,
++            curvature,
++            free: free.clone(),
++        };
++    } else {
++        *memory = NormalDirectionMemory::default();
++    }
+     let next = projected_line_update(&lambda, &p, alpha);
+     if next.iter().any(|x| !x.is_finite()) {
+         return;
+@@ -2747,8 +2845,8 @@
+ fn global_note(message: impl std::fmt::Display) {
+     GLOBAL_TRACE.with(|t| {
+         let (step, round) = t.get();
+-        if (1..=16).contains(&step)
+-            || ((1..=16).contains(&step) && message.to_string().contains("coarse_status="))
++        if (225..=245).contains(&step)
++            || ((225..=245).contains(&step) && message.to_string().contains("coarse_status="))
+         {
+             println!("ROUND182 step={step} round={round} {message}");
+         }
+@@ -3050,6 +3148,11 @@
+         }
+         let basis = wrench_basis(cs, points);
+         let rank = basis.len().saturating_sub(1);
++        #[cfg(test)]
++        global_note(format!(
++            "local_pair={},{} local_rank={rank}",
++            cs[points[0]].a, cs[points[0]].b
++        ));
+         if rank == 0 {
+             continue;
+         }
+@@ -3070,8 +3173,12 @@
+         }
+         let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
+         let Some(inverse) = small_spd_inverse(matrix, rank, scale) else {
++            #[cfg(test)]
++            global_note("local_status=badpivot");
+             continue;
+         };
++        #[cfg(test)]
++        global_note("local_status=accepted");
+         let mut x = [0.0; 3];
+         for a in 0..rank {
+             for b in 0..rank {
+@@ -3088,3 +3195,41 @@
+     }
+     out
+ }
++
++#[derive(Default, Clone, Debug)]
++pub(crate) struct NormalDirectionMemory {
++    p: Vec<f64>,
++    ap: Vec<f64>,
++    curvature: f64,
++    free: Vec<bool>,
++}
++fn remembered_direction(mut z: Vec<f64>, memory: &NormalDirectionMemory) -> Vec<f64> {
++    if memory.p.len() == z.len() && memory.curvature.is_finite() && memory.curvature > 0.0 {
++        let beta = z.iter().zip(&memory.ap).map(|(a, b)| a * b).sum::<f64>() / memory.curvature;
++        for (i, x) in z.iter_mut().enumerate() {
++            *x -= beta * memory.p[i];
++        }
++    }
++    z
++}
++fn memory_feasible_direction(
++    lambda: &[f64],
++    g: &[f64],
++    z: Vec<f64>,
++    diagonal: &[f64],
++    free: &[bool],
++    memory: &mut NormalDirectionMemory,
++) -> (Vec<f64>, bool) {
++    if memory.free != free {
++        *memory = NormalDirectionMemory::default();
++    }
++    let candidate = remembered_direction(z.clone(), memory);
++    let clipped = (0..candidate.len()).any(|i| lambda[i] == 0.0 && candidate[i] < 0.0);
++    let descent = candidate.iter().zip(g).map(|(a, b)| a * b).sum::<f64>();
++    if clipped || candidate.iter().any(|x| !x.is_finite()) || !descent.is_finite() || descent >= 0.0
++    {
++        *memory = NormalDirectionMemory::default();
++        return (feasible_direction(lambda, g, z, diagonal), false);
++    }
++    (candidate, true)
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -4648,7 +4648,7 @@
+     use crate::body::BodyBuilder;
+ 
+     #[test]
+-    fn global_projection_32_layer_early_observation() {
++    fn global_force_local_torque_12_layer_observation() {
+         let mut world = PhysicsWorld::new();
+         world.set_fixed_dt(1.0 / 60.0);
+         world.config.speculative_margin = 0.005;
+@@ -4661,7 +4661,7 @@
+             })
+             .position(vec3(0.0, -0.25, 0.0)),
+         );
+-        let handles: Vec<_> = (0..32)
++        let handles: Vec<_> = (0..12)
+             .map(|i| {
+                 world.add_builder(
+                     BodyBuilder::dynamic(Shape::Box {
+@@ -4679,7 +4679,7 @@
+         };
+         let mut max_pair = 0.0f64;
+         let mut max_floor = 0.0f64;
+-        for step in 1..=16 {
++        for step in 1..=260 {
+             crate::solver::GLOBAL_TRACE.with(|t| t.set((step, 0)));
+             world.step(1.0 / 60.0);
+             let poses: Vec<_> = handles
+@@ -4692,17 +4692,21 @@
+                     max_pair = max_pair.max((-a.separation(*b)).max(0.0));
+                 }
+             }
+-            if step == 8 {
++            if step == 233 {
+                 println!(
+-                    "ROUND184_STEP8 pair34={:.15}",
++                    "ROUND189_STEP233 pair34={:.15}",
+                     -poses[3].separation(poses[4])
+                 );
+             }
+-            if (1..=16).contains(&step) {
++            if (225..=245).contains(&step) {
+                 println!("ROUND182_SAT step={step} pair01={} cumulative_pair={max_pair} cumulative_floor={max_floor}",-poses[3].separation(poses[4]));
+             }
+         }
+-        println!("ROUND182_RESULT steps=16 layers=32 pair={max_pair} floor={max_floor} diagnostic_only=true");
++        assert!(
++            (max_pair - 0.005163915172886169).abs() < 1e-12,
++            "pair={max_pair}"
++        );
++        println!("ROUND182_RESULT steps=260 layers=12 pair={max_pair} floor={max_floor} diagnostic_only=true");
+     }
+ 
+     #[test]
+--- a/crates/quench3d-physics/src/parallel.rs
++++ b/crates/quench3d-physics/src/parallel.rs
+@@ -28,8 +28,8 @@
+ 
+ use crate::island::Islands;
+ use crate::solver::{
+-    relax_contacts, solve_position_contacts, solve_velocity_contacts, BodyView, SolverConfig,
+-    SolverContact,
++    relax_contacts, solve_position_contacts, solve_velocity_contacts_memory, BodyView,
++    NormalDirectionMemory, SolverConfig, SolverContact,
+ };
+ 
+ /// 至少这么多接触才值得开线程（太小的场景线程开销大于收益）。
+@@ -38,12 +38,13 @@
+ const MAX_THREADS: usize = 16;
+ 
+ /// 一个岛在本地布局里的两段长度。
+-#[derive(Clone, Copy, Debug, Default)]
++#[derive(Clone, Debug, Default)]
+ struct Chunk {
+     /// 本地视图数量（清醒体 + 冻结伙伴副本）。
+     view_len: u32,
+     /// 接触数量。
+     contact_len: u32,
++    memory: NormalDirectionMemory,
+ }
+ 
+ /// 并行求解的布局与缓冲（跨步复用，稳态零分配）。
+@@ -265,6 +266,7 @@
+         self.chunks.push(Chunk {
+             view_len,
+             contact_len,
++            memory: NormalDirectionMemory::default(),
+         });
+     }
+ 
+@@ -337,7 +339,7 @@
+     /// 线程内部再按岛切分——全程安全 Rust，没有 `unsafe`。
+     fn run_workers<F>(&mut self, f: F)
+     where
+-        F: Fn(&mut [SolverContact], &mut [BodyView]) + Send + Sync,
++        F: Fn(&mut [SolverContact], &mut [BodyView], &mut NormalDirectionMemory) + Send + Sync,
+     {
+         if !self.enabled {
+             return;
+@@ -352,8 +354,10 @@
+         std::thread::scope(|scope| {
+             let mut vs: &mut [BodyView] = views;
+             let mut cs: &mut [SolverContact] = contacts;
++            let mut remaining_chunks = &mut chunks[..];
+             for &(cstart, cend) in workers.iter() {
+-                let slice = &chunks[cstart as usize..cend as usize];
++                let (slice, rest) = remaining_chunks.split_at_mut((cend - cstart) as usize);
++                remaining_chunks = rest;
+                 let vlen: usize = slice.iter().map(|c| c.view_len as usize).sum();
+                 let clen: usize = slice.iter().map(|c| c.contact_len as usize).sum();
+                 let (v, vr) = vs.split_at_mut(vlen);
+@@ -369,7 +373,7 @@
+                         vv = ivr;
+                         let (ic, icr) = cc.split_at_mut(ch.contact_len as usize);
+                         cc = icr;
+-                        f(ic, iv);
++                        f(ic, iv, &mut ch.memory);
+                     }
+                 });
+             }
+@@ -391,9 +395,9 @@
+         cfg: &SolverConfig,
+         pos_iters: usize,
+     ) {
+-        self.run_workers(move |cs, vs| {
++        self.run_workers(move |cs, vs, memory| {
+             for _ in 0..iters {
+-                solve_velocity_contacts(cs, vs, cfg.global_normal_projection);
++                solve_velocity_contacts_memory(cs, vs, cfg.global_normal_projection, memory);
+             }
+             relax_contacts(cs, vs, relax_iters, gain);
+             solve_position_contacts(cs, vs, dt, cfg, pos_iters);
+@@ -402,16 +406,18 @@
+ 
+     /// 并行跑一轮速度迭代。
+     pub fn solve_velocity(&mut self, global: bool) {
+-        self.run_workers(move |cs, vs| solve_velocity_contacts(cs, vs, global));
++        self.run_workers(move |cs, vs, memory| {
++            solve_velocity_contacts_memory(cs, vs, global, memory)
++        });
+     }
+ 
+     /// 并行松弛。
+     pub fn relax(&mut self, iterations: usize, gain: f32) {
+-        self.run_workers(|cs, vs| relax_contacts(cs, vs, iterations, gain));
++        self.run_workers(|cs, vs, _| relax_contacts(cs, vs, iterations, gain));
+     }
+ 
+     /// 并行位置修正。
+     pub fn solve_position(&mut self, dt: f32, cfg: &SolverConfig, iterations: usize) {
+-        self.run_workers(|cs, vs| solve_position_contacts(cs, vs, dt, cfg, iterations));
++        self.run_workers(|cs, vs, _| solve_position_contacts(cs, vs, dt, cfg, iterations));
+     }
+ }
