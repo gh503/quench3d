@@ -222,7 +222,9 @@
   封闭容器 125 粒子 × 120 步的最小间距约 0.05428 m，均未满足固定 0.07990 m 目标。
   [链压回证据](experiments/particle_chain_recompression.md)与
   [封闭容器强目标](experiments/sealed_particle_separation.md)必须同时验收；
-  [固定预算全图半空间实验](experiments/particle_global_halfspace.md)目前只有 stub 红，尚未完成求解器。
+  [固定预算全图半空间实验](experiments/particle_global_halfspace.md)已按强目标否决：
+  代数与保护控制通过、两种三粒子顺序通过，但完整封闭容器有 46/120 次未认证，
+  最小间距 0.002796 m。候选已移除；未测成本，未交付全图分离求解器。
 - [x] 粒子局部流场拖曳（`fluids[].flow_coupling`，1/s，缺省 0）：取刚体 AABB 内
   粒子平均速度，把浸没刚体 XZ 速度拖向它；AABB 内无粒子时跳过，0 时旧路径逐位
   不变。回归 `flowing_particles_drag_a_body_toward_the_local_flow`、
