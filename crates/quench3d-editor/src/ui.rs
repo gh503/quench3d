@@ -723,23 +723,23 @@ fn view_menu(
             CameraMode::Orbit => "环绕对象",
             CameraMode::Fly => "飞行相机",
         };
-        egui::ComboBox::from_id_salt("camera-mode")
-            .selected_text(mode_label)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(engine.camera_mode == CameraMode::Orbit, "环绕对象")
-                    .clicked()
-                {
-                    let center = doc.selection_center(engine);
-                    crate::navigation::switch(engine, CameraMode::Orbit, center);
-                }
-                if ui
-                    .selectable_label(engine.camera_mode == CameraMode::Fly, "飞行相机")
-                    .clicked()
-                {
-                    crate::navigation::switch(engine, CameraMode::Fly, None);
-                }
-            });
+        ui.menu_button(mode_label, |ui| {
+            if ui
+                .selectable_label(engine.camera_mode == CameraMode::Orbit, "环绕对象")
+                .clicked()
+            {
+                let center = doc.selection_center(engine);
+                crate::navigation::switch(engine, CameraMode::Orbit, center);
+                ui.close();
+            }
+            if ui
+                .selectable_label(engine.camera_mode == CameraMode::Fly, "飞行相机")
+                .clicked()
+            {
+                crate::navigation::switch(engine, CameraMode::Fly, None);
+                ui.close();
+            }
+        });
         ui.checkbox(&mut engine.camera_collision, "相机防穿墙")
             .on_hover_text("轨道相机被几何挡住时自动拉近；不改缩放距离，移开后恢复");
         ui.horizontal_wrapped(|ui| {

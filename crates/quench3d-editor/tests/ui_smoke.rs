@@ -48,6 +48,105 @@ fn headless_engine() -> Option<Engine> {
 }
 
 #[test]
+fn view_camera_submenu_click_switches_mode_and_closes_both_menus() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    engine.camera_mode = CameraMode::Orbit;
+    let mut doc = Doc::new();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut time = 0.0;
+    let mut run = |engine: &mut Engine, events| {
+        time += 0.1;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, &mut doc, &mut view, &mut gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let click = |pos| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]
+    };
+    run(&mut engine, vec![]);
+    let shapes = run(&mut engine, vec![]);
+    let view_button = text_shape_rect(&shapes, "视图").unwrap().center();
+    run(&mut engine, click(view_button));
+    let shapes = run(&mut engine, vec![]);
+    // Exclude identically named quick-toolbar and property-panel selectors.
+    let menu_shapes: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), "环绕对象")
+                .is_some_and(|r| r.center().y > 100.0 && r.center().x < 900.0)
+        })
+        .collect();
+    let parent = text_shape_rect(&menu_shapes, "环绕对象")
+        .expect("camera mode inside view menu")
+        .center();
+    run(&mut engine, vec![egui::Event::PointerMoved(parent)]);
+    run(&mut engine, click(parent));
+    let shapes = run(&mut engine, vec![]);
+    assert!(
+        shapes_contain_text(&shapes, "相机防穿墙"),
+        "clicking camera submenu parent must retain view menu"
+    );
+    let choices: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), "飞行相机")
+                .is_some_and(|r| r.center().y > 100.0 && r.center().x < 900.0)
+        })
+        .collect();
+    let fly = text_shape_rect(&choices, "飞行相机")
+        .expect("camera submenu choices available")
+        .center();
+    run(&mut engine, click(fly));
+    let shapes = run(&mut engine, vec![]);
+    assert_eq!(engine.camera_mode, CameraMode::Fly);
+    assert!(
+        !shapes_contain_text(&shapes, "相机防穿墙"),
+        "leaf choice closes parent menu"
+    );
+    let menu_choices = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), "环绕对象")
+                .is_some_and(|r| r.center().y > 100.0 && r.center().x < 900.0)
+        })
+        .count();
+    assert_eq!(menu_choices, 0, "leaf choice closes child menu");
+}
+
+#[test]
 fn render_water_header_click_keeps_menu_open_for_settings() {
     let Some(mut engine) = headless_engine() else {
         return;
