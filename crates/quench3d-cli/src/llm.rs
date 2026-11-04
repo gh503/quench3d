@@ -763,75 +763,9 @@ fn post_via_curl(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn curl_config_escaping_neutralizes_quotes_and_control_chars() {
-        // 反斜杠与双引号必须转义，否则能提前闭合配置里的字符串
-        assert_eq!(curl_config_escape(r#"a"b\c"#), r#"a\"b\\c"#);
-        // 换行/回车/制表符转成转义序列：否则可以伪造一条新的配置行（比如换掉 url）
-        assert_eq!(curl_config_escape("x\ny\rz\tw"), r"x\ny\rz\tw");
-        // 其余控制字符直接丢弃
-        assert_eq!(curl_config_escape("a\u{7}b\u{0}c"), "abc");
-        // 普通字符原样保留
-        assert_eq!(
-            curl_config_escape("Bearer sk-abc_123.456"),
-            "Bearer sk-abc_123.456"
-        );
-    }
-
-    #[test]
-    fn url_parsing_handles_ports_and_paths() {
-        let u = Url::parse("http://localhost:11434/v1/chat/completions").unwrap();
-        assert_eq!(u.scheme, "http");
-        assert_eq!(u.host, "localhost");
-        assert_eq!(u.port, 11434);
-        assert_eq!(u.path, "/v1/chat/completions");
-
-        let u = Url::parse("https://api.example.com/v1").unwrap();
-        assert_eq!(u.port, 443);
-        assert_eq!(u.path, "/v1");
-
-        let u = Url::parse("http://127.0.0.1").unwrap();
-        assert_eq!(u.port, 80);
-        assert_eq!(u.path, "/");
-    }
-
-    #[test]
-    fn endpoint_join_is_idempotent() {
-        let mut c = LlmConfig {
-            base_url: "http://localhost:8080/v1/".into(),
-            ..Default::default()
-        };
-        assert_eq!(c.endpoint(), "http://localhost:8080/v1/chat/completions");
-        c.base_url = "http://localhost:8080/v1/chat/completions".into();
-        assert_eq!(c.endpoint(), "http://localhost:8080/v1/chat/completions");
-    }
-
-    #[test]
-    fn extract_json_ignores_prose_and_code_fences() {
-        let text = "好的，这是场景：\n```json\n{\"name\": \"a\", \"nested\": {\"x\": [1,2,3]}}\n```\n希望有帮助！";
-        let json = extract_json(text).unwrap();
-        assert_eq!(json, r#"{"name": "a", "nested": {"x": [1,2,3]}}"#);
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["nested"]["x"][2], 3);
-    }
-
-    #[test]
-    fn extract_json_handles_braces_inside_strings() {
-        let text = r#"prefix {"a": "}{ not a brace", "b": 1} suffix"#;
-        assert_eq!(
-            extract_json(text).unwrap(),
-            r#"{"a": "}{ not a brace", "b": 1}"#
-        );
-    }
-}
-
 /// 解析 OpenAI 兼容响应；原生 HTTP 和浏览器传输共享同一工具调用规则。
 pub fn parse_chat_response(raw: &str, fallback_model: &str) -> Result<ChatOutcome, LlmError> {
-    let value: serde_json::Value = serde_json::from_str(&raw)
+    let value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| LlmError::parse(format!("响应不是合法 JSON: {e}")))?;
 
     if let Some(err) = value.get("error") {
@@ -910,4 +844,70 @@ pub fn parse_chat_response(raw: &str, fallback_model: &str) -> Result<ChatOutcom
             .and_then(|f| f.as_str())
             .map(|s| s.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curl_config_escaping_neutralizes_quotes_and_control_chars() {
+        // 反斜杠与双引号必须转义，否则能提前闭合配置里的字符串
+        assert_eq!(curl_config_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        // 换行/回车/制表符转成转义序列：否则可以伪造一条新的配置行（比如换掉 url）
+        assert_eq!(curl_config_escape("x\ny\rz\tw"), r"x\ny\rz\tw");
+        // 其余控制字符直接丢弃
+        assert_eq!(curl_config_escape("a\u{7}b\u{0}c"), "abc");
+        // 普通字符原样保留
+        assert_eq!(
+            curl_config_escape("Bearer sk-abc_123.456"),
+            "Bearer sk-abc_123.456"
+        );
+    }
+
+    #[test]
+    fn url_parsing_handles_ports_and_paths() {
+        let u = Url::parse("http://localhost:11434/v1/chat/completions").unwrap();
+        assert_eq!(u.scheme, "http");
+        assert_eq!(u.host, "localhost");
+        assert_eq!(u.port, 11434);
+        assert_eq!(u.path, "/v1/chat/completions");
+
+        let u = Url::parse("https://api.example.com/v1").unwrap();
+        assert_eq!(u.port, 443);
+        assert_eq!(u.path, "/v1");
+
+        let u = Url::parse("http://127.0.0.1").unwrap();
+        assert_eq!(u.port, 80);
+        assert_eq!(u.path, "/");
+    }
+
+    #[test]
+    fn endpoint_join_is_idempotent() {
+        let mut c = LlmConfig {
+            base_url: "http://localhost:8080/v1/".into(),
+            ..Default::default()
+        };
+        assert_eq!(c.endpoint(), "http://localhost:8080/v1/chat/completions");
+        c.base_url = "http://localhost:8080/v1/chat/completions".into();
+        assert_eq!(c.endpoint(), "http://localhost:8080/v1/chat/completions");
+    }
+
+    #[test]
+    fn extract_json_ignores_prose_and_code_fences() {
+        let text = "好的，这是场景：\n```json\n{\"name\": \"a\", \"nested\": {\"x\": [1,2,3]}}\n```\n希望有帮助！";
+        let json = extract_json(text).unwrap();
+        assert_eq!(json, r#"{"name": "a", "nested": {"x": [1,2,3]}}"#);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["nested"]["x"][2], 3);
+    }
+
+    #[test]
+    fn extract_json_handles_braces_inside_strings() {
+        let text = r#"prefix {"a": "}{ not a brace", "b": 1} suffix"#;
+        assert_eq!(
+            extract_json(text).unwrap(),
+            r#"{"a": "}{ not a brace", "b": 1}"#
+        );
+    }
 }
