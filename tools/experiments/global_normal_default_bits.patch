@@ -1,0 +1,434 @@
+--- /dev/null
++++ b/crates/quench3d-physics/src/world/default_bits_193.rs
+@@ -0,0 +1,399 @@
++use super::*;
++use crate::BodyBuilder;
++use std::io::{Read, Write};
++#[derive(Default)]
++struct Encoder {
++    bytes: Vec<u8>,
++}
++impl Encoder {
++    fn field(&mut self, tag: &str, bytes: &[u8]) {
++        self.bytes.extend((tag.len() as u32).to_le_bytes());
++        self.bytes.extend(tag.as_bytes());
++        self.bytes.extend((bytes.len() as u64).to_le_bytes());
++        self.bytes.extend(bytes);
++    }
++    fn u(&mut self, t: &str, v: u64) {
++        self.field(t, &v.to_le_bytes());
++    }
++    fn f(&mut self, t: &str, v: f32) {
++        self.field(t, &v.to_bits().to_le_bytes());
++    }
++    fn v(&mut self, t: &str, v: Vec3) {
++        for (axis, x) in [v.x, v.y, v.z].into_iter().enumerate() {
++            self.f(&format!("{t}.{axis}"), x);
++        }
++    }
++    fn q(&mut self, t: &str, q: Quat) {
++        for (i, x) in [q.x, q.y, q.z, q.w].into_iter().enumerate() {
++            self.f(&format!("{t}.{i}"), x);
++        }
++    }
++    fn handle(&mut self, t: &str, h: BodyHandle) {
++        self.u(&format!("{t}.index"), h.index as u64);
++        self.u(&format!("{t}.generation"), h.generation as u64);
++    }
++}
++macro_rules! floats {($e:ident,$p:expr,$b:ident,$($field:ident),*)=>{$($e.f(&format!("{}.{}",$p,stringify!($field)),$b.$field);)*};}
++macro_rules! vectors {($e:ident,$p:expr,$b:ident,$($field:ident),*)=>{$($e.v(&format!("{}.{}",$p,stringify!($field)),$b.$field);)*};}
++fn snapshot(w: &PhysicsWorld) -> Vec<u8> {
++    let mut e = Encoder::default();
++    e.u("step", w.step_count);
++    e.f("fixed_dt", w.fixed_dt);
++    e.f("accumulator", w.accumulator);
++    e.u("version", w.version);
++    e.v("gravity", w.gravity);
++    e.u("bodies.len", w.bodies.len() as u64);
++    for (i, s) in w.bodies.iter().enumerate() {
++        let p = format!("body.{i}");
++        e.u(&format!("{p}.generation"), s.generation as u64);
++        e.u(&format!("{p}.present"), s.body.is_some() as u64);
++        if let Some(b) = &s.body {
++            e.v(&format!("{p}.scale"), b.transform.scale);
++            e.v(&format!("{p}.prev.scale"), b.prev_transform.scale);
++            e.v(&format!("{p}.position"), b.position());
++            e.q(&format!("{p}.rotation"), b.rotation());
++            e.v(&format!("{p}.prev.position"), b.prev_transform.position);
++            e.q(&format!("{p}.prev.rotation"), b.prev_transform.rotation);
++            vectors!(
++                e,
++                p,
++                b,
++                linear_velocity,
++                angular_velocity,
++                pseudo_linear_velocity,
++                pseudo_angular_velocity,
++                force,
++                torque,
++                inertia_local,
++                inv_inertia_local,
++                local_center,
++                friction_axis
++            );
++            floats!(
++                e,
++                p,
++                b,
++                mass,
++                inv_mass,
++                restitution,
++                friction,
++                static_friction,
++                rolling_friction,
++                friction_anisotropy,
++                linear_damping,
++                angular_damping,
++                gravity_scale,
++                submerged,
++                sleep_timer
++            );
++            e.u(&format!("{p}.type"), b.body_type as u64);
++            for (t, v) in [
++                ("sleeping", b.sleeping),
++                ("allow_sleep", b.allow_sleep),
++                ("sensor", b.sensor),
++                ("ccd", b.ccd),
++                ("ccd_precise", b.ccd_precise),
++            ] {
++                e.u(&format!("{p}.{t}"), v as u64);
++            }
++            e.u(&format!("{p}.user_data"), b.user_data);
++            e.u(
++                &format!("{p}.friction_combine"),
++                b.friction_combine.map_or(0, |v| v as u64 + 1),
++            );
++            e.u(
++                &format!("{p}.restitution_combine"),
++                b.restitution_combine.map_or(0, |v| v as u64 + 1),
++            );
++        }
++    }
++    for (t, list) in [("free", &w.free), ("joint_free", &w.joint_free)] {
++        e.u(&format!("{t}.len"), list.len() as u64);
++        for (i, v) in list.iter().enumerate() {
++            e.u(&format!("{t}.{i}"), *v as u64);
++        }
++    }
++    e.u("contacts.len", w.contacts.len() as u64);
++    for (i, c) in w.contacts.iter().enumerate() {
++        let p = format!("publiccontact.{i}");
++        e.handle(&format!("{p}.a"), c.a);
++        e.handle(&format!("{p}.b"), c.b);
++        vectors!(e, p, c, normal, point);
++        floats!(e, p, c, impulse);
++        e.u(&format!("{p}.sensor"), c.sensor as u64);
++    }
++    e.u("manifolds.len", w.manifolds.len() as u64);
++    for (i, m) in w.manifolds.iter().enumerate() {
++        let p = format!("manifold.{i}");
++        e.u(&format!("{p}.a"), m.a as u64);
++        e.u(&format!("{p}.b"), m.b as u64);
++        e.u(&format!("{p}.points.len"), m.points.len() as u64);
++        for (j, c) in m.points.iter().enumerate() {
++            let p = format!("{p}.point.{j}");
++            vectors!(e, p, c, position, normal);
++            floats!(e, p, c, penetration);
++            e.u(&format!("{p}.feature_id"), c.feature_id as u64);
++        }
++    }
++    e.u("solvercontacts.len", w.contact_solver.contacts.len() as u64);
++    for (i, c) in w.contact_solver.contacts.iter().enumerate() {
++        let p = format!("solvercontact.{i}");
++        e.u(&format!("{p}.a"), c.a as u64);
++        e.u(&format!("{p}.b"), c.b as u64);
++        e.u(&format!("{p}.feature_id"), c.feature_id as u64);
++        vectors!(e, p, c, normal, ra, rb, local_a, local_b);
++        floats!(
++            e,
++            p,
++            c,
++            k_normal,
++            friction,
++            rolling_friction,
++            restitution_bias,
++            speculative_bias,
++            penetration,
++            normal_impulse,
++            pseudo_impulse
++        );
++        for j in 0..2 {
++            e.v(&format!("{p}.tangent.{j}"), c.tangent[j]);
++            e.v(&format!("{p}.normal_arm.{j}"), c.normal_arm[j]);
++            for k in 0..2 {
++                e.v(&format!("{p}.tangent_arm.{j}.{k}"), c.tangent_arm[j][k]);
++            }
++            for (t, v) in [
++                ("k_tangent", c.k_tangent[j]),
++                ("friction_tangent", c.friction_tangent[j]),
++                ("tangent_impulse", c.tangent_impulse[j]),
++            ] {
++                e.f(&format!("{p}.{t}.{j}"), v);
++            }
++        }
++        e.u(&format!("{p}.precomputed"), c.precomputed as u64);
++        e.u(&format!("{p}.friction_cone"), c.friction_cone as u64);
++    }
++    let (keys, ranges, impulses) = w.cache.test_export_193();
++    e.u("cache.keys.len", keys.len() as u64);
++    for (i, ((a, b), (start, end))) in keys.iter().zip(ranges).enumerate() {
++        for (t, v) in [("a", *a), ("b", *b), ("start", *start), ("end", *end)] {
++            e.u(&format!("cache.key.{i}.{t}"), v as u64);
++        }
++    }
++    e.u("cache.impulses.len", impulses.len() as u64);
++    for (i, c) in impulses.iter().enumerate() {
++        let p = format!("cache.impulse.{i}");
++        vectors!(e, p, c, local_a, local_b);
++        floats!(e, p, c, normal);
++        for j in 0..2 {
++            e.f(&format!("{p}.tangent.{j}"), c.tangent[j]);
++        }
++        e.u(&format!("{p}.feature_id"), c.feature_id as u64);
++    }
++    e.u("joints.len", w.joints.len() as u64);
++    for (i, s) in w.joints.iter().enumerate() {
++        let p = format!("joint.{i}");
++        e.u(&format!("{p}.generation"), s.generation as u64);
++        e.u(&format!("{p}.present"), s.joint.is_some() as u64);
++        let c = &s.impulses;
++        vectors!(e, p, c, point, ang3);
++        floats!(e, p, c, scalar, limit, motor);
++        for j in 0..2 {
++            e.f(&format!("{p}.uv.{j}"), c.uv[j]);
++            e.f(&format!("{p}.uv_ang.{j}"), c.uv_ang[j]);
++        }
++        e.u(
++            &format!("{p}.collide_connected"),
++            s.collide_connected as u64,
++        );
++        e.f(&format!("{p}.radial_clearance"), s.radial_clearance);
++        for (t, v) in [
++            ("break_force", s.break_force),
++            ("break_torque", s.break_torque),
++        ] {
++            e.u(&format!("{p}.{t}.present"), v.is_some() as u64);
++            if let Some(v) = v {
++                e.f(&format!("{p}.{t}"), v);
++            }
++        }
++    }
++    for (t, list) in [
++        ("sensor_pairs", &w.sensor_pairs),
++        ("sensor_pairs_prev", &w.sensor_pairs_prev),
++        ("touch_pairs", &w.touch_pairs),
++        ("touch_pairs_prev", &w.touch_pairs_prev),
++    ] {
++        e.u(&format!("{t}.len"), list.len() as u64);
++        for (i, (a, b)) in list.iter().enumerate() {
++            e.u(&format!("{t}.{i}.a"), *a as u64);
++            e.u(&format!("{t}.{i}.b"), *b as u64);
++        }
++    }
++    for (i, v) in w.sleeping_prev.iter().enumerate() {
++        e.u(&format!("sleeping_prev.{i}"), *v as u64);
++    }
++    e.u("events_dropped", w.events_dropped);
++    e.u("event_capacity", w.event_capacity as u64);
++    e.u("events.len", w.events.len() as u64);
++    for (i, v) in w.events.iter().enumerate() {
++        let p = format!("event.{i}");
++        e.u(&format!("{p}.step"), v.step);
++        e.u(&format!("{p}.kind"), v.kind as u64);
++        e.handle(&format!("{p}.a"), v.a);
++        e.u(&format!("{p}.b.present"), v.b.is_some() as u64);
++        if let Some(h) = v.b {
++            e.handle(&format!("{p}.b"), h);
++        }
++        e.u(&format!("{p}.joint.present"), v.joint.is_some() as u64);
++        if let Some(h) = v.joint {
++            e.u(&format!("{p}.joint.index"), h.index as u64);
++            e.u(&format!("{p}.joint.generation"), h.generation as u64);
++        }
++        floats!(e, p, v, force, torque);
++    }
++    e.u("sensor_events.len", w.sensor_events.len() as u64);
++    for (i, v) in w.sensor_events.iter().enumerate() {
++        let p = format!("sensor_event.{i}");
++        e.handle(&format!("{p}.sensor"), v.sensor);
++        e.handle(&format!("{p}.other"), v.other);
++        e.u(&format!("{p}.started"), v.started as u64);
++    }
++    let stats = w.islands.stats();
++    for (t, v) in [
++        ("islands", stats.islands),
++        ("awake_bodies", stats.awake_bodies),
++        ("largest", stats.largest),
++        ("multi_body_islands", stats.multi_body_islands),
++    ] {
++        e.u(&format!("islandstats.{t}"), v as u64);
++    }
++    for i in 0..w.bodies.len() {
++        e.u(
++            &format!("island_of.{i}"),
++            w.islands.island_of(i).map_or(u64::MAX, |v| v as u64),
++        );
++    }
++    e.bytes
++}
++fn fixture(kind: usize, parallel: bool) -> PhysicsWorld {
++    if kind == 2 {
++        return crate::digest_tests::mixed_world();
++    }
++    let mut w = PhysicsWorld::new();
++    w.config.parallel = parallel;
++    w.config.max_threads = 2;
++    w.config.sleep_enabled = false;
++    w.add_builder(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }));
++    for col in 0..if kind == 0 { 6 } else { 20 } {
++        let mut handles = Vec::new();
++        for layer in 0..if kind == 0 { 6 } else { 5 } {
++            handles.push(
++                w.add_builder(
++                    BodyBuilder::dynamic(Shape::Box {
++                        half_extents: Vec3::splat(0.4),
++                    })
++                    .position(vec3(
++                        col as f32 * 3.0,
++                        0.4 + layer as f32 * 0.81,
++                        0.0,
++                    )),
++                ),
++            );
++        }
++        if kind == 1 {
++            w.add_joint(Joint::Distance {
++                a: handles[0],
++                b: handles[2],
++                local_anchor_a: Vec3::ZERO,
++                local_anchor_b: Vec3::ZERO,
++                rest_length: 1.62,
++                stiffness: 0.0,
++                damping: 0.0,
++            });
++        }
++    }
++    w
++}
++fn mismatch(expected: &[u8], actual: &[u8]) -> String {
++    let mut p = 0;
++    while p < expected.len().min(actual.len()) {
++        let start = p;
++        let n = u32::from_le_bytes(expected[p..p + 4].try_into().unwrap()) as usize;
++        p += 4;
++        let tag = String::from_utf8_lossy(&expected[p..p + n]);
++        p += n;
++        let n = u64::from_le_bytes(expected[p..p + 8].try_into().unwrap()) as usize;
++        p += 8;
++        let end = p + n;
++        if end > actual.len() || expected[start..end] != actual[start..end] {
++            return format!(
++                "field={tag} recordoffset={start} expected={:?} actual={:?}",
++                &expected[p..end],
++                actual.get(p..end)
++            );
++        }
++        p = end;
++    }
++    format!("length expected={} actual={}", expected.len(), actual.len())
++}
++#[test]
++#[ignore = "explicit baseline/candidate canonical default compatibility"]
++fn default_false_canonical_193() {
++    let root = std::env::var("Q193_OUTPUT").expect("Q193_OUTPUT");
++    let mode = std::env::var("Q193_MODE").unwrap();
++    std::fs::create_dir_all(&root).unwrap();
++    println!(
++        "ROUND193 hardware={:?} mode={mode}",
++        std::thread::available_parallelism()
++    );
++    for (name, kind, parallel, steps) in [
++        ("columns_serial", 0, false, 240),
++        ("columns_parallel", 0, true, 240),
++        ("joints_serial", 1, false, 180),
++        ("joints_parallel", 1, true, 180),
++        ("mixed", 2, false, 400),
++    ] {
++        let mut w = fixture(kind, parallel);
++        let path = std::path::Path::new(&root).join(format!("{name}.bin"));
++        let mut file = if mode == "generate" {
++            std::fs::File::create(path).unwrap()
++        } else {
++            std::fs::File::open(path).unwrap()
++        };
++        let mut parallel_steps = 0;
++        let mut maxthreads = 0;
++        let mut total = 0;
++        for step in 1..=steps {
++            w.step(1.0 / 60.0);
++            assert_eq!(w.step_count, step);
++            parallel_steps += usize::from(w.uses_parallel_solver());
++            maxthreads = maxthreads.max(w.solver_threads());
++            let bytes = snapshot(&w);
++            total += bytes.len();
++            if mode == "generate" {
++                file.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
++                file.write_all(&bytes).unwrap();
++            } else {
++                let mut n = [0; 8];
++                file.read_exact(&mut n).unwrap();
++                let mut expected = vec![0; u64::from_le_bytes(n) as usize];
++                file.read_exact(&mut expected).unwrap();
++                assert!(
++                    bytes == expected,
++                    "case={name} step={step} {}",
++                    mismatch(&expected, &bytes)
++                );
++            }
++        }
++        if mode != "generate" {
++            let mut one = [0];
++            assert_eq!(file.read(&mut one).unwrap(), 0);
++        }
++        if parallel {
++            assert!(
++                parallel_steps > 0 && maxthreads >= 2,
++                "actual parallel coverage required"
++            );
++        }
++        println!("ROUND193 case={name} steps={steps} bytes={total} parallelsteps={parallel_steps} maxthreads={maxthreads}");
++    }
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -8383,3 +8383,6 @@
+         );
+     }
+ }
++
++#[cfg(test)]
++mod default_bits_193;
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -275,6 +275,9 @@
+ }
+ 
+ impl ContactCache {
++    #[cfg(test)]
++    pub(crate) fn test_export_193(&self)->(&[(u32,u32)],&[(u32,u32)],&[CachedImpulse]) {(&self.keys,&self.ranges,&self.impulses)}
++
+     /// 清空（保留已分配的容量）。
+     pub fn clear(&mut self) {
+         self.keys.clear();
+--- a/crates/quench3d-physics/src/digest_tests.rs
++++ b/crates/quench3d-physics/src/digest_tests.rs
+@@ -41,7 +41,7 @@
+ }
+ 
+ /// 覆盖多种形状、关节与睡眠的混合场景。
+-fn mixed_world() -> PhysicsWorld {
++pub(crate) fn mixed_world() -> PhysicsWorld {
+     let mut w = PhysicsWorld::new();
+     w.set_gravity(Vec3::new(0.0, -9.81, 0.0));
+     w.add_body(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }).build());
