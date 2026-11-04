@@ -39,6 +39,161 @@ fn chat_reads_content_length_response_and_sends_expected_request() {
 }
 
 #[test]
+fn chat_null_content_accepts_valid_tool_calls_over_http() {
+    let message = serde_json::json!({
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [{
+            "id": "call_spawn_1",
+            "type": "function",
+            "function": {"name": "spawn", "arguments": "{\"name\":\"cube\"}"}
+        }]
+    });
+    let response = serde_json::json!({
+        "model": "tool-model",
+        "choices": [{"message": message, "finish_reason": "tool_calls"}],
+        "usage": {"total_tokens": 41}
+    });
+    let server = MockLlm::start_raw(&response.to_string());
+    let tools = serde_json::json!([{
+        "type": "function",
+        "function": {"name": "spawn", "parameters": {"type": "object"}}
+    }]);
+    let outcome = client(&server.base_url)
+        .chat_with_tools(&[Message::user("add a cube")], Some(&tools))
+        .expect("standard tool-only assistant messages permit null content");
+    assert_eq!(outcome.text, "");
+    assert_eq!(outcome.model, "tool-model");
+    assert_eq!(outcome.total_tokens, Some(41));
+    assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(outcome.assistant_message, message);
+    assert_eq!(outcome.raw, response.to_string());
+    assert_eq!(outcome.tool_calls.len(), 1);
+    assert_eq!(outcome.tool_calls[0].id, "call_spawn_1");
+    assert_eq!(outcome.tool_calls[0].name, "spawn");
+    assert_eq!(
+        outcome.tool_calls[0].args(),
+        serde_json::json!({"name": "cube"})
+    );
+    let request = server
+        .next_request(Duration::from_secs(5))
+        .expect("real HTTP request");
+    let sent: serde_json::Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(sent["tools"], tools);
+    assert_eq!(sent["tool_choice"], "auto");
+}
+
+#[test]
+fn chat_tool_only_assistant_and_receipt_roundtrip_over_two_http_requests() {
+    let assistant = serde_json::json!({
+        "role": "assistant", "content": null,
+        "tool_calls": [{"id": "call_inspect", "type": "function", "function": {
+            "name": "inspect_scene", "arguments": "{}"
+        }}]
+    });
+    let server = MockLlm::start_sequence(
+        vec![
+            serde_json::json!({"choices": [{"message": assistant, "finish_reason": "tool_calls"}]})
+                .to_string(),
+            serde_json::json!({"choices": [{"message": {"role": "assistant", "content": "done"}}]})
+                .to_string(),
+        ],
+        true,
+    );
+    let client = client(&server.base_url);
+    let mut messages = vec![Message::user("inspect")];
+    let first = client.chat(&messages).expect("first actual HTTP round");
+    let mut replay = Message::assistant(first.text);
+    replay.tool_calls = Some(first.assistant_message["tool_calls"].clone());
+    messages.push(replay);
+    messages.push(Message::tool_result("call_inspect", "{\"ok\":true}"));
+    assert_eq!(client.chat(&messages).unwrap().text, "done");
+    server
+        .next_request(Duration::from_secs(5))
+        .expect("first request");
+    let second: serde_json::Value = serde_json::from_str(
+        &server
+            .next_request(Duration::from_secs(5))
+            .expect("second request"),
+    )
+    .unwrap();
+    assert_eq!(second["messages"][1], assistant);
+    assert_eq!(
+        second["messages"][2],
+        serde_json::json!({"role": "tool", "content": "{\"ok\":true}", "tool_call_id": "call_inspect"})
+    );
+    assert_eq!(Message::assistant("").to_json()["content"], "");
+    let mut with_text = Message::assistant("checking");
+    with_text.tool_calls = Some(assistant["tool_calls"].clone());
+    assert_eq!(with_text.to_json()["content"], "checking");
+}
+
+#[test]
+fn chat_null_content_without_valid_tool_calls_is_rejected_over_http() {
+    for calls in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!([{"type": "function", "function": {"name": "spawn", "arguments": "{}"}}]),
+    ] {
+        let response = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": calls}}]
+        });
+        let server = MockLlm::start_raw(&response.to_string());
+        let error = client(&server.base_url)
+            .chat_with_tools(&[Message::user("add a cube")], None)
+            .expect_err("null content without an identifiable tool call must remain an error");
+        assert_eq!(error.kind, "parse");
+        assert!(!error.message.is_empty());
+        assert!(server.next_request(Duration::from_secs(5)).is_some());
+    }
+}
+
+#[test]
+fn tool_call_strict_arguments_reject_malformed_and_nonobject_without_fallback() {
+    use quench3d_cli::llm::ToolCall;
+    for arguments in ["{broken", "null", "[]", "42", "\"text\""] {
+        let call = ToolCall {
+            id: "call_bad".into(),
+            name: "spawn".into(),
+            arguments: arguments.into(),
+        };
+        let error = call
+            .try_args()
+            .expect_err("invalid arguments must never become an executable empty object");
+        assert_eq!(error.kind, "parse");
+        assert!(error.message.contains("call_bad") && error.message.contains("spawn"));
+        if arguments == "{broken" {
+            assert_eq!(call.args(), serde_json::json!({}));
+        }
+    }
+    let call = ToolCall {
+        id: "call_ok".into(),
+        name: "inspect".into(),
+        arguments: "{\"revision\":3}".into(),
+    };
+    assert_eq!(call.try_args().unwrap(), serde_json::json!({"revision": 3}));
+}
+
+#[test]
+fn shared_response_parser_preserves_legacy_text_and_rejects_missing_content() {
+    use quench3d_cli::llm::parse_chat_response;
+    let legacy =
+        parse_chat_response(r#"{"choices":[{"text":"legacy reply"}]}"#, "fallback").unwrap();
+    assert_eq!(legacy.text, "legacy reply");
+    assert_eq!(legacy.model, "fallback");
+    assert_eq!(legacy.assistant_message["content"], "legacy reply");
+    assert!(
+        parse_chat_response(r#"{"choices":[{"message":{"content":42}}]}"#, "fallback").is_err()
+    );
+    assert_eq!(
+        parse_chat_response(r#"{"error":{"message":"quota exhausted"}}"#, "fallback")
+            .unwrap_err()
+            .kind,
+        "http"
+    );
+}
+
+#[test]
 fn chat_decodes_chunked_responses() {
     let server = MockLlm::start_with("分块也能读".to_string(), 200, true);
     let outcome = client(&server.base_url)

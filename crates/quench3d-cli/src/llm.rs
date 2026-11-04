@@ -241,6 +241,9 @@ impl Message {
     pub fn to_json(&self) -> serde_json::Value {
         let mut v = serde_json::json!({ "role": self.role, "content": self.content });
         if let Some(calls) = &self.tool_calls {
+            if self.role == "assistant" && self.content.is_empty() {
+                v["content"] = serde_json::Value::Null;
+            }
             v["tool_calls"] = calls.clone();
         }
         if let Some(id) = &self.tool_call_id {
@@ -262,6 +265,23 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    /// 严格解析工具参数；只有 JSON 对象才可交给工具执行。
+    pub fn try_args(&self) -> Result<serde_json::Value, LlmError> {
+        let value: serde_json::Value = serde_json::from_str(&self.arguments).map_err(|e| {
+            LlmError::parse(format!(
+                "工具调用 {} ({}) 参数不是合法 JSON: {e}",
+                self.id, self.name
+            ))
+        })?;
+        if !value.is_object() {
+            return Err(LlmError::parse(format!(
+                "工具调用 {} ({}) 参数必须是 JSON 对象",
+                self.id, self.name
+            )));
+        }
+        Ok(value)
+    }
+
     /// 解析参数；不合法时退化成空对象，让工具自己报参数错误。
     pub fn args(&self) -> serde_json::Value {
         serde_json::from_str(&self.arguments).unwrap_or_else(|_| serde_json::json!({}))
@@ -346,71 +366,7 @@ impl LlmClient {
             Duration::from_secs(self.config.timeout_secs),
         )?;
 
-        let value: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| LlmError::parse(format!("响应不是合法 JSON: {e}")))?;
-
-        if let Some(err) = value.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or_else(|| err.as_str().unwrap_or("未知错误"));
-            return Err(LlmError::http(format!("模型服务返回错误: {msg}"))
-                .with_hint("检查 base_url / model 名 / API Key 是否正确（本地服务不需要 Key）"));
-        }
-
-        let text = value
-            .pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .or_else(|| value.pointer("/choices/0/text").and_then(|c| c.as_str()))
-            .ok_or_else(|| {
-                LlmError::parse("响应里没有 choices[0].message.content".to_string())
-                    .with_hint("该服务可能不是 OpenAI 兼容协议")
-            })?
-            .to_string();
-
-        let assistant_message = value
-            .pointer("/choices/0/message")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({ "role": "assistant", "content": text }));
-        let tool_calls = assistant_message
-            .get("tool_calls")
-            .and_then(|c| c.as_array())
-            .map(|calls| {
-                calls
-                    .iter()
-                    .filter_map(|c| {
-                        Some(ToolCall {
-                            id: c.get("id")?.as_str()?.to_string(),
-                            name: c.pointer("/function/name")?.as_str()?.to_string(),
-                            arguments: c
-                                .pointer("/function/arguments")
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("{}")
-                                .to_string(),
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        Ok(ChatOutcome {
-            text,
-            model: value
-                .get("model")
-                .and_then(|m| m.as_str())
-                .unwrap_or(&self.config.model)
-                .to_string(),
-            total_tokens: value
-                .pointer("/usage/total_tokens")
-                .and_then(|t| t.as_u64()),
-            raw,
-            tool_calls,
-            assistant_message,
-            finish_reason: value
-                .pointer("/choices/0/finish_reason")
-                .and_then(|f| f.as_str())
-                .map(|s| s.to_string()),
-        })
+        parse_chat_response(&raw, &self.config.model)
     }
 
     /// 发一轮对话并解析出 JSON。
@@ -871,4 +827,87 @@ mod tests {
             r#"{"a": "}{ not a brace", "b": 1}"#
         );
     }
+}
+
+/// 解析 OpenAI 兼容响应；原生 HTTP 和浏览器传输共享同一工具调用规则。
+pub fn parse_chat_response(raw: &str, fallback_model: &str) -> Result<ChatOutcome, LlmError> {
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| LlmError::parse(format!("响应不是合法 JSON: {e}")))?;
+
+    if let Some(err) = value.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or_else(|| err.as_str().unwrap_or("未知错误"));
+        return Err(LlmError::http(format!("模型服务返回错误: {msg}"))
+            .with_hint("检查 base_url / model 名 / API Key 是否正确（本地服务不需要 Key）"));
+    }
+
+    let assistant_message = value
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "role": "assistant", "content": value.pointer("/choices/0/text").and_then(|v| v.as_str()).unwrap_or("") }));
+    let tool_calls = assistant_message
+        .get("tool_calls")
+        .and_then(|c| c.as_array())
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|c| {
+                    let id = c.get("id")?.as_str()?;
+                    let name = c.pointer("/function/name")?.as_str()?;
+                    if id.trim().is_empty()
+                        || name.trim().is_empty()
+                        || c.get("type")?.as_str()? != "function"
+                    {
+                        return None;
+                    }
+                    Some(ToolCall {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        arguments: c
+                            .pointer("/function/arguments")
+                            .and_then(|a| a.as_str())?
+                            .to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let text = value
+        .pointer("/choices/0/message/content")
+        .and_then(|c| c.as_str())
+        .or_else(|| value.pointer("/choices/0/text").and_then(|c| c.as_str()))
+        .or_else(|| {
+            (value
+                .pointer("/choices/0/message/content")
+                .is_some_and(serde_json::Value::is_null)
+                && !tool_calls.is_empty())
+            .then_some("")
+        })
+        .ok_or_else(|| {
+            LlmError::parse("响应里没有 choices[0].message.content".to_string())
+                .with_hint("该服务可能不是 OpenAI 兼容协议")
+        })?
+        .to_string();
+
+    Ok(ChatOutcome {
+        text,
+        model: value
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or(fallback_model)
+            .to_string(),
+        total_tokens: value
+            .pointer("/usage/total_tokens")
+            .and_then(|t| t.as_u64()),
+        raw: raw.to_string(),
+        tool_calls,
+        assistant_message,
+        finish_reason: value
+            .pointer("/choices/0/finish_reason")
+            .and_then(|f| f.as_str())
+            .map(|s| s.to_string()),
+    })
 }
