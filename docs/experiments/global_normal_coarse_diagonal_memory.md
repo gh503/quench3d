@@ -1,0 +1,32 @@
+# Coarse plus diagonal preconditioner with direction memory proposal
+
+Round208 read-onlyproposalafter207AdenseHrejected/restoredexact205fivehashesPASS. 20512cost1.421497FAILisrealperformancered. No implementationyet.
+
+CandidateCpreconditionerP=F D^-1 F+F B T^-1 Bᵀ F,retainingdiagonal+forcecoarseand190conjugatedirectionmemory,removinglocaltorqueadditiononly. Validpreparedcontactsk_normal>0,soD^-1strictlypositiveonfreecoordinates;acceptedfullgeometryTusesexistingSPDLDLpivotguard. CoarseaddendPSD,thereforePpositive-definiteonfree-subspace. Invalidchainignoredasbefore,diagonalalonepreservesdescentfallback. CandidateBforce+torquewithoutDcouldhavecheckerboard/nullspaceandislessrobust;notrecommendedfirst.
+
+KeepactualJ M^-1 Jᵀ/currentAp,freshfriction/gradient,memoryreset/freeactiveboundary/line/fallback/rolling/scheduled20roundsunchanged. No layerconditionalroute/sleep/material/geometry/slopthresholdchanges. OmitlocalQR/inverse/setupandlocalRHS/scatter;normalendpointforcecacheandfirstsortedgroupsstillneeded. Historical188force-onlylacked190directionmemory,soearliernegativeevidencecannotdecidethisnewcombination. Onlynewfull4/12/32×1800precisioncanacceptorreject;anyfailurearchive/restore205before193/192/cost. Defaultfalseunchanged.
+
+Possiblelocalsetup/applicationcostsavinglimitedhistoricalphasebudgets;no assuranceclosingwhole15%gap. Naturallychangedtrajectory/sleeptimeisvalidphysicaloutputonlyafterall1800stepsindependentSATpasses—nota reasonadjustsleepthreshold. LeadformallyauthorizedimplementationafterSPD/fallbackproof. Actualcandidateomitsalllocalsetup/apply;cfgtesthistorical_localswitchretainsold20540roundbitfixturewitholdalgorithmexplicitly,notnew208bitidentity. Newactual7mask×9probeSPD/referencecomposefixtureexercisesdiag+forceonly. Actualsetupcounterexpected[1,1,0,<=20]reflectsintentionalfeatureomission,not195threefactoronceclaim. Mainproductionunchanged.
+
+## Actual validation and cost
+
+Firstjob bash-0cb0541b1fae4ddc formallycollected101,compile56.74s:7mathpassed,SPDfixturewronglyassertedstrictpositiveenergyforzerovector(mask1/probe0sin0);historical198kernelcounttestcallednewactualgeometryandexpected32whilelocalfeatureomittedproduced0. Correctedtestnonzeroprobephase+.17andexplicitlyenabledhistorical_localonlyinoldkerneloncefixture;productionalgorithmunchanged. Secondjob bash-6cf0b9669eff4dcb formallycollected101:8passed/1newreferencefailedbecausefixtureaddeddiagonaltochain_preconditionwhichalreadyincludesdiagonal(solver3091). Correctedexpectedtooldforce+diagonalimplementationdirectly;no tolerancelooseningorproductionchange. Thesearetestauthoringerrors,notphysicalalgorithmreds. Allinitiallogs/patchversionspreserved.
+
+Finalarchive[global_normal_coarse_diagonal_memory.patch](../../tools/experiments/global_normal_coarse_diagonal_memory.patch),SHA256 `f758c89343c78260b21484107171763a5963c463d9de7c5aef253eae8df47004`,incrementalagainst205,applycheck0. Thirdjob bash-81a20ee2b2d14d27 formallycollected0:math9including7masks9nonzeroprobesoldforce+diagonalreference(notindependentdenseoracle)andpositiveenergy;history40bitsusesold205localtestmode;actualsetup[1,1,0,20]. Direction2/local1/projection2PASS. Full5400precisionPASS1.11s:
+
+|Layers|Pair peak mm|Finitefloor peak mm|Firstallsleep|Outside samples|
+|---:|---:|---:|---:|---:|
+|4|1.374530630|1.233034021|33|0|
+|12|1.741904440|1.352014139|234|0|
+|32|1.537665949|1.030870790|39|0|
+
+Followup bash-5caff01de7724c60 formallycollected0:193full1240states/931616648bytesPASS4.59s;192threevariants1800paired/1800actualparallel/maxthreads2/hardware4eachPASS62.05s.
+
+Onlyafterallcompatibilitypasses,unchangedcost195exampleSHAa2d02863c9b35f5f27abe6d04fd895e348b692ae79e344283fd22b920bc21f97sameproductionreleasebinary/W8M120/fivefixedalternatingABBAtrials. Job bash-ca9fc774ddc7467e formallycollectedexit1,compile8.69s:
+
+|Layers|Legacy median s|Candidate median s|Ratio|Limit|Result|
+|---:|---:|---:|---:|---:|---|
+|12|.018902366|.023699625|1.253791|1.15|FAIL|
+|32|.051162603|.017409022|.340268|1.15|PASS|
+
+12candidateobservablylowerthan205.027477852inseparatemeasurementsets,notpairedstatisticalproof. Same-run12allowedtime.021737721s leaves.001961904sgap;goalNOTcomplete/no shippingclaim. Leadexplicitlyretainscandidate208asthenextoptimizationbaselinewhilethecostgateremainsunmet;nosleep/material/iteration/geometrychanges. Fullrawtrials/source3/costhashes/status/binarymanifestunder /home/gh503/Documents/infra-dev/quench3d/target/tmp/round208-coarse-diagonal/. Mainproductionunchanged/alljobscollected/no runningbuilder.

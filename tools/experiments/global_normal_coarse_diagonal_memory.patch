@@ -1,0 +1,269 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1846,6 +1846,7 @@
+         let mut reference_cs = cs.clone();
+         let mut reference_vs = vs.clone();
+         let mut state = NormalSolveState::default();
++        state.geometry.historical_local = true;
+         let mut memory = NormalDirectionMemory::default();
+         let mut warmed = None;
+         for step in 0..2 {
+@@ -1938,6 +1939,7 @@
+         }
+         LOCAL_KERNEL_CALLS.with(|c| c.set(0));
+         let mut geometry = NormalGeometry::default();
++        geometry.historical_local = true;
+         geometry.build(&cs, &vs);
+         let n = LOCAL_KERNEL_CALLS.with(|c| c.get());
+         println!("ROUND198 actual_matching_endpoint_kernels={n}");
+@@ -1993,6 +1995,47 @@
+     }
+ 
+     #[test]
++    fn global_normal_coarse_diagonal_spd_masked() {
++        let mut vs = vec![BodyView::frozen(); 4];
++        vs[0].is_static = true;
++        for v in &mut vs[1..] {
++            v.inv_m = 1.0;
++            v.inv_i_world_mat = Mat3::IDENTITY;
++        }
++        let mut cs = Vec::new();
++        for edge in 0..3 {
++            let mut c = contact(edge, edge + 1, 0);
++            c.k_normal = 2.0;
++            cs.push(c);
++        }
++        let mut geometry = NormalGeometry::default();
++        geometry.build(&cs, &vs);
++        assert!(geometry.locals.is_empty());
++        for mask in 1..8 {
++            let free: Vec<_> = (0..3).map(|i| mask & (1 << i) != 0).collect();
++            for probe in 0..9 {
++                let r: Vec<_> = (0..3)
++                    .map(|i| {
++                        if free[i] {
++                            (0.17 + (i * 7 + probe * 3) as f64 * 0.37).sin()
++                        } else {
++                            0.0
++                        }
++                    })
++                    .collect();
++                let actual = geometry.apply(&cs, &vs, &r, &free).clone();
++                let expected = chain_precondition(&cs, &vs, &r, &free);
++                for (a, b) in actual.iter().zip(expected) {
++                    assert!((a - b).abs() < 1e-12 * a.abs().max(b.abs()).max(1.0));
++                }
++                let energy = r.iter().zip(&actual).map(|(a, b)| a * b).sum::<f64>();
++                assert!(energy > 0.0);
++            }
++        }
++        println!("ROUND208 SPD maskeddiag+coarse 7masks9probes PASS");
++    }
++
++    #[test]
+     fn global_normal_setup_once_per_substep() {
+         let mut vs = vec![BodyView::frozen(); 4];
+         vs[0].is_static = true;
+@@ -2024,7 +2067,7 @@
+         println!("ROUND195 actual_geometry_force_local_ap={counts:?}");
+         assert_eq!(counts[0], 1);
+         assert_eq!(counts[1], 1);
+-        assert_eq!(counts[2], 3);
++        assert_eq!(counts[2], 0, "208 omits local torque factors");
+         assert!(counts[3] <= 20);
+     }
+ 
+@@ -3811,6 +3854,8 @@
+ }
+ #[derive(Default, Clone, Debug)]
+ struct NormalGeometry {
++    #[cfg(test)]
++    historical_local: bool,
+     ready: bool,
+     endpoint: Vec<NormalEndpoint>,
+     chains: Vec<CachedForceChain>,
+@@ -3954,53 +3999,59 @@
+                 rhs: vec![0.0; n],
+             });
+         }
+-        for (_, points) in &edges {
+-            if points.iter().any(|i| cs[*i].normal != cs[points[0]].normal) {
+-                continue;
+-            }
+-            let basis = wrench_basis(cs, points);
+-            let rank = basis.len().saturating_sub(1);
+-            #[cfg(test)]
+-            global_note(format!(
+-                "local_pair={},{} local_rank={rank}",
+-                cs[points[0]].a, cs[points[0]].b
+-            ));
+-            if rank == 0 {
+-                continue;
+-            }
+-            let kernel = LocalKernelCache::build_shared(points, cs, vs, &self.endpoint);
+-            let mut ordered = [[0.0; 3]; 3];
+-            for a in 0..rank {
+-                for b in 0..rank {
+-                    ordered[a][b] = kernel.weighted(&basis[a + 1], &basis[b + 1]);
+-                }
+-            }
+-            let mut matrix = [[0.0; 3]; 3];
+-            for a in 0..rank {
+-                for b in 0..rank {
+-                    matrix[a][b] = 0.5 * (ordered[a][b] + ordered[b][a]);
+-                }
+-            }
+-            let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
+-            #[cfg(test)]
+-            NORMAL_SETUP_COUNTS.with(|c| {
+-                let mut n = c.get();
+-                n[2] += 1;
+-                c.set(n);
+-            });
+-            let Some(inverse) = small_spd_inverse(matrix, rank, scale) else {
++        #[cfg(test)]
++        let build_local = self.historical_local;
++        #[cfg(not(test))]
++        let build_local = false;
++        if build_local {
++            for (_, points) in &edges {
++                if points.iter().any(|i| cs[*i].normal != cs[points[0]].normal) {
++                    continue;
++                }
++                let basis = wrench_basis(cs, points);
++                let rank = basis.len().saturating_sub(1);
+                 #[cfg(test)]
+-                global_note("local_status=badpivot");
+-                continue;
+-            };
+-            #[cfg(test)]
+-            global_note("local_status=accepted");
+-            self.locals.push(CachedLocal {
+-                points: points.clone(),
+-                basis,
+-                inverse,
+-                rank,
+-            });
++                global_note(format!(
++                    "local_pair={},{} local_rank={rank}",
++                    cs[points[0]].a, cs[points[0]].b
++                ));
++                if rank == 0 {
++                    continue;
++                }
++                let kernel = LocalKernelCache::build_shared(points, cs, vs, &self.endpoint);
++                let mut ordered = [[0.0; 3]; 3];
++                for a in 0..rank {
++                    for b in 0..rank {
++                        ordered[a][b] = kernel.weighted(&basis[a + 1], &basis[b + 1]);
++                    }
++                }
++                let mut matrix = [[0.0; 3]; 3];
++                for a in 0..rank {
++                    for b in 0..rank {
++                        matrix[a][b] = 0.5 * (ordered[a][b] + ordered[b][a]);
++                    }
++                }
++                let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
++                #[cfg(test)]
++                NORMAL_SETUP_COUNTS.with(|c| {
++                    let mut n = c.get();
++                    n[2] += 1;
++                    c.set(n);
++                });
++                let Some(inverse) = small_spd_inverse(matrix, rank, scale) else {
++                    #[cfg(test)]
++                    global_note("local_status=badpivot");
++                    continue;
++                };
++                #[cfg(test)]
++                global_note("local_status=accepted");
++                self.locals.push(CachedLocal {
++                    points: points.clone(),
++                    basis,
++                    inverse,
++                    rank,
++                });
++            }
+         }
+         self.ready = true;
+     }
+@@ -4055,40 +4106,46 @@
+                 }
+             }
+         }
+-        self.out.clear();
+-        self.out.resize(cs.len(), 0.0);
+-        for local in &self.locals {
+-            let CachedLocal {
+-                points,
+-                basis,
+-                inverse,
+-                rank,
+-            } = local;
+-            let mut rhs = [0.0; 3];
+-            for a in 0..*rank {
+-                rhs[a] = points
+-                    .iter()
+-                    .enumerate()
+-                    .filter(|(_, i)| free[**i])
+-                    .map(|(j, i)| basis[a + 1][j] * r[*i])
+-                    .sum();
+-            }
+-            let mut x = [0.0; 3];
+-            for a in 0..*rank {
+-                for b in 0..*rank {
+-                    x[a] += inverse[a][b] * rhs[b];
+-                }
+-            }
+-            for (j, i) in points.iter().enumerate() {
+-                if free[*i] {
+-                    for a in 0..*rank {
+-                        self.out[*i] += basis[a + 1][j] * x[a];
++        #[cfg(test)]
++        let apply_local = self.historical_local;
++        #[cfg(not(test))]
++        let apply_local = false;
++        if apply_local {
++            self.out.clear();
++            self.out.resize(cs.len(), 0.0);
++            for local in &self.locals {
++                let CachedLocal {
++                    points,
++                    basis,
++                    inverse,
++                    rank,
++                } = local;
++                let mut rhs = [0.0; 3];
++                for a in 0..*rank {
++                    rhs[a] = points
++                        .iter()
++                        .enumerate()
++                        .filter(|(_, i)| free[**i])
++                        .map(|(j, i)| basis[a + 1][j] * r[*i])
++                        .sum();
++                }
++                let mut x = [0.0; 3];
++                for a in 0..*rank {
++                    for b in 0..*rank {
++                        x[a] += inverse[a][b] * rhs[b];
+                     }
+                 }
+-            }
+-        }
+-        for (z, local) in self.z.iter_mut().zip(self.out.iter()) {
+-            *z += local;
++                for (j, i) in points.iter().enumerate() {
++                    if free[*i] {
++                        for a in 0..*rank {
++                            self.out[*i] += basis[a + 1][j] * x[a];
++                        }
++                    }
++                }
++            }
++            for (z, local) in self.z.iter_mut().zip(self.out.iter()) {
++                *z += local;
++            }
+         }
+         &self.z
+     }
