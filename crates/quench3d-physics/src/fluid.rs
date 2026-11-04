@@ -179,6 +179,17 @@ pub enum FluidSeparationMode {
     /// Opt in to bounded boundary-constrained pair corrections.
     /// Requires particle collision and swept primitive or mesh collision.
     BoundaryConstrained,
+    #[cfg(test)]
+    GlobalHalfspaceExperimental,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ExperimentalSeparationStatus {
+    #[default]
+    NotRun,
+    StubUncertified,
+    Certified,
 }
 
 /// Temporal motion policy for rigid liquid boundaries.
@@ -978,6 +989,8 @@ pub struct FoamParticle {
 #[derive(Clone, Debug)]
 pub struct Fluid {
     desc: FluidDesc,
+    #[cfg(test)]
+    experimental_separation_status: ExperimentalSeparationStatus,
     positions: Vec<Vec3>,
     velocities: Vec<Vec3>,
     /// 本步预测位置（PBF 的位置迭代变量）。
@@ -1031,6 +1044,8 @@ impl Fluid {
         }
         let mut fluid = Self {
             desc,
+            #[cfg(test)]
+            experimental_separation_status: ExperimentalSeparationStatus::NotRun,
             positions: Vec::new(),
             velocities: Vec::new(),
             predicted: Vec::new(),
@@ -1282,6 +1297,22 @@ impl Fluid {
         index: Option<&SweepBodyIndex>,
         mesh_cache: Option<&MeshSweepCache>,
     ) {
+        #[cfg(test)]
+        if self.desc.separation_mode == FluidSeparationMode::GlobalHalfspaceExperimental {
+            // Stage-one stub: execute the actual old operator, not a second algorithm.
+            // Construction/copying is deliberately excluded from performance claims.
+            let mut baseline = Fluid::new(FluidDesc {
+                separation_mode: FluidSeparationMode::BoundaryConstrained,
+                ..self.desc.clone()
+            })
+            .expect("validated experimental fixture");
+            baseline.predicted = self.predicted.clone();
+            baseline.neighbors = self.neighbors.clone();
+            baseline.separate_particles(radius, bodies, bounds, index, mesh_cache);
+            self.predicted = baseline.predicted;
+            self.experimental_separation_status = ExperimentalSeparationStatus::StubUncertified;
+            return;
+        }
         let min_dist = 2.0 * radius;
         if min_dist <= 0.0 {
             return;
@@ -12400,6 +12431,11 @@ mod tests {
     #[test]
     #[ignore = "unmet diameter-level separation target in the fixed sealed 125-particle fixture"]
     fn sealed_container_diameter_separation_target() {
+        let failures = sealed_container_separation_goal(FluidSeparationMode::BoundaryConstrained);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    fn sealed_container_separation_goal(mode: FluidSeparationMode) -> Vec<String> {
         let dt = 1.0 / 60.0;
         let mut world = PhysicsWorld::with_gravity(vec3(0.0, -9.81, 0.0));
         world.set_fixed_dt(dt);
@@ -12423,7 +12459,7 @@ mod tests {
             initial_velocity: vec3(0.15, 0.0, -0.1),
             particle_collision: true,
             collision_mode: FluidCollisionMode::SweptMeshes,
-            separation_mode: FluidSeparationMode::BoundaryConstrained,
+            separation_mode: mode,
             ..FluidDesc::default()
         };
         assert_eq!(desc.iterations, 4);
@@ -12441,6 +12477,7 @@ mod tests {
         let mut pair_samples = 0usize;
         let mut contacts = 0usize;
         let mut density_nonzero = 0usize;
+        let mut uncertified = 0usize;
         SEPARATION_PUSHES.with(|n| n.set(0));
         for step in 1..=120 {
             MESH_DENSITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
@@ -12448,6 +12485,11 @@ mod tests {
             let trace = MESH_DENSITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
             density_nonzero += trace.iter().filter(|(_, a, b, _)| a != b).count();
             let fluid = &world.fluids()[0];
+            if mode == FluidSeparationMode::GlobalHalfspaceExperimental
+                && fluid.experimental_separation_status != ExperimentalSeparationStatus::Certified
+            {
+                uncertified += 1;
+            }
             let positions = fluid.particles();
             let velocities = fluid.velocities();
             if (world.step_count != step
@@ -12512,8 +12554,208 @@ mod tests {
             contacts > 0 && pushes > 0 && density_nonzero > 0,
             "non-vacuous solver work"
         );
-        assert!(invariant_failure.is_none(), "{invariant_failure:?}");
-        assert!(first_bad_pair.is_none(), "diameter separation unmet: target={target:.12} first={first_bad_pair:?} worst={worst:?}");
+        let mut failures = Vec::new();
+        if let Some(failure) = invariant_failure {
+            failures.push(failure);
+        }
+        if let Some(first) = first_bad_pair {
+            failures.push(format!(
+                "diameter separation unmet: target={target:.12} first={first:?} worst={worst:?}"
+            ));
+        }
+        if uncertified > 0 {
+            failures.push(format!(
+                "mode={mode:?} uncertified_attempts={uncertified}/120"
+            ));
+        }
+        println!("GLOBAL_SEALED mode={mode:?} completed_steps={} uncertified={uncertified} failures={failures:?}", world.step_count);
+        failures
+    }
+
+    // Test-only algebra entrypoint; stage one intentionally has no solver.
+    fn global_halfspace_218_algebra_stub(_rows: &[(Vec<f64>, f64)]) -> Option<Vec<f64>> {
+        None
+    }
+
+    #[test]
+    #[ignore = "registered algebra goal; no global solver implemented"]
+    fn global_halfspace_218_dense_algebra_targets() {
+        // Independent two-variable active-subset enumeration, not dual iteration.
+        fn dense_oracle(rows: &[(Vec<f64>, f64)]) -> Option<[f64; 2]> {
+            let feasible = |x: [f64; 2]| {
+                rows.iter()
+                    .all(|(a, b)| a[0] * x[0] + a[1] * x[1] >= b - 1e-10)
+            };
+            let mut candidates = vec![[0.0, 0.0]];
+            for (i, (a, b)) in rows.iter().enumerate() {
+                let aa = a[0] * a[0] + a[1] * a[1];
+                if aa > 0.0 {
+                    candidates.push([a[0] * b / aa, a[1] * b / aa]);
+                }
+                for (c, d) in &rows[i + 1..] {
+                    let determinant = a[0] * c[1] - a[1] * c[0];
+                    if determinant.abs() > 1e-12 {
+                        candidates.push([
+                            (b * c[1] - a[1] * d) / determinant,
+                            (a[0] * d - b * c[0]) / determinant,
+                        ]);
+                    }
+                }
+            }
+            candidates
+                .into_iter()
+                .filter(|&x| feasible(x))
+                .min_by(|a, b| (a[0] * a[0] + a[1] * a[1]).total_cmp(&(b[0] * b[0] + b[1] * b[1])))
+        }
+        let cases = [
+            (
+                "equal_pair",
+                vec![(vec![-1.0, 1.0], 0.02)],
+                Some([-0.01, 0.01]),
+            ),
+            (
+                "unequal_pair",
+                vec![(vec![-1.0, 0.5], 0.02)],
+                Some([-0.016, 0.008]),
+            ),
+            ("slack", vec![(vec![-1.0, 1.0], -0.02)], Some([0.0, 0.0])),
+            (
+                "floor_pair",
+                vec![(vec![-1.0, 1.0], 0.02), (vec![1.0, 0.0], 0.0)],
+                Some([0.0, 0.02]),
+            ),
+            (
+                "redundant",
+                vec![(vec![-1.0, 1.0], 0.02), (vec![-1.0, 1.0], 0.02)],
+                Some([-0.01, 0.01]),
+            ),
+            (
+                "inconsistent",
+                vec![(vec![1.0, 0.0], 1.0), (vec![-1.0, 0.0], 1.0)],
+                None,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, rows, expected) in cases {
+            let oracle = dense_oracle(&rows);
+            assert_eq!(oracle.is_some(), expected.is_some());
+            if let (Some(actual), Some(expected)) = (oracle, expected) {
+                for axis in 0..2 {
+                    assert!((actual[axis] - expected[axis]).abs() < 1e-10);
+                }
+                if name == "unequal_pair" {
+                    // y=(sqrt(1)*delta_a,sqrt(4)*delta_b).
+                    assert!((actual[0] + 4.0 * actual[1] / 2.0).abs() < 1e-10);
+                }
+            }
+            let candidate = global_halfspace_218_algebra_stub(&rows);
+            println!("GLOBAL_ALGEBRA name={name} oracle={oracle:?} candidate={candidate:?}");
+            if let Some(reference) = oracle {
+                match candidate {
+                    Some(x)
+                        if x.len() == 2
+                            && (x[0] - reference[0]).abs() <= 1e-7
+                            && (x[1] - reference[1]).abs() <= 1e-7 => {}
+                    _ => failures.push(format!(
+                        "{name}: missing/incorrect candidate, oracle={reference:?}"
+                    )),
+                }
+            } else {
+                assert!(candidate.is_none());
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "algebra stub only, not physical red: {}",
+            failures.join("; ")
+        );
+    }
+
+    #[test]
+    #[ignore = "registered experimental global separation precision target; stub is uncertified"]
+    fn global_halfspace_218_physical_targets() {
+        fn distance(a: Vec3, b: Vec3) -> f64 {
+            a.to_array()
+                .into_iter()
+                .zip(b.to_array())
+                .map(|(x, y)| (f64::from(x) - f64::from(y)).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        }
+        let physical = [
+            vec3(0.0, 1.0, 0.0),
+            vec3(0.06, 1.0, 0.0),
+            vec3(0.12, 1.0, 0.0),
+        ];
+        let radius = 0.04f32;
+        let target = 2.0 * f64::from(radius) - 1e-4;
+        let mut failures = Vec::new();
+        let mut completed = 0;
+        // Isolated control and both orders all execute before the final assertion.
+        for order in [vec![0usize, 1], vec![0usize, 1, 2], vec![2usize, 1, 0]] {
+            let initial: Vec<_> = order.iter().map(|&i| physical[i]).collect();
+            let n = initial.len();
+            let mut fluid = Fluid::new(FluidDesc {
+                initial_positions: Some(initial.clone()),
+                max_particles: n,
+                radius,
+                spacing: 0.1,
+                particle_collision: true,
+                collision_mode: FluidCollisionMode::SweptMeshes,
+                separation_mode: FluidSeparationMode::GlobalHalfspaceExperimental,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+            let mass = fluid.mass.to_bits();
+            let velocities = fluid.velocities.clone();
+            fluid.predicted = initial.clone();
+            fluid.neighbors = vec![Vec::new(); n];
+            let h = fluid.desc.smoothing_radius();
+            let grid = FluidGrid::new(&initial, h).unwrap();
+            for (i, neighbors) in fluid.neighbors.iter_mut().enumerate() {
+                grid.neighbors(&initial, i, h * h, neighbors);
+                assert_eq!(neighbors.len(), n - 1);
+                for j in 0..n {
+                    assert_eq!(neighbors.contains(&(j as u32)), i != j);
+                }
+            }
+            fluid.separate_particles(radius, &[], None, None, None);
+            assert_eq!(fluid.predicted.len(), n);
+            assert_eq!(fluid.positions, initial);
+            assert_eq!(fluid.mass.to_bits(), mass);
+            assert_eq!(fluid.velocities, velocities);
+            for axis in 0..3 {
+                let before: f64 = initial.iter().map(|p| f64::from(p[axis])).sum();
+                let after: f64 = fluid.predicted.iter().map(|p| f64::from(p[axis])).sum();
+                assert!((before - after).abs() <= 1e-6);
+            }
+            for p in &fluid.predicted {
+                assert!(p.is_finite());
+                assert!((f64::from(p.y) - 1.0).abs() <= 1e-6 && f64::from(p.z).abs() <= 1e-6);
+            }
+            for i in 0..n {
+                for j in i + 1..n {
+                    let measured = distance(fluid.predicted[i], fluid.predicted[j]);
+                    println!("GLOBAL_CHAIN order={order:?} physical_pair=({}, {}) distance={measured:.12} target={target:.12} status={:?}", order[i], order[j], fluid.experimental_separation_status);
+                    if measured < target {
+                        failures.push(format!("order={order:?} pair=({}, {}) distance={measured:.12} target={target:.12}", order[i], order[j]));
+                    }
+                }
+            }
+            if fluid.experimental_separation_status != ExperimentalSeparationStatus::Certified {
+                failures.push(format!(
+                    "order={order:?} status={:?}",
+                    fluid.experimental_separation_status
+                ));
+            }
+            completed += 1;
+        }
+        assert_eq!(completed, 3);
+        failures.extend(sealed_container_separation_goal(
+            FluidSeparationMode::GlobalHalfspaceExperimental,
+        ));
+        println!("GLOBAL_COMPLETED control=1 chains=2 sealed_steps=120 failures={failures:?}");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
