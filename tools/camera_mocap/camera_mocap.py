@@ -613,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--model-complexity", type=int, default=1, choices=[0, 1, 2])
+    ap.add_argument("--self-test-pose", action="store_true", help="用固定空白图像验证内置 full 人体模型，不访问摄像头")
+    ap.add_argument("--preview-only", action="store_true", help="仅采集画面，不初始化姿态/轮廓/深度推理（只需 OpenCV 与 numpy）")
     ap.add_argument("--no-display", action="store_true", help="不弹 OpenCV 预览窗口")
     ap.add_argument("--max-frames", type=int, default=0, help="跑 N 帧后退出；0 = 不限")
     ap.add_argument("--no-depth", action="store_true", help="关闭单目深度")
@@ -623,6 +625,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--download-depth-model", action="store_true")
     ap.add_argument("--no-mirror", action="store_true", help="不水平翻转画面（缺省镜像，像照镜子）")
     args = ap.parse_args(argv)
+
+    if args.self_test_pose:
+        estimator = PoseEstimator(model_complexity=1, static_image_mode=True)
+        try:
+            result = estimator.process(np.zeros((256, 256, 3), dtype=np.uint8))
+            print(json.dumps({
+                "ok": True, "backend": "mediapipe_pose", "model_complexity": 1,
+                "pose_present": result.present,
+            }, sort_keys=True))
+        finally:
+            estimator.close()
+        return 0
 
     if args.download_depth_model:
         download_depth_model(Path(args.depth_model))
@@ -641,7 +655,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pose_est: PoseEstimator | None = None
     depth_worker: DepthWorker | None = None
-    if args.source != "synthetic":
+    if args.source != "synthetic" and not args.preview_only:
         pose_est = PoseEstimator(args.model_complexity, static_image_mode=is_image)
         if not args.no_depth:
             try:
@@ -672,8 +686,10 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.no_mirror:
                     bgr = cv2.flip(bgr, 1)
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                assert pose_est is not None
-                pose = pose_est.process(rgb)
+                pose = (
+                    pose_est.process(rgb) if pose_est is not None
+                    else PoseResult([], [], False, 0.0, None)
+                )
                 silhouette = None
                 if pose.mask is not None:
                     silhouette = largest_contour_polygon(pose.mask)
@@ -694,6 +710,11 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.source == "synthetic":
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+            if args.preview_only:
+                pose = PoseResult([], [], False, 0.0, None)
+                silhouette = None
+                depth_u8, depth_lo, depth_hi = None, None, None
 
             points = None
             if not args.no_points and depth_u8 is not None:

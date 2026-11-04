@@ -14,6 +14,7 @@ dry=$(bash tools/package_release.sh --dry-run --out "$tmp/dry")
 grep -q 'quench3d' <<<"$dry"
 grep -q 'quench3d-editor' <<<"$dry"
 grep -q 'web/pkg' <<<"$dry"
+grep -q 'tools/camera_mocap' <<<"$dry"
 if [ -e "$tmp/dry" ]; then
   echo "FAIL dry-run 不应创建输出目录" >&2
   exit 1
@@ -21,7 +22,11 @@ fi
 
 cargo build --locked -p quench3d-cli -p quench3d-editor --bins
 
-bash tools/package_release.sh --debug --skip-build --out "$tmp/pkg"
+camera_args=()
+if [ -n "${CAMERA_WORKER_DIR:-}" ]; then
+  camera_args=(--camera-worker-dir "$CAMERA_WORKER_DIR")
+fi
+bash tools/package_release.sh --debug --skip-build "${camera_args[@]}" --out "$tmp/pkg"
 
 test -x "$tmp/pkg/bin/quench3d"
 test -x "$tmp/pkg/bin/quench3d-editor"
@@ -33,9 +38,22 @@ test -f "$tmp/pkg/SHA256SUMS"
 test -f "$tmp/pkg/README.md"
 test -f "$tmp/pkg/LICENSE-MIT"
 test -f "$tmp/pkg/LICENSE-APACHE"
+for resource in camera_mocap.py requirements.txt README.md; do
+  test -f "$tmp/pkg/tools/camera_mocap/$resource"
+  cmp "tools/camera_mocap/$resource" "$tmp/pkg/tools/camera_mocap/$resource"
+done
+
+if [ -n "${CAMERA_WORKER_DIR:-}" ]; then
+  test -x "$tmp/pkg/bin/quench3d-camera"
+  test -d "$tmp/pkg/bin/_internal"
+  test -f "$tmp/pkg/bin/camera-worker.json"
+  test -d "$tmp/pkg/bin/licenses"
+  env -u PYTHONPATH -u PYTHONHOME "$tmp/pkg/bin/quench3d-camera" --self-test-pose
+fi
 
 # 清单里的每个文件都必须存在，版本/提交/配置必须写对。
 python3 - "$tmp/pkg" <<'PY'
+import hashlib
 import json
 import os
 import sys
@@ -51,6 +69,12 @@ files = manifest["files"]
 assert files, "清单不能为空"
 assert any(p.startswith("bin/") for p in files), files
 assert any(p.startswith("web/pkg/") for p in files), files
+for resource in ("camera_mocap.py", "requirements.txt", "README.md"):
+    rel = f"tools/camera_mocap/{resource}"
+    assert rel in files, f"摄像头资源未进清单：{rel}"
+    with open(os.path.join(root, rel), "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    assert manifest["sha256"][rel] == digest, f"摄像头资源哈希不一致：{rel}"
 for rel in files:
     path = os.path.join(root, rel)
     assert os.path.isfile(path), f"清单列了不存在的文件：{rel}"

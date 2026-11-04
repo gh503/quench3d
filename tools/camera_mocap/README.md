@@ -15,6 +15,36 @@
 这是**单帧单人的参考实现**，不是产品级动作捕捉：没有 SMPL/SMPL-X 体型、没有
 多相机/多人体、没有米制深度、没有时间同步/IMU 融合、没有 TSDF 网格重建。
 
+## 发行包中的普通摄像头预览
+
+附带摄像头运行时的 Linux x86_64 包提供 `bin/quench3d-camera` 和同级 `_internal`，
+内含 Python、OpenCV、MediaPipe 及 full 人体模型，无需用户安装 Python 或运行 pip。
+解压后保留目录结构，直接启动 `bin/quench3d-editor`。在摄像头面板选择设备并点击启动，
+默认只预览画面；需要骨架和轮廓时，停止采集、勾选“人体识别”再启动，使用包内 full 模型。
+该构建在 Ubuntu 22.04 / glibc 2.35
+验证，仍需要系统图形/摄像头驱动；未验证 Windows、macOS 或更旧 Linux。
+`bin/camera-worker.json` 记录构建工具、依赖来源及人体模型哈希；原始许可材料在 `bin/licenses`。
+MiDaS 深度模型和 lite/heavy 人体模型不随包提供。
+
+只附带源码的发行包包含本目录的采集脚本、`requirements.txt` 和本文档，需要已有 Python 环境。
+桌面编辑器的摄像头按钮默认使用 `--preview-only` 启动画面预览：只需 Python 3、OpenCV 和 numpy，
+不初始化 MediaPipe 或深度推理；此时协议中的姿态、轮廓、深度和点云均标记为未提供。
+缺少 Python/采集依赖或启动失败时，编辑器摄像头面板会显示错误，不会自动执行 pip 安装。
+
+在发行包根目录准备 `.venv` 或 `venv`，或用 `QUENCH3D_CAMERA_PYTHON` 指向已有 Python
+解释器；之后启动 `bin/quench3d-editor`，在编辑器中启动摄像头即可。解释器会优先按环境变量、
+包内虚拟环境、开发树虚拟环境及系统 PATH 顺序查找，采集脚本位置不依赖启动时的工作目录。
+需要命令行验证时，可以从包根目录执行：
+
+```bash
+QUENCH3D_CAMERA_PYTHON=/path/to/python bin/quench3d-editor
+# 同一解释器手动采集画面（不运行人体识别）
+/path/to/python tools/camera_mocap/camera_mocap.py --preview-only --source 0
+```
+
+不加 `--preview-only` 的命令行仍使用原有动捕流程，需要完整 `requirements.txt` 中的
+MediaPipe 等依赖；深度模型保持可选，不随发行包提供。以下安装和动捕说明适用于该流程。
+
 ## 1. 安装
 
 不要用系统 Python 的旧 OpenCV。建一个 venv：

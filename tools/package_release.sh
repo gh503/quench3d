@@ -6,8 +6,10 @@
 #   tools/package_release.sh --debug         # 调试二进制（门禁用）
 #   tools/package_release.sh --dry-run       # 只打印计划，不构建、不落盘
 #   tools/package_release.sh --out DIR       # 指定输出目录（必须不存在）
+#   tools/package_release.sh --camera-worker-dir target/camera-worker/quench3d-camera # 附带冻结采集运行时
 #
 # 包内容：bin/quench3d、bin/quench3d-editor、web/pkg/*、README/CHANGELOG/LICENSE、
+# tools/camera_mocap/{camera_mocap.py,requirements.txt,README.md}、
 # manifest.json（版本/提交/文件大小）与 SHA256SUMS。wasm 额外生成 Brotli
 # `.br` 供静态服务器协商；没有 wasm-opt，也不生成平台安装器。
 set -euo pipefail
@@ -18,10 +20,15 @@ OUT=""
 PROFILE=release
 SKIP_BUILD=0
 DRY_RUN=0
+CAMERA_WORKER_DIR=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out)
       OUT=${2:-}
+      shift 2
+      ;;
+    --camera-worker-dir)
+      CAMERA_WORKER_DIR=${2:?--camera-worker-dir 需要冻结程序目录}
       shift 2
       ;;
     --debug)
@@ -73,6 +80,10 @@ printf '  提交：%s\n' "$commit"
 printf '  输出：%s\n' "$dest"
 printf '  二进制：bin/quench3d、bin/quench3d-editor\n'
 printf '  Web：web/pkg（wasm + JS + build_stamp + wasm.br）\n'
+printf '  摄像头源码：tools/camera_mocap（采集脚本、requirements.txt、README.md）\n'
+if [ -n "$CAMERA_WORKER_DIR" ]; then
+  printf '  摄像头运行时：%s → bin/quench3d-camera、bin/_internal（含人体模型）\n' "$CAMERA_WORKER_DIR"
+fi
 printf '  文档：README.md、CHANGELOG.md、LICENSE-MIT、LICENSE-APACHE\n'
 printf '  清单：manifest.json、SHA256SUMS\n'
 if [ "$DRY_RUN" = "1" ]; then
@@ -87,6 +98,42 @@ fi
 if [ ! -f web/pkg/quench3d_web_bg.wasm ] || [ ! -f web/pkg/quench3d_web.js ]; then
   echo "web/pkg 缺少 wasm/JS，先运行 tools/build_web.sh web_client" >&2
   exit 1
+fi
+
+camera_resources=(camera_mocap.py requirements.txt README.md)
+for resource in "${camera_resources[@]}"; do
+  if [ ! -f "$ROOT/tools/camera_mocap/$resource" ]; then
+    echo "缺少摄像头发行资源：tools/camera_mocap/$resource" >&2
+    exit 1
+  fi
+done
+
+if [ -n "$CAMERA_WORKER_DIR" ]; then
+  python3 - "$CAMERA_WORKER_DIR" <<'PY'
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]).resolve()
+import os
+assert (root / "quench3d-camera").is_file() and os.access(root / "quench3d-camera", os.X_OK), "缺少可执行 quench3d-camera"
+assert (root / "_internal").is_dir(), "缺少冻结运行时 _internal"
+assert (root / "licenses/CPython-LICENSE.txt").is_file(), "缺少 Python 许可材料"
+with (root / "camera-worker.json").open() as f:
+    metadata = json.load(f)
+assert metadata["format"] == "quench3d.camera-worker/1", metadata
+assert metadata["platform"] == "linux-x86_64", metadata
+assert os.uname().sysname == "Linux" and os.uname().machine == "x86_64", "摄像头运行时仅支持 Linux x86_64"
+required_models = {
+    "_internal/mediapipe/modules/pose_detection/pose_detection.tflite",
+    "_internal/mediapipe/modules/pose_landmark/pose_landmark_full.tflite",
+    "_internal/mediapipe/modules/pose_landmark/pose_landmark_cpu.binarypb",
+}
+assert set(metadata["models"]) == required_models, "人体模型清单不完整"
+for rel, digest in metadata["models"].items():
+    import hashlib
+    assert hashlib.sha256((root / rel).read_bytes()).hexdigest() == digest, rel
+assert metadata["models"], "缺少人体模型清单"
+PY
 fi
 
 if [ "$SKIP_BUILD" = "0" ]; then
@@ -104,11 +151,22 @@ for bin in quench3d quench3d-editor; do
   fi
 done
 
-mkdir -p "$dest/bin" "$dest/web/pkg"
+mkdir -p "$dest/bin" "$dest/web/pkg" "$dest/tools/camera_mocap"
 install -m 755 "$bin_dir/quench3d" "$dest/bin/quench3d"
 install -m 755 "$bin_dir/quench3d-editor" "$dest/bin/quench3d-editor"
 cp -a web/pkg/. "$dest/web/pkg/"
 cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$dest/"
+for resource in "${camera_resources[@]}"; do
+  install -m 644 "$ROOT/tools/camera_mocap/$resource" "$dest/tools/camera_mocap/$resource"
+done
+
+if [ -n "$CAMERA_WORKER_DIR" ]; then
+  # 只接收冻结程序的约定目录，避免把开发 venv 或任意顶层文件当作运行时。
+  cp -a "$CAMERA_WORKER_DIR/quench3d-camera" "$dest/bin/"
+  cp -a "$CAMERA_WORKER_DIR/_internal" "$dest/bin/"
+  cp -a "$CAMERA_WORKER_DIR/camera-worker.json" "$dest/bin/"
+  cp -a "$CAMERA_WORKER_DIR/licenses" "$dest/bin/"
+fi
 
 # 静态服务器可直接对 Accept-Encoding: br 返回同一路径的 `.br`（需配置
 # `Content-Encoding: br` 与 `Content-Type: application/wasm`）。压缩在打包目录

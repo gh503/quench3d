@@ -2,7 +2,7 @@
 //! 2D 轮廓/骨架，并把 3D 世界点作为调试线段叠进 3D 视口。
 //!
 //! 采集/推理在 `tools/camera_mocap/camera_mocap.py` 里（MediaPipe + OpenCV），
-//! 这里不链接任何 CV 库，也不启动子进程。两边只共享一个很小的文件协议：
+//! 这里不链接任何 CV 库；用户点击后由原生控制器启动本地采集子进程。两边共享文件协议：
 //!
 //! ```text
 //! target/camera/latest.json   元数据 + 33 个 2D/3D 关键点 + 轮廓多边形
@@ -31,6 +31,10 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "camera_capture.rs"]
+mod capture;
 
 use crate::reconstruct::PointCloudAccumulator;
 #[cfg(not(target_arch = "wasm32"))]
@@ -274,6 +278,10 @@ impl Shared {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct CameraFeed {
     dir: PathBuf,
+    capture: capture::CaptureProcess,
+    show: bool,
+    source: u32,
+    pose_capture: bool,
     shared: Shared,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -372,6 +380,10 @@ impl CameraFeed {
         );
         Self {
             dir,
+            capture: capture::CaptureProcess::default(),
+            show: false,
+            source: 0,
+            pose_capture: false,
             shared,
             stop,
             worker,
@@ -822,32 +834,104 @@ impl CameraFeed {
         ok
     }
 
-    /// 桌面端摄像头窗口由文件数据自动出现，工具栏不加按钮。
-    pub fn toolbar(&mut self, _ui: &mut egui::Ui) {}
+    /// 由“视图 → 摄像头预览”打开窗口；不主动访问设备。
+    pub fn toolbar(&mut self, _ui: &mut egui::Ui) {
+        self.show = true;
+    }
 
-    /// 画浮动窗口：摄像头画面 + 2D 骨架/轮廓 + 深度开关。
+    fn stop_reader(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+
+    fn clear_preview(&mut self) {
+        if let Ok(mut error) = self.shared.error.lock() {
+            *error = None;
+        }
+        if let Ok(mut latest) = self.shared.latest.lock() {
+            *latest = None;
+        }
+        self.texture = None;
+        self.depth_texture = None;
+        self.background_3d = false;
+        self.background_frame = u64::MAX;
+        self.texture_frame = u64::MAX;
+        self.depth_frame = u64::MAX;
+        self.recon_auto = false;
+    }
+
+    fn start_capture(&mut self) {
+        match self.capture.start(self.source, self.pose_capture) {
+            Ok(dir) => {
+                self.stop_reader();
+                self.clear_preview();
+                self.dir = dir;
+                self.stop = Arc::new(AtomicBool::new(false));
+                self.worker = spawn_worker(
+                    self.dir.clone(),
+                    self.shared.latest.clone(),
+                    self.shared.error.clone(),
+                    self.stop.clone(),
+                );
+            }
+            Err(error) => self.capture.status = error,
+        }
+    }
+
+    fn stop_capture(&mut self) {
+        self.capture.stop();
+        self.stop_reader();
+        self.clear_preview();
+    }
+
+    /// 画浮动窗口；关闭窗口只隐藏，停止按钮才结束采集。
     pub fn window(&mut self, ctx: &egui::Context) {
-        // 不挂关闭按钮：第一阶段先保证"能看见"；等接入顶栏开关后再让它可隐藏。
-        egui::Window::new("摄像头动捕（实验）")
+        let was_running = self.capture.running();
+        self.capture.poll();
+        if was_running && !self.capture.running() {
+            self.stop_reader();
+            self.clear_preview();
+        }
+        if !self.show {
+            return;
+        }
+        let mut open = self.show;
+        egui::Window::new("摄像头预览")
+            .open(&mut open)
             .default_pos(egui::pos2(40.0, 140.0))
             .default_width(380.0)
             .resizable(true)
             .show(ctx, |ui| self.contents(ui));
+        self.show = open;
     }
 
     fn contents(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new(
-                "采集/姿态/轮廓/深度由 tools/camera_mocap 在本地完成；编辑器只读 latest.* 文件。",
-            )
-            .small()
-            .weak(),
-        );
+        ui.label("普通摄像头预览在本机运行；关闭窗口只隐藏，停止按钮会释放摄像头。");
+        ui.horizontal(|ui| {
+            ui.label("设备编号");
+            ui.add_enabled(
+                !self.capture.running(),
+                egui::DragValue::new(&mut self.source).range(0..=99),
+            );
+            if !self.capture.running() {
+                if ui.button("开启摄像头").clicked() {
+                    self.start_capture();
+                }
+            } else if ui.button("停止摄像头").clicked() {
+                self.stop_capture();
+            }
+        });
+        ui.add_enabled_ui(!self.capture.running(), |ui| {
+            ui.checkbox(&mut self.pose_capture, "人体识别（姿态与轮廓）");
+        });
+        if !self.capture.status.is_empty() {
+            ui.label(&self.capture.status);
+        }
         let Some(frame) = self.latest() else {
             ui.add_space(4.0);
-            ui.label("还没有收到帧。先运行：");
-            ui.code("python tools/camera_mocap/camera_mocap.py --source 0");
-            ui.label(egui_hint());
+            ui.label("点击开启摄像头后，画面会显示在这里。");
             if let Some(err) = self.last_error() {
                 ui.colored_label(Color32::from_rgb(255, 120, 100), err);
             }
@@ -1159,18 +1243,9 @@ impl Default for CameraFeed {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for CameraFeed {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
+        self.capture.stop();
+        self.stop_reader();
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn egui_hint() -> &'static str {
-    "没有摄像头时可以用合成源验证：\n\
-     python tools/camera_mocap/camera_mocap.py --source synthetic\n\
-     或指定输出目录 QUENCH3D_CAMERA_DIR=/path/to/dir 后重启编辑器。"
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2337,6 +2412,97 @@ async fn open_camera() -> Result<HtmlVideoElement, String> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_preview_buttons_start_and_stop_fake_worker() {
+        fn text_rect(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<egui::Rect> {
+            fn locate(shape: &egui::epaint::Shape, needle: &str) -> Option<egui::Rect> {
+                match shape {
+                    egui::epaint::Shape::Text(text) if text.galley.text() == needle => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    egui::epaint::Shape::Vec(shapes) => {
+                        shapes.iter().find_map(|s| locate(s, needle))
+                    }
+                    _ => None,
+                }
+            }
+            shapes.iter().find_map(|s| locate(&s.shape, needle))
+        }
+        let mut feed = CameraFeed::new();
+        let directory = std::env::temp_dir().join(format!(
+            "camera-ui-fake-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut command =
+            std::process::Command::new(if cfg!(windows) { "python" } else { "python3" });
+        command.args(["-c", "import time; time.sleep(60)"]);
+        feed.capture.test_command = Some((command, directory));
+        feed.show = true;
+        let ctx = egui::Context::default();
+        let run = |feed: &mut CameraFeed, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 900.0),
+                    )),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    feed.window(ui.ctx());
+                },
+            );
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let click = |pos| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ]
+        };
+        run(&mut feed, vec![]);
+        let shapes = run(&mut feed, vec![]);
+        let start = text_rect(&shapes, "开启摄像头")
+            .expect("start button visible")
+            .center();
+        run(&mut feed, click(start));
+        assert!(feed.capture.running());
+        feed.show = false;
+        run(&mut feed, vec![]);
+        assert!(
+            feed.capture.running(),
+            "hiding preview must not stop capture"
+        );
+        feed.show = true;
+        let shapes = run(&mut feed, vec![]);
+        let stop = text_rect(&shapes, "停止摄像头")
+            .expect("stop button visible")
+            .center();
+        run(&mut feed, click(stop));
+        assert!(!feed.capture.running());
+        assert!(feed.worker.is_none());
+        assert!(feed.latest().is_none());
+        assert!(!feed.background_3d);
+    }
 
     #[test]
     fn depth_grid_backprojects_in_engine_axes() {

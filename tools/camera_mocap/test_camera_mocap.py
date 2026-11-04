@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -120,6 +121,64 @@ class FeedPayloadTests(unittest.TestCase):
             self.assertAlmostEqual(payload["depth"]["z_far"], cm.POINT_Z_FAR)
             self.assertEqual(payload["depth"]["origin"], list(cm.POINT_ORIGIN))
             self.assertGreater(payload["intrinsics"]["fx"], 0.0)
+
+
+class PoseSelfTestTests(unittest.TestCase):
+    def test_self_test_initializes_full_pose_without_opening_camera(self):
+        estimator = mock.Mock()
+        estimator.process.return_value = cm.PoseResult([], [], False, 0.0, None)
+        with mock.patch.object(cm, "PoseEstimator", return_value=estimator) as pose, \
+                mock.patch.object(cm, "open_source") as source, \
+                mock.patch("builtins.print") as output:
+            self.assertEqual(cm.main(["--self-test-pose"]), 0)
+            pose.assert_called_once_with(model_complexity=1, static_image_mode=True)
+            source.assert_not_called()
+            self.assertEqual(estimator.process.call_args.args[0].shape, (256, 256, 3))
+            estimator.close.assert_called_once()
+            payload = json.loads(output.call_args.args[0])
+            self.assertEqual(payload["backend"], "mediapipe_pose")
+            self.assertEqual(payload["model_complexity"], 1)
+            self.assertTrue(payload["ok"])
+
+
+class PreviewOnlyTests(unittest.TestCase):
+    def test_camera_preview_writes_rgb_without_pose_or_depth_initialization(self):
+        bgr = np.zeros((2, 3, 3), dtype=np.uint8)
+        bgr[:, :, 0] = 17
+        cap = mock.Mock()
+        cap.isOpened.return_value = True
+        cap.read.return_value = (True, bgr)
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(cm, "open_source", return_value=(cap, False)), \
+                mock.patch.object(cm, "PoseEstimator") as pose, \
+                mock.patch.object(cm, "DepthEstimator") as depth:
+            result = cm.main([
+                "--source", "0", "--preview-only", "--no-display",
+                "--width", "3", "--height", "2", "--max-frames", "1", "--out", td,
+            ])
+            self.assertEqual(result, 0)
+            pose.assert_not_called()
+            depth.assert_not_called()
+            cap.release.assert_called_once()
+            out = Path(td)
+            payload = json.loads((out / "latest.json").read_text())
+            self.assertEqual(payload["schema"], "quench3d.mocap/1")
+            self.assertEqual((payload["width"], payload["height"]), (3, 2))
+            self.assertFalse(payload["pose"]["present"])
+            self.assertFalse(payload["silhouette"]["present"])
+            self.assertFalse(payload["depth"]["present"])
+            self.assertFalse(payload["points"]["present"])
+            self.assertEqual((out / "latest.rgb").read_bytes(), bytes([0, 0, 17]) * 6)
+
+    def test_default_cli_keeps_pose_initialization(self):
+        cap = mock.Mock()
+        cap.isOpened.return_value = True
+        cap.read.return_value = (False, None)
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(cm, "open_source", return_value=(cap, False)), \
+                mock.patch.object(cm, "PoseEstimator") as pose:
+            self.assertEqual(cm.main(["--no-display", "--no-depth", "--out", td]), 0)
+            pose.assert_called_once()
 
 
 class PoseTableTests(unittest.TestCase):
