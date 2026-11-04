@@ -12187,6 +12187,170 @@ mod tests {
         assert_eq!(pa, pb, "同输入必须逐位相同");
     }
 
+    /// Registered operator target: later pair visits must not recompress an earlier pair.
+    /// No public time step, density solve, rigid boundary, or repeated separation call.
+    #[test]
+    #[ignore = "registered unmet all-pair separation target for a single three-particle traversal"]
+    fn particle_chain_recompression_target() {
+        fn distance(a: Vec3, b: Vec3) -> f64 {
+            a.to_array()
+                .into_iter()
+                .zip(b.to_array())
+                .map(|(x, y)| (f64::from(x) - f64::from(y)).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        }
+        fn run(points: Vec<Vec3>, label: &str) -> (Vec<Vec3>, Vec<DensityTraceEntry>) {
+            let n = points.len();
+            let mut fluid = Fluid::new(FluidDesc {
+                initial_positions: Some(points.clone()),
+                max_particles: n,
+                radius: 0.04,
+                spacing: 0.1,
+                particle_collision: true,
+                collision_mode: FluidCollisionMode::SweptMeshes,
+                separation_mode: FluidSeparationMode::BoundaryConstrained,
+                ..FluidDesc::default()
+            })
+            .unwrap();
+            let mass_bits = fluid.mass.to_bits();
+            let total_mass = f64::from(fluid.mass) * n as f64;
+            let velocities = fluid.velocities.clone();
+            let positions = fluid.positions.clone();
+            let h = fluid.desc.smoothing_radius();
+            let radius = fluid.desc.radius;
+            fluid.predicted = points.clone();
+            fluid.neighbors = vec![Vec::new(); n];
+            let grid = FluidGrid::new(&fluid.predicted, h).unwrap();
+            for (i, neighbors) in fluid.neighbors.iter_mut().enumerate() {
+                grid.neighbors(&fluid.predicted, i, h * h, neighbors);
+                assert_eq!(neighbors.len(), n - 1, "{label} neighbor count i={i}");
+                for j in 0..n {
+                    assert_eq!(neighbors.contains(&(j as u32)), i != j);
+                }
+            }
+            println!("CHAIN_INPUT label={label} bits={:?} neighbors={:?} radius_bits={} mass_bits={mass_bits} total_mass={total_mass:.12}", points.iter().map(|p| p.to_array().map(f32::to_bits)).collect::<Vec<_>>(), fluid.neighbors, radius.to_bits());
+            MESH_CONTINUITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+            fluid.separate_particles(radius, &[], None, None, None);
+            let trace = MESH_CONTINUITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
+            assert_eq!(fluid.predicted.len(), n);
+            assert_eq!(
+                fluid.positions, positions,
+                "position operator leaves stored positions unchanged"
+            );
+            assert_eq!(fluid.velocities, velocities);
+            assert_eq!(fluid.mass.to_bits(), mass_bits);
+            assert_eq!(
+                f64::from(fluid.mass) * fluid.predicted.len() as f64,
+                total_mass
+            );
+            assert!(total_mass.is_finite() && total_mass > 0.0);
+            for (before, after) in points.iter().zip(&fluid.predicted) {
+                assert!(after.is_finite());
+                assert!((f64::from(after.y) - f64::from(before.y)).abs() <= 1e-6);
+                assert!((f64::from(after.z) - f64::from(before.z)).abs() <= 1e-6);
+            }
+            for axis in 0..3 {
+                let before: f64 = points.iter().map(|p| f64::from(p[axis])).sum();
+                let after: f64 = fluid.predicted.iter().map(|p| f64::from(p[axis])).sum();
+                assert!(
+                    (before - after).abs() <= 1e-6,
+                    "{label} position sum axis={axis}: {before} -> {after}"
+                );
+            }
+            (fluid.predicted, trace)
+        }
+
+        let physical = [
+            vec3(0.0, 1.0, 0.0),
+            vec3(0.06, 1.0, 0.0),
+            vec3(0.12, 1.0, 0.0),
+        ];
+        let diameter = 2.0 * f64::from(0.04f32);
+        let target = diameter - 1e-4;
+        let (control, _) = run(physical[..2].to_vec(), "AB_control");
+        assert!(
+            distance(control[0], control[1]) >= target,
+            "isolated pair control"
+        );
+        let mut failures = Vec::new();
+        let mut completed = 0;
+        for order in [[0usize, 1, 2], [2usize, 1, 0]] {
+            let label = format!("{order:?}");
+            let initial: Vec<_> = order.iter().map(|&i| physical[i]).collect();
+            let (actual, trace) = run(initial.clone(), &label);
+            assert!(trace.len() >= 7);
+            let split = trace.len() - initial.len();
+            assert_eq!(split % 2, 0);
+            let mut state = initial.clone();
+            let mut first_pair = None;
+            let mut recompressed = false;
+            for (visit, pair) in trace[..split].chunks_exact(2).enumerate() {
+                let [(i, before_i, request_i, accepted_i), (j, before_j, request_j, accepted_j)] =
+                    pair
+                else {
+                    unreachable!()
+                };
+                assert_ne!(i, j);
+                assert_eq!(*before_i, state[*i]);
+                assert_eq!(*before_j, state[*j]);
+                assert_eq!(request_i, accepted_i, "free-space correction i");
+                assert_eq!(request_j, accepted_j, "free-space correction j");
+                state[*i] = *accepted_i;
+                state[*j] = *accepted_j;
+                let own_distance = distance(state[*i], state[*j]);
+                if visit == 0 {
+                    assert_eq!(
+                        order[*i].abs_diff(order[*j]),
+                        1,
+                        "first pair is physically adjacent"
+                    );
+                    assert!((own_distance - diameter).abs() <= 1e-6);
+                    first_pair = Some((*i, *j, own_distance));
+                } else {
+                    let (a, b, separated) = first_pair.unwrap();
+                    if distance(state[a], state[b]) < separated - 1e-6 {
+                        recompressed = true;
+                    }
+                }
+                let mut physical_state = [Vec3::ZERO; 3];
+                for (index, &identity) in order.iter().enumerate() {
+                    physical_state[identity] = state[index];
+                }
+                println!("CHAIN_PAIR order={order:?} visit={visit} physical_pair=({}, {}) own_distance={own_distance:.12} state_ABC={physical_state:?}", order[*i], order[*j]);
+            }
+            assert!(
+                recompressed,
+                "{label}: actual later pair must reduce first-pair distance"
+            );
+            for &(i, before, request, accepted) in &trace[split..] {
+                assert_eq!(before, state[i]);
+                assert_eq!(request, before);
+                assert_eq!(accepted, before, "no-boundary final projection");
+                state[i] = accepted;
+            }
+            assert_eq!(
+                state, actual,
+                "trace reconstructs actual final operator state"
+            );
+            for i in 0..3 {
+                for j in i + 1..3 {
+                    let measured = distance(actual[i], actual[j]);
+                    println!("CHAIN_RESULT order={order:?} physical_pair=({}, {}) initial={:.12} final={measured:.12} target={target:.12} positions={:?}", order[i], order[j], distance(initial[i], initial[j]), [actual[i], actual[j]]);
+                    if measured < target {
+                        failures.push(format!("order={order:?} physical_pair=({}, {}) distance={measured:.12} target={target:.12}", order[i], order[j]));
+                    }
+                }
+            }
+            completed += 1;
+        }
+        assert_eq!(
+            completed, 2,
+            "both index orders finish before strong target assertion"
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     #[test]
     #[ignore = "registered single-visit floor separation target"]
     fn boundary_floor_single_visit_target() {

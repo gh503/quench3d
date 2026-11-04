@@ -1,6 +1,6 @@
 # Particle chain recompression: registered operator counterexample
 
-Status: registered analytic hypothesis, **not compiled or executed**. No new physical red or green result is claimed. This registration adds no production API, test source or solver implementation. Actual execution requires the parent's later source/build-slot authorization.
+Status: the registered cfg(test) operator target was implemented and executed after parent source/build-slot authorization. Release compilation succeeded; one exact ignored test completed both three-particle index orders and the isolated two-particle control, then failed only the final all-pair separation assertion (exit 101). No production API, solver implementation, parameters, or iteration budget changed. The strong target remains explicitly ignored while unmet; normal gate success does not mean it passes.
 
 ## Question and fixed scope
 
@@ -53,4 +53,28 @@ A failure would support the specific mechanism of later-pair recompression in a 
 
 Do not add repeated passes, extra PBF iterations, timestep changes, modified particle inputs, reordered production loops or a looser geometric threshold to make this registration pass. Any future graph-wide/active-boundary solver needs a separate registered algorithm and budget, plus the unchanged [sealed 125-particle full-step target](sealed_particle_separation.md). This document does not authorize implementing that solver.
 
-No command has been run for this registration. A future test-only strong target should remain explicitly ignored while unmet; normal gate success must not be described as passing this target. Record actual command, source hashes, all permutation results and formal exit status only after execution is authorized and completed.
+The original registration above preceded implementation and execution. The following actual result is separate from its analytic predictions.
+
+## Actual release execution — Round217
+
+The parent reviewed the new cfg(test) function `fluid::tests::particle_chain_recompression_target` before authorizing execution. `cargo fmt --all` completed with exit 0; the source then remained frozen throughout the single release job. Workspace CARGO_HOME/RUSTUP_HOME, CARGO_NET_OFFLINE=true, the Node24/toolchain PATH, and shared CARGO_TARGET_DIR=/home/gh503/Documents/infra-dev/quench3d/target/default-bits-candidate-193 were used. No concurrent Cargo job or production candidate was started.
+
+```bash
+cargo test --release --offline --locked -p quench3d-physics --lib \
+  fluid::tests::particle_chain_recompression_target -- --ignored --exact --nocapture
+```
+
+Release compilation succeeded in 53.25 s. Exactly one test executed, including the isolated AB control and both ABC/CBA fixtures. The formally collected job `bash-2b1d01a942244537` exited **101**. Its only panic was the final aggregated all-pair separation assertion, after the completed-fixture count reached two. Complete output and status are retained locally at `target/tmp/round217-particle-chain/red.log` and `red.status`; `source.sha256` records frozen fluid source SHA-256 **b7a79a378e17750e67e1559224d510cd4b005861483b5ab1e2716f1e235291a6**.
+
+The AB-only control passed the same diameter-minus-tolerance target, and its position sum, mass, finite-state and unchanged-velocity checks passed. Both three-particle fixtures had exactly six directed real FluidGrid neighbor edges. Every trace before endpoint matched reconstructed current state; free-space accepted endpoints matched requests; the final no-boundary projection left every point unchanged and reconstructed state matched actual `predicted`. Each first adjacent correction reached stored-radius diameter within 1e-6 m, and the subsequent actual pair correction reduced that earlier pair's distance. No assertion hard-coded the analytic .065 prediction.
+
+| Index order | First physical pair | Distance after its correction (m) | Same pair after later visit / final minimum (m) | Other adjacent final distance (m) | Nonadjacent final distance (m) |
+|---|---|---|---|---|---|
+| ABC | A/B | 0.080000000075 | **0.064999999478** | 0.079999990761 | 0.144999990240 |
+| CBA | C/B | 0.079999998212 | **0.064999997616** | 0.079999998212 | 0.144999995828 |
+
+The fixed target was **0.079899998212 m**. The first reported violation was ABC physical A/B; the global minimum was CBA physical C/B. ABC final physical A/B/C X coordinates were approximately `[-.01, .055, .13499999]`; CBA mapped back to physical A/B/C was `[-.015000001, .065, .13]`. All Y coordinates remained 1 and all Z remained 0. Input X bits for A/B/C were `[0, 1031127695, 1039516303]`, Y bits 1065353216, Z bits 0; radius bits 1025758986. Calibrated per-particle mass bits remained 1065190808; three-particle total mass remained 2.970959186554. All position-sum checks passed the registered 1e-6 m per-axis tolerance; velocities and stored positions were unchanged by this position-only operator.
+
+This actual red supports later-pair recompression in the existing single traversal independently of boundary blockage. It does not prove which phase dominates the separate sealed125-particle trajectory, fix density/pressure accuracy, or establish a sufficient global solver. The existing sealed125 × 120-step target and its 930000 independent pair samples remain mandatory and unchanged.
+
+The current strong test also contains historical mechanism assertions (first pair reaches diameter, then is recompressed). Those diagnose this baseline and must not become requirements imposed on a future corrected solver. Before a production candidate is evaluated, preserve the baseline attribution evidence separately and separate the pure all-pair correctness target from these expected-failure mechanism assertions; do not loosen the geometric target or fixture. No production fix, performance claim, full gate, or release-artifact verification was performed by this isolated red job.
