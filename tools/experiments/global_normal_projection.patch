@@ -1,0 +1,572 @@
+diff --git a/crates/quench3d-physics/src/parallel.rs b/crates/quench3d-physics/src/parallel.rs
+index 114768a..8337b0d 100644
+--- a/crates/quench3d-physics/src/parallel.rs
++++ b/crates/quench3d-physics/src/parallel.rs
+@@ -393,7 +393,7 @@ impl ParallelLayout {
+     ) {
+         self.run_workers(move |cs, vs| {
+             for _ in 0..iters {
+-                solve_velocity_contacts(cs, vs);
++                solve_velocity_contacts(cs, vs, cfg.global_normal_projection);
+             }
+             relax_contacts(cs, vs, relax_iters, gain);
+             solve_position_contacts(cs, vs, dt, cfg, pos_iters);
+@@ -401,8 +401,8 @@ impl ParallelLayout {
+     }
+ 
+     /// 并行跑一轮速度迭代。
+-    pub fn solve_velocity(&mut self) {
+-        self.run_workers(solve_velocity_contacts);
++    pub fn solve_velocity(&mut self, global: bool) {
++        self.run_workers(move |cs, vs| solve_velocity_contacts(cs, vs, global));
+     }
+ 
+     /// 并行松弛。
+diff --git a/crates/quench3d-physics/src/solver.rs b/crates/quench3d-physics/src/solver.rs
+index 4cd9372..27b2d31 100644
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -78,6 +78,8 @@ pub struct SolverConfig {
+     /// 打开后更接近 PhysX/Rapier 的圆形摩擦锥。需要每步按配置解析，不能只存在
+     /// 接触里（配置可能在步之间改）。
+     pub friction_cone: bool,
++    /// Opt in to true-mass global projected normal iterations.
++    pub global_normal_projection: bool,
+ }
+ 
+ impl Default for SolverConfig {
+@@ -100,6 +102,7 @@ impl Default for SolverConfig {
+             static_friction_speed: 0.02,
+             speculative_margin: 0.0,
+             friction_cone: false,
++            global_normal_projection: false,
+         }
+     }
+ }
+@@ -125,6 +128,7 @@ impl BodyStore for Vec<Option<RigidBody>> {
+ /// 求解器看到的刚体视图（值语义，避免迭代时的借用冲突）。
+ #[derive(Clone, Copy, Debug)]
+ pub(crate) struct BodyView {
++    pub is_static: bool,
+     /// 形状原点位置。
+     pub pos: Vec3,
+     /// 旋转。
+@@ -173,6 +177,7 @@ impl BodyView {
+     pub fn from_body(b: &RigidBody) -> Self {
+         let frozen = b.sleeping || b.body_type != BodyType::Dynamic;
+         Self {
++            is_static: b.body_type == BodyType::Static,
+             pos: b.transform.position,
+             rot: b.transform.rotation,
+             com: b.com_world(),
+@@ -194,6 +199,7 @@ impl BodyView {
+     /// 空槽位占位（完全冻结、位于原点）。
+     pub fn frozen() -> Self {
+         Self {
++            is_static: false,
+             pos: Vec3::ZERO,
+             rot: Quat::IDENTITY,
+             com: Vec3::ZERO,
+@@ -965,8 +971,8 @@ impl ContactSolver {
+     }
+ 
+     /// 一轮速度迭代。
+-    pub fn solve_velocity(&mut self, views: &mut [BodyView]) {
+-        solve_velocity_contacts(&mut self.contacts, views);
++    pub fn solve_velocity(&mut self, views: &mut [BodyView], global: bool) {
++        solve_velocity_contacts(&mut self.contacts, views, global);
+     }
+ 
+     /// 松弛：只在仍然相互接近时补一点冲量，绝不抽走能量。
+@@ -1027,7 +1033,15 @@ fn anisotropic_friction(
+ /// 串行路径传整张接触表，并行路径传某个 island 的接触切片——**同一份实现**，
+ /// 避免两条路径的浮点运算顺序悄悄分叉。调用方必须保证切片内接触的下标
+ /// 已经映射到 `views` 的局部下标。
+-pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mut [BodyView]) {
++pub(crate) fn solve_velocity_contacts(
++    contacts: &mut [SolverContact],
++    views: &mut [BodyView],
++    global: bool,
++) {
++    if global {
++        global_normal_round(contacts, views);
++        return;
++    }
+     for c in contacts.iter_mut() {
+         let Some((va, vb)) = split_body_pair(views, c.a, c.b) else {
+             continue;
+@@ -1787,6 +1801,48 @@ mod cache_algorithm_tests {
+         out
+     }
+ 
++    #[test]
++    fn global_projection_spd_boundary_and_release() {
++        let lambda = [0.0, 1.0];
++        let g = [-1.0, 1.0];
++        let p = feasible_direction(&lambda, &g, vec![-1.0, -3.0], &[1.0, 1.0]);
++        assert_eq!(p, vec![0.0, -3.0]);
++        let alpha: f64 = 1.0 / 3.0;
++        let next = [lambda[0] + alpha * p[0], lambda[1] + alpha * p[1]];
++        assert_eq!(next, [0.0, 0.0]);
++        assert!(0.5 * (next[0] * next[0] + next[1] * next[1]) - next[0] < 0.5);
++        assert_eq!(
++            feasible_direction(&[0.0, 0.0], &[-1.0, 1.0], vec![1.0, -1.0], &[1.0, 1.0]),
++            vec![1.0, 0.0]
++        );
++        assert_eq!(
++            feasible_direction(&[1.0], &[1.0], vec![-1.0], &[1.0]),
++            vec![-1.0]
++        );
++    }
++
++    #[test]
++    fn global_projection_product_dense_and_true_mass() {
++        let mut bodies = vec![BodyView::frozen(); 2];
++        bodies[0].inv_m = 0.5;
++        bodies[1].inv_m = 1.0;
++        bodies[0].inv_i_world_mat = Mat3::IDENTITY;
++        bodies[1].inv_i_world_mat = Mat3::IDENTITY;
++        let mut c = contact(0, 1, 0);
++        c.normal = Vec3::Y;
++        c.ra = vec3(0.2, 0.0, 0.3);
++        c.rb = vec3(-0.1, 0.0, 0.4);
++        let got = normal_product(&[c], &bodies, &[2.0])[0];
++        let expected = 2.0 * (1.5 + 0.2 * 0.2 + 0.3 * 0.3 + 0.1 * 0.1 + 0.4 * 0.4);
++        assert!((got - expected).abs() < 1e-6);
++        let (a, b) = split_body_pair(&mut bodies, 0, 1).unwrap();
++        pair_apply_impulse(a, b, c.ra, c.rb, Vec3::Y * 2.0);
++        assert!((a.lin / a.inv_m + b.lin / b.inv_m).length() < 1e-6);
++        assert!(
++            (f64::from(pair_relative_velocity(a, b, c.ra, c.rb).dot(c.normal)) - got).abs() < 1e-6
++        );
++    }
++
+     #[test]
+     fn cache_rebuild_and_lookup_match_reference_multiframe() {
+         CACHE_REFERENCE.set(0);
+@@ -1970,8 +2026,8 @@ mod cache_algorithm_tests {
+             let mut v1 = views;
+             let mut v2 = views;
+             for _ in 0..10 {
+-                opt.solve_velocity(&mut v1);
+-                old.solve_velocity(&mut v2);
++                opt.solve_velocity(&mut v1, false);
++                old.solve_velocity(&mut v2, false);
+             }
+             for (a, b) in v1.iter().zip(v2) {
+                 for (va, vb) in [(a.lin, b.lin), (a.ang, b.ang)] {
+@@ -2030,3 +2086,340 @@ mod cache_algorithm_tests {
+         assert_eq!(CACHE_PAIR_SEARCHES.get(), 40);
+     }
+ }
++
++fn global_friction(c: &mut SolverContact, va: &mut BodyView, vb: &mut BodyView) {
++    let mut vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
++    // 摩擦（用上一轮的法向冲量作为上界）
++    let max_friction = c.friction * c.normal_impulse;
++    // 各向异性时两个切向的上界不同；ratio=0 时两值逐位等于 friction，
++    // 下面仍走原来的标量路径，旧场景/旧测试逐位不变。
++    let anisotropic = c.friction_tangent[0].to_bits() != c.friction.to_bits()
++        || c.friction_tangent[1].to_bits() != c.friction.to_bits();
++    if c.friction_cone {
++        // 圆形摩擦锥：两个切向方向一起投影，再按总量缩放。旧路径的
++        // 逐轴 clamp 在对角线方向允许 √2·μ·N。
++        if c.k_tangent[0] > 1e-12 && c.k_tangent[1] > 1e-12 {
++            let d0 = -vrel.dot(c.tangent[0]) / c.k_tangent[0];
++            let d1 = -vrel.dot(c.tangent[1]) / c.k_tangent[1];
++            let mut next = [c.tangent_impulse[0] + d0, c.tangent_impulse[1] + d1];
++            let len = (next[0] * next[0] + next[1] * next[1]).sqrt();
++            // 各向异性 + 圆形锥没有单一 μ：取两个方向上限的平均值作为
++            // 保守上界。真正沿椭圆锥的投影留给后续版本。
++            let cone_limit = if anisotropic {
++                (c.friction_tangent[0] + c.friction_tangent[1]) * 0.5 * c.normal_impulse
++            } else {
++                max_friction
++            };
++            if len > cone_limit {
++                let scale = cone_limit / len;
++                next[0] *= scale;
++                next[1] *= scale;
++            }
++            for (i, n) in next.iter().enumerate() {
++                let d = *n - c.tangent_impulse[i];
++                c.tangent_impulse[i] = *n;
++                if d != 0.0 {
++                    if c.precomputed {
++                        apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
++                    } else {
++                        pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
++                    }
++                }
++            }
++            vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
++        }
++    } else {
++        for i in 0..2 {
++            let k = c.k_tangent[i];
++            if k <= 1e-12 {
++                continue;
++            }
++            let vt = vrel.dot(c.tangent[i]);
++            let mut d = -vt / k;
++            let limit = if anisotropic {
++                c.friction_tangent[i] * c.normal_impulse
++            } else {
++                max_friction
++            };
++            let new = clamp(c.tangent_impulse[i] + d, -limit, limit);
++            d = new - c.tangent_impulse[i];
++            c.tangent_impulse[i] = new;
++            // 冲量没变时不需要再乘一遍/重算相对速度；结果逐位相同。
++            if d != 0.0 {
++                if c.precomputed {
++                    apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
++                } else {
++                    pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
++                }
++                vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
++            }
++        }
++    }
++}
++
++fn normal_product(contacts: &[SolverContact], views: &[BodyView], p: &[f64]) -> Vec<f64> {
++    let mut force = vec![(Vec3::ZERO, Vec3::ZERO); views.len()];
++    for (c, value) in contacts.iter().zip(p) {
++        let impulse = c.normal * (*value as f32);
++        force[c.a].0 -= impulse;
++        force[c.a].1 -= c.ra.cross(impulse);
++        force[c.b].0 += impulse;
++        force[c.b].1 += c.rb.cross(impulse);
++    }
++    for (v, (lin, ang)) in views.iter().zip(&mut force) {
++        *lin *= v.inv_m;
++        *ang = v.inv_i_world(*ang);
++    }
++    contacts
++        .iter()
++        .map(|c| {
++            let (la, wa) = force[c.a];
++            let (lb, wb) = force[c.b];
++            f64::from(((lb + wb.cross(c.rb)) - (la + wa.cross(c.ra))).dot(c.normal))
++        })
++        .collect()
++}
++
++// Coarse aggregate columns are evaluated with exactly the same true-body wrench.
++fn coarse_cross(a: &[usize], b: &[usize], cs: &[SolverContact], vs: &[BodyView]) -> f64 {
++    let mut result = 0.0;
++    for &i in a {
++        for &j in b {
++            let x = &cs[i];
++            let y = &cs[j];
++            for (body_x, sign_x, arm_x) in [(x.a, -1.0, x.ra), (x.b, 1.0, x.rb)] {
++                for (body_y, sign_y, arm_y) in [(y.a, -1.0, y.ra), (y.b, 1.0, y.rb)] {
++                    if body_x == body_y {
++                        let v = vs[body_x];
++                        result += sign_x
++                            * sign_y
++                            * (f64::from(v.inv_m * x.normal.dot(y.normal))
++                                + f64::from(
++                                    arm_x
++                                        .cross(x.normal)
++                                        .dot(v.inv_i_world(arm_y.cross(y.normal))),
++                                ));
++                    }
++                }
++            }
++        }
++    }
++    result / (a.len() * b.len()) as f64
++}
++
++fn chain_precondition(
++    cs: &[SolverContact],
++    vs: &[BodyView],
++    residual: &[f64],
++    free: &[bool],
++) -> Vec<f64> {
++    let mut z: Vec<_> = cs
++        .iter()
++        .zip(residual)
++        .zip(free)
++        .map(|((c, r), f)| if *f { r / f64::from(c.k_normal) } else { 0.0 })
++        .collect();
++    let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
++        std::collections::BTreeMap::new();
++    for (i, c) in cs.iter().enumerate() {
++        groups.entry((c.a, c.b)).or_default().push(i);
++    }
++    let mut adjacency = vec![Vec::new(); vs.len()];
++    let edges: Vec<_> = groups.into_iter().collect();
++    for (i, ((a, b), _)) in edges.iter().enumerate() {
++        adjacency[*a].push(i);
++        adjacency[*b].push(i);
++    }
++    let roots: Vec<_> = vs
++        .iter()
++        .enumerate()
++        .filter(|(i, v)| v.is_static && adjacency[*i].len() == 1)
++        .map(|(i, _)| i)
++        .collect();
++    for root in roots {
++        let mut node = root;
++        let mut previous = usize::MAX;
++        let mut columns = Vec::new();
++        let mut seen = vec![false; vs.len()];
++        let mut direction = None;
++        let mut valid = true;
++        loop {
++            if seen[node] {
++                valid = false;
++                break;
++            }
++            seen[node] = true;
++            let next: Vec<_> = adjacency[node]
++                .iter()
++                .copied()
++                .filter(|e| *e != previous)
++                .collect();
++            if next.is_empty() {
++                break;
++            }
++            if next.len() != 1 {
++                valid = false;
++                break;
++            }
++            let edge = next[0];
++            let ((a, b), points) = &edges[edge];
++            let other = if *a == node { *b } else { *a };
++            if vs[other].inv_m <= 0.0 {
++                valid = false;
++                break;
++            }
++            let n = cs[points[0]].normal * if *a == node { 1.0 } else { -1.0 };
++            if direction.is_some_and(|d: Vec3| d.dot(n) < 0.999)
++                || points.iter().any(|i| cs[*i].normal != cs[points[0]].normal)
++            {
++                valid = false;
++                break;
++            }
++            direction = Some(n);
++            columns.push(points.clone());
++            previous = edge;
++            node = other;
++        }
++        if !valid || columns.is_empty() {
++            continue;
++        }
++        let n = columns.len();
++        let mut diagonal = vec![0.0; n];
++        let mut lower = vec![0.0; n];
++        let mut rhs = vec![0.0; n];
++        for i in 0..n {
++            diagonal[i] = coarse_cross(&columns[i], &columns[i], cs, vs);
++            rhs[i] = columns[i]
++                .iter()
++                .filter(|j| free[**j])
++                .map(|j| residual[*j])
++                .sum::<f64>()
++                / columns[i].len() as f64;
++            if i > 0 {
++                lower[i] = coarse_cross(&columns[i], &columns[i - 1], cs, vs);
++            }
++        }
++        let scale = diagonal.iter().copied().fold(0.0, f64::max);
++        for i in 0..n {
++            if i > 0 {
++                let off = lower[i];
++                lower[i] /= diagonal[i - 1];
++                diagonal[i] -= lower[i] * off;
++                rhs[i] -= lower[i] * rhs[i - 1];
++            }
++            if !diagonal[i].is_finite() || diagonal[i] <= 1e-9 * scale {
++                valid = false;
++                break;
++            }
++        }
++        if !valid {
++            continue;
++        }
++        for i in 0..n {
++            rhs[i] /= diagonal[i];
++        }
++        for i in (0..n.saturating_sub(1)).rev() {
++            rhs[i] -= lower[i + 1] * rhs[i + 1];
++        }
++        for i in 0..n {
++            for j in &columns[i] {
++                if free[*j] {
++                    z[*j] += rhs[i] / columns[i].len() as f64;
++                }
++            }
++        }
++    }
++    z
++}
++
++fn feasible_direction(
++    lambda: &[f64],
++    gradient: &[f64],
++    mut p: Vec<f64>,
++    diagonal: &[f64],
++) -> Vec<f64> {
++    for i in 0..p.len() {
++        if lambda[i] == 0.0 && p[i] < 0.0 {
++            p[i] = 0.0;
++        }
++    }
++    if p.iter().zip(gradient).map(|(p, g)| p * g).sum::<f64>() >= 0.0
++        || p.iter().any(|x| !x.is_finite())
++    {
++        for i in 0..p.len() {
++            p[i] = if lambda[i] > 0.0 || gradient[i] < 0.0 {
++                -gradient[i] / diagonal[i]
++            } else {
++                0.0
++            };
++        }
++    }
++    p
++}
++
++fn global_normal_round(cs: &mut [SolverContact], vs: &mut [BodyView]) {
++    for c in cs.iter_mut() {
++        if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
++            global_friction(c, a, b);
++        }
++    }
++    let lambda: Vec<_> = cs.iter().map(|c| f64::from(c.normal_impulse)).collect();
++    let gradient: Vec<_> = cs
++        .iter()
++        .map(|c| {
++            f64::from(
++                pair_relative_velocity(&vs[c.a], &vs[c.b], c.ra, c.rb).dot(c.normal)
++                    - c.restitution_bias
++                    - c.speculative_bias,
++            )
++        })
++        .collect();
++    let free: Vec<_> = lambda
++        .iter()
++        .zip(&gradient)
++        .map(|(l, g)| *l > 0.0 || *g < 0.0)
++        .collect();
++    let residual: Vec<_> = gradient.iter().map(|x| -x).collect();
++    let diagonal: Vec<_> = cs.iter().map(|c| f64::from(c.k_normal)).collect();
++    let p = feasible_direction(
++        &lambda,
++        &gradient,
++        chain_precondition(cs, vs, &residual, &free),
++        &diagonal,
++    );
++    let descent = p.iter().zip(&gradient).map(|(p, g)| p * g).sum::<f64>();
++    if !descent.is_finite() || descent >= 0.0 {
++        return;
++    }
++    let ap = normal_product(cs, vs, &p);
++    let curvature = p.iter().zip(ap).map(|(p, a)| p * a).sum::<f64>();
++    if !curvature.is_finite() || curvature <= 0.0 {
++        return;
++    }
++    let mut alpha = -descent / curvature;
++    for i in 0..p.len() {
++        if p[i] < 0.0 {
++            alpha = alpha.min(-lambda[i] / p[i]);
++        }
++    }
++    if !alpha.is_finite() || alpha <= 0.0 {
++        return;
++    }
++    let next: Vec<_> = lambda
++        .iter()
++        .zip(&p)
++        .map(|(l, p)| (l + alpha * p).max(0.0) as f32)
++        .collect();
++    if next.iter().any(|x| !x.is_finite()) {
++        return;
++    }
++    for (c, new) in cs.iter_mut().zip(next) {
++        let delta = new - c.normal_impulse;
++        c.normal_impulse = new;
++        if delta != 0.0 {
++            if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
++                pair_apply_impulse(a, b, c.ra, c.rb, c.normal * delta);
++            }
++        }
++    }
++}
+diff --git a/crates/quench3d-physics/src/world.rs b/crates/quench3d-physics/src/world.rs
+index 53d12a4..b4aa6f0 100644
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -2093,7 +2093,8 @@ impl PhysicsWorld {
+                     break;
+                 }
+                 self.parallel.sync_from(&views);
+-                self.parallel.solve_velocity();
++                self.parallel
++                    .solve_velocity(self.config.global_normal_projection);
+                 self.parallel.sync_to(&mut views);
+                 self.joint_solver.solve_velocity(&mut views, dt);
+             }
+@@ -2110,7 +2111,8 @@ impl PhysicsWorld {
+             }
+         } else {
+             for _ in 0..iters {
+-                self.contact_solver.solve_velocity(&mut views);
++                self.contact_solver
++                    .solve_velocity(&mut views, self.config.global_normal_projection);
+                 self.joint_solver.solve_velocity(&mut views, dt);
+             }
+             #[cfg(test)]
+diff --git a/crates/quench3d-physics/tests/stack_precision.rs b/crates/quench3d-physics/tests/stack_precision.rs
+index 26b68c2..f614660 100644
+--- a/crates/quench3d-physics/tests/stack_precision.rs
++++ b/crates/quench3d-physics/tests/stack_precision.rs
+@@ -259,6 +259,15 @@ fn run_duration_velocity_fixture(
+     layers: usize,
+     steps: usize,
+     velocity_iterations: usize,
++) -> (f64, f64) {
++    run_duration_global_fixture(layers, steps, velocity_iterations, false)
++}
++
++fn run_duration_global_fixture(
++    layers: usize,
++    steps: usize,
++    velocity_iterations: usize,
++    global: bool,
+ ) -> (f64, f64) {
+     let started = std::time::Instant::now();
+     let floor = Obb {
+@@ -271,6 +280,7 @@ fn run_duration_velocity_fixture(
+     world.set_fixed_dt(1.0 / 60.0);
+     world.config.speculative_margin = 0.005;
+     world.config.velocity_iterations = velocity_iterations;
++    world.config.global_normal_projection = global;
+     world.config.position_iterations = 8;
+     world.add_builder(
+         BodyBuilder::r#static(Shape::Box {
+@@ -398,6 +408,21 @@ fn run_duration_velocity_fixture(
+     (max_pair, max_floor)
+ }
+ 
++#[test]
++#[ignore = "registered globalnormal20round30second precision acceptance"]
++fn global_normal_projection_sustained_precision_target() {
++    let mut results = Vec::new();
++    for layers in [4, 12, 32] {
++        let (pair, floor) = run_duration_global_fixture(layers, 1800, 20, true);
++        println!("ROUND181_GLOBAL layers={layers} pair={pair:.12} floor={floor:.12}");
++        results.push((layers, pair, floor));
++    }
++    assert!(
++        results.iter().all(|r| r.1 <= 0.00501 && r.2 <= 0.00501),
++        "global normal fixed precision unmet: {results:?}"
++    );
++}
++
+ #[test]
+ #[ignore = "controlled80vs20velocity30s32layer precision diagnostic, not solver implementation"]
+ fn stack_velocity_budget_80_controlled_diagnostic() {
