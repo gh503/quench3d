@@ -251,6 +251,172 @@ fn audit() -> Vec<Summary> {
     assert_eq!(summaries.len(), 8);
     summaries
 }
+fn run_duration_fixture(layers: usize, steps: usize) -> (f64, f64) {
+    let started = std::time::Instant::now();
+    let floor = Obb {
+        center: [0.0, -0.25, 0.0],
+        axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        half: [4.0, 0.25, 4.0],
+    };
+
+    let mut world = PhysicsWorld::new();
+    world.set_fixed_dt(1.0 / 60.0);
+    world.config.speculative_margin = 0.005;
+    world.config.velocity_iterations = 20;
+    world.config.position_iterations = 8;
+    world.add_builder(
+        BodyBuilder::r#static(Shape::Box {
+            half_extents: vec3(4.0, 0.25, 4.0),
+        })
+        .position(vec3(0.0, -0.25, 0.0)),
+    );
+    let handles: Vec<_> = (0..layers)
+        .map(|i| {
+            world.add_builder(
+                BodyBuilder::dynamic(Shape::Box {
+                    half_extents: Vec3::splat(0.25),
+                })
+                .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
+                .mass(1.0),
+            )
+        })
+        .collect();
+    let (mut max_pair, mut max_floor, mut drift) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut pair_worst, mut floor_worst) = (0, 0);
+    let mut contact_steps = 0;
+    let mut outside = 0;
+    let mut first_sleep = None;
+    let mut first_excess = false;
+    let mut first_pair_excess = false;
+    let mut footprint = [0.0f64; 2];
+    for step in 1..=steps {
+        world.step(1.0 / 60.0);
+        assert_eq!(world.step_count, step as u64);
+        assert_eq!(world.body_count(), layers + 1);
+        let poses: Vec<_> = handles.iter().map(|h| Obb::read(&world, *h)).collect();
+        let mut mass = 0.0f32;
+        for h in &handles {
+            let b = world.body(*h).unwrap();
+            assert!(
+                b.position().is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite()
+            );
+            let q = b.rotation();
+            assert!([q.x, q.y, q.z, q.w].into_iter().all(f32::is_finite));
+            mass += b.mass();
+        }
+        assert_eq!(mass, layers as f32);
+        contact_steps += usize::from(!world.contacts().is_empty());
+        if first_sleep.is_none()
+            && handles
+                .iter()
+                .all(|h| world.body(*h).unwrap().is_sleeping())
+        {
+            first_sleep = Some(step);
+        }
+        for (i, a) in poses.iter().enumerate() {
+            let fd = (-a.separation(floor)).max(0.0);
+            if fd > max_floor {
+                max_floor = fd;
+                floor_worst = step;
+            }
+            let horizontal = (a.center[0] * a.center[0] + a.center[2] * a.center[2]).sqrt();
+            drift = drift.max(horizontal);
+            let corners = a.corners();
+            for c in corners {
+                footprint[0] = footprint[0].max(c[0].abs());
+                footprint[1] = footprint[1].max(c[2].abs());
+            }
+            if corners.iter().all(|p| p[0] > 4.0)
+                || corners.iter().all(|p| p[0] < -4.0)
+                || corners.iter().all(|p| p[2] > 4.0)
+                || corners.iter().all(|p| p[2] < -4.0)
+            {
+                outside += 1;
+            }
+            if fd > 0.00501 && !first_excess {
+                first_excess = true;
+                println!(
+                    "ROUND176_FIRST layers={layers} step={step} floor_body={i} depth={fd:.12}"
+                );
+                if std::env::var_os("Q3D_STACK_DURATION_TRACE").is_some() {
+                    println!(
+                        "ROUND176_POSES before_unavailable_post={poses:?} contacts={:?}",
+                        world.contacts()
+                    );
+                }
+            }
+            for (j, b) in poses.iter().enumerate().skip(i + 1) {
+                let d = (-a.separation(*b)).max(0.0);
+                if d > max_pair {
+                    max_pair = d;
+                    pair_worst = step;
+                }
+                if d > 0.00501 && !first_pair_excess {
+                    first_pair_excess = true;
+                    let inside = |o: Obb| {
+                        o.corners()
+                            .iter()
+                            .all(|p| p[0].abs() <= 4.0 && p[2].abs() <= 4.0)
+                    };
+                    println!("ROUND176_FIRST_PAIR layers={layers} step={step} pair={i},{j} depth={d:.12} both_footprints_inside={} a={a:?} b={b:?}",inside(*a)&&inside(*b));
+                }
+                if d > 0.00501 && !first_excess {
+                    first_excess = true;
+                    println!(
+                        "ROUND176_FIRST layers={layers} step={step} pair={i},{j} depth={d:.12}"
+                    );
+                    if std::env::var_os("Q3D_STACK_DURATION_TRACE").is_some() {
+                        println!(
+                            "ROUND176_POSES post={poses:?} contacts={:?}",
+                            world.contacts()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(contact_steps > 0);
+    let sleeping = handles
+        .iter()
+        .filter(|h| world.body(**h).unwrap().is_sleeping())
+        .count();
+    println!("ROUND176_DURATION layers={layers} hz=60 steps={steps} seconds={} pair={max_pair:.12} pair_worst_step={pair_worst} floor={max_floor:.12} floor_worst_step={floor_worst} contact_steps={contact_steps} final_sleep={sleeping} awake={} first_all_sleep={first_sleep:?} drift={drift:.12} footprint={footprint:?} wholly_outside_samples={outside}",steps as f64/60.0,layers-sleeping);
+    println!(
+        "ROUND176_WALL layers={layers} total_seconds={:.6} diagnostic_only_not_benchmark",
+        started.elapsed().as_secs_f64()
+    );
+    (max_pair, max_floor)
+}
+
+#[test]
+fn speculative_stack_sustained_precision_recipe() {
+    for layers in [4, 12] {
+        let (pair, floor) = run_duration_fixture(layers, 1800);
+        assert!(
+            pair <= 0.00501 && floor <= 0.00501,
+            "30s recipe layers={layers} pair={pair} floor={floor}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "unmet: fixed32layer30s recipe exceeds5mm before leaving finite floor"]
+fn speculative_stack_sustained_scale_precision_target() {
+    let (pair, floor) = run_duration_fixture(32, 1800);
+    assert!(
+        pair <= 0.00501 && floor <= 0.00501,
+        "32layer30s5mm target pair={pair} floor={floor}"
+    );
+}
+
+#[test]
+#[ignore = "opt-in bounded first16step32layer geometry trace"]
+fn speculative_stack_scale_early_trace() {
+    run_duration_fixture(32, 16);
+}
+
 #[test]
 fn speculative_stack_precision_recipe_and_zero_margin_audit() {
     for layers in [4usize, 12] {
