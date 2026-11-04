@@ -1,0 +1,23 @@
+# Diagonal only preconditioner with one previous direction proposal
+
+Round213 controlledmathproposalonretained209;noimplementationyet. Historysearchdocs/experiments diagonal-only/Jacobi/diagonal-memoryfoundnomatchingfulltrajectorycandidate. Round190conjugatedirectiondocline3explicitlyretains188force+localtorqueadditiveB;itsline7two-by-twoSPDdiagonaltoytestisnotfullstackdiagonal-onlyexperiment. Thusnogenuineidenticalfailedfullcandidatefound,notproofnoneexistsoutsidearchiveddocs.
+
+B=F D^-1 F, D_i=preparedpositivefinitek_normal. Fornonzerofree-subspacev,vᵀBv=Σfree v_i²/k_i>0(validfinitearithmeticdomain);inactivecoordinateszero. Keepfallback/invalidguardsunchanged. z_i=free_i?r_i/f64(k_i):positive0originaldivision/castordering. ActualtrueA/currentAp/freshfriction/gradient/onepriorconjugatedirection/activeboundline/20roundbudgets/rolling/sleep/defaultfalseunchanged,allglobalworldsuniform. Omitforce-topology/endpoints/LDL/RHS/scatteraswellasalreadyomittedlocalτ. Geometryreadydoesnotenterphysicaldirectionmemory;withoutbuilditmayremainfalsebutcannotresetmemorybeyondexistingprepare/reset.
+
+Potential~.91msgeometry+~1.13mspreconditionexclusiveceilingincludesdiagonalwhichremains,soactualsavingstrictlyless~2.04mshistoricaldiag212inclusive. No promisedprecision/sleep/costimprovement. Independentmathbasis/allmasks/signedzerocompareliteraldiagonalformulaandSPDenergy;actualsetupcount[0,0,0,<=20]isfeaturedeletionnotcache-onceproof. Historical205local/209coarse40bitfixturesmustexplicitlyenablehistoricalforce;cannotclaimnewdiagonalalgorithmoldbits. Firstmath+all5400precision,anyfailurearchive/rejectrestore209before193/192/cost;onlyallprecPASSthen193fullbytes192actualparityandunchangedfixed5ABBAcost. Leadformallyapprovedimplementationafterhistory/SPDproof. Actualnewapply_diagonalindependent16masks6probesrawbits/signedzero/SPD;historical205/20940fixturesexplicitcoarse_reference=true,notnewdiagonalbitidentity. Mainproductionunchanged.
+
+## Actual result: diagonal only fails 32-layer physics, rejected
+
+[global_normal_diagonal_memory.patch](../../tools/experiments/global_normal_diagonal_memory.patch),SHA256 `ca4270fa6b58df9ea730ecbe305b44c8bbcc1f242c37efc763dc0cba93ba2c43`,incrementalagainstretained209,applycheck0. Job bash-0290e983996d4edf formallycollected101. Math11includingnewindependent16masks6probesrawf64diagonalformula/signedzero/SPDandhistoricalcoarse/local40bitsPASS;direction2/local1/projection2PASS. Actualsetup[0,0,0,20]reflectsintentionallyomittedgeometry/force/local—notoldonceperstepfactorproof. Historical40fixturesusecoarse_reference=true,notnewdiagonalalgorithmidentity.
+
+Allthreeworldscompleted1800publicpoststepsbeforefinalassert(1.23s):
+
+|Layers|Pair peak mm|Finitefloor peak mm|Firstallsleep|Outside samples|Precision|
+|---:|---:|---:|---|---:|---|
+|4|1.303423396|1.133125978|33|0|PASS|
+|12|1.413786198|1.558788447|35|0|PASS|
+|32|451.719785697|99.668403296|None|6553|FAIL|
+
+32horizontalcenterdrift94.514229866m/finalsleep28awake4. Thisisarealphysicalfailure,notafixtureerror. SPDpreconditionerdoesnotguaranteeadequatefixed-budgetnonlinearmultibodyconvergence. 12earlysleepcannotjustifycosttestingwhen32failed. REJECTEDwithoutchangingbudget/slop/sleep/material/geometry. No193/defaultbytes,192/nativeparityorcostrunafterfailure.
+
+Rawlogs/source/status/manifest/rejected-solverunder /home/gh503/Documents/infra-dev/quench3d/target/tmp/round213-diagonal-memory/. Exact209solverrestoredandallfive209costsourcehashchecksPASS. No213diagonly/coarse_referencecode remains/mainproductionunchanged/alljobsformallycollected/no runningbuilder/performanceobjectiveNOTcomplete.

@@ -1,0 +1,164 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1848,6 +1848,7 @@
+         let mut state = NormalSolveState::default();
+         state.geometry.historical_local = true;
+         state.memory.copy_commit = true;
++        state.memory.coarse_reference = true;
+         let mut memory = NormalDirectionMemory::default();
+         let mut warmed = None;
+         for step in 0..2 {
+@@ -1951,6 +1952,8 @@
+ 
+         let mut reference_state = NormalSolveState::default();
+         reference_state.memory.copy_commit = true;
++        reference_state.memory.coarse_reference = true;
++        state.memory.coarse_reference = true;
+         let mut warmed = None;
+         for step in 0..2 {
+             state.reset();
+@@ -2146,6 +2149,49 @@
+     }
+ 
+     #[test]
++    fn global_normal_diagonal_memory_formula_spd() {
++        let mut cs = vec![contact(0, 1, 0); 4];
++        for (i, c) in cs.iter_mut().enumerate() {
++            c.k_normal = 0.5 + i as f32 * 0.75;
++        }
++        let mut geometry = NormalGeometry::default();
++        for mask in 0..16 {
++            let free: Vec<_> = (0..4).map(|i| mask & (1 << i) != 0).collect();
++            for probe in 0..6 {
++                let r: Vec<_> = (0..4)
++                    .map(|i| {
++                        if probe == 0 {
++                            -0.0
++                        } else {
++                            0.13 + (i + probe) as f64 * 0.27
++                        }
++                    })
++                    .collect();
++                let z = geometry.apply_diagonal(&cs, &r, &free);
++                let mut energy = 0.0;
++                for i in 0..4 {
++                    let expected = if free[i] {
++                        r[i] / f64::from(cs[i].k_normal)
++                    } else {
++                        0.0
++                    };
++                    assert_eq!(
++                        z[i].to_bits(),
++                        expected.to_bits(),
++                        "mask={mask} probe={probe} i={i}"
++                    );
++                    energy += r[i] * z[i];
++                }
++                if mask != 0 && probe != 0 {
++                    assert!(energy > 0.0);
++                }
++            }
++        }
++        assert!(!geometry.ready);
++        println!("ROUND213 diagonal-only 16masks6probes signedzero formula rawbits SPD PASS");
++    }
++
++    #[test]
+     fn global_normal_setup_once_per_substep() {
+         let mut vs = vec![BodyView::frozen(); 4];
+         vs[0].is_static = true;
+@@ -2175,8 +2221,8 @@
+         }
+         let counts = NORMAL_SETUP_COUNTS.with(|c| c.get());
+         println!("ROUND195 actual_geometry_force_local_ap={counts:?}");
+-        assert_eq!(counts[0], 1);
+-        assert_eq!(counts[1], 1);
++        assert_eq!(counts[0], 0, "213 removes geometry setup");
++        assert_eq!(counts[1], 0, "213 removes force factors");
+         assert_eq!(counts[2], 0, "208 omits local torque factors");
+         assert!(counts[3] <= 20);
+     }
+@@ -2461,6 +2507,8 @@
+         let mut memory = NormalDirectionMemory {
+             #[cfg(test)]
+             copy_commit: false,
++            #[cfg(test)]
++            coarse_reference: false,
+             p: vec![1.0, 0.0],
+             ap: vec![4.0, 1.0],
+             curvature: 4.0,
+@@ -2479,6 +2527,8 @@
+         memory = NormalDirectionMemory {
+             #[cfg(test)]
+             copy_commit: false,
++            #[cfg(test)]
++            coarse_reference: false,
+             p: vec![0.0, 1.0],
+             ap: vec![1.0, 3.0],
+             curvature: 3.0,
+@@ -2513,6 +2563,7 @@
+             }
+             memory = NormalDirectionMemory {
+                 copy_commit: false,
++                coarse_reference: false,
+                 p,
+                 ap,
+                 curvature,
+@@ -3510,6 +3561,8 @@
+         *memory = NormalDirectionMemory {
+             #[cfg(test)]
+             copy_commit: false,
++            #[cfg(test)]
++            coarse_reference: false,
+             p: p.clone(),
+             ap,
+             curvature,
+@@ -3900,6 +3953,8 @@
+ pub(crate) struct NormalDirectionMemory {
+     #[cfg(test)]
+     copy_commit: bool,
++    #[cfg(test)]
++    coarse_reference: bool,
+     p: Vec<f64>,
+     ap: Vec<f64>,
+     curvature: f64,
+@@ -4173,6 +4228,22 @@
+             }
+         }
+         self.ready = true;
++    }
++    fn apply_diagonal<'a>(
++        &'a mut self,
++        cs: &[SolverContact],
++        r: &[f64],
++        free: &[bool],
++    ) -> &'a Vec<f64> {
++        self.z.clear();
++        self.z.extend(cs.iter().zip(r).zip(free).map(|((c, r), f)| {
++            if *f {
++                r / f64::from(c.k_normal)
++            } else {
++                0.0
++            }
++        }));
++        &self.z
+     }
+     fn apply<'a>(
+         &'a mut self,
+@@ -4416,7 +4487,15 @@
+     residual.extend(gradient.iter().map(|x| -x));
+     diagonal.clear();
+     diagonal.extend(cs.iter().map(|c| f64::from(c.k_normal)));
+-    z.clone_from(cache.apply(cs, vs, residual, free));
++    #[cfg(test)]
++    let coarse_reference = memory.coarse_reference;
++    #[cfg(not(test))]
++    let coarse_reference = false;
++    z.clone_from(if coarse_reference {
++        cache.apply(cs, vs, residual, free)
++    } else {
++        cache.apply_diagonal(cs, residual, free)
++    });
+     if memory.free != *free {
+         memory.clear();
+     }
