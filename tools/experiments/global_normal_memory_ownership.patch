@@ -1,0 +1,190 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1847,6 +1847,7 @@
+         let mut reference_vs = vs.clone();
+         let mut state = NormalSolveState::default();
+         state.geometry.historical_local = true;
++        state.memory.copy_commit = true;
+         let mut memory = NormalDirectionMemory::default();
+         let mut warmed = None;
+         for step in 0..2 {
+@@ -1921,6 +1922,115 @@
+             }
+         }
+         println!("ROUND195_REFERENCE 40rounds bits=true changedmask/joint_velocity/invalidation/holes=true workspacecapacitystable=true");
++    }
++
++    #[test]
++    fn global_normal_memory_swap_actual_coarse_bits() {
++        let mut vs = vec![BodyView::frozen(); 5];
++        vs[0].is_static = true;
++        for v in &mut vs[1..4] {
++            v.inv_m = 1.0;
++            v.inv_i_world_mat = Mat3::IDENTITY;
++            v.lin = -Vec3::Y;
++        }
++        let mut cs = Vec::new();
++        for edge in 0..3 {
++            for (x, z) in [(-0.2, -0.2), (0.2, -0.2), (-0.2, 0.2), (0.2, 0.2)] {
++                let mut c = contact(edge, edge + 1, 0);
++                c.ra = vec3(x, 0.25, z);
++                c.rb = vec3(x, -0.25, z);
++                c.k_normal = 2.0;
++                c.normal_impulse = 0.0;
++                c.tangent_impulse = [-0.0, 0.0];
++                cs.push(c);
++            }
++        }
++        let mut reference_cs = cs.clone();
++        let mut reference_vs = vs.clone();
++        let mut state = NormalSolveState::default();
++
++        let mut reference_state = NormalSolveState::default();
++        reference_state.memory.copy_commit = true;
++        let mut warmed = None;
++        for step in 0..2 {
++            state.reset();
++            reference_state.reset();
++            if step == 1 {
++                vs[2].inv_m = 0.75;
++                vs[2].inv_i_world_mat = Mat3::from_cols(
++                    vec3(1.2, 0.1, 0.0),
++                    vec3(0.1, 0.9, 0.0),
++                    vec3(0.0, 0.0, 1.1),
++                );
++                reference_vs = vs.clone();
++                cs[4].normal = vec3(0.01, 1.0, 0.0).normalize();
++                reference_cs = cs.clone();
++            }
++            for round in 0..20 {
++                if round % 3 == 0 {
++                    let dv = vec3(0.03, -0.02, 0.01);
++                    vs[2].lin += dv;
++                    reference_vs[2].lin += dv;
++                    cs[round % 12].normal_impulse = 0.0;
++                    reference_cs[round % 12].normal_impulse = 0.0;
++                }
++                solve_velocity_contacts_state(&mut cs, &mut vs, true, &mut state);
++                solve_velocity_contacts_state(
++                    &mut reference_cs,
++                    &mut reference_vs,
++                    true,
++                    &mut reference_state,
++                );
++                let memory = &reference_state.memory;
++                for (a, b) in vs.iter().zip(&reference_vs) {
++                    let bits = |v: &BodyView| {
++                        [v.lin.x, v.lin.y, v.lin.z, v.ang.x, v.ang.y, v.ang.z].map(f32::to_bits)
++                    };
++                    assert_eq!(bits(a), bits(b), "step={step} round={round}");
++                }
++                for (a, b) in cs.iter().zip(&reference_cs) {
++                    assert_eq!(a.normal_impulse.to_bits(), b.normal_impulse.to_bits());
++                    assert_eq!(
++                        a.tangent_impulse.map(f32::to_bits),
++                        b.tangent_impulse.map(f32::to_bits)
++                    );
++                }
++                assert_eq!(
++                    state
++                        .memory
++                        .p
++                        .iter()
++                        .map(|x| x.to_bits())
++                        .collect::<Vec<_>>(),
++                    memory.p.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
++                );
++                assert_eq!(
++                    state
++                        .memory
++                        .ap
++                        .iter()
++                        .map(|x| x.to_bits())
++                        .collect::<Vec<_>>(),
++                    memory.ap.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
++                );
++                assert_eq!(state.memory.curvature.to_bits(), memory.curvature.to_bits());
++                assert_eq!(state.memory.free, memory.free);
++                let mut caps = [
++                    state.work.p.capacity(),
++                    state.work.ap.capacity(),
++                    state.memory.p.capacity(),
++                    state.memory.ap.capacity(),
++                ];
++                caps.sort();
++                if step == 0 && round == 3 {
++                    warmed = Some(caps);
++                }
++                if step == 0 && round > 3 {
++                    assert_eq!(Some(caps), warmed, "workspace capacity grew after warmup");
++                }
++            }
++        }
++        println!("ROUND209 actual208coarse40round swap-vs-copy rawbits/pass fourcapacitysetstableafterwarm3");
+     }
+ 
+     #[test]
+@@ -2349,6 +2459,8 @@
+     #[test]
+     fn normal_direction_memory_changed_rhs_restart() {
+         let mut memory = NormalDirectionMemory {
++            #[cfg(test)]
++            copy_commit: false,
+             p: vec![1.0, 0.0],
+             ap: vec![4.0, 1.0],
+             curvature: 4.0,
+@@ -2365,6 +2477,8 @@
+         assert!(p[0] - p[1] < 0.0);
+         assert!(retain);
+         memory = NormalDirectionMemory {
++            #[cfg(test)]
++            copy_commit: false,
+             p: vec![0.0, 1.0],
+             ap: vec![1.0, 3.0],
+             curvature: 3.0,
+@@ -2398,6 +2512,7 @@
+                 g[i] += alpha * ap[i];
+             }
+             memory = NormalDirectionMemory {
++                copy_commit: false,
+                 p,
+                 ap,
+                 curvature,
+@@ -3393,6 +3508,8 @@
+     let hitbound = (0..p.len()).any(|i| p[i] < 0.0 && alpha == -lambda[i] / p[i]);
+     if retain && !hitbound {
+         *memory = NormalDirectionMemory {
++            #[cfg(test)]
++            copy_commit: false,
+             p: p.clone(),
+             ap,
+             curvature,
+@@ -3781,6 +3898,8 @@
+ 
+ #[derive(Default, Clone, Debug)]
+ pub(crate) struct NormalDirectionMemory {
++    #[cfg(test)]
++    copy_commit: bool,
+     p: Vec<f64>,
+     ap: Vec<f64>,
+     curvature: f64,
+@@ -4409,8 +4528,17 @@
+         return;
+     }
+     if retain && !hitbound {
+-        memory.p.clone_from(p);
+-        memory.ap.clone_from(ap);
++        #[cfg(test)]
++        let copy_commit = memory.copy_commit;
++        #[cfg(not(test))]
++        let copy_commit = false;
++        if copy_commit {
++            memory.p.clone_from(p);
++            memory.ap.clone_from(ap);
++        } else {
++            std::mem::swap(&mut memory.p, p);
++            std::mem::swap(&mut memory.ap, ap);
++        }
+         memory.curvature = curvature;
+         memory.free.clone_from(free);
+     } else {
