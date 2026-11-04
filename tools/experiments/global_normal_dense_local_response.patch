@@ -1,0 +1,120 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1846,6 +1846,7 @@
+         let mut reference_cs = cs.clone();
+         let mut reference_vs = vs.clone();
+         let mut state = NormalSolveState::default();
++        state.geometry.factored_local_reference = true;
+         let mut memory = NormalDirectionMemory::default();
+         let mut warmed = None;
+         for step in 0..2 {
+@@ -1990,6 +1991,42 @@
+             }
+         }
+         println!("ROUND198 exactf64kernelbits nineprobes swappedendpoints/nonDiagI/unequalM/normal/offCOM/signedzero PASS");
++    }
++
++    #[test]
++    fn global_normal_dense_local_response_oracle() {
++        let mut vs = vec![BodyView::frozen(); 2];
++        for (i, v) in vs.iter_mut().enumerate() {
++            v.inv_m = 0.7 + i as f32 * 0.4;
++            let rot = Mat3::from_axis_angle(vec3(0.3, 0.8, 0.2).normalize(), 0.3 + i as f32 * 0.2);
++            v.inv_i_world_mat = rot * Mat3::from_diagonal(vec3(0.7, 1.3, 2.2)) * rot.transpose();
++        }
++        for count in [1, 2, 4] {
++            let mut cs = Vec::new();
++            for i in 0..count {
++                let mut c = contact(0, 1, 0);
++                c.ra = vec3((i % 2) as f32 * 0.4 - 0.2, 0.25, (i / 2) as f32 * 0.4 - 0.2);
++                c.rb = c.ra - vec3(0.0, 0.5, 0.0);
++                cs.push(c);
++            }
++            for mask in 0..(1 << count) {
++                let r: Vec<_> = (0..count).map(|i| 0.13 - i as f64 * 0.27).collect();
++                let free: Vec<_> = (0..count).map(|i| mask & (1 << i) != 0).collect();
++                let mut actual = NormalGeometry::default();
++                actual.build(&cs, &vs);
++                let mut reference = actual.clone();
++                reference.factored_local_reference = true;
++                let a = actual.apply(&cs, &vs, &r, &free).clone();
++                let b = reference.apply(&cs, &vs, &r, &free).clone();
++                for (x, y) in a.iter().zip(&b) {
++                    assert!(
++                        (x - y).abs() <= 1e-12 * x.abs().max(y.abs()).max(1.0),
++                        "count={count} mask={mask} actual={x} old={y}"
++                    );
++                }
++            }
++        }
++        println!("ROUND207 dense-local rank0/1/2 allmasks factoredreference tolerance1e-12 PASS");
+     }
+ 
+     #[test]
+@@ -3804,6 +3841,7 @@
+ }
+ #[derive(Clone, Debug)]
+ struct CachedLocal {
++    dense: Vec<f64>,
+     points: Vec<usize>,
+     basis: Vec<Vec<f64>>,
+     inverse: [[f64; 3]; 3],
+@@ -3811,6 +3849,8 @@
+ }
+ #[derive(Default, Clone, Debug)]
+ struct NormalGeometry {
++    #[cfg(test)]
++    factored_local_reference: bool,
+     ready: bool,
+     endpoint: Vec<NormalEndpoint>,
+     chains: Vec<CachedForceChain>,
+@@ -3995,7 +4035,19 @@
+             };
+             #[cfg(test)]
+             global_note("local_status=accepted");
++            let mut dense = vec![0.0; points.len() * points.len()];
++            for i in 0..points.len() {
++                for j in 0..points.len() {
++                    for a in 0..rank {
++                        for b in 0..rank {
++                            dense[i * points.len() + j] +=
++                                basis[a + 1][i] * inverse[a][b] * basis[b + 1][j];
++                        }
++                    }
++                }
++            }
+             self.locals.push(CachedLocal {
++                dense,
+                 points: points.clone(),
+                 basis,
+                 inverse,
+@@ -4058,11 +4110,29 @@
+         self.out.clear();
+         self.out.resize(cs.len(), 0.0);
+         for local in &self.locals {
++            #[cfg(test)]
++            let use_dense = !self.factored_local_reference;
++            #[cfg(not(test))]
++            let use_dense = true;
++            if use_dense {
++                let n = local.points.len();
++                for (i, &point) in local.points.iter().enumerate() {
++                    if free[point] {
++                        for (j, &other) in local.points.iter().enumerate() {
++                            if free[other] {
++                                self.out[point] += local.dense[i * n + j] * r[other];
++                            }
++                        }
++                    }
++                }
++                continue;
++            }
+             let CachedLocal {
+                 points,
+                 basis,
+                 inverse,
+                 rank,
++                ..
+             } = local;
+             let mut rhs = [0.0; 3];
+             for a in 0..*rank {

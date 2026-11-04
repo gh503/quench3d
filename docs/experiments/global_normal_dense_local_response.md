@@ -1,0 +1,20 @@
+# Dense local response controlled arithmetic registration
+
+Round207A authorizedafter20512cost1.421497FAIL. Newmathcandidateexplicitf64regrouping:precomputeH=Qτ inv Qτᵀoncegeometry,eachroundF H F rlocalcorrectioninsteadoldmaskedQτRHS→inverse→Qτscatter. Keepdiag/force/actualJ/Ap/freshgradient/frictionaxisexpressions/rolling/history/budget/defaultfalse unchanged. Noforcedsymmetrization/newpointlimit/threshold.
+
+IndependentdenseoracleoldfactoredlocalvscachedHmultiplemasks/rank0..2/arbitraryrnon-diagonalIscale-awaref64tolerance1e-12;operatorphysics/fullprecisionistheacceptance,notf64bitidentity. Existingweighted/coarsekernelbitproofsremainvalid. Historical40roundbitfixtureexplicitlyusesoldfactoredlocaltest-onlyswitchtoverifyunchangedgeometry/workspace machinery;itdoesNOTclaimnewHfullalgorithmbitidentity. NewdenseoracleexercisesproductionHpath. Firstmath+full5400precision;anyscaleFAILarchive/reject/restore205andstopbefore193/192/cost. OnlyallprecisionPASSthen193fullbytes/192actualparityandunchangedfixedcostfiveABBAW8M120limit1.15. Mainproductionunchanged.
+
+## Actual result: compatible, no observed 12-layer benefit
+
+[global_normal_dense_local_response.patch](../../tools/experiments/global_normal_dense_local_response.patch),SHA256 `42fb3598feaeece35f88ad6f2d058255bbaa5501aed6dc498cc4b1af8b180e78`,incrementalagainstretained205,applycheck0. Math/precisionjob bash-12f2fba908c04850 formallycollected0:globalmath9(includingdensevsfactoredrank0/1/2allmasktolerance1e-12;historicalfactored40roundbitsnotnewHbits),direction2/local1/projection2PASS. Localrankmaximum2because3wrenchbasiscolumnsincludeconstantwhichisexcluded;rank3notreachablehere. Full5400precisionPASS1.11sallreportedpeaks/sleep/driftunchangedinthisfixture,notuniversalf64bitidentity.
+
+Followupjob bash-ae7f8378e07941cc formallycollected0:193full1240states/931616648bytesPASS4.64s;192threevariants1800paired/1800actualparallel/maxthreads2/hardware4eachPASS67.48s.
+
+Onlyafterallcompatibilitypasses,unchangedcost195exampleSHAa2d02863c9b35f5f27abe6d04fd895e348b692ae79e344283fd22b920bc21f97sameproductionreleasebinary/W8M120/fivefixedalternatingABBAtrials. Job bash-9835f6fc5db74fad formallycollectedexit1,compile8.47s.
+
+|Layers|Legacy median s|Candidate median s|Ratio|Limit|Result|
+|---:|---:|---:|---:|---:|---|
+|12|.018865330|.027807510|1.474001|1.15|FAIL|
+|32|.050827210|.019442407|.382520|1.15|PASS|
+
+No observed12candidatebenefitversus205.027477852/ratio1.421497inseparatemeasurementsets;notpairedstatisticalregressionproof. Newf64regrouping/densefactorstoragehasnotjustifiedperformancegain;LeadformallyREJECTED207A:newf64grouping/densestoragewithoutobservedbenefitnotretained. Archivedrejected-solverthenrestoredexact205source;allfive205costsourcehashchecksPASS. No denseH/localreference-switchcode remains. Rawtrials/source/status/binarymanifestunder /home/gh503/Documents/infra-dev/quench3d/target/tmp/round207-dense-local/. Mainproductionunchanged/alljobscollected/no runningbuilder/performancegoalstillunmet.
