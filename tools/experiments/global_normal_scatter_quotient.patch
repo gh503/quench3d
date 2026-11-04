@@ -1,0 +1,58 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1847,6 +1847,7 @@
+         let mut reference_vs = vs.clone();
+         let mut state = NormalSolveState::default();
+         state.geometry.historical_local = true;
++        state.geometry.scatter_reference = true;
+         state.memory.copy_commit = true;
+         let mut memory = NormalDirectionMemory::default();
+         let mut warmed = None;
+@@ -1951,6 +1952,7 @@
+ 
+         let mut reference_state = NormalSolveState::default();
+         reference_state.memory.copy_commit = true;
++        reference_state.geometry.scatter_reference = true;
+         let mut warmed = None;
+         for step in 0..2 {
+             state.reset();
+@@ -2030,7 +2032,7 @@
+                 }
+             }
+         }
+-        println!("ROUND209 actual208coarse40round swap-vs-copy rawbits/pass fourcapacitysetstableafterwarm3");
++        println!("ROUND211 actual208coarse40round quotient/swap-vs-repeated-div/copy rawbits/pass capstable");
+     }
+ 
+     #[test]
+@@ -3974,6 +3976,8 @@
+ #[derive(Default, Clone, Debug)]
+ struct NormalGeometry {
+     #[cfg(test)]
++    scatter_reference: bool,
++    #[cfg(test)]
+     historical_local: bool,
+     ready: bool,
+     endpoint: Vec<NormalEndpoint>,
+@@ -4217,10 +4221,20 @@
+             for i in (0..n.saturating_sub(1)).rev() {
+                 rhs[i] -= lower[i + 1] * rhs[i + 1];
+             }
++            #[cfg(test)]
++            let scatter_reference = self.scatter_reference;
++            #[cfg(not(test))]
++            let scatter_reference = false;
+             for i in 0..n {
++                let mut quotient = None;
+                 for j in &columns[i] {
+                     if free[*j] {
+-                        self.z[*j] += rhs[i] / columns[i].len() as f64;
++                        let q = if scatter_reference {
++                            rhs[i] / columns[i].len() as f64
++                        } else {
++                            *quotient.get_or_insert_with(|| rhs[i] / columns[i].len() as f64)
++                        };
++                        self.z[*j] += q;
+                     }
+                 }
+             }
