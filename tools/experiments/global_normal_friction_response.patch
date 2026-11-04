@@ -1,0 +1,239 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1838,6 +1838,8 @@
+                 c.ra = vec3(x, 0.25, z);
+                 c.rb = vec3(x, -0.25, z);
+                 c.k_normal = 2.0;
++                c.friction = 0.0;
++                c.friction_tangent = [0.0; 2];
+                 c.normal_impulse = 0.0;
+                 c.tangent_impulse = [-0.0, 0.0];
+                 cs.push(c);
+@@ -1920,6 +1922,146 @@
+             }
+         }
+         println!("ROUND195_REFERENCE 40rounds bits=true changedmask/joint_velocity/invalidation/holes=true workspacecapacitystable=true");
++    }
++
++    #[test]
++    fn global_normal_friction_response_physical_tolerance() {
++        fn arr(v: Vec3) -> [f64; 3] {
++            [v.x as f64, v.y as f64, v.z as f64]
++        }
++        fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
++            [
++                a[1] * b[2] - a[2] * b[1],
++                a[2] * b[0] - a[0] * b[2],
++                a[0] * b[1] - a[1] * b[0],
++            ]
++        }
++        fn inverse(m: Mat3) -> [[f64; 3]; 3] {
++            let cols = m.to_cols_array();
++            let mut a = [[0.0; 6]; 3];
++            for i in 0..3 {
++                for j in 0..3 {
++                    a[i][j] = cols[j * 3 + i] as f64;
++                }
++                a[i][3 + i] = 1.0;
++            }
++            for k in 0..3 {
++                let d = a[k][k];
++                for j in 0..6 {
++                    a[k][j] /= d;
++                }
++                for i in 0..3 {
++                    if i != k {
++                        let d = a[i][k];
++                        for j in 0..6 {
++                            a[i][j] -= d * a[k][j];
++                        }
++                    }
++                }
++            }
++            let mut out = [[0.0; 3]; 3];
++            for i in 0..3 {
++                for j in 0..3 {
++                    out[i][j] = a[i][3 + j];
++                }
++            }
++            out
++        }
++        for case in 0..24 {
++            let mut vs = vec![BodyView::frozen(); 2];
++            let centers = [vec3(-0.7, 0.2, 0.1), vec3(0.4, -0.3, 0.2)];
++            let point = vec3(0.1, 0.5, -0.2);
++            for b in 0..2 {
++                vs[b].inv_m = 0.7 + b as f32 * 0.5;
++                let r = Mat3::from_axis_angle(
++                    vec3(0.2, 0.7, 0.3).normalize(),
++                    0.1 * case as f32 + 0.3 * b as f32,
++                );
++                vs[b].inv_i_world_mat =
++                    r * Mat3::from_diagonal(vec3(0.8, 1.3, 2.1)) * r.transpose();
++            }
++            vs[1].lin = vec3(2.0 + case as f32 * 0.03, -0.4, -1.3);
++            let initial = vs.clone();
++            let mut c = contact(0, 1, 0);
++            c.ra = point - centers[0];
++            c.rb = point - centers[1];
++            c.normal_impulse = 1.7;
++            c.tangent_impulse = [0.0; 2];
++            c.friction = 0.6;
++            c.friction_tangent = if case % 3 == 0 { [0.3, 0.9] } else { [0.6; 2] };
++            c.friction_cone = case % 2 == 0;
++            for i in 0..2 {
++                c.k_tangent[i] =
++                    vs[0].k_axis(c.ra, c.tangent[i]) + vs[1].k_axis(c.rb, c.tangent[i]);
++            }
++            let mut geom = NormalGeometry::default();
++            geom.build(&[c], &vs);
++            let response = geom.friction_response[0];
++            for axis in 0..2 {
++                let d = 0.37;
++                let mut applied = initial.clone();
++                let (a, b) = split_body_pair(&mut applied, 0, 1).unwrap();
++                apply_precomputed(a, b, c.tangent[axis], response[axis], d);
++                for body in 0..2 {
++                    let sign = if body == 0 { -1.0 } else { 1.0 };
++                    let r = if body == 0 { c.ra } else { c.rb };
++                    let torque = cross(arr(r), arr(c.tangent[axis]).map(|x| x * d as f64));
++                    let matrix = initial[body].inv_i_world_mat.to_cols_array();
++                    for k in 0..3 {
++                        let expected = sign
++                            * (0..3)
++                                .map(|j| matrix[j * 3 + k] as f64 * torque[j])
++                                .sum::<f64>();
++                        assert!(
++                            (arr(applied[body].ang)[k] - expected).abs()
++                                < 128.0 * f32::EPSILON as f64 * expected.abs().max(1.0)
++                        );
++                    }
++                }
++            }
++            let mut old = vs.clone();
++            let mut oldc = c;
++            let (a, b) = split_body_pair(&mut old, 0, 1).unwrap();
++            global_friction(&mut oldc, a, b);
++            let (a, b) = split_body_pair(&mut vs, 0, 1).unwrap();
++            global_friction_response(&mut c, a, b, Some(response));
++            for (a, b) in vs.iter().zip(&old) {
++                assert!((a.lin - b.lin).length() < 3e-5);
++                assert!((a.ang - b.ang).length() < 3e-5);
++            }
++            if c.friction_cone {
++                let limit = if case % 3 == 0 { 0.6 } else { c.friction } * c.normal_impulse;
++                assert!(
++                    (c.tangent_impulse[0] * c.tangent_impulse[0]
++                        + c.tangent_impulse[1] * c.tangent_impulse[1])
++                        .sqrt()
++                        <= limit + 2e-6
++                );
++            } else {
++                for i in 0..2 {
++                    assert!(
++                        c.tangent_impulse[i].abs()
++                            <= c.friction_tangent[i] * c.normal_impulse + 2e-6
++                    );
++                }
++            }
++            let mut linear = [0.0; 3];
++            let mut angular = [0.0; 3];
++            for b in 0..2 {
++                let dv = arr(vs[b].lin - initial[b].lin).map(|x| x / initial[b].inv_m as f64);
++                let dw = arr(vs[b].ang - initial[b].ang);
++                let inertia = inverse(initial[b].inv_i_world_mat);
++                let orbital = cross(arr(centers[b]), dv);
++                for i in 0..3 {
++                    linear[i] += dv[i];
++                    angular[i] += orbital[i] + (0..3).map(|j| inertia[i][j] * dw[j]).sum::<f64>();
++                }
++            }
++            for x in linear.into_iter().chain(angular) {
++                assert!(x.abs() < 3e-5, "case={case} momentum={x}");
++            }
++        }
++        println!("ROUND197 physical24 boxcone anisotropic unequalM SPD offsetarms tolerance/momentum/budget pass");
+     }
+ 
+     #[test]
+@@ -2830,6 +2972,14 @@
+ }
+ 
+ fn global_friction(c: &mut SolverContact, va: &mut BodyView, vb: &mut BodyView) {
++    global_friction_response(c, va, vb, None);
++}
++fn global_friction_response(
++    c: &mut SolverContact,
++    va: &mut BodyView,
++    vb: &mut BodyView,
++    response: Option<[[Vec3; 2]; 2]>,
++) {
+     let mut vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
+     // 摩擦（用上一轮的法向冲量作为上界）
+     let max_friction = c.friction * c.normal_impulse;
+@@ -2861,7 +3011,9 @@
+                 let d = *n - c.tangent_impulse[i];
+                 c.tangent_impulse[i] = *n;
+                 if d != 0.0 {
+-                    if c.precomputed {
++                    if let Some(response) = response {
++                        apply_precomputed(va, vb, c.tangent[i], response[i], d);
++                    } else if c.precomputed {
+                         apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
+                     } else {
+                         pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
+@@ -2888,7 +3040,9 @@
+             c.tangent_impulse[i] = new;
+             // 冲量没变时不需要再乘一遍/重算相对速度；结果逐位相同。
+             if d != 0.0 {
+-                if c.precomputed {
++                if let Some(response) = response {
++                    apply_precomputed(va, vb, c.tangent[i], response[i], d);
++                } else if c.precomputed {
+                     apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
+                 } else {
+                     pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
+@@ -3744,6 +3898,7 @@
+     locals: Vec<CachedLocal>,
+     z: Vec<f64>,
+     out: Vec<f64>,
++    friction_response: Vec<[[Vec3; 2]; 2]>,
+ }
+ impl NormalGeometry {
+     fn build(&mut self, cs: &[SolverContact], vs: &[BodyView]) {
+@@ -3753,6 +3908,20 @@
+             n[0] += 1;
+             c.set(n);
+         });
++        self.friction_response.clear();
++        self.friction_response.extend(cs.iter().map(|c| {
++            let arm = |body: usize, r: Vec3, t: Vec3| {
++                if vs[body].inv_m > 0.0 {
++                    vs[body].inv_i_world(r.cross(t))
++                } else {
++                    Vec3::ZERO
++                }
++            };
++            [
++                [arm(c.a, c.ra, c.tangent[0]), arm(c.b, c.rb, c.tangent[0])],
++                [arm(c.a, c.ra, c.tangent[1]), arm(c.b, c.rb, c.tangent[1])],
++            ]
++        }));
+         self.chains.clear();
+         self.locals.clear();
+         let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+@@ -4123,9 +4292,12 @@
+         });
+         global_observe(cs, vs, "before_friction");
+     }
+-    for c in cs.iter_mut() {
++    if !cache.ready {
++        cache.build(cs, vs);
++    }
++    for (i, c) in cs.iter_mut().enumerate() {
+         if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
+-            global_friction(c, a, b);
++            global_friction_response(c, a, b, Some(cache.friction_response[i]));
+         }
+     }
+     #[cfg(test)]
