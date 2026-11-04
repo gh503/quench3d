@@ -1,0 +1,162 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -4120,6 +4120,8 @@
+     state: &mut NormalSolveState,
+ ) {
+     if global {
++        let ready206 = state.geometry.ready;
++        let before206 = diag206_snapshot(cs, vs, &state.memory);
+         global_normal_attempt_work(
+             cs,
+             vs,
+@@ -4127,11 +4129,12 @@
+             &mut state.geometry,
+             &mut state.work,
+         );
+-        for c in cs {
++        for c in cs.iter_mut() {
+             if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
+                 global_rolling(c, a, b);
+             }
+         }
++        diag206_record(before206, diag206_snapshot(cs, vs, &state.memory), ready206);
+     } else {
+         solve_velocity_contacts_memory(cs, vs, false, &mut state.memory);
+     }
+@@ -4494,3 +4497,70 @@
+     }
+     result / (a.len() * b.len()) as f64
+ }
++
++thread_local! {static DIAG206:std::cell::RefCell<([usize;8],[usize;20])>=const{std::cell::RefCell::new(([0;8],[0;20]))};}
++fn diag206_snapshot(
++    cs: &[SolverContact],
++    vs: &[BodyView],
++    m: &NormalDirectionMemory,
++) -> (Vec<u32>, Vec<u64>) {
++    let mut p = Vec::new();
++    for v in vs {
++        for x in [v.lin.x, v.lin.y, v.lin.z, v.ang.x, v.ang.y, v.ang.z] {
++            p.push(x.to_bits());
++        }
++    }
++    for c in cs {
++        p.extend([
++            c.normal_impulse.to_bits(),
++            c.tangent_impulse[0].to_bits(),
++            c.tangent_impulse[1].to_bits(),
++        ]);
++    }
++    let mut q = vec![
++        m.p.len() as u64,
++        m.ap.len() as u64,
++        m.free.len() as u64,
++        m.curvature.to_bits(),
++    ];
++    q.extend(m.p.iter().map(|x| x.to_bits()));
++    q.extend(m.ap.iter().map(|x| x.to_bits()));
++    q.extend(m.free.iter().map(|x| u64::from(*x)));
++    (p, q)
++}
++fn diag206_record(before: (Vec<u32>, Vec<u64>), after: (Vec<u32>, Vec<u64>), ready: bool) {
++    DIAG206.with(|d| {
++        let mut d = d.borrow_mut();
++        if !ready {
++            d.0[6] = 0;
++            d.0[7] = 0;
++        }
++        let round = d.0[6];
++        d.0[6] += 1;
++        d.0[0] += 1;
++        let physical = before.0 == after.0;
++        let memory = before.1 == after.1;
++        if !memory {
++            d.0[3] += 1;
++        }
++        if physical {
++            d.0[1] += 1;
++            if !memory {
++                d.0[2] += 1;
++            }
++        }
++        if ready && physical && memory {
++            d.0[4] += 1;
++            d.0[7] += 1;
++            d.0[5] = d.0[5].max(d.0[7]);
++            if round < 20 {
++                d.1[round] += 1;
++            }
++        } else {
++            d.0[7] = 0;
++        }
++    });
++}
++pub(crate) fn diag206_take() -> ([usize; 8], [usize; 20]) {
++    DIAG206.with(|d| std::mem::replace(&mut *d.borrow_mut(), ([0; 8], [0; 20])))
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -8754,3 +8754,10 @@
+ 
+ #[cfg(test)]
+ mod default_bits_193;
++
++impl PhysicsWorld {
++    #[doc(hidden)]
++    pub fn diagnostic_fixed206() -> ([usize; 8], [usize; 20]) {
++        crate::solver::diag206_take()
++    }
++}
+--- /dev/null
++++ b/crates/quench3d-physics/examples/global_normal_fixed206.rs
+@@ -0,0 +1,50 @@
++use quench3d_math::{vec3, Vec3};
++use quench3d_physics::{BodyBuilder, PhysicsWorld, Shape};
++fn sample(layers: usize, global: bool) -> f64 {
++    let mut w = PhysicsWorld::new();
++    w.set_fixed_dt(1.0 / 60.0);
++    w.config.global_normal_projection = global;
++    w.config.speculative_margin = 0.005;
++    w.config.velocity_iterations = 20;
++    w.config.position_iterations = 8;
++    w.add_builder(
++        BodyBuilder::r#static(Shape::Box {
++            half_extents: vec3(4.0, 0.25, 4.0),
++        })
++        .position(vec3(0.0, -0.25, 0.0)),
++    );
++    for i in 0..layers {
++        w.add_builder(
++            BodyBuilder::dynamic(Shape::Box {
++                half_extents: Vec3::splat(0.25),
++            })
++            .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
++            .mass(1.0),
++        );
++    }
++    for _ in 0..8 {
++        w.step(1.0 / 60.0);
++    }
++    PhysicsWorld::diagnostic_fixed206();
++    let start = std::time::Instant::now();
++    for _ in 0..120 {
++        w.step(1.0 / 60.0);
++    }
++    let elapsed = start.elapsed().as_secs_f64();
++    println!(
++        "ROUND206 layers={layers} global={global} state_counts={:?}",
++        PhysicsWorld::diagnostic_fixed206()
++    );
++    assert_eq!(w.step_count, 128);
++    std::hint::black_box(
++        w.bodies()
++            .map(|(_, b)| (b.position(), b.linear_velocity))
++            .collect::<Vec<_>>(),
++    );
++    elapsed
++}
++fn main() {
++    for layers in [12, 32] {
++        sample(layers, true);
++    }
++}

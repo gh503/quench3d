@@ -1,0 +1,18 @@
+# Exact normal round fixed point census registration
+
+Round206 diagnosisONLYonretained205,leadexplicitlyretainedstructuralreusewithoutperformancepassclaim. No rounds skipped/no epsilon/newbudget. Snapshotsbeforenormal+rollingandafterallrollingincludeallBodyViewlin/angf32bits,allcontactnormal/tangentimpulsef32bits,andmemoryp/Ap/curvaturef64bits/freebooleans/lengths. Geometry/mass/worldI/armsfixedwithinprepare;worklambda/g/free/r/diag/z/p/Ap/next/forceoverwrittenbeforeuseeachcall,soexcludedfromsemanticstate;geometryreadybuildmaychangefirstcallbutdeterministicfactorssameimmutableinputs. Countequalityonly,noperformanceclaimfromcloningdiagnosticoverhead.
+
+Reportfullstatefixedpoints,physicalonlyunchangedbutmemorychanged,memorybefore/afterchanged,consecutivemaxrunandperroundindexdistribution,12/32W8M120sameworldfixtures(nojoint). Newstepresetstartsroundindex/runfresh;includegeometryreadyineligibilitytoexcludeunbuiltfirstcall. Anyfuturejointoptimizationswouldneedcurrentstatecomparisonafterexternaljointupdates,notstepflag. No skipimplementationauthorized;archiveandrestoreexact205sourceaftercounts. Mainproductionunchanged.
+
+## Actual census: no exact fixed point
+
+Job bash-2c9f1f4c5e394a69 formallycollected0,releasecompile18.76s. No timingclaim;diagnosticcloning/snapshotcountsareintrusive. Snapshotwrapsentireglobalnormalattemptandrolling;readybeforefalseexcludesinitialbuildtransitionandresetsperstepindex/consecutiverun. Pseudo/geometry/contactbias/materialfieldsexcludedbecauseimmutablewithinvelocityround;workbuffersfullyoverwrittenbeforeuse,geometryrhs/outactiveentriesrewritten,soarenotsemanticnextcallinputs.
+
+|Layers|Normal rounds|Physical unchanged|Physical unchanged/memory changed|Memory changed|Fullstate fixed|Longest fixed run|
+|---:|---:|---:|---:|---:|---:|---:|
+|12|2400|0|0|2386|0|0|
+|32|600|0|0|600|0|0|
+
+All20roundindexhistogrambucketszero. 12remaining14roundswithunchangedmemoryarestillphysicalchanges;noteligibleforskip. No exactmemoizationcandidatejustifiedinthisregisteredwindow. Do notintroduceepsilon/statehashcollisions/skipbudgetsasfallback. Thisrulesouttheproposedwhole-statefixedpointoptimizationfortheseinputs,notallpossibleworlds.
+
+[global_normal_fixed_point_census.patch](../../tools/experiments/global_normal_fixed_point_census.patch),SHA256 `411159a7313ce8f9c3af61ba9c7e6e0f013cd187c916a843d885ec620c7d8e04`,applycheck0againstrestored205. Logs/source/binaryhash/statusunder /home/gh503/Documents/infra-dev/quench3d/target/tmp/round206-fixed-point/. Archivecompletedthenexact205solver/worldrestoredandtemporaryexampledeleted;allfive205costsourcehashchecksPASS. No diagnosticAPI/snapshotcode remains/no skipimplemented/mainproductionunchanged/alljobscollected/no runningbuilder. Performancegoalstillunmet20512ratio1.421497.
