@@ -2025,9 +2025,13 @@ impl PhysicsWorld {
         // 5.9 扭矩级 PD 马达：先作为外力施加一次，再进约束求解。
         self.joint_solver.apply_pd_torques(&mut views, dt);
         // 6. 热启动
+        #[cfg(test)]
+        self.trace_stack_solver("prepared", &views);
         self.contact_solver.warm_start(&mut views, &self.config);
         self.joint_solver.warm_start(&mut views);
         lap!(prepare_us);
+        #[cfg(test)]
+        self.trace_stack_solver("warm", &views);
         // 7. 速度迭代
         let iters = self.config.velocity_iterations.max(1);
         let pos_iters = self.config.position_iterations;
@@ -2085,7 +2089,11 @@ impl PhysicsWorld {
                 self.contact_solver.solve_velocity(&mut views);
                 self.joint_solver.solve_velocity(&mut views, dt);
             }
+            #[cfg(test)]
+            self.trace_stack_solver("velocity", &views);
             self.contact_solver.relax(&mut views, relax_iters, 0.5);
+            #[cfg(test)]
+            self.trace_stack_solver("relax", &views);
         }
         lap!(velocity_us);
         // 8. 位置迭代（分裂冲量）
@@ -2107,6 +2115,8 @@ impl PhysicsWorld {
             self.config.max_correction_velocity,
         );
         lap!(position_us);
+        #[cfg(test)]
+        self.trace_stack_solver("position", &views);
         // 9. 写回速度与伪速度
         for (i, view) in views.iter().enumerate() {
             if let Some(b) = self.bodies[i].body.as_mut() {
@@ -2364,6 +2374,24 @@ impl PhysicsWorld {
     ///
     /// `lap_at` 是阶段计时的「上次打点」（关闭计时时为 `None`）：
     /// 宽相结束后会在这里再打一次点，把宽相与窄相分开统计。
+    #[cfg(test)]
+    fn trace_stack_solver(&self, phase: &str, views: &[BodyView]) {
+        if std::env::var_os("Q3D_STACK_SOLVER_TRACE").is_none()
+            || self.step_count >= 16
+            || self.body_count() != 13
+        {
+            return;
+        }
+        for (index, c) in self.contact_solver.contacts.iter().enumerate() {
+            let a = &views[c.a];
+            let b = &views[c.b];
+            let vn = (b.velocity_at(c.rb) - a.velocity_at(c.ra)).dot(c.normal);
+            let pv = (b.pseudo_velocity_at(c.rb) - a.pseudo_velocity_at(c.ra)).dot(c.normal);
+            let target = c.speculative_bias + c.restitution_bias;
+            println!("ROUND175_SOLVER step={} phase={phase} point={index} pair={},{} pen={} normal={:?} vn={vn} target={target} residual={} impulse={} pseudo_vn={pv} pseudo_impulse={}",self.step_count+1,c.a,c.b,c.penetration,c.normal,(target-vn).max(0.0),c.normal_impulse,c.pseudo_impulse);
+        }
+    }
+
     fn collect_contacts(&mut self, lap_at: &mut Option<f64>) {
         let mut manifolds = std::mem::take(&mut self.manifolds);
         let mut contacts = std::mem::take(&mut self.contacts);
@@ -4561,6 +4589,39 @@ impl PhysicsWorld {
 mod tests {
     use super::*;
     use crate::body::BodyBuilder;
+
+    #[test]
+    fn stack_solver_bounded_replay() {
+        for enhanced in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_fixed_dt(1.0 / 60.0);
+            world.config.speculative_margin = 0.005;
+            if enhanced {
+                world.config.velocity_iterations = 20;
+                world.config.position_iterations = 8;
+            }
+            world.add_builder(
+                BodyBuilder::r#static(Shape::Box {
+                    half_extents: vec3(4.0, 0.25, 4.0),
+                })
+                .position(vec3(0.0, -0.25, 0.0)),
+            );
+            for i in 0..12 {
+                world.add_builder(
+                    BodyBuilder::dynamic(Shape::Box {
+                        half_extents: Vec3::splat(0.25),
+                    })
+                    .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
+                    .mass(1.0),
+                );
+            }
+            println!("ROUND175_REPLAY enhanced={enhanced}");
+            for _ in 0..16 {
+                world.step(1.0 / 60.0);
+            }
+            assert_eq!(world.step_count, 16);
+        }
+    }
 
     #[test]
     fn speculative_boxes_original_surface_matrix() {

@@ -252,13 +252,18 @@ fn audit() -> Vec<Summary> {
     summaries
 }
 #[test]
-fn speculative_stack_existing_configuration_audit() {
+fn speculative_stack_precision_recipe_and_zero_margin_audit() {
     for layers in [4usize, 12] {
         let mut zero_reference = Vec::new();
-        for setting in 0..3 {
-            let margin = if setting == 2 { 0.005 } else { 0.0 };
+        for setting in 0..4 {
+            let margin = if setting >= 2 { 0.005 } else { 0.0 };
             let mut world = PhysicsWorld::new();
             world.set_fixed_dt(1.0 / 60.0);
+            if setting == 3 {
+                world.config.velocity_iterations = 20;
+                world.config.position_iterations = 8;
+            }
+            let mut first_excess = false;
             if setting != 0 {
                 world.config.speculative_margin = margin;
             }
@@ -299,6 +304,14 @@ fn speculative_stack_existing_configuration_audit() {
                     for (j, b) in poses.iter().enumerate().skip(i + 1) {
                         let d = (-a.separation(*b)).max(0.0);
                         all = all.max(d);
+                        if std::env::var_os("Q3D_STACK_SOLVER_TRACE").is_some()
+                            && setting >= 2
+                            && d > 0.00501
+                            && !first_excess
+                        {
+                            first_excess = true;
+                            println!("ROUND175_FIRST layers={layers} setting={setting} step={step} pair={i},{j} depth={d:.12} a={a:?} b={b:?} va={:?} vb={:?} contacts={:?}",world.body(handles[i]).unwrap().linear_velocity,world.body(handles[j]).unwrap().linear_velocity,world.contacts());
+                        }
                         if j == i + 1 {
                             adjacent = adjacent.max(d);
                             if step <= 16 {
@@ -328,11 +341,19 @@ fn speculative_stack_existing_configuration_audit() {
                     }
                     bits.push(u32::from(b.is_sleeping()));
                 }
-                if step <= 16 && setting != 1 {
+                if std::env::var_os("Q3D_STACK_SOLVER_TRACE").is_some()
+                    && step <= 16
+                    && setting != 1
+                {
                     println!("ROUND173_EARLY layers={layers} margin={margin} step={step} contacts={} early_pairmax={early:.12} bottom_y={} top_y={}",world.contacts().len(),poses[0].center[1],poses[layers-1].center[1]);
                 }
             }
             assert!(contacts > 0);
+            // First-green recipe verification using existing API; no new solver fix.
+            if setting == 3 {
+                assert!(all <= 0.00501 && floor_depth <= 0.00501,
+                    "existing margin=.005 and20/8 recipe fixed4/12layer240step5mm target: all={all} floor={floor_depth}");
+            }
             println!("ROUND173_STACK layers={layers} setting={setting} margin={margin} steps=240 early16={early:.12} adjacent={adjacent:.12} allpairs={all:.12} floor={floor_depth:.12} contacts={contacts}");
             if setting == 0 {
                 zero_reference = bits;
