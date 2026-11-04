@@ -1,0 +1,59 @@
+# Round219: first budget-rejection snapshot registration
+
+Status: diagnostic registration only. No source instrumentation, replay, captured first-rejection step, offline solver result, feasibility conclusion, or performance measurement exists yet. Current scope permits this document alone; parent review must precede source changes and sole-builder execution. This is a new diagnostic experiment, not a new acceptance attempt or continuation/tuning of the rejected Round218 solver.
+
+## Fixed reference and question
+
+The reference is the archived Round218 cfg(test) candidate with fluid source SHA256 `dd6aa6bf7f749d53f8028d435e89c98d26d5c2b9425f83fb402898bf1ce809c9`, preserved at `target/tmp/round218-global-halfspace/candidate/fluid.rs` with its patch against `796a62c`. It performed exactly128 stable full dual sweeps over the complete frozen pair/wall graph, capped at32768 total rows, using the registered1e-7m physical certificate and unchanged sealed fixture. Its full120-step target failed; candidate source was restored to the committed tests/stubs. See [registration and actual rejection](particle_global_halfspace.md).
+
+Round218 reported46 budget_residual rejections, but logged no step on each rejection. Its first **pair-distance** violation at step75 is not known to be its first budget rejection, and the46 messages do not establish a continuous rejection interval. The question here is narrower: what is the exact first rejected frozen system, and what numerical state did the fixed128 solver reach? Its feasibility and the reason for all later rejections remain Unknown.
+
+Rollback means retaining the complete predicted array at entry to this step's separation operator, after this step's earlier PBF phases. It is not restoration of the previous public frame or a previously certified safe state. Capture must preserve that distinction.
+
+## Diagnostic-only replay and stop point
+
+After explicit source authorization, reinstate the archived candidate solely for a new ignored cfg(test) diagnostic target. Preserve its numerical graph construction, row ordering, mass transform, sweep count, update expressions, y-reference reduction, guard and certificates exactly. No algorithm, tolerance, timestep, ordering, parameter, branch policy, budget or cost gate changes are permitted. Production/default/old modes remain unchanged. The original Round218 strong target and its criteria remain unchanged; this diagnostic does not replace or satisfy them.
+
+Use exactly the existing sealed fixture: six overlapping static boxes with inner X/Z +/-0.5 and Y0/1, thickness0.1; initial fluid center(0,0.5,0), half extents(0.2,0.2,0.2), spacing0.1, radius0.04, capacity2000, actual125 particles, initial velocity(0.15,0,-0.1), gravity(0,-9.81,0), four density iterations, fixed dt1/60, experimental global separation. No emit/drain/foam/bubbles. Limit the search to at most the original120 actual public steps.
+
+Add a separate diagnostic test and an optional cfg(test) thread-local/context collector. Set the intended one-based step identifier before each actual public world.step(dt). Each public step invokes the real operator once. In that same invocation, at the first core return reporting budget_residual, capture the state before local rows/lambda/incremental-y are discarded. Do not call the operator again to regenerate a snapshot, and do not stop the public step midway. Record the whole-array atomic rollback result, let the current public step finish, record its actual final state, then break the diagnostic loop. After the first snapshot, collect no later rejection snapshots. If no rejection occurs by120 steps, report that outcome as a diagnostic discrepancy, not a pass of the original strong target.
+
+There is one exact diagnostic command and one physical trajectory with capture enabled. No second capture-off trajectory or extra public/operator replay is required in this stage. Instrumentation may copy state and perform read-only diagnostics; it must never feed these results into the numerical update, accepted state, rejection decision or stopping budget. No timing/performance claim is made.
+
+## Required snapshot fields and exact representation
+
+Preserve a machine-readable local snapshot plus a concise human-readable summary, complete runner output, exit status and source/fixture hashes. Use exact integer bits for stored f32 values and exact f64 bits or round-trip-safe decimal/hex representation for numerical arrays; avoid truncated println formatting as the sole data source.
+
+The snapshot contains:
+
+- Identity: experiment/reference source hash, instrumented source hash, one-based intended and actual public step count, fixed-dt bits, accumulator bits, particle count, descriptor values/bits relevant to the solve, and the rejection reason.
+- Operator entry: all125 predicted position f32 bits, stored liquid position/velocity f32 bits at entry, calibrated mass bits, explicit per-particle f64 mass values/bits, radius/spacing/iteration/mode values, and any required original previous positions. The entry array is the precise rollback baseline.
+- Boundaries: all six body's stable index/type/sensor/part count, exact Box half extents and world transform position/rotation/scale bits; normalized support normal, surface point, selected feature/axis and signed clearance used for every particle-wall row. The registered fixtures use identity/Builder-normalized rotations. No arbitrary nonunit runtime quaternion support is inferred.
+- Full frozen graph: exact row count and stable order, row kind and source identities (pair i/j or particle/body/feature), coefficient variable indices and f64 values/bits, right-hand side and squared denominator. Record zero coefficients if the reference row representation retained them. Preserve all8500 rows, including slack rows.
+- Solver end: all row multipliers, final incremental y, independently recomputed A-transpose*lambda reference y, mass-unscaled displacements, physical row residuals `b-a dot y_ref`, finite flags, actual128 sweep count, actual dual updates and decreases. Retain enough information to reconstruct both incremental and reference residuals without rerunning the physical world.
+- End-of-attempt summary: maximum positive physical row residual in metres and its row identity, separate pair/wall violating counts, deterministic top16 residual rows, minimum/maximum multiplier, physical incremental/reference drift norm per particle and global maximum, plus dual objective and finiteness checks. A positive residual is a failed certificate, not an infeasibility proof.
+- Atomic/public result: post-rejection operator predicted bits and bitwise comparison with every entry position; then actual public-step final positions/velocities, actual step count/accumulator and independent final minimum pair distance/six-inner-face clearance. Subsequent phases may alter state, so these arrays must be distinct fields.
+
+Additionally record128 scalar sweep summaries: maximum positive residual in metres, dual objective and multiplier norm after each complete sweep. These read-only calculations are evaluated on the then-current incremental y and lambda, do not mutate either and do not alter the update expressions. Do not dump the complete graph or all multipliers after every sweep; the full graph/end state plus scalar history are sufficient for this capture scope. Extra O(128E) observation cost is accepted and explicitly excluded from performance claims.
+
+## Observation integrity and bit-equivalence checks
+
+Before execution, parent and independent read-only review compare the instrumented numerical sections against the archived reference. The meaningful source diff must be observation-only: optional collector/context fields, scalar-history reads, cloned end-of-core state, row identity metadata, snapshot serialization and the separate diagnostic wrapper. Do not refactor, reorder reductions, change loop nesting, normalize coefficients differently or replace floating expressions while adding capture.
+
+Freeze and hash the source, archive the observation-only patch and exact command, then run the sole diagnostic once. Record the snapshot's own byte hash and hashes for the operator-entry array and ordered graph. Using the captured representation offline, independently re-evaluate row count/order consistency, positive finite denominators, A-transpose*lambda in its documented order, stored reference-y equality/drift, residual summaries and exact bitwise rollback. This data-integrity check is not another physical simulation and does not require solving or modifying the frozen QP. Do not claim full captured/uncaptured trajectory bit equality from source inspection alone; the guarantee recorded in this stage is unchanged numerical statements plus validated snapshot consistency, not an unexecuted second trajectory comparison.
+
+The diagnostic must explicitly assert that all mandatory fields were captured, the first snapshot is unique, the actual public step completed, the operator invocation was not repeated to obtain data, row/mass/finite invariants are valid, and the whole rejected predicted array is bit-identical to entry. Failed observation/serialization invariants are diagnostic failures, not new physical acceptance failures. Final positions may overlap: this test is not an overlap acceptance oracle.
+
+## Later independent feasibility evidence (not implemented here)
+
+After capture, a separate reviewed task may inspect available local numerical tools without installing dependencies or accessing the network, then solve the same frozen system independently. One possible Phase-I problem minimizes t subject to Ay+t>=b and t>=0. This capture stage does not implement Phase-I, add a solver dependency, pick a new production method or promise convergence.
+
+An independently found finite y satisfying every captured original row to the registered physical tolerance is a numerical feasible witness. To connect that witness to the actual position representation and safety path, separately reconstruct displacement, apply the existing guard/store-f32 path and recheck all original rows, all particle pairs and body clearances. A successful frozen-row witness can show that the128-sweep failure was not due to infeasibility of that specific captured system; successful post-storage certificates are a distinct stronger statement. Neither extrapolates to all46 rejected systems or full trajectory acceptance.
+
+A positive Phase-I objective by itself is not sufficient to declare infeasibility. A corresponding Farkas witness needs z>=0, A-transpose*z=0 and b-transpose*z>0, independently checked; for the Phase-I normalization also check sum(z)<=1 where applicable. Finite floating residuals near zero provide numerical evidence, not an automatic strict mathematical proof. If no independently validated primal or dual witness exists, report Unknown. Do not turn exhausted iteration budget, a positive residual, an optimizer status string or one captured snapshot into a global infeasibility claim.
+
+## Evidence and boundary of completion
+
+The sole authorized builder saves exact toolchain/environment/command, complete log, formal exit status, reference/instrumented source hashes, snapshot bytes/hash, ordered-row/input hashes and observation-only replay patch. Formally collect the job. Completion means one trustworthy first-rejection snapshot and validated atomic/public-state separation, or an honestly documented diagnostic failure. It does not mean fixed128 precision passes, a new separation mode exists, arbitrary transforms are supported, the sealed problem is solved, or any cost target is met.
+
+At registration time no source or build action has been taken for Round219. Await parent review before implementation; offline feasibility work requires its own later scope.
