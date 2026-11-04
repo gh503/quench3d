@@ -1,0 +1,26 @@
+# Exact normal round redundancy registration
+
+Round204 authorizedminimalcandidateonexact202(after203rejected). Trueperformanceredis20212ratio1.506265FAIL;no inventedsemanticred. Onlytwoprovenredundancies:retaintruep/gunchangedsinceralreadycomputedd=sum(p*g),sodescentreuseexactd;retainfalsefallbackretainsoriginalfinalsum. Recordhitboundduringoriginalnextmapbranchp<0&&alpha==-lambda/p,same+0assignment;removeonlylaterduplicatehitboundscan. Fullnextfiniteguardstillbeforememorycommit;nochangealphaminloop/reductionorder/friction/history/Ap/budget/impulseapply. No memorybufferswap.
+
+Scopeexpandedbyexplicitleadauthorizationbeforeadditionalimplementation:cachelocalperpoint/endpointexactf32torque=r.cross(normal)andresponse=inv_i_world(torque),thenoriginalf32dotandinvMdot/f64sum unchanged;cacheorderedweightedwabforALLorderedrankpairs(4forrank2),thenoriginalmatrix[a][b]=.5*(wab[a][b]+wab[b][a])everyelement,preservingoperandorder/no symmetryassumption. No forcekernelsharing/frictionresponsechanges. Existingactualendpointkernelcounterstillcounts32matchingpointpairterms(not8responses);do notrenamecounterorclaimsamequantity. Independent9probesoldweightedbits+40roundreference+fullphysicalcompatibilityprotectnewhoist.
+
+Tiny2implementationjob bash-fe191598c30a4828 hadalreadybegunwhenexpanded4authorizationarrived;sourcefrozenuntilitcompletes,thenimplementremainingtwoandrerunfullcompatibilityagainstfinalexpandedsource. Intermediatepassresultsnotfinalfour-itemvalidation. No tiny2costrun.
+
+Olduncachedreferenceunchangedandnonzero-friction40roundbitproof+overflow/fresh/rolling/mathmustpass;then5400precision/193readonlyfullbytes/1925400actualparallelpairedsteps. Onlyallgreenunchangedcost195example/W8M120/fivefixedalternatingABBAtrials/12&32limit1.15. Ifnoobservedbenefitreject/restore202as203,norepeatedmeasurementselection. Mainproductionunchanged.
+
+## Actual four-item result
+
+Intermediatetiny2job bash-fe191598c30a4828 formallycollected0(allmath/precision/defaultbytes/parity);no intermediatecost. Thenimplementedtwolocalsetupchangesandreranallcompatibilityfromfinalsource. [global_normal_exact_round_redundancy.patch](../../tools/experiments/global_normal_exact_round_redundancy.patch),SHA256 `b3a2f358c9a7b221f1ca35acb86ebca0e8c3568244bc7242bc38595a376aed1c`,incrementalagainstexact202,applycheck0.
+
+Finaljob bash-abbf21139c84416f formallycollected0:query0/globalmath8(including9kernelbitprobes,nonzero-friction40roundreference,overflow/freshcoupling/rolling)/direction2/local1/projection2PASS. Full5400precisionPASS1.13sallreportedpeaks/sleep/driftunchanged. 193full1240states/931616648bytesPASS4.79s. 192threevariants1800paired/1800actualparallel/maxthreads2/hardware4eachPASS66.30s.
+
+Onlyafterallcompatibilitypasses,unchangedcost195exampleSHAa2d02863c9b35f5f27abe6d04fd895e348b692ae79e344283fd22b920bc21f97sameproductionreleasebinary/W8M120/fivefixedalternatingABBAtrials. Job bash-2492c8a650844f2e formallycollectedexit1,compile8.72s.
+
+|Layers|Legacy median s|Candidate median s|Ratio|Limit|Result|
+|---:|---:|---:|---:|---:|---|
+|12|.019770570|.027588060|1.395410|1.15|FAIL|
+|32|.052514493|.020462180|.389648|1.15|PASS|
+
+Observed12candidatebenefitversus202.028979216/ratio1.506265inseparatemeasurementsets;notpairedcrossversionstatisticalproof. Retainfour-itemexactcandidateunderleadretentionruleforobservedbenefit;12performancegateNOTpassed/no shippingclaim. LocalgeometryVecallocatesoncepersetup;endpointkernelcounterstill32matchingterms,precomputedresponses8perfourpointpairbyconstruction(not8kernelterms). No forcekernelsharing/memoryswap/frictionarithmeticregrouping/203fillfusionincluded.
+
+Finalevidenceabsolute root /home/gh503/Documents/infra-dev/quench3d/target/tmp/round204-exact-redundancy/final/ :source/costhashes,math/precision/default/parity/costlogs/status/binarymanifest. Parentrootpreservesexact202before-solverandtiny2intermediates. Candidatecurrently204retained/mainproductionunchanged/alljobscollected/no runningbuilder.

@@ -1,0 +1,97 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -3959,12 +3959,16 @@
+                 continue;
+             }
+             let kernel = LocalKernelCache::build(points, cs, vs);
++            let mut ordered = [[0.0; 3]; 3];
++            for a in 0..rank {
++                for b in 0..rank {
++                    ordered[a][b] = kernel.weighted(&basis[a + 1], &basis[b + 1]);
++                }
++            }
+             let mut matrix = [[0.0; 3]; 3];
+             for a in 0..rank {
+                 for b in 0..rank {
+-                    matrix[a][b] = 0.5
+-                        * (kernel.weighted(&basis[a + 1], &basis[b + 1])
+-                            + kernel.weighted(&basis[b + 1], &basis[a + 1]));
++                    matrix[a][b] = 0.5 * (ordered[a][b] + ordered[b][a]);
+                 }
+             }
+             let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
+@@ -4268,11 +4272,14 @@
+             }
+         }
+     }
+-    let descent = p
+-        .iter()
+-        .zip(gradient.iter())
+-        .map(|(p, g)| p * g)
+-        .sum::<f64>();
++    let descent = if retain {
++        d
++    } else {
++        p.iter()
++            .zip(gradient.iter())
++            .map(|(p, g)| p * g)
++            .sum::<f64>()
++    };
+     if !descent.is_finite() || descent >= 0.0 {
+         memory.clear();
+         return;
+@@ -4320,9 +4327,11 @@
+         memory.clear();
+         return;
+     }
++    let mut hitbound = false;
+     next.clear();
+     next.extend(lambda.iter().zip(p.iter()).map(|(l, p)| {
+         if *p < 0.0 && alpha == -*l / *p {
++            hitbound = true;
+             0.0
+         } else {
+             (l + alpha * p).max(0.0) as f32
+@@ -4332,7 +4341,6 @@
+         memory.clear();
+         return;
+     }
+-    let hitbound = (0..p.len()).any(|i| p[i] < 0.0 && alpha == -lambda[i] / p[i]);
+     if retain && !hitbound {
+         memory.p.clone_from(p);
+         memory.ap.clone_from(ap);
+@@ -4385,12 +4393,21 @@
+         let n = points.len();
+         let mut terms = vec![[0.0; 4]; n * n];
+         let mut matches = vec![0; n * n];
++        let geometry: Vec<_> = points
++            .iter()
++            .map(|i| {
++                let c = cs[*i];
++                let t = [c.ra.cross(c.normal), c.rb.cross(c.normal)];
++                let response = [vs[c.a].inv_i_world(t[0]), vs[c.b].inv_i_world(t[1])];
++                (t, response)
++            })
++            .collect();
+         for (ii, &i) in points.iter().enumerate() {
+             for (jj, &j) in points.iter().enumerate() {
+                 let x = cs[i];
+                 let y = cs[j];
+-                for (ax, (bx, rx)) in [(x.a, x.ra), (x.b, x.rb)].into_iter().enumerate() {
+-                    for (ay, (by, ry)) in [(y.a, y.ra), (y.b, y.rb)].into_iter().enumerate() {
++                for (ax, (bx, _)) in [(x.a, ()), (x.b, ())].into_iter().enumerate() {
++                    for (ay, (by, _)) in [(y.a, ()), (y.b, ())].into_iter().enumerate() {
+                         if bx == by {
+                             #[cfg(test)]
+                             LOCAL_KERNEL_CALLS.with(|c| c.set(c.get() + 1));
+@@ -4398,9 +4415,7 @@
+                             let slot = ax * 2 + ay;
+                             matches[ii * n + jj] |= 1 << slot;
+                             terms[ii * n + jj][slot] = f64::from(v.inv_m * x.normal.dot(y.normal))
+-                                + f64::from(
+-                                    rx.cross(x.normal).dot(v.inv_i_world(ry.cross(y.normal))),
+-                                );
++                                + f64::from(geometry[ii].0[ax].dot(geometry[jj].1[ay]));
+                         }
+                     }
+                 }
