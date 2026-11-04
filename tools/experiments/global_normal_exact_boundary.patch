@@ -1,0 +1,72 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1802,6 +1802,24 @@
+     }
+ 
+     #[test]
++    fn projected_line_exact_active_boundary() {
++        // Recorded step2round5 coordinate; preserve the exact binary64 inputs.
++        let l = f64::from_bits(0x3f9cc5bca0000000);
++        let p = f64::from_bits(0xbfa6d9e25e14a96c);
++        let alpha = -l / p;
++        let next = projected_line_update(&[l, 2.0 * l], &[p, 2.0 * p], alpha);
++        assert_eq!(
++            next,
++            [0.0, 0.0],
++            "identified exact-boundary coordinates must store zero, not cancellation residue"
++        );
++        assert_eq!(
++            projected_line_update(&[l], &[p], alpha * 0.5),
++            vec![(l + alpha * 0.5 * p) as f32]
++        );
++    }
++
++    #[test]
+     fn wrench_basis_normal_offset_invariance() {
+         let mut vs = vec![BodyView::frozen(); 3];
+         vs[0].is_static = true;
+@@ -2585,11 +2603,7 @@
+     if !alpha.is_finite() || alpha <= 0.0 {
+         return;
+     }
+-    let next: Vec<_> = lambda
+-        .iter()
+-        .zip(&p)
+-        .map(|(l, p)| (l + alpha * p).max(0.0) as f32)
+-        .collect();
++    let next = projected_line_update(&lambda, &p, alpha);
+     if next.iter().any(|x| !x.is_finite()) {
+         return;
+     }
+@@ -2883,3 +2897,17 @@
+     }
+     Some(out)
+ }
++
++fn projected_line_update(lambda: &[f64], p: &[f64], alpha: f64) -> Vec<f32> {
++    lambda
++        .iter()
++        .zip(p)
++        .map(|(l, p)| {
++            if *p < 0.0 && alpha == -*l / *p {
++                0.0
++            } else {
++                (l + alpha * p).max(0.0) as f32
++            }
++        })
++        .collect()
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -4692,6 +4692,11 @@
+                     max_pair = max_pair.max((-a.separation(*b)).max(0.0));
+                 }
+             }
++            if step == 9 {
++                let depth = -poses[3].separation(poses[4]);
++                println!("ROUND186_STEP9 pair34={depth:.15}");
++                assert!((depth - 0.005328714104).abs() < 1e-12, "step9={depth}");
++            }
+             if step == 8 {
+                 println!(
+                     "ROUND184_STEP8 pair34={:.15}",
