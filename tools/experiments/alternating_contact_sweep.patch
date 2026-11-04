@@ -1,0 +1,199 @@
+diff --git a/crates/quench3d-physics/src/parallel.rs b/crates/quench3d-physics/src/parallel.rs
+index 114768a..30bb64c 100644
+--- a/crates/quench3d-physics/src/parallel.rs
++++ b/crates/quench3d-physics/src/parallel.rs
+@@ -28,8 +28,8 @@
+ 
+ use crate::island::Islands;
+ use crate::solver::{
+-    relax_contacts, solve_position_contacts, solve_velocity_contacts, BodyView, SolverConfig,
+-    SolverContact,
++    relax_contacts, solve_position_contacts, solve_velocity_contacts,
++    solve_velocity_contacts_reverse, BodyView, ContactSweepOrder, SolverConfig, SolverContact,
+ };
+ 
+ /// 至少这么多接触才值得开线程（太小的场景线程开销大于收益）。
+@@ -392,8 +392,12 @@ impl ParallelLayout {
+         pos_iters: usize,
+     ) {
+         self.run_workers(move |cs, vs| {
+-            for _ in 0..iters {
+-                solve_velocity_contacts(cs, vs);
++            for iteration in 0..iters {
++                if cfg.contact_sweep_order == ContactSweepOrder::Alternating && iteration % 2 == 1 {
++                    solve_velocity_contacts_reverse(cs, vs);
++                } else {
++                    solve_velocity_contacts(cs, vs);
++                }
+             }
+             relax_contacts(cs, vs, relax_iters, gain);
+             solve_position_contacts(cs, vs, dt, cfg, pos_iters);
+@@ -405,6 +409,10 @@ impl ParallelLayout {
+         self.run_workers(solve_velocity_contacts);
+     }
+ 
++    pub fn solve_velocity_reverse(&mut self) {
++        self.run_workers(solve_velocity_contacts_reverse);
++    }
++
+     /// 并行松弛。
+     pub fn relax(&mut self, iterations: usize, gain: f32) {
+         self.run_workers(|cs, vs| relax_contacts(cs, vs, iterations, gain));
+diff --git a/crates/quench3d-physics/src/solver.rs b/crates/quench3d-physics/src/solver.rs
+index 4cd9372..e27984c 100644
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -19,11 +19,21 @@ use crate::small_vec::SmallVec;
+ /// 求解器侧每个流形最多保留的接触点数（与 `ContactManifold::MAX_POINTS` 一致）。
+ const MAX_MANIFOLD_POINTS: usize = 4;
+ 
++/// Contact traversal for each velocity sweep; Forward preserves historical order.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum ContactSweepOrder {
++    #[default]
++    Forward,
++    Alternating,
++}
++
+ /// 求解器可调参数。
+ #[derive(Clone, Copy, Debug, PartialEq)]
+ pub struct SolverConfig {
+     /// 速度迭代次数。
+     pub velocity_iterations: usize,
++    /// Opt-in alternating forward/reverse contact sweeps at the same iteration budget.
++    pub contact_sweep_order: ContactSweepOrder,
+     /// 位置（分裂冲量）迭代次数。
+     pub position_iterations: usize,
+     /// 松弛迭代次数。
+@@ -84,6 +94,7 @@ impl Default for SolverConfig {
+     fn default() -> Self {
+         Self {
+             velocity_iterations: 10,
++            contact_sweep_order: ContactSweepOrder::Forward,
+             position_iterations: 4,
+             relaxation_iterations: 1,
+             warm_starting: true,
+@@ -969,6 +980,10 @@ impl ContactSolver {
+         solve_velocity_contacts(&mut self.contacts, views);
+     }
+ 
++    pub fn solve_velocity_reverse(&mut self, views: &mut [BodyView]) {
++        solve_velocity_contacts_reverse(&mut self.contacts, views);
++    }
++
+     /// 松弛：只在仍然相互接近时补一点冲量，绝不抽走能量。
+     pub fn relax(&mut self, views: &mut [BodyView], iterations: usize, gain: f32) {
+         relax_contacts(&mut self.contacts, views, iterations, gain);
+@@ -1036,6 +1051,18 @@ pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mu
+     }
+ }
+ 
++pub(crate) fn solve_velocity_contacts_reverse(
++    contacts: &mut [SolverContact],
++    views: &mut [BodyView],
++) {
++    for c in contacts.iter_mut().rev() {
++        let Some((va, vb)) = split_body_pair(views, c.a, c.b) else {
++            continue;
++        };
++        solve_velocity_contact(c, va, vb);
++    }
++}
++
+ #[inline(always)]
+ fn solve_velocity_contact(c: &mut SolverContact, va: &mut BodyView, vb: &mut BodyView) {
+     let mut vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
+diff --git a/crates/quench3d-physics/src/world.rs b/crates/quench3d-physics/src/world.rs
+index a8294e0..51bff17 100644
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -2064,12 +2064,18 @@ impl PhysicsWorld {
+             // 有关节时：每个迭代里「先全部接触（岛间并行）再全部关节（串行）」，
+             // 与串行版的顺序完全一致。
+             #[cfg(not(target_arch = "wasm32"))]
+-            for _ in 0..iters {
++            for iteration in 0..iters {
+                 if no_joints {
+                     break;
+                 }
+                 self.parallel.sync_from(&views);
+-                self.parallel.solve_velocity();
++                if self.config.contact_sweep_order == solver::ContactSweepOrder::Alternating
++                    && iteration % 2 == 1
++                {
++                    self.parallel.solve_velocity_reverse();
++                } else {
++                    self.parallel.solve_velocity();
++                }
+                 self.parallel.sync_to(&mut views);
+                 self.joint_solver.solve_velocity(&mut views, dt);
+             }
+@@ -2085,8 +2091,14 @@ impl PhysicsWorld {
+                     .flush_impulses(&mut self.contact_solver.contacts);
+             }
+         } else {
+-            for _ in 0..iters {
+-                self.contact_solver.solve_velocity(&mut views);
++            for iteration in 0..iters {
++                if self.config.contact_sweep_order == solver::ContactSweepOrder::Alternating
++                    && iteration % 2 == 1
++                {
++                    self.contact_solver.solve_velocity_reverse(&mut views);
++                } else {
++                    self.contact_solver.solve_velocity(&mut views);
++                }
+                 self.joint_solver.solve_velocity(&mut views, dt);
+             }
+             #[cfg(test)]
+diff --git a/crates/quench3d-physics/tests/stack_precision.rs b/crates/quench3d-physics/tests/stack_precision.rs
+index 58b6e45..0524451 100644
+--- a/crates/quench3d-physics/tests/stack_precision.rs
++++ b/crates/quench3d-physics/tests/stack_precision.rs
+@@ -252,6 +252,13 @@ fn audit() -> Vec<Summary> {
+     summaries
+ }
+ fn run_duration_fixture(layers: usize, steps: usize) -> (f64, f64) {
++    run_duration_order(layers, steps, quench3d_physics::ContactSweepOrder::Forward)
++}
++fn run_duration_order(
++    layers: usize,
++    steps: usize,
++    order: quench3d_physics::ContactSweepOrder,
++) -> (f64, f64) {
+     let started = std::time::Instant::now();
+     let floor = Obb {
+         center: [0.0, -0.25, 0.0],
+@@ -264,6 +271,7 @@ fn run_duration_fixture(layers: usize, steps: usize) -> (f64, f64) {
+     world.config.speculative_margin = 0.005;
+     world.config.velocity_iterations = 20;
+     world.config.position_iterations = 8;
++    world.config.contact_sweep_order = order;
+     world.add_builder(
+         BodyBuilder::r#static(Shape::Box {
+             half_extents: vec3(4.0, 0.25, 4.0),
+@@ -390,6 +398,25 @@ fn run_duration_fixture(layers: usize, steps: usize) -> (f64, f64) {
+     (max_pair, max_floor)
+ }
+ 
++#[test]
++fn alternating_sweep_sustained_precision_target() {
++    let mut failures = Vec::new();
++    for layers in [4, 12, 32] {
++        let (pair, floor) = run_duration_order(
++            layers,
++            1800,
++            quench3d_physics::ContactSweepOrder::Alternating,
++        );
++        if pair > 0.00501 || floor > 0.00501 {
++            failures.push((layers, pair, floor));
++        }
++    }
++    assert!(
++        failures.is_empty(),
++        "preregistered alternating32layer5mm candidate acceptance: {failures:?}"
++    );
++}
++
+ #[test]
+ fn speculative_stack_sustained_precision_recipe() {
+     for layers in [4, 12] {
