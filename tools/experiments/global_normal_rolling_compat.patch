@@ -1,0 +1,85 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1818,6 +1818,40 @@
+     }
+ 
+     #[test]
++    fn global_normal_rolling_two_round_stall() {
++        for rolling in [0.0, 0.2] {
++            let mut vs = vec![BodyView::frozen(); 2];
++            vs[0].is_static = true;
++            vs[1].inv_m = 1.0;
++            vs[1].inv_i_world_mat = Mat3::IDENTITY;
++            vs[1].lin = -Vec3::Y;
++            vs[1].ang = Vec3::X * 3.0;
++            let mut c = contact(0, 1, 0);
++            c.ra = Vec3::ZERO;
++            c.rb = -Vec3::Y;
++            c.friction = 0.0;
++            c.friction_tangent = [0.0; 2];
++            c.rolling_friction = rolling;
++            c.normal_impulse = 0.0;
++            c.tangent_impulse = [0.0; 2];
++            c.k_normal = 1.0;
++            let mut cs = vec![c];
++            let mut memory = NormalDirectionMemory::default();
++            for _ in 0..2 {
++                solve_velocity_contacts_memory(&mut cs, &mut vs, true, &mut memory);
++            }
++            assert_eq!(cs[0].normal_impulse, 1.0);
++            assert_eq!(vs[1].lin, Vec3::ZERO);
++            let expected = if rolling == 0.0 { 3.0 } else { 2.8 };
++            assert!(
++                (vs[1].ang.x - expected).abs() < 1e-6,
++                "rolling={rolling} spin={:?}",
++                vs[1].ang
++            );
++        }
++    }
++
++    #[test]
+     fn normal_direction_memory_changed_rhs_restart() {
+         let mut memory = NormalDirectionMemory {
+             p: vec![1.0, 0.0],
+@@ -2722,6 +2756,19 @@
+     vs: &mut [BodyView],
+     memory: &mut NormalDirectionMemory,
+ ) {
++    global_normal_attempt(cs, vs, memory);
++    for c in cs.iter() {
++        if let Some((va, vb)) = split_body_pair(vs, c.a, c.b) {
++            global_rolling(c, va, vb);
++        }
++    }
++}
++
++fn global_normal_attempt(
++    cs: &mut [SolverContact],
++    vs: &mut [BodyView],
++    memory: &mut NormalDirectionMemory,
++) {
+     #[cfg(test)]
+     {
+         GLOBAL_TRACE.with(|t| {
+@@ -3233,3 +3280,21 @@
+     }
+     (candidate, true)
+ }
++
++fn global_rolling(c: &SolverContact, va: &mut BodyView, vb: &mut BodyView) {
++    if c.rolling_friction > 0.0 && c.normal_impulse > 0.0 {
++        let wrel = vb.ang - va.ang;
++        // 标量近似 1/trace(invI_a + invI_b)，避免为每个接触求 3x3 逆。
++        let k = va.inv_i_world_mat.cols[0].x
++            + va.inv_i_world_mat.cols[1].y
++            + va.inv_i_world_mat.cols[2].z
++            + vb.inv_i_world_mat.cols[0].x
++            + vb.inv_i_world_mat.cols[1].y
++            + vb.inv_i_world_mat.cols[2].z;
++        if k.is_finite() && k > 1e-9 {
++            let limit = c.rolling_friction * c.normal_impulse * 0.5;
++            let dl = (wrel * (-1.0 / k)).clamp_length(limit);
++            pair_apply_angular_impulse(va, vb, dl);
++        }
++    }
++}
