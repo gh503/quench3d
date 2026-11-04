@@ -12572,6 +12572,269 @@ mod tests {
         failures
     }
 
+    #[derive(Debug)]
+    struct GlobalGuardObservation {
+        positions: Vec<Vec3>,
+        status: ExperimentalSeparationStatus,
+        reason: &'static str,
+        rows: usize,
+        sweeps: usize,
+        dual_decreases: usize,
+        post_guard_checked: bool,
+    }
+
+    // Future adapters must call the actual experimental wrapper/core.
+    // These intentionally unimplemented adapters are not validation substitutes.
+    fn global_halfspace_218_world_guard_probe(
+        points: &[Vec3],
+        _masses: &[f64],
+        _bodies: &[BodySlot],
+        _damage: bool,
+    ) -> GlobalGuardObservation {
+        GlobalGuardObservation {
+            positions: points.to_vec(),
+            status: ExperimentalSeparationStatus::StubUncertified,
+            reason: "stub",
+            rows: 0,
+            sweeps: 0,
+            dual_decreases: 0,
+            post_guard_checked: false,
+        }
+    }
+
+    fn global_halfspace_218_core_guard_probe(_rows: &[(Vec<f64>, f64)]) -> GlobalGuardObservation {
+        global_halfspace_218_world_guard_probe(&[], &[], &[], false)
+    }
+
+    #[test]
+    #[ignore = "registered atomic wall/capacity guards; wrapper is unimplemented"]
+    fn global_halfspace_218_atomic_wall_and_capacity_guards() {
+        let initial = vec![vec3(0.0, 0.04, 0.0), vec3(0.0, 0.10, 0.0)];
+        let masses = vec![1.0; 2];
+        let bits = |points: &[Vec3]| {
+            points
+                .iter()
+                .map(|p| p.to_array().map(f32::to_bits))
+                .collect::<Vec<_>>()
+        };
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for plane in [false, true] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            let shape = if plane {
+                Shape::Plane { normal: Vec3::Y }
+            } else {
+                Shape::Box {
+                    half_extents: vec3(0.6, 0.05, 0.6),
+                }
+            };
+            world.add_builder(BodyBuilder::r#static(shape).position(if plane {
+                Vec3::ZERO
+            } else {
+                vec3(0.0, -0.05, 0.0)
+            }));
+            let result = global_halfspace_218_world_guard_probe(
+                &initial,
+                &masses,
+                world.fluid_test_body_slots(),
+                false,
+            );
+            println!("GLOBAL_GUARD floor_plane={plane} result={result:?}");
+            if result.status != ExperimentalSeparationStatus::Certified {
+                failures.push(format!("supported floor plane={plane}: {}", result.reason));
+            } else {
+                assert_eq!(result.sweeps, 128);
+                assert_eq!(result.rows, 3);
+                let [a, b] = result.positions.as_slice() else {
+                    panic!("two particles");
+                };
+                assert!(
+                    f64::from(a.y) >= f64::from(0.04f32) - 1e-4
+                        && f64::from(b.y) >= f64::from(0.04f32) - 1e-4
+                );
+                assert!(overlap_distance(*a, *b) >= 2.0 * f64::from(0.04f32) - 1e-4);
+                assert!(result.post_guard_checked);
+            }
+            checked += 1;
+        }
+        for (name, builder) in [
+            (
+                "sphere",
+                BodyBuilder::r#static(Shape::Sphere { radius: 0.5 }),
+            ),
+            (
+                "dynamic",
+                BodyBuilder::dynamic(Shape::Box {
+                    half_extents: Vec3::ONE,
+                }),
+            ),
+            (
+                "kinematic",
+                BodyBuilder::kinematic(Shape::Box {
+                    half_extents: Vec3::ONE,
+                }),
+            ),
+            (
+                "compound",
+                BodyBuilder::r#static(Shape::Box {
+                    half_extents: Vec3::ONE,
+                })
+                .part_at(Shape::Sphere { radius: 0.1 }, Vec3::X),
+            ),
+        ] {
+            let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+            world.add_builder(builder);
+            let result = global_halfspace_218_world_guard_probe(
+                &initial,
+                &masses,
+                world.fluid_test_body_slots(),
+                false,
+            );
+            assert_eq!(bits(&result.positions), bits(&initial), "{name} rollback");
+            if result.status == ExperimentalSeparationStatus::Certified
+                || result.reason != "unsupported"
+            {
+                failures.push(format!("{name} must reject unsupported: {result:?}"));
+            }
+            checked += 1;
+        }
+        // Builder intentionally ignores scale; inject the unsupported runtime transform directly.
+        let mut scaled = PhysicsWorld::with_gravity(Vec3::ZERO);
+        let handle = scaled.add_builder(BodyBuilder::r#static(Shape::Box {
+            half_extents: Vec3::ONE,
+        }));
+        scaled.body_mut(handle).unwrap().transform.scale = Vec3::splat(2.0);
+        let result = global_halfspace_218_world_guard_probe(
+            &initial,
+            &masses,
+            scaled.fluid_test_body_slots(),
+            false,
+        );
+        assert_eq!(bits(&result.positions), bits(&initial));
+        if result.reason != "unsupported"
+            || result.status == ExperimentalSeparationStatus::Certified
+        {
+            failures.push(format!("nonunit runtime scale must reject: {result:?}"));
+        }
+        checked += 1;
+        // 32640 pair rows fit; one wall adds256 and must exceed32768.
+        let many: Vec<_> = (0..256).map(|i| vec3(i as f32 * 0.1, 1.0, 0.0)).collect();
+        let free = global_halfspace_218_world_guard_probe(&many, &vec![1.0; 256], &[], false);
+        if free.status != ExperimentalSeparationStatus::Certified
+            || free.rows != 32640
+            || free.sweeps != 128
+        {
+            failures.push(format!("below-cap free graph positive control: {free:?}"));
+        }
+        let mut wall = PhysicsWorld::with_gravity(Vec3::ZERO);
+        wall.add_builder(BodyBuilder::r#static(Shape::Plane { normal: Vec3::Y }));
+        let result = global_halfspace_218_world_guard_probe(
+            &many,
+            &vec![1.0; 256],
+            wall.fluid_test_body_slots(),
+            false,
+        );
+        assert_eq!(bits(&result.positions), bits(&many));
+        if result.reason != "row_cap"
+            || result.status == ExperimentalSeparationStatus::Certified
+            || result.rows != 0
+            || result.sweeps != 0
+        {
+            failures.push(format!(
+                "wall-inclusive cap rejects before generation: {result:?}"
+            ));
+        }
+        checked += 2;
+        for invalid_mass in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let result =
+                global_halfspace_218_world_guard_probe(&initial, &[1.0, invalid_mass], &[], false);
+            assert_eq!(bits(&result.positions), bits(&initial));
+            if result.reason != "invalid_input"
+                || result.status == ExperimentalSeparationStatus::Certified
+            {
+                failures.push(format!("invalid mass={invalid_mass}: {result:?}"));
+            }
+            checked += 1;
+        }
+        let mut nonfinite = initial.clone();
+        nonfinite[1].x = f32::NAN;
+        let result = global_halfspace_218_world_guard_probe(&nonfinite, &masses, &[], false);
+        assert_eq!(bits(&result.positions), bits(&nonfinite));
+        if result.reason != "invalid_input" {
+            failures.push("nonfinite coordinate must reject".to_owned());
+        }
+        checked += 1;
+        for damage in [false, true] {
+            let result = global_halfspace_218_world_guard_probe(&initial, &masses, &[], damage);
+            if damage {
+                assert_eq!(bits(&result.positions), bits(&initial));
+                if result.reason != "post_guard_certificate"
+                    || result.status == ExperimentalSeparationStatus::Certified
+                    || !result.post_guard_checked
+                {
+                    failures.push(format!(
+                        "post-guard overlap must reject atomically: {result:?}"
+                    ));
+                }
+            } else if result.status != ExperimentalSeparationStatus::Certified
+                || !result.post_guard_checked
+            {
+                failures.push("undamaged free positive control must certify".to_owned());
+            }
+            checked += 1;
+        }
+        println!("GLOBAL_GUARDS completed={checked} failures={failures:?}");
+        assert_eq!(checked, 16);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    #[ignore = "registered fixed-budget dual-memory guards; core is unimplemented"]
+    fn global_halfspace_218_dual_memory_and_budget_guards() {
+        let cases = [
+            (
+                "decrease",
+                vec![(vec![1.0, 0.0], 1.0), (vec![1.0, 1.0], 3.0)],
+                true,
+            ),
+            (
+                "decrease_reversed",
+                vec![(vec![1.0, 1.0], 3.0), (vec![1.0, 0.0], 1.0)],
+                true,
+            ),
+            (
+                "inconsistent",
+                vec![(vec![1.0, 0.0], 1.0), (vec![-1.0, 0.0], 1.0)],
+                false,
+            ),
+            (
+                "near_parallel_budget",
+                vec![(vec![1.0, 0.0], 1.0), (vec![-1.0, 1e-6], 1.0)],
+                false,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, rows, should_certify) in cases {
+            let result = global_halfspace_218_core_guard_probe(&rows);
+            println!("GLOBAL_CORE_GUARD name={name} result={result:?}");
+            if should_certify {
+                if result.status != ExperimentalSeparationStatus::Certified || result.sweeps != 128
+                {
+                    failures.push(format!("{name}: expected certified fixed-budget result"));
+                }
+                if name == "decrease" && result.dual_decreases == 0 {
+                    failures.push("must undo prior multiplier contribution".to_owned());
+                }
+            } else if result.status == ExperimentalSeparationStatus::Certified
+                || result.reason != "budget_residual"
+                || result.sweeps != 128
+            {
+                failures.push(format!("{name}: expected fixed128 uncertified residual"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     // Test-only algebra entrypoint; stage one intentionally has no solver.
     fn global_halfspace_218_algebra_stub(_rows: &[(Vec<f64>, f64)]) -> Option<Vec<f64>> {
         None
