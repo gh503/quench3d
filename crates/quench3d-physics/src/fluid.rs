@@ -12316,12 +12316,9 @@ mod tests {
             let mut state = initial.clone();
             let mut first_pair = None;
             let mut recompressed = false;
-            for (visit, pair) in trace[..split].chunks_exact(2).enumerate() {
+            for (visit, pair) in trace[..split].as_chunks::<2>().0.iter().enumerate() {
                 let [(i, before_i, request_i, accepted_i), (j, before_j, request_j, accepted_j)] =
-                    pair
-                else {
-                    unreachable!()
-                };
+                    pair;
                 assert_ne!(i, j);
                 assert_eq!(*before_i, state[*i]);
                 assert_eq!(*before_j, state[*j]);
