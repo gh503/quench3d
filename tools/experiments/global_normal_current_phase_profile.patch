@@ -1,0 +1,169 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -4182,7 +4182,9 @@
+         free: &[bool],
+     ) -> &'a Vec<f64> {
+         if !self.ready {
++            let t212 = std::time::Instant::now();
+             self.build(cs, vs);
++            note212(0, t212);
+         }
+         self.z.clear();
+         self.z.extend(cs.iter().zip(r).zip(free).map(|((c, r), f)| {
+@@ -4375,6 +4377,7 @@
+         });
+         global_observe(cs, vs, "before_friction");
+     }
++    let mut t212 = std::time::Instant::now();
+     for c in cs.iter_mut() {
+         if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
+             global_friction(c, a, b);
+@@ -4382,6 +4385,8 @@
+     }
+     #[cfg(test)]
+     global_observe(cs, vs, "fresh_gradient");
++    note212(2, t212);
++    t212 = std::time::Instant::now();
+     let NormalWork {
+         lambda,
+         gradient,
+@@ -4416,7 +4421,11 @@
+     residual.extend(gradient.iter().map(|x| -x));
+     diagonal.clear();
+     diagonal.extend(cs.iter().map(|c| f64::from(c.k_normal)));
++    note212(3, t212);
++    t212 = std::time::Instant::now();
+     z.clone_from(cache.apply(cs, vs, residual, free));
++    note212(1, t212);
++    t212 = std::time::Instant::now();
+     if memory.free != *free {
+         memory.clear();
+     }
+@@ -4470,6 +4479,8 @@
+         memory.clear();
+         return;
+     }
++    note212(4, t212);
++    t212 = std::time::Instant::now();
+     normal_product_into(cs, vs, p, force, ap);
+     let curvature = p.iter().zip(ap.iter()).map(|(p, a)| p * a).sum::<f64>();
+     if !curvature.is_finite() || curvature <= 0.0 {
+@@ -4481,6 +4492,8 @@
+         "descent={descent} curvature={curvature} alphaopt={} apcount=1",
+         -descent / curvature
+     ));
++    note212(5, t212);
++    t212 = std::time::Instant::now();
+     let mut alpha = -descent / curvature;
+     for i in 0..p.len() {
+         if p[i] < 0.0 {
+@@ -4527,6 +4540,8 @@
+         memory.clear();
+         return;
+     }
++    note212(6, t212);
++    t212 = std::time::Instant::now();
+     if retain && !hitbound {
+         #[cfg(test)]
+         let copy_commit = memory.copy_commit;
+@@ -4544,6 +4559,8 @@
+     } else {
+         memory.clear();
+     }
++    note212(7, t212);
++    t212 = std::time::Instant::now();
+     for (c, new) in cs.iter_mut().zip(next.iter().copied()) {
+         let delta = new - c.normal_impulse;
+         c.normal_impulse = new;
+@@ -4553,6 +4570,7 @@
+             }
+         }
+     }
++    note212(8, t212);
+     #[cfg(test)]
+     global_observe(cs, vs, "after_normal");
+ }
+@@ -4679,3 +4697,15 @@
+     }
+     result / (a.len() * b.len()) as f64
+ }
++
++thread_local! {static PROFILE212:std::cell::RefCell<([u128;10],[usize;10])>=const{std::cell::RefCell::new(([0;10],[0;10]))};}
++fn note212(i: usize, t: std::time::Instant) {
++    PROFILE212.with(|p| {
++        let mut p = p.borrow_mut();
++        p.0[i] += t.elapsed().as_nanos();
++        p.1[i] += 1;
++    });
++}
++pub(crate) fn take212() -> ([u128; 10], [usize; 10]) {
++    PROFILE212.with(|p| std::mem::replace(&mut *p.borrow_mut(), ([0; 10], [0; 10])))
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -8754,3 +8754,10 @@
+ 
+ #[cfg(test)]
+ mod default_bits_193;
++
++impl PhysicsWorld {
++    #[doc(hidden)]
++    pub fn diagnostic_profile212() -> ([u128; 10], [usize; 10]) {
++        crate::solver::take212()
++    }
++}
+--- /dev/null
++++ b/crates/quench3d-physics/examples/global_normal_profile212.rs
+@@ -0,0 +1,52 @@
++use quench3d_math::{vec3, Vec3};
++use quench3d_physics::{BodyBuilder, PhysicsWorld, Shape};
++fn sample(layers: usize, global: bool) -> f64 {
++    let mut w = PhysicsWorld::new();
++    w.set_fixed_dt(1.0 / 60.0);
++    w.config.global_normal_projection = global;
++    w.config.speculative_margin = 0.005;
++    w.config.velocity_iterations = 20;
++    w.config.position_iterations = 8;
++    w.add_builder(
++        BodyBuilder::r#static(Shape::Box {
++            half_extents: vec3(4.0, 0.25, 4.0),
++        })
++        .position(vec3(0.0, -0.25, 0.0)),
++    );
++    for i in 0..layers {
++        w.add_builder(
++            BodyBuilder::dynamic(Shape::Box {
++                half_extents: Vec3::splat(0.25),
++            })
++            .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
++            .mass(1.0),
++        );
++    }
++    for _ in 0..8 {
++        w.step(1.0 / 60.0);
++    }
++    PhysicsWorld::diagnostic_profile212();
++    let start = std::time::Instant::now();
++    for _ in 0..120 {
++        w.step(1.0 / 60.0);
++    }
++    let elapsed = start.elapsed().as_secs_f64();
++    println!(
++        "ROUND212 layers={layers} global={global} whole={elapsed:.9} ns_counts={:?}",
++        PhysicsWorld::diagnostic_profile212()
++    );
++    assert_eq!(w.step_count, 128);
++    std::hint::black_box(
++        w.bodies()
++            .map(|(_, b)| (b.position(), b.linear_velocity))
++            .collect::<Vec<_>>(),
++    );
++    elapsed
++}
++fn main() {
++    for layers in [12, 32] {
++        for global in [false, true] {
++            sample(layers, global);
++        }
++    }
++}
