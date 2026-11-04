@@ -1,0 +1,161 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1965,6 +1965,17 @@
+         }
+         let points: Vec<_> = (0..cs.len()).collect();
+         let kernel = LocalKernelCache::build(&points, &cs, &vs);
++        let endpoints: Vec<_> = cs.iter().map(|c| NormalEndpoint::new(c, &vs)).collect();
++        let sets = [points.clone(), vec![4, 2, 0], vec![1, 3], vec![3, 1, 4, 0]];
++        for a in &sets {
++            for b in &sets {
++                assert_eq!(
++                    coarse_cross(a, b, &cs, &vs).to_bits(),
++                    coarse_cross_cached(a, b, &cs, &vs, &endpoints).to_bits()
++                );
++            }
++        }
++        println!("ROUND205 coarse16permutedsubsetkernelbits PASS");
+         let probes = [
+             [0.13, -0.27, 0.0, -0.0, 0.71],
+             [0.37, 0.23, -0.19, 0.41, -0.53],
+@@ -3801,6 +3812,7 @@
+ #[derive(Default, Clone, Debug)]
+ struct NormalGeometry {
+     ready: bool,
++    endpoint: Vec<NormalEndpoint>,
+     chains: Vec<CachedForceChain>,
+     locals: Vec<CachedLocal>,
+     z: Vec<f64>,
+@@ -3814,6 +3826,9 @@
+             n[0] += 1;
+             c.set(n);
+         });
++        self.endpoint.clear();
++        self.endpoint
++            .extend(cs.iter().map(|c| NormalEndpoint::new(c, vs)));
+         self.chains.clear();
+         self.locals.clear();
+         let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+@@ -3898,9 +3913,10 @@
+             let mut diagonal = vec![0.0; n];
+             let mut lower = vec![0.0; n];
+             for i in 0..n {
+-                diagonal[i] = coarse_cross(&columns[i], &columns[i], cs, vs);
++                diagonal[i] = coarse_cross_cached(&columns[i], &columns[i], cs, vs, &self.endpoint);
+                 if i > 0 {
+-                    lower[i] = coarse_cross(&columns[i], &columns[i - 1], cs, vs);
++                    lower[i] =
++                        coarse_cross_cached(&columns[i], &columns[i - 1], cs, vs, &self.endpoint);
+                 }
+             }
+             #[cfg(test)]
+@@ -3938,13 +3954,7 @@
+                 rhs: vec![0.0; n],
+             });
+         }
+-        let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+-            std::collections::BTreeMap::new();
+-        for (i, c) in cs.iter().enumerate() {
+-            groups.entry((c.a, c.b)).or_default().push(i);
+-        }
+-
+-        for points in groups.values() {
++        for (_, points) in &edges {
+             if points.iter().any(|i| cs[*i].normal != cs[points[0]].normal) {
+                 continue;
+             }
+@@ -3958,7 +3968,7 @@
+             if rank == 0 {
+                 continue;
+             }
+-            let kernel = LocalKernelCache::build(points, cs, vs);
++            let kernel = LocalKernelCache::build_shared(points, cs, vs, &self.endpoint);
+             let mut ordered = [[0.0; 3]; 3];
+             for a in 0..rank {
+                 for b in 0..rank {
+@@ -4389,19 +4399,20 @@
+     matches: Vec<u8>,
+ }
+ impl LocalKernelCache {
++    #[cfg(test)]
+     fn build(points: &[usize], cs: &[SolverContact], vs: &[BodyView]) -> Self {
++        let endpoint: Vec<_> = cs.iter().map(|c| NormalEndpoint::new(c, vs)).collect();
++        Self::build_shared(points, cs, vs, &endpoint)
++    }
++    fn build_shared(
++        points: &[usize],
++        cs: &[SolverContact],
++        vs: &[BodyView],
++        endpoint: &[NormalEndpoint],
++    ) -> Self {
+         let n = points.len();
+         let mut terms = vec![[0.0; 4]; n * n];
+         let mut matches = vec![0; n * n];
+-        let geometry: Vec<_> = points
+-            .iter()
+-            .map(|i| {
+-                let c = cs[*i];
+-                let t = [c.ra.cross(c.normal), c.rb.cross(c.normal)];
+-                let response = [vs[c.a].inv_i_world(t[0]), vs[c.b].inv_i_world(t[1])];
+-                (t, response)
+-            })
+-            .collect();
+         for (ii, &i) in points.iter().enumerate() {
+             for (jj, &j) in points.iter().enumerate() {
+                 let x = cs[i];
+@@ -4415,7 +4426,7 @@
+                             let slot = ax * 2 + ay;
+                             matches[ii * n + jj] |= 1 << slot;
+                             terms[ii * n + jj][slot] = f64::from(v.inv_m * x.normal.dot(y.normal))
+-                                + f64::from(geometry[ii].0[ax].dot(geometry[jj].1[ay]));
++                                + f64::from(endpoint[i].torque[ax].dot(endpoint[j].response[ay]));
+                         }
+                     }
+                 }
+@@ -4440,3 +4451,46 @@
+         value
+     }
+ }
++
++#[derive(Clone, Debug)]
++struct NormalEndpoint {
++    torque: [Vec3; 2],
++    response: [Vec3; 2],
++}
++impl NormalEndpoint {
++    fn new(c: &SolverContact, vs: &[BodyView]) -> Self {
++        let torque = [c.ra.cross(c.normal), c.rb.cross(c.normal)];
++        let response = [
++            vs[c.a].inv_i_world(torque[0]),
++            vs[c.b].inv_i_world(torque[1]),
++        ];
++        Self { torque, response }
++    }
++}
++fn coarse_cross_cached(
++    a: &[usize],
++    b: &[usize],
++    cs: &[SolverContact],
++    vs: &[BodyView],
++    endpoint: &[NormalEndpoint],
++) -> f64 {
++    let mut result = 0.0;
++    for &i in a {
++        for &j in b {
++            let x = &cs[i];
++            let y = &cs[j];
++            for (ax, (body_x, sign_x)) in [(x.a, -1.0), (x.b, 1.0)].into_iter().enumerate() {
++                for (ay, (body_y, sign_y)) in [(y.a, -1.0), (y.b, 1.0)].into_iter().enumerate() {
++                    if body_x == body_y {
++                        let v = vs[body_x];
++                        result += sign_x
++                            * sign_y
++                            * (f64::from(v.inv_m * x.normal.dot(y.normal))
++                                + f64::from(endpoint[i].torque[ax].dot(endpoint[j].response[ay])));
++                    }
++                }
++            }
++        }
++    }
++    result / (a.len() * b.len()) as f64
++}

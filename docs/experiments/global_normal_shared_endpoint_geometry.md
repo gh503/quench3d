@@ -1,0 +1,22 @@
+# Shared endpoint geometry and pair grouping proposal
+
+Round205 read-onlyproof/registrationonretained204candidate12cost1.395410FAIL. No implementationauthorizedyet. Scopeproposalonlynormalgeometrysetup—notfrictionunitresponses,notrawkernelaggregation.
+
+ProducerNormalGeometry.build3819BTree<(a,b),Vec<globalcontactindex>>builtbycs.enumeratepush;3825into_iteredgespreserveskeyascendingandcontactoriginalorder. Forcechaintraversalborrowsedges/clonespointlistswithoutmutatingedges/cs. Second3941mapusesidenticalkeys/sameenumeration,soitsgroups.valuesorder/pointlistsareexactlyedges.iter().map(points). Replaceonlysecondmapconstruction/iterationwithborrowededges,retainnormalalignmentqualification.
+
+PotentialNormalGeometry.endpointVec<Endpoint{torque:[Vec3;2],response:[Vec3;2]}>filledonceperbuildcsoriginalglobalindex,torque=[ra.cross(n),rb.cross(n)]f32,response=[vs[a].inv_i_world(torque0),vs[b].inv_i_world(torque1)]f32. Theseareidentical204local-cacheproducerexpressions. Forceconsumernewcoarse_cachedglobalindicesi/jendpointslotsmaintainsii/jj/bx/byorder,sign_x*sign_y*(f64(invM*normaldot)+f64(torque_i.dot(response_j)))originalgrouping/accumulation/division. Localconsumerpoints[localindex]→globalendpointindex,matchingbodymask/independentendpointK/qa*qb*sx*sychainunchanged. Shareonlytorque/response,notforce/localf64reductionsorrawKtable.
+
+Everybuildclear/extendoverwritesendpointstorage;prepare/layoutresetreadyfalseforcesnewmass/worldI/normal/armsgeometry. Readersborrowendpointduringfactorconstruction;nofreegradientfrictionstaleness. Testoldcoarse_crossvsnewcachedf64bitsforarbitrarynormals/nonDiagI/unequalmass/offCOM/swappedendpoints/signedzeros+existinglocal9probe/40roundbits/allprecision/default/paritybeforecost. Forcegeometry~1.5msceiling,do notpromiseclosingremainingcostgap. Leadformallyauthorizedimplementationafterproof;implementedsharedglobalindexendpointVecandborrowededges,oldcoarse_cross/weighted_crossreferencearithmeticuntouched. Added16coarseold/cachedf64bitcomparisonsacrosspermuted/subsetpointlistsalongsideexisting9weightedprobes. Actualperformancefailure204ratio1.395410isred;no fakebehaviorfailure. Mainproductionunchanged.
+
+## Actual result
+
+[global_normal_shared_endpoint_geometry.patch](../../tools/experiments/global_normal_shared_endpoint_geometry.patch),SHA256 `81cad648e7141755bfab59cc5b32a19e9bbdd0a9f7e3422ace743391b039c0c9`,incrementalagainstretained204,applycheck0. Compatjob bash-35e2a4668c614572 formallycollected0:query0/globalmath8(16coarsepermuted/subsetf64bitcomparisons+9localweightedprobes+nonzero-friction40roundreference+overflow/fresh/rolling)/direction2/local1/projection2PASS. Full5400precisionPASS1.11sallreportedpeaks/sleep/driftunchanged. 193full1240states/931616648bytesPASS4.72s. 192threevariants1800paired/1800actualparallel/maxthreads2/hardware4eachPASS66.69s.
+
+Onlyafterallcompatibilitypasses,unchangedcost195exampleSHAa2d02863c9b35f5f27abe6d04fd895e348b692ae79e344283fd22b920bc21f97sameproductionreleasebinary/W8M120/fivefixedalternatingABBAtrials. Job bash-7ed594e979d84fdf formallycollectedexit1,compile8.59s.
+
+|Layers|Legacy median s|Candidate median s|Ratio|Limit|Result|
+|---:|---:|---:|---:|---:|---|
+|12|.019330222|.027477852|1.421497|1.15|FAIL|
+|32|.051897058|.019714291|.379873|1.15|PASS|
+
+12candidateelapsedonly~.11mslowerthan204.027588060inseparatemeasurementsets,whilebaselinefasterincreasesratiofrom1.395410to1.421497. No significantbenefit/statisticalregressionclaimfromunpairedruns. Leadexplicitlyretainsstructuralexactreusecandidatewithoutclaimingobservedsignificantperformancebenefit;costobjectiveNOTcomplete/no shippingclaim. EndpointVecretainscapacitybutnestedfactorsstillallocateoncepersetup,no globalzeroallocationclaim. Fullrawtrial/source/status/binarymanifestunder /home/gh503/Documents/infra-dev/quench3d/target/tmp/round205-shared-endpoint/. Mainproductionunchanged/alljobscollected/no runningbuilder.
