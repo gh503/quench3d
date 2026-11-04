@@ -780,161 +780,168 @@ fn view_menu(
 }
 
 fn render_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
-    ui.menu_button("渲染", |ui| {
-        ui.set_min_width(280.0);
-        ui.horizontal(|ui| {
-            ui.label("阴影级联");
-            ui.add(
-                egui::DragValue::new(&mut engine.renderer.options.shadow_cascades)
-                    .speed(0.05)
-                    .range(1..=4),
-            )
-            .on_hover_text("1 = 单级（近处最清晰）；2~4 = 远处也有阴影，近处会糊一些");
-            ui.add(
-                egui::DragValue::new(&mut engine.renderer.options.shadow_split_lambda)
-                    .speed(0.01)
-                    .range(0.0..=1.0),
-            )
-            .on_hover_text("0 = 按距离均匀，1 = 对数分布（近处更细）");
-            let mut resolution = engine.renderer.options.shadow_map_size;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut resolution)
-                        .speed(64.0)
-                        .range(512..=4096)
-                        .prefix("阴影 "),
-                )
-                .on_hover_text("阴影贴图边长（像素）；聚光取一半、点光每面再取一半")
-                .changed()
-            {
-                engine
-                    .renderer
-                    .set_shadow_map_size(&engine.gpu.device, resolution);
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut limit = if engine.renderer.options.max_draw_distance.is_finite() {
-                engine.renderer.options.max_draw_distance
-            } else {
-                0.0
-            };
-            ui.label("最大绘制距离");
-            if ui
-                .add(
-                    egui::DragValue::new(&mut limit)
-                        .speed(1.0)
-                        .range(0.0..=10000.0)
-                        .suffix(" m"),
-                )
-                .on_hover_text("0 = 不限；按实例包围盒最近点到相机的距离剔除，不是遮挡剔除")
-                .changed()
-            {
-                engine.renderer.options.max_draw_distance =
-                    if limit <= 0.0 { f32::INFINITY } else { limit };
-            }
-        });
-        ui.checkbox(&mut engine.renderer.options.bloom.enabled, "泛光（bloom）");
-        ui.add_enabled_ui(engine.renderer.options.bloom.enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("强度");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.bloom.intensity)
-                        .speed(0.01)
-                        .range(0.0..=4.0),
-                );
-                ui.label("阈值");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.bloom.threshold)
-                        .speed(0.01)
-                        .range(0.0..=16.0),
-                );
-            });
-        });
-        ui.checkbox(
-            &mut engine.renderer.options.taa.enabled,
-            "时域抗锯齿（TAA）",
-        );
-        ui.add_enabled_ui(engine.renderer.options.taa.enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("历史权重");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.taa.feedback)
-                        .speed(0.01)
-                        .range(0.0..=0.98),
-                );
-            });
-            ui.checkbox(&mut engine.renderer.options.taa.motion_vectors, "运动向量")
-                .on_hover_text("物体的 TAA 重投影；关掉只保留深度反投影，运动物体会更容易拖影");
-        });
-        ui.checkbox(
-            &mut engine.renderer.options.motion_blur.enabled,
-            "相机运动模糊（M）",
+    // This menu contains expandable sections and continuous settings. Opening
+    // a section must not count as selecting a command and dismiss the popup.
+    egui::containers::menu::MenuButton::new("渲染")
+        .config(
+            egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
         )
-        .on_hover_text("只模糊相机运动；需要可读深度，GL/WebGL2 上不生效");
-        ui.add_enabled_ui(engine.renderer.options.motion_blur.enabled, |ui| {
+        .ui(ui, |ui| {
+            ui.set_min_width(280.0);
             ui.horizontal(|ui| {
-                ui.label("快门");
+                ui.label("阴影级联");
                 ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.motion_blur.shutter)
-                        .speed(0.01)
-                        .range(0.0..=2.0),
-                );
-                ui.label("采样");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.motion_blur.samples)
-                        .speed(1.0)
-                        .range(1..=16),
-                );
-                ui.label("最大");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.motion_blur.max_blur)
-                        .speed(1.0)
-                        .range(0.0..=256.0)
-                        .suffix("px"),
-                );
-            });
-        });
-        ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）");
-        ui.checkbox(
-            &mut engine.renderer.options.ssao.enabled,
-            "环境光遮蔽（SSAO）",
-        );
-        ui.add_enabled_ui(engine.renderer.options.ssao.enabled, |ui| {
-            ui.checkbox(
-                &mut engine.renderer.options.ssao.denoise,
-                "SSAO 去噪（4 邻域双边，5× 采样）",
-            );
-        });
-        ui.checkbox(&mut engine.renderer.options.dof.enabled, "景深（DoF）");
-        ui.add_enabled_ui(engine.renderer.options.dof.enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("对焦");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.dof.focus)
+                    egui::DragValue::new(&mut engine.renderer.options.shadow_cascades)
                         .speed(0.05)
-                        .range(0.1..=100.0)
-                        .suffix("m"),
-                );
-                ui.label("光圈");
+                        .range(1..=4),
+                )
+                .on_hover_text("1 = 单级（近处最清晰）；2~4 = 远处也有阴影，近处会糊一些");
                 ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.dof.aperture)
+                    egui::DragValue::new(&mut engine.renderer.options.shadow_split_lambda)
                         .speed(0.01)
-                        .range(0.0..=4.0),
-                );
-                ui.label("模糊");
-                ui.add(
-                    egui::DragValue::new(&mut engine.renderer.options.dof.max_blur)
-                        .speed(0.1)
-                        .range(0.0..=32.0)
-                        .suffix("px"),
+                        .range(0.0..=1.0),
+                )
+                .on_hover_text("0 = 按距离均匀，1 = 对数分布（近处更细）");
+                let mut resolution = engine.renderer.options.shadow_map_size;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut resolution)
+                            .speed(64.0)
+                            .range(512..=4096)
+                            .prefix("阴影 "),
+                    )
+                    .on_hover_text("阴影贴图边长（像素）；聚光取一半、点光每面再取一半")
+                    .changed()
+                {
+                    engine
+                        .renderer
+                        .set_shadow_map_size(&engine.gpu.device, resolution);
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut limit = if engine.renderer.options.max_draw_distance.is_finite() {
+                    engine.renderer.options.max_draw_distance
+                } else {
+                    0.0
+                };
+                ui.label("最大绘制距离");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut limit)
+                            .speed(1.0)
+                            .range(0.0..=10000.0)
+                            .suffix(" m"),
+                    )
+                    .on_hover_text("0 = 不限；按实例包围盒最近点到相机的距离剔除，不是遮挡剔除")
+                    .changed()
+                {
+                    engine.renderer.options.max_draw_distance =
+                        if limit <= 0.0 { f32::INFINITY } else { limit };
+                }
+            });
+            ui.checkbox(&mut engine.renderer.options.bloom.enabled, "泛光（bloom）");
+            ui.add_enabled_ui(engine.renderer.options.bloom.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("强度");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.bloom.intensity)
+                            .speed(0.01)
+                            .range(0.0..=4.0),
+                    );
+                    ui.label("阈值");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.bloom.threshold)
+                            .speed(0.01)
+                            .range(0.0..=16.0),
+                    );
+                });
+            });
+            ui.checkbox(
+                &mut engine.renderer.options.taa.enabled,
+                "时域抗锯齿（TAA）",
+            );
+            ui.add_enabled_ui(engine.renderer.options.taa.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("历史权重");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.taa.feedback)
+                            .speed(0.01)
+                            .range(0.0..=0.98),
+                    );
+                });
+                ui.checkbox(&mut engine.renderer.options.taa.motion_vectors, "运动向量")
+                    .on_hover_text("物体的 TAA 重投影；关掉只保留深度反投影，运动物体会更容易拖影");
+            });
+            ui.checkbox(
+                &mut engine.renderer.options.motion_blur.enabled,
+                "相机运动模糊（M）",
+            )
+            .on_hover_text("只模糊相机运动；需要可读深度，GL/WebGL2 上不生效");
+            ui.add_enabled_ui(engine.renderer.options.motion_blur.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("快门");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.motion_blur.shutter)
+                            .speed(0.01)
+                            .range(0.0..=2.0),
+                    );
+                    ui.label("采样");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.motion_blur.samples)
+                            .speed(1.0)
+                            .range(1..=16),
+                    );
+                    ui.label("最大");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.motion_blur.max_blur)
+                            .speed(1.0)
+                            .range(0.0..=256.0)
+                            .suffix("px"),
+                    );
+                });
+            });
+            ui.checkbox(&mut engine.renderer.options.fxaa.enabled, "抗锯齿（FXAA）");
+            ui.checkbox(
+                &mut engine.renderer.options.ssao.enabled,
+                "环境光遮蔽（SSAO）",
+            );
+            ui.add_enabled_ui(engine.renderer.options.ssao.enabled, |ui| {
+                ui.checkbox(
+                    &mut engine.renderer.options.ssao.denoise,
+                    "SSAO 去噪（4 邻域双边，5× 采样）",
                 );
             });
+            ui.checkbox(&mut engine.renderer.options.dof.enabled, "景深（DoF）");
+            ui.add_enabled_ui(engine.renderer.options.dof.enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("对焦");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.dof.focus)
+                            .speed(0.05)
+                            .range(0.1..=100.0)
+                            .suffix("m"),
+                    );
+                    ui.label("光圈");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.dof.aperture)
+                            .speed(0.01)
+                            .range(0.0..=4.0),
+                    );
+                    ui.label("模糊");
+                    ui.add(
+                        egui::DragValue::new(&mut engine.renderer.options.dof.max_blur)
+                            .speed(0.1)
+                            .range(0.0..=32.0)
+                            .suffix("px"),
+                    );
+                });
+            });
+            ui.separator();
+            joint_physics_section(ui, engine, doc);
+            water_physics_section(ui, engine, doc);
+            water_section(ui, engine);
         });
-        ui.separator();
-        joint_physics_section(ui, engine, doc);
-        water_physics_section(ui, engine, doc);
-        water_section(ui, engine);
-    });
 }
 
 fn layout_menu(ui: &mut Ui, doc: &mut Doc) {

@@ -47,6 +47,131 @@ fn headless_engine() -> Option<Engine> {
     ))
 }
 
+#[test]
+fn render_water_header_click_keeps_menu_open_for_settings() {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut time = 0.0;
+    let mut run = |engine: &mut Engine, events| {
+        time += 0.1;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, &mut doc, &mut view, &mut gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let click = |pos| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]
+    };
+    run(&mut engine, vec![]);
+    let shapes = run(&mut engine, vec![]);
+    let render = text_shape_rect(&shapes, "渲染").unwrap().center();
+    run(&mut engine, click(render));
+    let shapes = run(&mut engine, vec![]);
+    let menu_shapes: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), "屏幕空间水")
+                .is_some_and(|r| r.center().x < 900.0)
+        })
+        .collect();
+    let header = text_shape_rect(&menu_shapes, "屏幕空间水")
+        .expect("render water header visible")
+        .center();
+    run(&mut engine, click(header));
+    let shapes = run(&mut engine, vec![]);
+    assert!(
+        shapes_contain_text(&shapes, "阴影级联"),
+        "opening water settings must keep render menu open"
+    );
+    assert!(
+        shapes_contain_text(&shapes, "清澈度"),
+        "expanded water settings must be available after click"
+    );
+    let clarity = text_shape_rect(&shapes, "清澈度")
+        .expect("water clarity control visible")
+        .center();
+    let before = engine.renderer.options.water.clarity;
+    run(
+        &mut engine,
+        vec![
+            egui::Event::PointerMoved(clarity),
+            egui::Event::PointerButton {
+                pos: clarity,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+        ],
+    );
+    let moved = clarity + egui::vec2(-20.0, 0.0);
+    run(&mut engine, vec![egui::Event::PointerMoved(moved)]);
+    run(
+        &mut engine,
+        vec![egui::Event::PointerButton {
+            pos: moved,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        }],
+    );
+    let shapes = run(&mut engine, vec![]);
+    assert_ne!(
+        engine.renderer.options.water.clarity, before,
+        "actual water drag changes value"
+    );
+    assert!(
+        shapes_contain_text(&shapes, "阴影级联"),
+        "continuous adjustment keeps menu open"
+    );
+    run(&mut engine, click(egui::pos2(950.0, 840.0)));
+    let shapes = run(&mut engine, vec![]);
+    assert!(
+        !shapes_contain_text(&shapes, "阴影级联"),
+        "outside click closes rendering menu"
+    );
+    run(&mut engine, click(render));
+    run(&mut engine, vec![]);
+    run(&mut engine, click(render));
+    let shapes = run(&mut engine, vec![]);
+    assert!(
+        !shapes_contain_text(&shapes, "阴影级联"),
+        "second top-level click closes rendering menu"
+    );
+}
+
 /// 无底稿的运行态流体不能被菜单添加错配；拒绝也不能悄悄多记历史。
 #[test]
 fn add_menu_particle_fluid_rejects_unknown_runtime_origin_without_mutation() {
