@@ -1,6 +1,6 @@
 # Round221: independent feasibility of the captured step75 system
 
-Status: preregistered; no optimizer has run on the captured fluid system. This is an offline numerical diagnosis, not a new fluid algorithm or physical trajectory.
+Status: the sole preregistered solve completed with exit0. HiGHS returned t=0 after1661 iterations, and independent serial original-row checks found a finite numerical feasible witness within the unchanged1e-7m tolerance. Simple f32 storage also passed the registered analytic certificates; the real Rust guard was not executed. This is an offline numerical diagnosis, not a new fluid algorithm or physical trajectory.
 
 ## Frozen input
 
@@ -26,4 +26,8 @@ Only the captured step75 system is addressed. Nothing here changes the rejected 
 
 ## Evidence location
 
-Use `target/tmp/round221-frozen-feasibility/` for solver report, exact witness and verification output. Source tooling and tests must be reviewed before the sole real solve. Synthetic feasibility and corrupted-witness negative tests may run without consuming the sole captured-system solve.
+Evidence is retained in `target/tmp/round221-frozen-feasibility/`: result.json, solve.log, solve.status(0), result.sha256, tool-source.sha256 and synthetic-tests.log. Solver source841fdc53ff61bebbde46c92f87a7964b74a1a6f0f0f9dbb7cb8b578cf3ecd2da and test source15da1d186264b3051510ccd90e5ddfce43bf8afe80fbeaaad17cc6684ac6d9ca were frozen and independently reviewed; six synthetic controls passed before the sole captured-system solve. Result SHA256 is fa8e7d886a5936a4bdb34d7f9eb763485c7ddb2f6e89258712aa46d4bada83d4.
+
+Actual result: NumPy1.21.5/SciPy1.8.0, success/status0,1661 iterations, t=0. The f64 original-row maximum positive residual is9.293781022545744e-16m (row6544, pair75/95), with zero violating rows. Simple f32 storage has maximum original-row residual3.725290298461914e-8m (row8021, wall45/1), minimum pair distance0.08000243995481666m and minimum inner-face clearance−7.450580596923828e-9m, with zero registered row/pair/wall violations. Returned Phase-I z is all zero and provides no infeasibility evidence. Solver elapsed0.3818s is a one-off offline diagnostic, not an engine performance measurement.
+
+The Phase-I objective minimizes only t, not displacement: the returned witness has maximum particle displacement approximately0.971278m and mass-weighted vector norm3.31657. It is deliberately **not** a minimal-displacement QP solution or a proposed physically suitable correction. Feasibility at this frozen step does not validate the fixed128 method, later rejected systems, the real guard, or a complete simulation trajectory.
