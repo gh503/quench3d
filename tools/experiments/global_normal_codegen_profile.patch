@@ -1,0 +1,204 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -3814,6 +3814,7 @@
+             n[0] += 1;
+             c.set(n);
+         });
++        let timer196 = profile196_start();
+         self.chains.clear();
+         self.locals.clear();
+         let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+@@ -3938,6 +3939,8 @@
+                 rhs: vec![0.0; n],
+             });
+         }
++        profile196_end(0, timer196);
++        let timer196 = profile196_start();
+         let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+             std::collections::BTreeMap::new();
+         for (i, c) in cs.iter().enumerate() {
+@@ -3988,6 +3991,7 @@
+                 rank,
+             });
+         }
++        profile196_end(1, timer196);
+         self.ready = true;
+     }
+     fn apply<'a>(
+@@ -4000,6 +4004,7 @@
+         if !self.ready {
+             self.build(cs, vs);
+         }
++        let timer196 = profile196_start();
+         self.z.clear();
+         self.z.extend(cs.iter().zip(r).zip(free).map(|((c, r), f)| {
+             if *f {
+@@ -4076,6 +4081,7 @@
+         for (z, local) in self.z.iter_mut().zip(self.out.iter()) {
+             *z += local;
+         }
++        profile196_end(2, timer196);
+         &self.z
+     }
+ }
+@@ -4185,6 +4191,7 @@
+         });
+         global_observe(cs, vs, "before_friction");
+     }
++    let timer196 = profile196_start();
+     for c in cs.iter_mut() {
+         if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
+             global_friction(c, a, b);
+@@ -4192,6 +4199,8 @@
+     }
+     #[cfg(test)]
+     global_observe(cs, vs, "fresh_gradient");
++    profile196_end(3, timer196);
++    let timer196 = profile196_start();
+     let NormalWork {
+         lambda,
+         gradient,
+@@ -4226,7 +4235,11 @@
+     residual.extend(gradient.iter().map(|x| -x));
+     diagonal.clear();
+     diagonal.extend(cs.iter().map(|c| f64::from(c.k_normal)));
++    profile196_end(4, timer196);
++    let timer196 = profile196_start();
+     z.clone_from(cache.apply(cs, vs, residual, free));
++    profile196_end(5, timer196);
++    let timer196 = profile196_start();
+     if memory.free != *free {
+         memory.clear();
+     }
+@@ -4277,7 +4290,11 @@
+         memory.clear();
+         return;
+     }
++    profile196_end(6, timer196);
++    let timer196 = profile196_start();
+     normal_product_into(cs, vs, p, force, ap);
++    profile196_end(7, timer196);
++    let timer196 = profile196_start();
+     let curvature = p.iter().zip(ap.iter()).map(|(p, a)| p * a).sum::<f64>();
+     if !curvature.is_finite() || curvature <= 0.0 {
+         memory.clear();
+@@ -4341,6 +4358,8 @@
+     } else {
+         memory.clear();
+     }
++    profile196_end(8, timer196);
++    let timer196 = profile196_start();
+     for (c, new) in cs.iter_mut().zip(next.iter().copied()) {
+         let delta = new - c.normal_impulse;
+         c.normal_impulse = new;
+@@ -4350,6 +4369,7 @@
+             }
+         }
+     }
++    profile196_end(9, timer196);
+     #[cfg(test)]
+     global_observe(cs, vs, "after_normal");
+ }
+@@ -4425,3 +4445,25 @@
+         value
+     }
+ }
++
++thread_local! {static PROFILE196:std::cell::RefCell<[(u128,u64);12]>=const {std::cell::RefCell::new([(0,0);12])};}
++fn profile196_start() -> Option<std::time::Instant> {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    if *ON.get_or_init(|| std::env::var_os("Q196_PROFILE").is_some()) {
++        Some(std::time::Instant::now())
++    } else {
++        None
++    }
++}
++fn profile196_end(i: usize, t: Option<std::time::Instant>) {
++    if let Some(t) = t {
++        PROFILE196.with(|p| {
++            let mut p = p.borrow_mut();
++            p[i].0 += t.elapsed().as_nanos();
++            p[i].1 += 1;
++        });
++    }
++}
++pub(crate) fn profile196_take() -> [(u128, u64); 12] {
++    PROFILE196.with(|p| std::mem::replace(&mut *p.borrow_mut(), [(0, 0); 12]))
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -8754,3 +8754,10 @@
+ 
+ #[cfg(test)]
+ mod default_bits_193;
++
++impl PhysicsWorld {
++    #[doc(hidden)]
++    pub fn diagnostic_profile_196() -> [(u128, u64); 12] {
++        crate::solver::profile196_take()
++    }
++}
+--- /dev/null
++++ b/crates/quench3d-physics/examples/global_normal_profile_196.rs
+@@ -0,0 +1,61 @@
++use quench3d_math::{vec3, Vec3};
++use quench3d_physics::{BodyBuilder, PhysicsWorld, Shape};
++fn sample(layers: usize, global: bool) -> f64 {
++    let mut w = PhysicsWorld::new();
++    w.set_fixed_dt(1.0 / 60.0);
++    w.config.global_normal_projection = global;
++    w.config.speculative_margin = 0.005;
++    w.config.velocity_iterations = 20;
++    w.config.position_iterations = 8;
++    w.add_builder(
++        BodyBuilder::r#static(Shape::Box {
++            half_extents: vec3(4.0, 0.25, 4.0),
++        })
++        .position(vec3(0.0, -0.25, 0.0)),
++    );
++    for i in 0..layers {
++        w.add_builder(
++            BodyBuilder::dynamic(Shape::Box {
++                half_extents: Vec3::splat(0.25),
++            })
++            .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
++            .mass(1.0),
++        );
++    }
++    for _ in 0..8 {
++        w.step(1.0 / 60.0);
++    }
++    PhysicsWorld::diagnostic_profile_196();
++    let mut contact_samples = 0;
++    let mut awake_samples = 0;
++    let mut first_sleep = None;
++    let start = std::time::Instant::now();
++    for step in 0..120 {
++        w.step(1.0 / 60.0);
++        contact_samples += w.contacts().len();
++        let awake = w
++            .bodies()
++            .filter(|(_, b)| !b.is_sleeping() && b.body_type == quench3d_physics::BodyType::Dynamic)
++            .count();
++        awake_samples += awake;
++        if awake == 0 && first_sleep.is_none() {
++            first_sleep = Some(step + 9);
++        }
++    }
++    let elapsed = start.elapsed().as_secs_f64();
++    println!("ROUND196 layers={layers} global={global} diagnostic_seconds={elapsed:.9} contactsamples={contact_samples} awakesamples={awake_samples} first_all_sleep={first_sleep:?} phases_ns_calls={:?}",PhysicsWorld::diagnostic_profile_196());
++    assert_eq!(w.step_count, 128);
++    std::hint::black_box(
++        w.bodies()
++            .map(|(_, b)| (b.position(), b.linear_velocity))
++            .collect::<Vec<_>>(),
++    );
++    elapsed
++}
++fn main() {
++    for layers in [12, 32] {
++        for global in [false, true] {
++            sample(layers, global);
++        }
++    }
++}

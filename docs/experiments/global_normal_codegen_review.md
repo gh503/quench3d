@@ -1,0 +1,20 @@
+# Global normal code generation review
+
+Round199 reviewonlyafter198correctnesscompatiblebut12cost1.836612FAIL. Preserve198exactlocal-kernelcache;197frictionarithmeticregroupingstillrejected. Source arithmetic/optimizationflagsunchanged.
+
+BodyView::inv_i_world218, pair_relative_velocity1215, pair_apply_impulse1241 alreadyinline(always). Vec3::dot303/cross308andMat3::mul_vec3216inline. Cargo.releasealreadythinLTO/codegen-units1. Exact198releasecostbinary nm-C/objdump-d-C containsnosymbolorcallnamedglobal_friction/pair_apply_impulse/pair_relative_velocity/inv_i_world/Vec3dot/cross/Mat3mul_vec3;smallhelpercalloverheadhypothesisunsupported. Do notaddredundantinlineattributesorwidecompilerflags. No newbenchmarkneededforunchangedsource/no performanceclaim.
+
+Assemblysaved target/tmp/round198-local-kernel/assembly.txt,existingmanifestrecordsreleasebinarySHA. 198sourceunchanged;mainproductionunchanged. Authorizeddiagnosticrebase196phaseinstrumentationonto198completed;diagnostictimingsnotregisteredacceptance.
+
+Job bash-0fd3529c070f42d2 formallycollected0,compile18.81s,productionreleaseenvQ196_PROFILE/samewarm8+120/default-global12/32. Direct196patchapplycheckinitiallyfailednewEOFcontextwithoutmutatingfiles;markersrebasedexplicitlywithnomathematicalchange.
+
+|Mode|Diagnostic total ms|Contactpair samples|Awakebody samples|Firstallsleep|
+|---|---:|---:|---:|---|
+|12 legacy|19.328|1440|1440|none|
+|12 cached198|35.117|1440|1440|none|
+|32 legacy|51.626|3861|3840|none|
+|32 cached198|25.795|960|928|38|
+
+12normal2400rounds/120setups:friction9.489ms,forcegeometry1.496ms,localgeometry1.911ms,preconditionerapplication2.792ms,gradient1.110ms,direction.833ms,Ap1.761ms,line1.662ms,impulseapply1.577ms. Preconditionerinclusive6.499msalreadyincludesforce/local/application;no doublecount. 196localgeometry6.113msversus1991.911msisconsistentwithremovedrepeatedkernels,butthesediagnosticsetsarenotregisteredcrossversioncostproof. Remainingworldstepcostoutsideglobalphasesandprofilingoverheadnotseparatelyattributed;do notascribefullremaininggaptofrictionorhelpercalls. 12bothawakeentirewindow;32sleepdifferencepersists.
+
+[global_normal_codegen_profile.patch](../../tools/experiments/global_normal_codegen_profile.patch),SHA256 `48396b94874ecb00136048f3f5ed315efe7f6e01643e194f9f2089b658aa0274`,applycheck0againstrestored198. Sourcebefore/after/binaryhashesandlogunder target/tmp/round199-codegen-profile/. Afterarchivingexact198solver/worldbytesrestored,temporaryprofileexampleremoved,all198costsourcehashchecksPASS. No diagnosticAPI/timersremain;no newoptimizationimplemented/no newcostrun. Mainproductionunchanged/alljobscollected.
