@@ -501,6 +501,15 @@ let (ids, terrain) = engine.load_model_as_static("level.obj", Transform::IDENTIT
 
 ### 3.3 物理
 
+Rust 宿主可通过 `world.config.global_normal_projection = true` 启用全局投影法向求解；
+默认 `false` 保留旧路径。此选项目前通过 Rust 配置开启，尚未接入场景 JSON 或编辑器面板。
+已验收的堆叠配置为 60 Hz、`speculative_margin = 0.005`、20 次速度与 8 次位置迭代：
+4/12/32 层各运行 1800 步，逐步独立 OBB 检查箱间与有限地板穿透不超过 5.01 mm，
+同时要求有限状态与无离地板样本。固定成本门禁比较同一 release 二进制的完整 `world.step`，
+12/32 层分别要求候选与旧路径中位数之比不超过 1.15；这些固定场景结果不代表任意场景精度或普适加速。
+持续精度已纳入普通测试，默认路径逐状态黄金校验和固定成本已接入完整门禁及 Linux CI。
+完整过程和适用范围见[验收记录](docs/experiments/global_normal_final_gate.md)。
+
 ```rust
 let mut world = PhysicsWorld::with_gravity(Vec3::new(0.0, -9.81, 0.0));
 
