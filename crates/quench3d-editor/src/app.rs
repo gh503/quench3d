@@ -194,7 +194,17 @@ impl Game for EditorGame {
         camera_input.scroll = std::mem::take(&mut self.pending_scroll);
         camera_input.dragging = camera_input.look_delta.length_squared() > 0.0;
         let pan_delta = std::mem::take(&mut self.pending_pan);
-        if !self.keys_enabled {
+        // Shortcut modifiers must never become flight movement, including the
+        // frame before the platform's modifier-state event catches up.
+        if !self.keys_enabled
+            || engine.input.ctrl
+            || engine
+                .input
+                .key_down(quench3d::winit::keyboard::KeyCode::ControlLeft)
+            || engine
+                .input
+                .key_down(quench3d::winit::keyboard::KeyCode::ControlRight)
+        {
             camera_input.forward = 0.0;
             camera_input.right = 0.0;
             camera_input.up = 0.0;
@@ -2776,6 +2786,91 @@ mod navigation_regression_tests {
         assert_eq!(engine.orbit.yaw.to_bits(), before.yaw.to_bits());
         assert_eq!(engine.orbit.pitch.to_bits(), before.pitch.to_bits());
         assert_eq!(engine.orbit.focus, before.focus);
+    }
+
+    #[test]
+    fn flight_shortcut_modifiers_do_not_translate_camera() {
+        if std::env::var("QUENCH3D_GPU_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let gpu = pollster::block_on(GpuContext::headless(64, 64, Default::default())).unwrap();
+        let mut engine = Engine::new(gpu, &EngineConfig::default());
+        engine.camera_mode = CameraMode::Fly;
+        engine.auto_camera = false;
+        let mut game = EditorGame {
+            keys_enabled: true,
+            ..Default::default()
+        };
+        for mode in [CameraMode::Fly, CameraMode::Orbit] {
+            engine.camera_mode = mode;
+            for modifier_flag in [false, true] {
+                for chord in [
+                    vec![KeyCode::ControlLeft],
+                    vec![KeyCode::ControlRight, KeyCode::KeyS],
+                    vec![KeyCode::ControlLeft, KeyCode::KeyZ],
+                    vec![KeyCode::ControlLeft, KeyCode::KeyD],
+                ] {
+                    engine.input.on_focus_lost();
+                    engine.input.ctrl = modifier_flag;
+                    for key in chord {
+                        engine.input.on_key_down(key);
+                    }
+                    let before = engine.fly.position;
+                    let focus = engine.orbit.focus;
+                    for _ in 0..60 {
+                        game.update(&mut engine, 1.0 / 60.0);
+                    }
+                    assert_eq!(
+                        engine.fly.position, before,
+                        "held editor shortcut must not move view"
+                    );
+                    assert_eq!(
+                        engine.orbit.focus, focus,
+                        "shortcut must not move orbit center"
+                    );
+                }
+            }
+        }
+        engine.camera_mode = CameraMode::Fly;
+        engine.input.on_focus_lost();
+        engine.input.ctrl = true;
+        engine.input.on_key_down(KeyCode::KeyS);
+        let before = engine.fly.position;
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_eq!(
+            engine.fly.position, before,
+            "modifier flag alone blocks a shortcut"
+        );
+        engine.input.ctrl = false;
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_ne!(
+            engine.fly.position, before,
+            "movement resumes after Ctrl release"
+        );
+        engine.input.on_focus_lost();
+        engine.input.on_key_down(KeyCode::KeyQ);
+        let before = engine.fly.position.y;
+        game.update(&mut engine, 1.0 / 60.0);
+        assert!(
+            engine.fly.position.y < before,
+            "Q remains deliberate descent"
+        );
+        engine.input.on_focus_lost();
+        engine.input.on_key_down(KeyCode::KeyE);
+        let before = engine.fly.position.y;
+        game.update(&mut engine, 1.0 / 60.0);
+        assert!(
+            engine.fly.position.y > before,
+            "E remains deliberate ascent"
+        );
+        game.keys_enabled = false;
+        engine.input.on_key_down(KeyCode::KeyW);
+        let before = engine.fly.position;
+        game.update(&mut engine, 1.0 / 60.0);
+        assert_eq!(
+            engine.fly.position, before,
+            "text input focus blocks translation"
+        );
     }
 
     #[test]
