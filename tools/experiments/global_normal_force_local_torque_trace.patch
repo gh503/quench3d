@@ -1,0 +1,93 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -2747,8 +2747,8 @@
+ fn global_note(message: impl std::fmt::Display) {
+     GLOBAL_TRACE.with(|t| {
+         let (step, round) = t.get();
+-        if (1..=16).contains(&step)
+-            || ((1..=16).contains(&step) && message.to_string().contains("coarse_status="))
++        if (225..=245).contains(&step)
++            || ((225..=245).contains(&step) && message.to_string().contains("coarse_status="))
+         {
+             println!("ROUND182 step={step} round={round} {message}");
+         }
+@@ -3050,6 +3050,11 @@
+         }
+         let basis = wrench_basis(cs, points);
+         let rank = basis.len().saturating_sub(1);
++        #[cfg(test)]
++        global_note(format!(
++            "local_pair={},{} local_rank={rank}",
++            cs[points[0]].a, cs[points[0]].b
++        ));
+         if rank == 0 {
+             continue;
+         }
+@@ -3070,8 +3075,12 @@
+         }
+         let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
+         let Some(inverse) = small_spd_inverse(matrix, rank, scale) else {
++            #[cfg(test)]
++            global_note("local_status=badpivot");
+             continue;
+         };
++        #[cfg(test)]
++        global_note("local_status=accepted");
+         let mut x = [0.0; 3];
+         for a in 0..rank {
+             for b in 0..rank {
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -4648,7 +4648,7 @@
+     use crate::body::BodyBuilder;
+ 
+     #[test]
+-    fn global_projection_32_layer_early_observation() {
++    fn global_force_local_torque_12_layer_observation() {
+         let mut world = PhysicsWorld::new();
+         world.set_fixed_dt(1.0 / 60.0);
+         world.config.speculative_margin = 0.005;
+@@ -4661,7 +4661,7 @@
+             })
+             .position(vec3(0.0, -0.25, 0.0)),
+         );
+-        let handles: Vec<_> = (0..32)
++        let handles: Vec<_> = (0..12)
+             .map(|i| {
+                 world.add_builder(
+                     BodyBuilder::dynamic(Shape::Box {
+@@ -4679,7 +4679,7 @@
+         };
+         let mut max_pair = 0.0f64;
+         let mut max_floor = 0.0f64;
+-        for step in 1..=16 {
++        for step in 1..=260 {
+             crate::solver::GLOBAL_TRACE.with(|t| t.set((step, 0)));
+             world.step(1.0 / 60.0);
+             let poses: Vec<_> = handles
+@@ -4692,17 +4692,21 @@
+                     max_pair = max_pair.max((-a.separation(*b)).max(0.0));
+                 }
+             }
+-            if step == 8 {
++            if step == 233 {
+                 println!(
+-                    "ROUND184_STEP8 pair34={:.15}",
++                    "ROUND189_STEP233 pair34={:.15}",
+                     -poses[3].separation(poses[4])
+                 );
+             }
+-            if (1..=16).contains(&step) {
++            if (225..=245).contains(&step) {
+                 println!("ROUND182_SAT step={step} pair01={} cumulative_pair={max_pair} cumulative_floor={max_floor}",-poses[3].separation(poses[4]));
+             }
+         }
+-        println!("ROUND182_RESULT steps=16 layers=32 pair={max_pair} floor={max_floor} diagnostic_only=true");
++        assert!(
++            (max_pair - 0.005163915172886169).abs() < 1e-12,
++            "pair={max_pair}"
++        );
++        println!("ROUND182_RESULT steps=260 layers=12 pair={max_pair} floor={max_floor} diagnostic_only=true");
+     }
+ 
+     #[test]
