@@ -1,0 +1,103 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1951,6 +1951,7 @@
+ 
+         let mut reference_state = NormalSolveState::default();
+         reference_state.memory.copy_commit = true;
++        reference_state.work.bound_reference = true;
+         let mut warmed = None;
+         for step in 0..2 {
+             state.reset();
+@@ -2030,7 +2031,7 @@
+                 }
+             }
+         }
+-        println!("ROUND209 actual208coarse40round swap-vs-copy rawbits/pass fourcapacitysetstableafterwarm3");
++        println!("ROUND210 actual208coarse40round cache/swap-vs-recompute/copy rawbits/pass fourcapacitysetstableafterwarm3");
+     }
+ 
+     #[test]
+@@ -2143,6 +2144,36 @@
+             }
+         }
+         println!("ROUND208 SPD maskeddiag+coarse 7masks9probes PASS");
++    }
++
++    #[test]
++    fn global_normal_bound_cache_witness() {
++        for (l, p) in [
++            (0.0, -1.0),
++            (-0.0, -1.0),
++            (1.0, -3.0),
++            (1e300, -1e-300),
++            (1e-300, -1e300),
++            (1.0, -0.0),
++            (1.0, 0.0),
++            (f64::MAX, -f64::MIN_POSITIVE),
++        ] {
++            let q = -l / p;
++            for alpha in [q, 0.25, 0.0] {
++                let expected = projected_line_update(&[l], &[p], alpha);
++                let actual = if p < 0.0 && alpha == q {
++                    0.0
++                } else {
++                    (l + alpha * p).max(0.0) as f32
++                };
++                assert_eq!(
++                    actual.to_bits(),
++                    expected[0].to_bits(),
++                    "lambda={l} p={p} alpha={alpha}"
++                );
++            }
++        }
++        println!("ROUND210 boundcache signedzero/extreme/overflow rawf32 PASS");
+     }
+ 
+     #[test]
+@@ -4315,6 +4346,9 @@
+ 
+ #[derive(Default, Clone, Debug)]
+ struct NormalWork {
++    bound: Vec<f64>,
++    #[cfg(test)]
++    bound_reference: bool,
+     lambda: Vec<f64>,
+     gradient: Vec<f64>,
+     free: Vec<bool>,
+@@ -4382,7 +4416,12 @@
+     }
+     #[cfg(test)]
+     global_observe(cs, vs, "fresh_gradient");
++    #[cfg(test)]
++    let bound_reference = work.bound_reference;
++    #[cfg(not(test))]
++    let bound_reference = false;
+     let NormalWork {
++        bound,
+         lambda,
+         gradient,
+         free,
+@@ -4482,9 +4521,11 @@
+         -descent / curvature
+     ));
+     let mut alpha = -descent / curvature;
++    bound.resize(p.len(), 0.0);
+     for i in 0..p.len() {
+         if p[i] < 0.0 {
+-            alpha = alpha.min(-lambda[i] / p[i]);
++            bound[i] = -lambda[i] / p[i];
++            alpha = alpha.min(bound[i]);
+         }
+     }
+     #[cfg(test)]
+@@ -4515,8 +4556,8 @@
+     }
+     let mut hitbound = false;
+     next.clear();
+-    next.extend(lambda.iter().zip(p.iter()).map(|(l, p)| {
+-        if *p < 0.0 && alpha == -*l / *p {
++    next.extend(lambda.iter().zip(p.iter()).enumerate().map(|(i, (l, p))| {
++        if *p < 0.0 && alpha == if bound_reference { -*l / *p } else { bound[i] } {
+             hitbound = true;
+             0.0
+         } else {

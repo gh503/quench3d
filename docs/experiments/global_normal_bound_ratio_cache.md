@@ -1,0 +1,20 @@
+# Exact negative direction boundary ratio cache registration
+
+Round210 authorizedafterretained20912cost1.231975FAIL. Fornegativepcomputeq=-lambda/pinoriginalalpha.minorder,storeinreusedNormalWork.boundVec. Nextmappingonlyreadsbound[i]whenp[i]<0,whichwaswrittenthiscallwithunchangedlambda/p;positive/signednegativezeropdoesnotreadstaleslot. resize(len,0)onlyinitializesnewtail,no blanketfill. PreserveNaN/Infminandequalitysemantics,noreassociation/fastmath/newthresholds. Thisremovesonedivisionpernegativecomponentandaddsread/write,no promisedperformancegain.
+
+Testfirstactual20940roundreferenceflags:copy_commit=trueandbound_reference=trueforold209copy/recompute;actualswap/cachedefaultfalse. Body/contact/historyrawbitsplus4capacitysetproofandnewboundcapacityafterwarm. Explicitboundarywitnesssignedzero/extreme/overflowcomparecachednextformulaagainstoldprojected_line_updatef32bits. Preserve20round/J/Ap/friction/rolling/defaultfalse. Fullmath/5400precision/193bytes/192actualparallelbeforeunchangedfixed5ABBAcost. Leadexplicitimplementationauthorizationreceived;mainproductionunchanged.
+
+## Actual result: rejected for no observed benefit
+
+[global_normal_bound_ratio_cache.patch](../../tools/experiments/global_normal_bound_ratio_cache.patch),SHA256 `3ac80ed977d6fe779f36f2e8443f407b6e0505fbfb809a3aab57d61e8ed5fa7f`,incrementalagainst209,applycheck0. Compatjob bash-191b977f34ea41fb formallycollected0:query/math11/direction2/local1/projection2PASS. Explicitboundarywitnesssignedzero/extreme/overflowrawf32PASS;actual208coarse40roundcache/swapvsrecompute/copybody/contact/historyrawbitsPASS. Fourmemory/workp/Apcapacitysetstableafterwarm3. PlannednewboundcapacityinstrumentationwasNOTadded;cap10historicalarrayand4slotsproofexcludeaddedboundVec,no zeroallocationclaim.
+
+Full5400precisionPASS1.09sallreportedpeaks/sleep/driftidentical208/209. 193full1240states/931616648bytesPASS4.63s. 192threevariants1800paired/1800actualparallel/maxthreads2/hardware4eachPASS62.75s.
+
+Onlyafterallcompatibilitypasses,unchangedcost195exampleSHAa2d02863c9b35f5f27abe6d04fd895e348b692ae79e344283fd22b920bc21f97sameproductionreleasebinary/W8M120/fivefixedalternatingABBAtrials. Job bash-b202b663f7c74ff4 formallycollectedexit1,compile8.33s:
+
+|Layers|Legacy median s|Candidate median s|Ratio|Limit|Result|
+|---:|---:|---:|---:|---:|---|
+|12|.019089928|.024162241|1.265706|1.15|FAIL|
+|32|.051852368|.018012765|.347386|1.15|PASS|
+
+No observedbenefitversus209new.023593623/.017193280inseparatetrialsets;notastatisticalregressionclaim. REJECTEDasprespecified:newboundVec/storage/testflagwithoutbenefitnotretained. Manifest/binarySHA/source/status/rawtrials/rejected-solverunder /home/gh503/Documents/infra-dev/quench3d/target/tmp/round210-bound-cache/. Exact209solverrestoredandallfive209costsourcehashchecksPASS. No210boundcache/testflagremains/mainproductionunchanged/alljobsformallycollected/no runningbuilder/performancegoalstillunmet.
