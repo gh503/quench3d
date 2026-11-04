@@ -8,7 +8,8 @@
 #   tools/package_release.sh --out DIR       # 指定输出目录（必须不存在）
 #   tools/package_release.sh --camera-worker-dir target/camera-worker/quench3d-camera # 附带冻结采集运行时
 #
-# 包内容：bin/quench3d、bin/quench3d-editor、web/pkg/*、README/CHANGELOG/LICENSE、
+# 包内容：bin/quench3d、bin/quench3d-editor、web/index.html、web/pkg/*、
+# tools/agent_server.py、docs/ai_agent.md、README/CHANGELOG/LICENSE、
 # tools/camera_mocap/{camera_mocap.py,requirements.txt,README.md}、
 # manifest.json（版本/提交/文件大小）与 SHA256SUMS。wasm 额外生成 Brotli
 # `.br` 供静态服务器协商；没有 wasm-opt，也不生成平台安装器。
@@ -79,7 +80,8 @@ printf '  平台：%s-%s\n' "$os" "$arch"
 printf '  提交：%s\n' "$commit"
 printf '  输出：%s\n' "$dest"
 printf '  二进制：bin/quench3d、bin/quench3d-editor\n'
-printf '  Web：web/pkg（wasm + JS + build_stamp + wasm.br）\n'
+printf '  Web：web/index.html、web/pkg（wasm + JS + build_stamp + wasm.br）\n'
+printf '  AI 代理：tools/agent_server.py（Python 标准库）、docs/ai_agent.md\n'
 printf '  摄像头源码：tools/camera_mocap（采集脚本、requirements.txt、README.md）\n'
 if [ -n "$CAMERA_WORKER_DIR" ]; then
   printf '  摄像头运行时：%s → bin/quench3d-camera、bin/_internal（含人体模型）\n' "$CAMERA_WORKER_DIR"
@@ -99,6 +101,14 @@ if [ ! -f web/pkg/quench3d_web_bg.wasm ] || [ ! -f web/pkg/quench3d_web.js ]; th
   echo "web/pkg 缺少 wasm/JS，先运行 tools/build_web.sh web_client" >&2
   exit 1
 fi
+
+agent_resources=(tools/agent_server.py web/index.html docs/ai_agent.md)
+for resource in "${agent_resources[@]}"; do
+  if [ ! -f "$ROOT/$resource" ]; then
+    echo "缺少 Web AI 发行资源：$resource" >&2
+    exit 1
+  fi
+done
 
 camera_resources=(camera_mocap.py requirements.txt README.md)
 for resource in "${camera_resources[@]}"; do
@@ -156,11 +166,14 @@ for bin in quench3d quench3d-editor; do
   fi
 done
 
-mkdir -p "$dest/bin" "$dest/web/pkg" "$dest/tools/camera_mocap"
+mkdir -p "$dest/bin" "$dest/web/pkg" "$dest/tools/camera_mocap" "$dest/docs"
 install -m 755 "$bin_dir/quench3d" "$dest/bin/quench3d"
 install -m 755 "$bin_dir/quench3d-editor" "$dest/bin/quench3d-editor"
 cp -a web/pkg/. "$dest/web/pkg/"
 cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$dest/"
+for resource in "${agent_resources[@]}"; do
+  install -m 644 "$ROOT/$resource" "$dest/$resource"
+done
 for resource in "${camera_resources[@]}"; do
   install -m 644 "$ROOT/tools/camera_mocap/$resource" "$dest/tools/camera_mocap/$resource"
 done

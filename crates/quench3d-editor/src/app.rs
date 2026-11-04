@@ -318,6 +318,7 @@ struct Inner {
     gizmo: Gizmo,
     /// 摄像头动捕读端（桌面端轮询 latest.*；Web 端空实现）。
     camera: CameraFeed,
+    agent: crate::agent::AgentPanel,
     /// 崩溃恢复自动保存（桌面写文件，Web 写 localStorage）。
     autosave: crate::autosave::AutoSave,
     last_time: f64,
@@ -520,6 +521,7 @@ impl Inner {
             viewport: Viewport::default(),
             gizmo: Gizmo::default(),
             camera: CameraFeed::new(),
+            agent: crate::agent::AgentPanel::default(),
             autosave,
             last_time: quench3d::clock::now_seconds(),
             first_frame_done: false,
@@ -574,6 +576,9 @@ impl Inner {
             }
         }
 
+        // AI 网络请求异步完成；实际工具只在拥有 Engine/Doc 的帧线程执行。
+        crate::agent_bridge::poll(&mut self.engine, &mut self.doc, &mut self.agent);
+        self.agent.poll(&mut self.engine, &mut self.doc);
         // ---- 1. 界面：先跑 UI，让它有机会改场景 ----
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
@@ -586,6 +591,10 @@ impl Inner {
                 &mut self.gizmo,
                 &mut self.camera,
             );
+            if requests.open_agent {
+                self.agent.open = true;
+            }
+            self.agent.window(ui.ctx());
             if requests.screenshot {
                 self.screenshot();
             }
@@ -1043,6 +1052,7 @@ impl Inner {
 
     /// 打开场景。
     fn load_scene(&mut self) {
+        self.agent.cancel();
         #[cfg(not(target_arch = "wasm32"))]
         {
             let path = std::path::PathBuf::from(self.doc.file_path.clone());
@@ -1070,6 +1080,7 @@ impl Inner {
 
     /// 把自动保存的内容装进引擎（不覆盖原场景文件/不自动下载）。
     fn restore_recovery(&mut self) {
+        self.agent.cancel();
         let Some(text) = self.doc.recovery.clone() else {
             return;
         };
@@ -1132,6 +1143,7 @@ impl Inner {
     /// 把浏览器上传的场景 JSON 装进引擎（Web 专用）。
     #[cfg(target_arch = "wasm32")]
     pub fn apply_scene_json(&mut self, text: &str) {
+        self.agent.cancel();
         match crate::scene_io::load_text_into_doc(&mut self.engine, &mut self.doc, text) {
             Ok((objects, path)) => {
                 self.doc

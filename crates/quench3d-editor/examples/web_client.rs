@@ -22,6 +22,20 @@ pub fn on_scene_file(name: String, text: String) {
     quench3d_editor::scene_io::on_scene_file(name, text);
 }
 
+/// Queue a request for the visible editor's AI session or live command dispatcher.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn enqueue_editor_request(json: String) -> Result<u32, wasm_bindgen::JsValue> {
+    quench3d_editor::agent_bridge::enqueue(&json).map_err(|e| wasm_bindgen::JsValue::from_str(&e))
+}
+
+/// Retrieve a completed live-editor request by ID without blocking rendering.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn take_editor_result(id: u32) -> Option<String> {
+    quench3d_editor::agent_bridge::take_result(id)
+}
+
 /// 外部姿态注入入口：页面脚本（例如 MediaPipe Tasks Vision）把 2D 骨架交给编辑器。
 ///
 /// JSON 形如 `{"present":true,"confidence":0.9,"landmarks":[{"x":0.5,"y":0.5},…]}`；

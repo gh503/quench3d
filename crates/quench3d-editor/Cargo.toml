@@ -49,6 +49,7 @@ web-sys = { version = "0.3", features = [
     "Document", "Window", "Element", "HtmlElement", "HtmlInputElement",
     "HtmlAnchorElement", "HtmlCanvasElement", "File", "FileList", "Blob",
     "Url", "Location", "Navigator", "Storage", "console",
+    "Request", "RequestInit", "RequestMode", "Response", "Headers", "AbortController", "AbortSignal",
     "MediaDevices", "MediaStream", "MediaStreamConstraints",
     "HtmlMediaElement", "HtmlVideoElement", "CanvasRenderingContext2d", "ImageData",
 ] }

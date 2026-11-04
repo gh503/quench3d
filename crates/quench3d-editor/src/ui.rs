@@ -73,6 +73,8 @@ pub struct Requests {
     pub load: bool,
     /// 截图（当前窗口内容 → PNG）。
     pub screenshot: bool,
+    /// 打开能实时调用编辑器工具的 AI 助手。
+    pub open_agent: bool,
     /// 把崩溃恢复文件装回引擎。
     pub restore_recovery: bool,
     /// 丢弃崩溃恢复文件。
@@ -188,6 +190,13 @@ fn top_bar(
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Quench3D").strong());
+                if ui
+                    .button("AI 助手")
+                    .on_hover_text("描述目标，让 AI 规划并操作当前场景")
+                    .clicked()
+                {
+                    req.open_agent = true;
+                }
                 ui.separator();
                 file_menu(ui, doc, req);
                 edit_menu(ui, engine, doc);

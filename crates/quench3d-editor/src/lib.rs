@@ -22,9 +22,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod agent;
+pub mod agent_bridge;
 pub mod app;
 pub mod autosave;
 pub mod camera;
+pub mod commands;
 pub mod doc;
 pub mod gizmo;
 pub mod history;

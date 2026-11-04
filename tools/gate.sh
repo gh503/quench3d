@@ -89,6 +89,15 @@ else
   tail -n 20 "$LOG_DIR/gate-license.log"
 fi
 
+step "AI 同源代理与模型闭环夹具（真实本地 HTTP）"
+if python3 tools/test_agent_server.py >"$LOG_DIR/gate-agent-proxy.log" 2>&1 && \
+   python3 tools/test_agent_fixture.py >>"$LOG_DIR/gate-agent-proxy.log" 2>&1; then
+  ok agent-proxy
+else
+  bad agent-proxy
+  tail -n 20 "$LOG_DIR/gate-agent-proxy.log"
+fi
+
 step "测试（全部 crate；QUENCH3D_GPU_TESTS=$QUENCH3D_GPU_TESTS）"
 # --no-fail-fast：**必须**。cargo 缺省在第一个失败的测试二进制就收工，后面的 crate 根本
 # 不会跑 —— 门禁于是只报"第一个"失败，剩下的红点要等你修完它、再跑一次才浮出来
@@ -161,6 +170,13 @@ else
 
   # 浏览器 wasm 基准需要本机 Chrome；CI 没装就跳过，不把“没浏览器”算红。
   if command -v "${CHROME:-google-chrome}" >/dev/null 2>&1; then
+    step "浏览器 AI 实时工具闭环与取消"
+    if OUT_DIR="$LOG_DIR/agent-browser" node tools/probe_web_agent.mjs >"$LOG_DIR/gate-agent-browser.log" 2>&1; then
+      ok agent-browser
+    else
+      bad agent-browser
+      tail -n 20 "$LOG_DIR/gate-agent-browser.log"
+    fi
     step "浏览器 wasm 基准（check_browser.mjs）"
     if node tools/check_browser.mjs >"$LOG_DIR/gate-browser.log" 2>&1; then
       ok browser-bench

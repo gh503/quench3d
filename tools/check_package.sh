@@ -15,6 +15,9 @@ grep -q 'quench3d' <<<"$dry"
 grep -q 'quench3d-editor' <<<"$dry"
 grep -q 'web/pkg' <<<"$dry"
 grep -q 'tools/camera_mocap' <<<"$dry"
+grep -q 'tools/agent_server.py' <<<"$dry"
+grep -q 'web/index.html' <<<"$dry"
+grep -q 'docs/ai_agent.md' <<<"$dry"
 if [ -e "$tmp/dry" ]; then
   echo "FAIL dry-run 不应创建输出目录" >&2
   exit 1
@@ -38,6 +41,13 @@ test -f "$tmp/pkg/SHA256SUMS"
 test -f "$tmp/pkg/README.md"
 test -f "$tmp/pkg/LICENSE-MIT"
 test -f "$tmp/pkg/LICENSE-APACHE"
+for resource in tools/agent_server.py web/index.html docs/ai_agent.md README.md; do
+  test -f "$tmp/pkg/$resource"
+  cmp "$resource" "$tmp/pkg/$resource"
+done
+for resource in tools/test_agent_server.py tools/test_agent_fixture.py tools/probe_web_agent.mjs; do
+  test ! -e "$tmp/pkg/$resource"
+done
 for resource in camera_mocap.py requirements.txt README.md; do
   test -f "$tmp/pkg/tools/camera_mocap/$resource"
   cmp "tools/camera_mocap/$resource" "$tmp/pkg/tools/camera_mocap/$resource"
@@ -69,6 +79,13 @@ files = manifest["files"]
 assert files, "清单不能为空"
 assert any(p.startswith("bin/") for p in files), files
 assert any(p.startswith("web/pkg/") for p in files), files
+for rel in ("tools/agent_server.py", "web/index.html", "docs/ai_agent.md"):
+    assert rel in files, f"Web AI 资源未进清单：{rel}"
+    with open(os.path.join(root, rel), "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    assert manifest["sha256"][rel] == digest, f"Web AI 资源哈希不一致：{rel}"
+for rel in ("tools/test_agent_server.py", "tools/test_agent_fixture.py", "tools/probe_web_agent.mjs"):
+    assert rel not in files, f"开发测试资源不应发行：{rel}"
 for resource in ("camera_mocap.py", "requirements.txt", "README.md"):
     rel = f"tools/camera_mocap/{resource}"
     assert rel in files, f"摄像头资源未进清单：{rel}"
