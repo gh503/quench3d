@@ -1,0 +1,765 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1802,6 +1802,92 @@
+     }
+ 
+     #[test]
++    fn wrench_basis_two_interface_dense_reference() {
++        let mut vs = vec![BodyView::frozen(); 3];
++        vs[0].is_static = true;
++        for v in &mut vs[1..] {
++            v.inv_m = 1.0;
++            v.inv_i_world_mat = Mat3::IDENTITY;
++        }
++        let corners = [[-0.7f32, -0.2f32], [0.5, -0.2], [0.5, 0.6], [-0.7, 0.6]];
++        let mut cs = Vec::new();
++        for edge in 0..2 {
++            for (i, [x, z]) in corners.iter().enumerate() {
++                let mut c = contact(edge, edge + 1, i);
++                c.normal = Vec3::Y;
++                c.ra = vec3(*x, 0.25, *z);
++                c.rb = vec3(*x, -0.25, *z);
++                c.k_normal = 2.0;
++                cs.push(c);
++            }
++        }
++        let columns0 = wrench_basis(&cs, &[0, 1, 2, 3]);
++        let columns1 = wrench_basis(&cs, &[4, 5, 6, 7]);
++        assert_eq!(columns0.len(), 3);
++        assert_eq!(columns1.len(), 3);
++        for q in &columns0 {
++            assert!((q.iter().map(|x| x * x).sum::<f64>() - 1.0).abs() < 1e-10);
++        }
++        for i in 0..3 {
++            for j in 0..i {
++                assert!(
++                    columns0[i]
++                        .iter()
++                        .zip(&columns0[j])
++                        .map(|(a, b)| a * b)
++                        .sum::<f64>()
++                        .abs()
++                        < 1e-10
++                );
++            }
++        }
++        let residual = vec![1.0, -0.3, 0.7, -0.2, 0.2, 0.8, -0.6, 0.4];
++        let free = vec![true; 8];
++        let z = chain_precondition(&cs, &vs, &residual, &free);
++        // Independent dense normal Jacobian rows: y translation, x/z torque.
++        let mut a = vec![vec![0.0f64; 8]; 8];
++        for i in 0..8 {
++            for j in 0..8 {
++                for body in 1..3 {
++                    let jac = |c: &SolverContact| {
++                        let sign = if c.a == body {
++                            -1.0
++                        } else if c.b == body {
++                            1.0
++                        } else {
++                            0.0
++                        };
++                        let r = if c.a == body { c.ra } else { c.rb };
++                        [sign, sign * (-r.z as f64), sign * (r.x as f64)]
++                    };
++                    let x = jac(&cs[i]);
++                    let y = jac(&cs[j]);
++                    a[i][j] += x.iter().zip(y).map(|(a, b)| a * b).sum::<f64>();
++                }
++            }
++        }
++        let mut p = vec![vec![0.0; 6]; 8];
++        for i in 0..4 {
++            for k in 0..3 {
++                p[i][k] = columns0[k][i];
++                p[4 + i][3 + k] = columns1[k][i];
++            }
++        }
++        let correction: Vec<_> = z.iter().zip(&residual).map(|(z, r)| z - r / 2.0).collect();
++        let mut worst = 0.0f64;
++        for k in 0..6 {
++            let expected = (0..8).map(|i| p[i][k] * residual[i]).sum::<f64>();
++            let got = (0..8)
++                .map(|i| p[i][k] * (0..8).map(|j| a[i][j] * correction[j]).sum::<f64>())
++                .sum::<f64>();
++            worst = worst.max((expected - got).abs());
++        }
++        assert!(worst < 1e-5, "projected dense residual={worst}");
++        assert!(z.iter().zip(residual).map(|(a, b)| a * b).sum::<f64>() > 0.0);
++        assert_eq!(wrench_basis(&cs, &[0, 1]).len(), 2);
++    }
++
++    #[test]
+     fn global_projection_spd_boundary_and_release() {
+         let lambda = [0.0, 1.0];
+         let g = [-1.0, 1.0];
+@@ -2236,6 +2322,12 @@
+         .filter(|(i, v)| v.is_static && adjacency[*i].len() == 1)
+         .map(|(i, _)| i)
+         .collect();
++    #[cfg(test)]
++    global_note(format!(
++        "roots={} freecount={}",
++        roots.len(),
++        free.iter().filter(|f| **f).count()
++    ));
+     for root in roots {
+         let mut node = root;
+         let mut previous = usize::MAX;
+@@ -2245,6 +2337,8 @@
+         let mut valid = true;
+         loop {
+             if seen[node] {
++                #[cfg(test)]
++                global_note("coarse_status=cycle");
+                 valid = false;
+                 break;
+             }
+@@ -2258,6 +2352,8 @@
+                 break;
+             }
+             if next.len() != 1 {
++                #[cfg(test)]
++                global_note("coarse_status=branch");
+                 valid = false;
+                 break;
+             }
+@@ -2265,6 +2361,8 @@
+             let ((a, b), points) = &edges[edge];
+             let other = if *a == node { *b } else { *a };
+             if vs[other].inv_m <= 0.0 {
++                #[cfg(test)]
++                global_note("coarse_status=frozenother");
+                 valid = false;
+                 break;
+             }
+@@ -2272,6 +2370,12 @@
+             if direction.is_some_and(|d: Vec3| d.dot(n) < 0.999)
+                 || points.iter().any(|i| cs[*i].normal != cs[points[0]].normal)
+             {
++                #[cfg(test)]
++                global_note(format!(
++                    "coarse_status=normal_mismatch adjacent_dot={} exactnormalneq={}",
++                    direction.map_or(1.0, |d: Vec3| d.dot(n)),
++                    points.iter().any(|i| cs[*i].normal != cs[points[0]].normal)
++                ));
+                 valid = false;
+                 break;
+             }
+@@ -2283,49 +2387,9 @@
+         if !valid || columns.is_empty() {
+             continue;
+         }
+-        let n = columns.len();
+-        let mut diagonal = vec![0.0; n];
+-        let mut lower = vec![0.0; n];
+-        let mut rhs = vec![0.0; n];
+-        for i in 0..n {
+-            diagonal[i] = coarse_cross(&columns[i], &columns[i], cs, vs);
+-            rhs[i] = columns[i]
+-                .iter()
+-                .filter(|j| free[**j])
+-                .map(|j| residual[*j])
+-                .sum::<f64>()
+-                / columns[i].len() as f64;
+-            if i > 0 {
+-                lower[i] = coarse_cross(&columns[i], &columns[i - 1], cs, vs);
+-            }
+-        }
+-        let scale = diagonal.iter().copied().fold(0.0, f64::max);
+-        for i in 0..n {
+-            if i > 0 {
+-                let off = lower[i];
+-                lower[i] /= diagonal[i - 1];
+-                diagonal[i] -= lower[i] * off;
+-                rhs[i] -= lower[i] * rhs[i - 1];
+-            }
+-            if !diagonal[i].is_finite() || diagonal[i] <= 1e-9 * scale {
+-                valid = false;
+-                break;
+-            }
+-        }
+-        if !valid {
+-            continue;
+-        }
+-        for i in 0..n {
+-            rhs[i] /= diagonal[i];
+-        }
+-        for i in (0..n.saturating_sub(1)).rev() {
+-            rhs[i] -= lower[i + 1] * rhs[i + 1];
+-        }
+-        for i in 0..n {
+-            for j in &columns[i] {
+-                if free[*j] {
+-                    z[*j] += rhs[i] / columns[i].len() as f64;
+-                }
++        if let Some(correction) = wrench_chain_correction(&columns, cs, vs, residual, free) {
++            for (i, x) in correction.iter().enumerate() {
++                z[i] += x;
+             }
+         }
+     }
+@@ -2338,6 +2402,13 @@
+     mut p: Vec<f64>,
+     diagonal: &[f64],
+ ) -> Vec<f64> {
++    #[cfg(test)]
++    global_note(format!(
++        "zero_clips={}",
++        (0..p.len())
++            .filter(|i| lambda[*i] == 0.0 && p[*i] < 0.0)
++            .count()
++    ));
+     for i in 0..p.len() {
+         if lambda[i] == 0.0 && p[i] < 0.0 {
+             p[i] = 0.0;
+@@ -2346,6 +2417,8 @@
+     if p.iter().zip(gradient).map(|(p, g)| p * g).sum::<f64>() >= 0.0
+         || p.iter().any(|x| !x.is_finite())
+     {
++        #[cfg(test)]
++        global_note("diag_descent_fallback=true");
+         for i in 0..p.len() {
+             p[i] = if lambda[i] > 0.0 || gradient[i] < 0.0 {
+                 -gradient[i] / diagonal[i]
+@@ -2358,11 +2431,21 @@
+ }
+ 
+ fn global_normal_round(cs: &mut [SolverContact], vs: &mut [BodyView]) {
++    #[cfg(test)]
++    {
++        GLOBAL_TRACE.with(|t| {
++            let (step, r) = t.get();
++            t.set((step, r + 1));
++        });
++        global_observe(cs, vs, "before_friction");
++    }
+     for c in cs.iter_mut() {
+         if let Some((a, b)) = split_body_pair(vs, c.a, c.b) {
+             global_friction(c, a, b);
+         }
+     }
++    #[cfg(test)]
++    global_observe(cs, vs, "fresh_gradient");
+     let lambda: Vec<_> = cs.iter().map(|c| f64::from(c.normal_impulse)).collect();
+     let gradient: Vec<_> = cs
+         .iter()
+@@ -2396,10 +2479,37 @@
+     if !curvature.is_finite() || curvature <= 0.0 {
+         return;
+     }
++    #[cfg(test)]
++    global_note(format!(
++        "descent={descent} curvature={curvature} alphaopt={} apcount=1",
++        -descent / curvature
++    ));
+     let mut alpha = -descent / curvature;
+     for i in 0..p.len() {
+         if p[i] < 0.0 {
+             alpha = alpha.min(-lambda[i] / p[i]);
++        }
++    }
++    #[cfg(test)]
++    global_note(format!(
++        "alpha={alpha} bound_limited={}",
++        alpha < -descent / curvature
++    ));
++    #[cfg(test)]
++    {
++        let limiting = (0..p.len())
++            .filter(|i| p[*i] < 0.0)
++            .min_by(|i, j| (-lambda[*i] / p[*i]).total_cmp(&(-lambda[*j] / p[*j])));
++        if let Some(i) = limiting {
++            global_note(format!(
++                "limiter={i} pair={},{} lambda={} p={} g={} ratio={}",
++                cs[i].a,
++                cs[i].b,
++                lambda[i],
++                p[i],
++                gradient[i],
++                alpha / (-descent / curvature)
++            ));
+         }
+     }
+     if !alpha.is_finite() || alpha <= 0.0 {
+@@ -2422,4 +2532,286 @@
+             }
+         }
+     }
+-}
++    #[cfg(test)]
++    global_observe(cs, vs, "after_normal");
++}
++
++#[cfg(test)]
++thread_local! { pub(crate) static GLOBAL_TRACE: std::cell::Cell<(usize,usize)> = const { std::cell::Cell::new((0,0)) }; }
++#[cfg(test)]
++fn global_note(message: impl std::fmt::Display) {
++    GLOBAL_TRACE.with(|t| {
++        let (step, round) = t.get();
++        if (400..=440).contains(&step)
++            || ((1..=480).contains(&step) && message.to_string().contains("coarse_status="))
++        {
++            println!("ROUND182 step={step} round={round} {message}");
++        }
++    });
++}
++#[cfg(test)]
++fn global_observe(cs: &[SolverContact], vs: &[BodyView], phase: &str) {
++    let kkt = cs
++        .iter()
++        .map(|c| {
++            let g = pair_relative_velocity(&vs[c.a], &vs[c.b], c.ra, c.rb).dot(c.normal)
++                - c.restitution_bias
++                - c.speculative_bias;
++            if c.normal_impulse > 0.0 {
++                g.abs()
++            } else {
++                (-g).max(0.0)
++            }
++        })
++        .fold(0.0, f32::max);
++    let pair: Vec<_> = cs
++        .iter()
++        .filter(|c| c.a == 1 && c.b == 2)
++        .map(|c| {
++            (
++                c.penetration,
++                pair_relative_velocity(&vs[c.a], &vs[c.b], c.ra, c.rb).dot(c.normal),
++                c.speculative_bias + c.restitution_bias,
++                c.normal_impulse,
++            )
++        })
++        .collect();
++    global_note(format!("phase={phase} kkt={kkt} pair12={pair:?}"));
++}
++
++#[cfg(test)]
++pub(crate) fn global_phase_observe(cs: &[SolverContact], vs: &[BodyView], phase: &str) {
++    global_observe(cs, vs, phase);
++}
++
++fn wrench_basis(cs: &[SolverContact], points: &[usize]) -> Vec<Vec<f64>> {
++    let n = cs[points[0]].normal;
++    let (t1, t2) = n.any_orthonormal_pair();
++    let raw: Vec<Vec<f64>> = vec![
++        vec![1.0; points.len()],
++        points
++            .iter()
++            .map(|i| f64::from(cs[*i].ra.cross(n).dot(t1)))
++            .collect(),
++        points
++            .iter()
++            .map(|i| f64::from(cs[*i].ra.cross(n).dot(t2)))
++            .collect(),
++    ];
++    let mut result: Vec<Vec<f64>> = Vec::new();
++    for mut v in raw {
++        let original = v.iter().map(|x| x * x).sum::<f64>().sqrt();
++        if !original.is_finite() || original <= 1e-30 {
++            continue;
++        }
++        for _ in 0..2 {
++            for q in &result {
++                let d = v.iter().zip(q).map(|(a, b)| a * b).sum::<f64>();
++                for (i, x) in v.iter_mut().enumerate() {
++                    *x -= d * q[i];
++                }
++            }
++        }
++        let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
++        if norm.is_finite() && norm > original * 1e-9 {
++            for x in &mut v {
++                *x /= norm;
++            }
++            result.push(v);
++        }
++    }
++    result
++}
++
++fn weighted_cross(
++    a: &[usize],
++    qa: &[f64],
++    b: &[usize],
++    qb: &[f64],
++    cs: &[SolverContact],
++    vs: &[BodyView],
++) -> f64 {
++    let mut value = 0.0;
++    for (ii, &i) in a.iter().enumerate() {
++        for (jj, &j) in b.iter().enumerate() {
++            let x = cs[i];
++            let y = cs[j];
++            for (bx, sx, rx) in [(x.a, -1.0, x.ra), (x.b, 1.0, x.rb)] {
++                for (by, sy, ry) in [(y.a, -1.0, y.ra), (y.b, 1.0, y.rb)] {
++                    if bx == by {
++                        let v = vs[bx];
++                        value += qa[ii]
++                            * qb[jj]
++                            * sx
++                            * sy
++                            * (f64::from(v.inv_m * x.normal.dot(y.normal))
++                                + f64::from(
++                                    rx.cross(x.normal).dot(v.inv_i_world(ry.cross(y.normal))),
++                                ));
++                    }
++                }
++            }
++        }
++    }
++    value
++}
++
++fn small_spd_inverse(a: [[f64; 3]; 3], n: usize, scale: f64) -> Option<[[f64; 3]; 3]> {
++    let mut l = [[0.0; 3]; 3];
++    for i in 0..n {
++        for j in 0..=i {
++            let mut x = a[i][j];
++            for k in 0..j {
++                x -= l[i][k] * l[j][k];
++            }
++            if i == j {
++                if !x.is_finite() || x <= scale * 1e-9 {
++                    return None;
++                }
++                l[i][j] = x.sqrt();
++            } else {
++                l[i][j] = x / l[j][j];
++            }
++        }
++    }
++    let mut inv = [[0.0; 3]; 3];
++    for col in 0..n {
++        let mut x = [0.0; 3];
++        for i in 0..n {
++            let mut rhs = if i == col { 1.0 } else { 0.0 };
++            for j in 0..i {
++                rhs -= l[i][j] * x[j];
++            }
++            x[i] = rhs / l[i][i];
++        }
++        for i in (0..n).rev() {
++            let mut rhs = x[i];
++            for j in i + 1..n {
++                rhs -= l[j][i] * inv[j][col];
++            }
++            inv[i][col] = rhs / l[i][i];
++        }
++    }
++    Some(inv)
++}
++
++fn wrench_chain_correction(
++    columns: &[Vec<usize>],
++    cs: &[SolverContact],
++    vs: &[BodyView],
++    residual: &[f64],
++    free: &[bool],
++) -> Option<Vec<f64>> {
++    let mut bases = Vec::new();
++    for points in columns {
++        let c = cs[points[0]];
++        if points.iter().any(|i| {
++            (cs[*i].ra - c.ra).dot(c.normal).abs() > 1e-5
++                || (cs[*i].rb - c.rb).dot(c.normal).abs() > 1e-5
++        }) {
++            return None;
++        }
++        let q = wrench_basis(cs, points);
++        if q.is_empty() {
++            return None;
++        }
++        bases.push(q);
++    }
++    let n = columns.len();
++    let mut d = vec![[[0.0; 3]; 3]; n];
++    let mut e = d.clone();
++    let mut rhs = vec![[0.0; 3]; n];
++    for i in 0..n {
++        for a in 0..bases[i].len() {
++            rhs[i][a] = columns[i]
++                .iter()
++                .enumerate()
++                .filter(|(_, j)| free[**j])
++                .map(|(j, index)| bases[i][a][j] * residual[*index])
++                .sum();
++            for b in 0..bases[i].len() {
++                let ab =
++                    weighted_cross(&columns[i], &bases[i][a], &columns[i], &bases[i][b], cs, vs);
++                let ba =
++                    weighted_cross(&columns[i], &bases[i][b], &columns[i], &bases[i][a], cs, vs);
++                d[i][a][b] = 0.5 * (ab + ba);
++            }
++            if i > 0 {
++                for b in 0..bases[i - 1].len() {
++                    let ab = weighted_cross(
++                        &columns[i],
++                        &bases[i][a],
++                        &columns[i - 1],
++                        &bases[i - 1][b],
++                        cs,
++                        vs,
++                    );
++                    let ba = weighted_cross(
++                        &columns[i - 1],
++                        &bases[i - 1][b],
++                        &columns[i],
++                        &bases[i][a],
++                        cs,
++                        vs,
++                    );
++                    e[i][a][b] = 0.5 * (ab + ba);
++                }
++            }
++        }
++    }
++    let scale = d
++        .iter()
++        .flat_map(|m| (0..3).map(move |i| m[i][i]))
++        .fold(0.0, f64::max);
++    let mut inverse = vec![[[0.0; 3]; 3]; n];
++    for i in 0..n {
++        if i > 0 {
++            for a in 0..bases[i].len() {
++                for b in 0..bases[i].len() {
++                    let mut delta = 0.0;
++                    for j in 0..bases[i - 1].len() {
++                        for k in 0..bases[i - 1].len() {
++                            delta += e[i][a][j] * inverse[i - 1][j][k] * e[i][b][k];
++                        }
++                    }
++                    d[i][a][b] -= delta;
++                }
++                let mut delta = 0.0;
++                for j in 0..bases[i - 1].len() {
++                    for k in 0..bases[i - 1].len() {
++                        delta += e[i][a][j] * inverse[i - 1][j][k] * rhs[i - 1][k];
++                    }
++                }
++                rhs[i][a] -= delta;
++            }
++        }
++        inverse[i] = small_spd_inverse(d[i], bases[i].len(), scale)?;
++    }
++    let mut x = vec![[0.0; 3]; n];
++    for i in (0..n).rev() {
++        let mut b = rhs[i];
++        if i + 1 < n {
++            for a in 0..bases[i].len() {
++                for j in 0..bases[i + 1].len() {
++                    b[a] -= e[i + 1][j][a] * x[i + 1][j];
++                }
++            }
++        }
++        for a in 0..bases[i].len() {
++            for j in 0..bases[i].len() {
++                x[i][a] += inverse[i][a][j] * b[j];
++            }
++        }
++    }
++    let mut out = vec![0.0; cs.len()];
++    for i in 0..n {
++        for (j, index) in columns[i].iter().enumerate() {
++            if free[*index] {
++                for a in 0..bases[i].len() {
++                    out[*index] += bases[i][a][j] * x[i][a];
++                }
++            }
++        }
++    }
++    Some(out)
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -2122,6 +2122,8 @@
+             self.trace_stack_solver("relax", &views);
+         }
+         lap!(velocity_us);
++        #[cfg(test)]
++        crate::solver::global_phase_observe(&self.contact_solver.contacts, &views, "post_relax");
+         // 8. 位置迭代（分裂冲量）
+         // 并行路径两种情况都已经做过接触的位置修正，这里不能再做一遍
+         // （否则有关节的场景会迭代两次位置约束）。
+@@ -2143,6 +2145,8 @@
+         lap!(position_us);
+         #[cfg(test)]
+         self.trace_stack_solver("position", &views);
++        #[cfg(test)]
++        crate::solver::global_phase_observe(&self.contact_solver.contacts, &views, "post_position");
+         // 9. 写回速度与伪速度
+         for (i, view) in views.iter().enumerate() {
+             if let Some(b) = self.bodies[i].body.as_mut() {
+@@ -4644,6 +4648,66 @@
+     use crate::body::BodyBuilder;
+ 
+     #[test]
++    fn global_projection_12_layer_bounded_observation() {
++        let mut world = PhysicsWorld::new();
++        world.set_fixed_dt(1.0 / 60.0);
++        world.config.speculative_margin = 0.005;
++        world.config.velocity_iterations = 20;
++        world.config.position_iterations = 8;
++        world.config.global_normal_projection = true;
++        world.add_builder(
++            BodyBuilder::r#static(Shape::Box {
++                half_extents: vec3(4.0, 0.25, 4.0),
++            })
++            .position(vec3(0.0, -0.25, 0.0)),
++        );
++        let handles: Vec<_> = (0..12)
++            .map(|i| {
++                world.add_builder(
++                    BodyBuilder::dynamic(Shape::Box {
++                        half_extents: Vec3::splat(0.25),
++                    })
++                    .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
++                    .mass(1.0),
++                )
++            })
++            .collect();
++        let floor = stack_oracle::Obb {
++            center: [0.0, -0.25, 0.0],
++            axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
++            half: [4.0, 0.25, 4.0],
++        };
++        let mut max_pair = 0.0f64;
++        let mut max_floor = 0.0f64;
++        for step in 1..=480 {
++            crate::solver::GLOBAL_TRACE.with(|t| t.set((step, 0)));
++            world.step(1.0 / 60.0);
++            let poses: Vec<_> = handles
++                .iter()
++                .map(|h| stack_oracle::Obb::read(&world, *h))
++                .collect();
++            for (i, a) in poses.iter().enumerate() {
++                max_floor = max_floor.max((-a.separation(floor)).max(0.0));
++                for b in poses.iter().skip(i + 1) {
++                    max_pair = max_pair.max((-a.separation(*b)).max(0.0));
++                }
++            }
++            if (400..=440).contains(&step) {
++                println!("ROUND182_SAT step={step} pair01={} cumulative_pair={max_pair} cumulative_floor={max_floor}",-poses[0].separation(poses[1]));
++            }
++        }
++        assert!(
++            (max_pair - 0.005135424688967494).abs() < 1e-12,
++            "pair={max_pair}"
++        );
++        assert!(
++            (max_floor - 0.0045088037607438625).abs() < 1e-12,
++            "floor={max_floor}"
++        );
++        println!("ROUND182_RESULT steps=480 layers=12 pair={max_pair} floor={max_floor} archived_peaks_exact=true");
++    }
++
++    #[test]
+     fn stack_solver_bounded_replay() {
+         for enhanced in [false, true] {
+             let mut world = PhysicsWorld::new();
+@@ -8385,3 +8449,105 @@
+         );
+     }
+ }
++
++#[cfg(test)]
++mod stack_oracle {
++    use super::*;
++    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
++        (0..3).map(|i| a[i] * b[i]).sum()
++    }
++    fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
++        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
++    }
++    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
++        [
++            a[1] * b[2] - a[2] * b[1],
++            a[2] * b[0] - a[0] * b[2],
++            a[0] * b[1] - a[1] * b[0],
++        ]
++    }
++    #[derive(Clone, Copy, Debug)]
++    pub(super) struct Obb {
++        pub(super) center: [f64; 3],
++        pub(super) axes: [[f64; 3]; 3],
++        pub(super) half: [f64; 3],
++    }
++    impl Obb {
++        pub(super) fn read(world: &PhysicsWorld, handle: crate::BodyHandle) -> Self {
++            let body = world.body(handle).unwrap();
++            let p = body.position();
++            let q = body.rotation();
++            let [x, y, z, w] = [q.x, q.y, q.z, q.w].map(f64::from);
++            let axes = [
++                [
++                    1.0 - 2.0 * (y * y + z * z),
++                    2.0 * (x * y + z * w),
++                    2.0 * (x * z - y * w),
++                ],
++                [
++                    2.0 * (x * y - z * w),
++                    1.0 - 2.0 * (x * x + z * z),
++                    2.0 * (y * z + x * w),
++                ],
++                [
++                    2.0 * (x * z + y * w),
++                    2.0 * (y * z - x * w),
++                    1.0 - 2.0 * (x * x + y * y),
++                ],
++            ];
++            Self {
++                center: [f64::from(p.x), f64::from(p.y), f64::from(p.z)],
++                axes,
++                half: [0.25; 3],
++            }
++        }
++        fn corners(self) -> [[f64; 3]; 8] {
++            std::array::from_fn(|i| {
++                std::array::from_fn(|axis| {
++                    self.center[axis]
++                        + (0..3)
++                            .map(|j| {
++                                (if i & (1 << j) == 0 {
++                                    -self.half[j]
++                                } else {
++                                    self.half[j]
++                                }) * self.axes[j][axis]
++                            })
++                            .sum::<f64>()
++                })
++            })
++        }
++        // Independent normalized SAT: signed positive gap=separated, negative=overlap.
++        // Corners/15axes use only public world pose, not engine narrowphase or AABBs.
++        pub(super) fn separation(self, other: Self) -> f64 {
++            let mut axes = self.axes.to_vec();
++            axes.extend(other.axes);
++            for a in self.axes {
++                for b in other.axes {
++                    axes.push(cross(a, b));
++                }
++            }
++            let (a, b) = (self.corners(), other.corners());
++            let mut separation = f64::NEG_INFINITY;
++            for axis in axes {
++                let length = dot(axis, axis).sqrt();
++                if length <= 1e-12 {
++                    continue;
++                }
++                let axis = axis.map(|x| x / length);
++                let range = |points: [[f64; 3]; 8]| {
++                    points
++                        .into_iter()
++                        .map(|p| dot(p, axis))
++                        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
++                            (lo.min(v), hi.max(v))
++                        })
++                };
++                let (alo, ahi) = range(a);
++                let (blo, bhi) = range(b);
++                separation = separation.max((blo - ahi).max(alo - bhi));
++            }
++            separation
++        }
++    }
++}
