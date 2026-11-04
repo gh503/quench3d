@@ -184,7 +184,7 @@ struct PointsJson {
     #[serde(default)]
     present: bool,
     #[serde(default)]
-    path: String,
+    path: Option<String>,
     #[serde(default)]
     count: usize,
     #[serde(default)]
@@ -1353,10 +1353,9 @@ fn read_frame(dir: &Path) -> Result<Option<FeedFrame>, String> {
         if json.points.count > 1_000_000 {
             return Err(format!("点云数量过大：{}", json.points.count));
         }
-        let path = if json.points.path.is_empty() {
-            dir.join("latest.points")
-        } else {
-            dir.join(&json.points.path)
+        let path = match json.points.path.as_deref().filter(|p| !p.is_empty()) {
+            Some(path) => dir.join(path),
+            None => dir.join("latest.points"),
         };
         match std::fs::read(&path) {
             Ok(bytes) if bytes.len() == expected => {
@@ -2612,6 +2611,148 @@ mod tests {
         let mut lines = DebugLines::new();
         add_pose_lines(&mut lines, &world);
         assert_eq!(lines.line_count(), 0);
+    }
+
+    #[test]
+    fn frozen_worker_frames_reach_native_reader() {
+        let worker = std::env::var_os("Q3D_TEST_CAMERA_WORKER")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("CAMERA_WORKER_DIR").map(|p| {
+                    PathBuf::from(p).join(if cfg!(windows) {
+                        "quench3d-camera.exe"
+                    } else {
+                        "quench3d-camera"
+                    })
+                })
+            });
+        let Some(worker) = worker else {
+            eprintln!("SKIP frozen wire test: set CAMERA_WORKER_DIR or Q3D_TEST_CAMERA_WORKER");
+            return;
+        };
+        for preview in [true, false] {
+            let directory = std::env::temp_dir().join(format!(
+                "q3d-frozen-wire-{}-{preview}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let mut command = std::process::Command::new(&worker);
+            command
+                .args([
+                    "--source",
+                    "synthetic",
+                    "--no-display",
+                    "--no-depth",
+                    "--no-points",
+                    "--max-frames",
+                    "2",
+                    "--out",
+                ])
+                .arg(&directory);
+            if preview {
+                command.arg("--preview-only");
+            }
+            let output = command.output().expect("run configured real frozen worker");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let frame = read_frame(&directory)
+                .expect("actual producer frame must reach reader")
+                .expect("frame exists");
+            assert_eq!(
+                frame.rgb.len(),
+                frame.json.width as usize * frame.json.height as usize * 3
+            );
+            assert_eq!(frame.json.pose.present, !preview);
+            assert!(!frame.json.points.present);
+            if preview {
+                assert!(frame.points.is_none());
+            }
+            // Synthetic pose mode also emits depth; the established reader may
+            // reconstruct points from it even when the producer skips the file.
+            assert_eq!(frame.json.frame, 1);
+            let mut feed = CameraFeed::new();
+            let ctx = egui::Context::default();
+            feed.update_texture(&ctx, &frame);
+            assert_eq!(
+                feed.texture.as_ref().unwrap().size(),
+                [frame.json.width as usize, frame.json.height as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_point_path_keeps_fallback_and_rejects_wrong_types() {
+        let directory = std::env::temp_dir().join(format!(
+            "q3d-null-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/data/camera_preview_worker.json"))
+                .unwrap();
+        value["points"]["present"] = true.into();
+        value["points"]["count"] = 1.into();
+        std::fs::write(
+            directory.join("latest.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.join("latest.rgb"), vec![1u8; 640 * 480 * 3]).unwrap();
+        assert!(
+            read_frame(&directory).unwrap().unwrap().points.is_none(),
+            "missing optional points file retains existing behavior"
+        );
+        std::fs::write(directory.join("latest.points"), [0u8; 12]).unwrap();
+        assert_eq!(
+            read_frame(&directory)
+                .unwrap()
+                .unwrap()
+                .points
+                .unwrap()
+                .len(),
+            1
+        );
+        value["points"]["path"] = 42.into();
+        std::fs::write(
+            directory.join("latest.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(read_frame(&directory)
+            .unwrap_err()
+            .contains("expected a string"));
+    }
+
+    #[test]
+    fn read_frame_accepts_real_frozen_preview_protocol() {
+        // Exact JSON captured from the 4d0349c frozen worker with synthetic input,
+        // --preview-only --no-display --max-frames 2 (no camera hardware).
+        let directory =
+            std::env::temp_dir().join(format!("quench-preview-protocol-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("latest.json"),
+            include_bytes!("../tests/data/camera_preview_worker.json"),
+        )
+        .unwrap();
+        std::fs::write(directory.join("latest.rgb"), vec![7u8; 640 * 480 * 3]).unwrap();
+        let frame = read_frame(&directory)
+            .expect("real frozen worker protocol must parse")
+            .unwrap();
+        assert_eq!(frame.rgb.len(), 640 * 480 * 3);
+        assert!(!frame.json.pose.present);
+        assert!(frame.points.is_none());
+        assert!(frame.depth.is_none());
     }
 
     #[test]
