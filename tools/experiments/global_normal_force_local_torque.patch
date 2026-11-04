@@ -1,0 +1,285 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -1802,6 +1802,104 @@
+     }
+ 
+     #[test]
++    fn global_force_local_torque_three_interface_dense_masked() {
++        let mut vs = vec![BodyView::frozen(); 4];
++        vs[0].is_static = true;
++        for (i, v) in vs.iter_mut().enumerate().skip(1) {
++            v.inv_m = 1.0 / (i as f32);
++            v.inv_i_world_mat = Mat3::IDENTITY;
++        }
++        let patches = [
++            vec![(-0.25, -0.25), (0.25, -0.25), (0.25, 0.25), (-0.25, 0.25)],
++            vec![(-0.25, 0.0), (0.25, 0.0)],
++            vec![(0.0, 0.0)],
++        ];
++        let mut cs = Vec::new();
++        let mut groups = Vec::new();
++        for (edge, patch) in patches.iter().enumerate() {
++            let mut group = Vec::new();
++            for (i, (x, z)) in patch.iter().enumerate() {
++                let mut c = contact(edge, edge + 1, i);
++                c.normal = Vec3::Y;
++                c.ra = vec3(*x, 0.25, *z);
++                c.rb = vec3(*x, -0.25, *z);
++                c.k_normal = 2.0;
++                group.push(cs.len());
++                cs.push(c);
++            }
++            groups.push(group);
++        }
++        let r = vec![0.3, -0.7, 1.1, 0.2, 0.8, -0.4, 0.5];
++        let free = vec![true, false, true, true, true, false, true];
++        let got = local_torque_correction(&cs, &vs, &r, &free);
++        let mut expected = vec![0.0; cs.len()];
++        for points in &groups {
++            let basis = wrench_basis(&cs, points);
++            let rank = basis.len() - 1;
++            assert!(rank <= 2);
++            if rank == 0 {
++                continue;
++            }
++            let mut a = vec![vec![0.0; points.len()]; points.len()];
++            for (i, ii) in points.iter().enumerate() {
++                for (j, jj) in points.iter().enumerate() {
++                    let x = cs[*ii];
++                    let y = cs[*jj];
++                    a[i][j] = f64::from(vs[x.a].inv_m + vs[x.b].inv_m)
++                        + (if x.a == 0 { 1.0 } else { 2.0 })
++                            * (f64::from(x.ra.x) * f64::from(y.ra.x)
++                                + f64::from(x.ra.z) * f64::from(y.ra.z));
++                }
++            }
++            let mut t = [[0.0; 2]; 2];
++            let mut b = [0.0; 2];
++            for i in 0..rank {
++                for (k, index) in points.iter().enumerate() {
++                    if free[*index] {
++                        b[i] += basis[i + 1][k] * r[*index];
++                    }
++                    for j in 0..rank {
++                        for l in 0..points.len() {
++                            t[i][j] += basis[i + 1][k] * a[k][l] * basis[j + 1][l];
++                        }
++                    }
++                }
++            }
++            let x = if rank == 1 {
++                [b[0] / t[0][0], 0.0]
++            } else {
++                let det = t[0][0] * t[1][1] - t[0][1] * t[1][0];
++                [
++                    (b[0] * t[1][1] - b[1] * t[0][1]) / det,
++                    (b[1] * t[0][0] - b[0] * t[1][0]) / det,
++                ]
++            };
++            for (k, index) in points.iter().enumerate() {
++                if free[*index] {
++                    for i in 0..rank {
++                        expected[*index] += basis[i + 1][k] * x[i];
++                    }
++                }
++            }
++        }
++        let error = got
++            .iter()
++            .zip(&expected)
++            .map(|(a, b)| (a - b).abs())
++            .fold(0.0, f64::max);
++        assert!(error < 1e-6, "local additive reference mismatch {error}");
++        let force = chain_precondition(&cs, &vs, &r, &free);
++        let actual: Vec<_> = force.iter().zip(&got).map(|(a, b)| a + b).collect();
++        for i in 0..cs.len() {
++            assert!((actual[i] - force[i] - expected[i]).abs() < 1e-6);
++            if !free[i] {
++                assert_eq!(actual[i], 0.0);
++            }
++        }
++        assert!(actual.iter().zip(&r).map(|(a, b)| a * b).sum::<f64>() > 0.0);
++    }
++
++    #[test]
+     fn wrench_basis_normal_offset_invariance() {
+         let mut vs = vec![BodyView::frozen(); 3];
+         vs[0].is_static = true;
+@@ -2449,18 +2547,57 @@
+         if !valid || columns.is_empty() {
+             continue;
+         }
+-        if let Some(correction) = wrench_chain_correction(&columns, cs, vs, residual, free) {
+-            #[cfg(test)]
+-            global_note(format!(
+-                "coarse_status=wrench_accepted chainlen={}",
+-                columns.len()
+-            ));
+-            for (i, x) in correction.iter().enumerate() {
+-                z[i] += x;
+-            }
+-        } else {
+-            #[cfg(test)]
+-            global_note("coarse_status=wrench_rejected");
++        let n = columns.len();
++        let mut diagonal = vec![0.0; n];
++        let mut lower = vec![0.0; n];
++        let mut rhs = vec![0.0; n];
++        for i in 0..n {
++            diagonal[i] = coarse_cross(&columns[i], &columns[i], cs, vs);
++            rhs[i] = columns[i]
++                .iter()
++                .filter(|j| free[**j])
++                .map(|j| residual[*j])
++                .sum::<f64>()
++                / columns[i].len() as f64;
++            if i > 0 {
++                lower[i] = coarse_cross(&columns[i], &columns[i - 1], cs, vs);
++            }
++        }
++        let scale = diagonal.iter().copied().fold(0.0, f64::max);
++        for i in 0..n {
++            if i > 0 {
++                let off = lower[i];
++                lower[i] /= diagonal[i - 1];
++                diagonal[i] -= lower[i] * off;
++                rhs[i] -= lower[i] * rhs[i - 1];
++            }
++            if !diagonal[i].is_finite() || diagonal[i] <= 1e-9 * scale {
++                #[cfg(test)]
++                global_note(format!("coarse_status=pivot ratio={}", diagonal[i] / scale));
++                valid = false;
++                break;
++            }
++        }
++        if !valid {
++            continue;
++        }
++        #[cfg(test)]
++        global_note(format!(
++            "coarse_status=accepted chainlen={n} minpivotratio={}",
++            diagonal.iter().copied().fold(f64::INFINITY, f64::min) / scale
++        ));
++        for i in 0..n {
++            rhs[i] /= diagonal[i];
++        }
++        for i in (0..n.saturating_sub(1)).rev() {
++            rhs[i] -= lower[i + 1] * rhs[i + 1];
++        }
++        for i in 0..n {
++            for j in &columns[i] {
++                if free[*j] {
++                    z[*j] += rhs[i] / columns[i].len() as f64;
++                }
++            }
+         }
+     }
+     z
+@@ -2534,12 +2671,14 @@
+         .collect();
+     let residual: Vec<_> = gradient.iter().map(|x| -x).collect();
+     let diagonal: Vec<_> = cs.iter().map(|c| f64::from(c.k_normal)).collect();
+-    let p = feasible_direction(
+-        &lambda,
+-        &gradient,
+-        chain_precondition(cs, vs, &residual, &free),
+-        &diagonal,
+-    );
++    let mut preconditioned = chain_precondition(cs, vs, &residual, &free);
++    for (z, local) in preconditioned
++        .iter_mut()
++        .zip(local_torque_correction(cs, vs, &residual, &free))
++    {
++        *z += local;
++    }
++    let p = feasible_direction(&lambda, &gradient, preconditioned, &diagonal);
+     let descent = p.iter().zip(&gradient).map(|(p, g)| p * g).sum::<f64>();
+     if !descent.is_finite() || descent >= 0.0 {
+         return;
+@@ -2585,11 +2724,7 @@
+     if !alpha.is_finite() || alpha <= 0.0 {
+         return;
+     }
+-    let next: Vec<_> = lambda
+-        .iter()
+-        .zip(&p)
+-        .map(|(l, p)| (l + alpha * p).max(0.0) as f32)
+-        .collect();
++    let next = projected_line_update(&lambda, &p, alpha);
+     if next.iter().any(|x| !x.is_finite()) {
+         return;
+     }
+@@ -2883,3 +3018,73 @@
+     }
+     Some(out)
+ }
++
++fn projected_line_update(lambda: &[f64], p: &[f64], alpha: f64) -> Vec<f32> {
++    lambda
++        .iter()
++        .zip(p)
++        .map(|(l, p)| {
++            if *p < 0.0 && alpha == -*l / *p {
++                0.0
++            } else {
++                (l + alpha * p).max(0.0) as f32
++            }
++        })
++        .collect()
++}
++fn local_torque_correction(
++    cs: &[SolverContact],
++    vs: &[BodyView],
++    r: &[f64],
++    free: &[bool],
++) -> Vec<f64> {
++    let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
++        std::collections::BTreeMap::new();
++    for (i, c) in cs.iter().enumerate() {
++        groups.entry((c.a, c.b)).or_default().push(i);
++    }
++    let mut out = vec![0.0; cs.len()];
++    for points in groups.values() {
++        if points.iter().any(|i| cs[*i].normal != cs[points[0]].normal) {
++            continue;
++        }
++        let basis = wrench_basis(cs, points);
++        let rank = basis.len().saturating_sub(1);
++        if rank == 0 {
++            continue;
++        }
++        let mut matrix = [[0.0; 3]; 3];
++        let mut rhs = [0.0; 3];
++        for a in 0..rank {
++            rhs[a] = points
++                .iter()
++                .enumerate()
++                .filter(|(_, i)| free[**i])
++                .map(|(j, i)| basis[a + 1][j] * r[*i])
++                .sum();
++            for b in 0..rank {
++                matrix[a][b] = 0.5
++                    * (weighted_cross(points, &basis[a + 1], points, &basis[b + 1], cs, vs)
++                        + weighted_cross(points, &basis[b + 1], points, &basis[a + 1], cs, vs));
++            }
++        }
++        let scale = (0..rank).map(|i| matrix[i][i]).fold(0.0, f64::max);
++        let Some(inverse) = small_spd_inverse(matrix, rank, scale) else {
++            continue;
++        };
++        let mut x = [0.0; 3];
++        for a in 0..rank {
++            for b in 0..rank {
++                x[a] += inverse[a][b] * rhs[b];
++            }
++        }
++        for (j, i) in points.iter().enumerate() {
++            if free[*i] {
++                for a in 0..rank {
++                    out[*i] += basis[a + 1][j] * x[a];
++                }
++            }
++        }
++    }
++    out
++}
