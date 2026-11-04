@@ -1,0 +1,62 @@
+--- a/crates/quench3d-physics/src/parallel.rs
++++ b/crates/quench3d-physics/src/parallel.rs
+@@ -135,18 +135,16 @@
+         if !force_layout && (!stats.parallelizable() || contacts.len() < MIN_CONTACTS) {
+             return false;
+         }
+-        #[cfg(not(target_arch = "wasm32"))]
+-        let hw = std::thread::available_parallelism()
+-            .map(|n| n.get())
+-            .unwrap_or(1);
+-        #[cfg(target_arch = "wasm32")]
+-        let hw = 1;
+         let cap = if max_threads == 0 {
+             MAX_THREADS
+         } else {
+             max_threads.min(MAX_THREADS)
+         };
+         let threads = if parallel && stats.parallelizable() && contacts.len() >= MIN_CONTACTS {
++            #[cfg(not(target_arch = "wasm32"))]
++            let hw = query_parallelism_202().map(|n| n.get()).unwrap_or(1);
++            #[cfg(target_arch = "wasm32")]
++            let hw = 1;
+             hw.min(cap).min(stats.multi_body_islands as usize).max(1)
+         } else {
+             1
+@@ -465,3 +463,36 @@
+         self.run_workers(|cs, vs, _| solve_position_contacts(cs, vs, dt, cfg, iterations));
+     }
+ }
++
++#[cfg(not(target_arch = "wasm32"))]
++fn query_parallelism_202() -> std::io::Result<std::num::NonZeroUsize> {
++    #[cfg(test)]
++    let started = std::time::Instant::now();
++    let result = std::thread::available_parallelism();
++    #[cfg(test)]
++    QUERY202.with(|c| {
++        let (n, t) = c.get();
++        c.set((n + 1, t + started.elapsed().as_nanos()));
++    });
++    result
++}
++#[cfg(test)]
++thread_local! {static QUERY202:std::cell::Cell<(usize,u128)>=const{std::cell::Cell::new((0,0))};}
++#[cfg(all(test, not(target_arch = "wasm32")))]
++mod query_tests_202 {
++    use super::*;
++    #[test]
++    fn global_normal_no_hardware_query_without_eligibility() {
++        let mut layout = ParallelLayout::default();
++        let mut islands = Islands::default();
++        islands.begin(&[]);
++        islands.finish();
++        QUERY202.with(|c| c.set((0, 0)));
++        for _ in 0..120 {
++            layout.build_global(&islands, &[], &[], 0, false);
++        }
++        let (n, ns) = QUERY202.with(|c| c.get());
++        println!("ROUND202 actualqueries={n} query_elapsed_ns={ns} serialsteps=120");
++        assert_eq!(n, 0);
++    }
++}

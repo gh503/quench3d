@@ -1,0 +1,22 @@
+# Parallel hardware query eligibility registration
+
+Round202 authorizedexactcontrolflowoptimizationafter201layout5.091ms/120stepsdiagnostic. Exact198source restoredallcosthashesPASS,201diagarchivedbeforeimplementation.
+
+Measureactualstd::thread::available_parallelismcallsandelapsedviahelperatrealquerysite,notstubhardware. Forcedglobal-layoutparallelfalse/singleisland/emptyislandsdoesnotneedhardwarewhenfinalthreads=1;countertestexpected0queriesthereoldactual1/steptruefailure. Diagnosticsquerytimeonlynotregisteredcost. Eligibleparallel&&stats.parallelizable&&contacts>=MINstillqueriescurrenthardwareeachstep,minwiththreadcap/islandcountunchanged. No globalhardwarecache/affinitystaleness,noWasmquery;defaultfalselegacydispatchunchanged.
+
+Movequeryinsideexistingeligibilitycondition,serialthreads1buildsharedlayoutstillpreserved. Allmath/5400precision/193readonlyfullbytes/192actual5400pairedparitybeforeunchangedregisteredfiveABBAcostW8M120each12/32/limit1.15. No predictedgatepass;mainproductionunchanged.
+
+Actualred bash-e00ca9f3e66e46d4 formallycollected101,successfulreleasecompile57.05s. Realhelpercalledstdquery120timesfor120forcedglobalempty-layoutparallelfalsebuilds,queryelapsed4,060,714ns;expected0failed. Confirmsquerysubstantialcomponentof201~5.091mslayoutbudget,notproofofalllayoutcost.
+
+Implementedqueryinsideexactexistingparallel&&stats.parallelizable()&&contacts>=MINcondition. No cap==1specialcase,hardwarecache,newworkerthresholdorlayoutbypass. Helperrealquery/fallbackunchanged;elapsed/countercfgtestonly. Wasmhelpercfgnotwasm. [global_normal_parallel_query.patch](../../tools/experiments/global_normal_parallel_query.patch),SHA256 `2451e419eccff23f607bec544699255f4b4f32e7c9344c181a771b908e392a30`,incrementalagainstpassing198kernelcache,applycheck0. Validationjob bash-af0c5b2a91054aa2 formallycollectedexit0:querycount120serialstepsactual0/0ns;globalmath8/direction2/local1/projection2allPASS;full5400precisionpublicstepsPASS1.12sallreportedpeaks/sleep/driftunchanged;193full1240states/931616648bytesPASS4.58s;192threevariants1800paired/1800actualparallel/maxthreads2/hardware4eachPASS67.86s.
+
+## Registered cost remains unmet
+
+Onlyafterallcompatibilityexit0,unchangedcost195exampleSHAa2d02863c9b35f5f27abe6d04fd895e348b692ae79e344283fd22b920bc21f97sameproductionreleasebinary/twoflags/W8M120/fivealternatingABBAtrials. Job bash-5bb6cbe0f6d447c5 formallycollectedexit1,compile8.64s.
+
+|Layers|Legacy median s|Candidate median s|Ratio|Limit|Result|
+|---:|---:|---:|---:|---:|---|
+|12|.019239119|.028979216|1.506265|1.15|FAIL|
+|32|.051146770|.020340336|.397686|1.15|PASS|
+
+Candidate12medianlowerthan198.034830091by~5.85msinseparatemeasurementsets;notpairedcrossversionstatisticalproof. Kernel+querycorrectness-compatiblecandidate retainedisolated;12performanceobjectiveNOTcomplete/no shippingclaim. Rawtrials/sourcehashes/status/binarySHAin target/tmp/round202-parallel-query/manifest.json/cost.sha256/cost.log. No diagAPI/clocksinproduction;queryhelperclockcfgtestonly. Mainproductionunchanged/alljobscollected/no runningbuilder.
