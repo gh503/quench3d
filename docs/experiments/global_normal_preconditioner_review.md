@@ -1,0 +1,15 @@
+# Preconditioner cost and controlled mathematical alternatives
+
+Round207 read-onlyonretained205. No implementation/newcostrun. 206fullroundfixedpointcensuszero;do notuseepsilon/skips. 20512costratio1.421497stillFAIL.
+
+12fixture48SolverContactpoints/13views/12interfacesrank≤2,2400normalroundsperW8M120. Legacy1075frictionthenimmediatescalarN/rollingpercontact;globalall48frictionthenfreshallgradient→preconditioner→trueAp→line→normalapply→rolling. Frictionformulaidenticalbutstate/orderdiffer;legacy14.128msvelocityinclrelaxversusglobal22.890mswholevelocity199/201diagnosticscannotattributeall8.8msextratopreconditioning.
+
+Currentpreconditionerz=maskedr/k+forcechain+localtorque. Diagonal48f64divisions;chain12RHSaverages/LDLforward+diagdivide+back/scatter;eachrank2localinterface2×4RHSproducts+2×2inverseproducts+4×2scatterproducts,withmaskchecks;separatelocaloutfinalpositivezeroaddition. Existingworkspacealreadyreused. 199preconditionerapplication2.792msisaninclusivehistoricalceilingforallthreecomponents,notjustlocal. Later204/205setupreusehasnotbeenreprofiled;avoidclaimingnewphasecosts.
+
+|Controlled math candidate|Preserved|Changed / risk|Possible saving bound|
+|---|---|---|---|
+|A Precompute full local H=Qτ inv Qτᵀ, maskedH*r then scatter|diag/coarse,actualJ/Ap,freshgradient,friction,budget|f64product/reductionregrouping;notbitidentical,active-maskscattermustremainbothsided|Localapplicationonly,strictlylesshistorical2.792mswholepreapply;setupmayincrease|
+|B Drop additive diagonal term, retain force+localτ|actualJ/Ap,friction,gradient,budget;originaldiagonalfallbackcanremain|PSD/nullspacecheckerboardmodes;direction/trajectorychanges;potentialpoorconvergence|48div/fill/addremoved,likelysub-ms—notpromise|
+|C Drop localτ, retain diagonal+force|actualJ/Ap,friction,gradient,budget|Knownhistoricalforce-onlyprecisionweakness;lowpriority/previousnegativeevidence|Localsetup+applyonly;1.911mssetupand2.792msallapplyhistoricalcannotbeclaimedalllocal|
+
+Amoststructuredcandidatebutnoassurancesofwhole15%gateorprecision;Bhighrisk;Chistoricalnegativeevidencemakesrepeatunattractive. Everycandidateisnewcontrolledmath,requiresindependentdenseoperator/momentum/activebounds/freshfrictiontestsandfull4/12/32×1800precision(defaultfalseunchangedbyteproof/nativeactualparity)beforefixedcost. NeverreplaceactualJ M^-1 Jᵀ,frictionscalarorder,iterationcount,slop/sleep/materialsorlayerconditionalroutes. No candidateauthorizedimplementationinthisreview. Mainproductionunchanged/alljobscollected.
