@@ -1,0 +1,285 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -282,7 +282,9 @@
+ 
+ impl ContactCache {
+     #[cfg(test)]
+-    pub(crate) fn test_export_193(&self)->(&[(u32,u32)],&[(u32,u32)],&[CachedImpulse]) {(&self.keys,&self.ranges,&self.impulses)}
++    pub(crate) fn test_export_193(&self) -> (&[(u32, u32)], &[(u32, u32)], &[CachedImpulse]) {
++        (&self.keys, &self.ranges, &self.impulses)
++    }
+ 
+     /// 清空（保留已分配的容量）。
+     pub fn clear(&mut self) {
+@@ -1821,6 +1823,247 @@
+     }
+ 
+     #[test]
++    fn global_normal_rejected_overflow_clears_memory() {
++        let mut vs = vec![BodyView::frozen(); 2];
++        for v in &mut vs {
++            v.inv_m = 1.0;
++            v.inv_i_world_mat = Mat3::IDENTITY;
++        }
++        vs[1].lin = -Vec3::Y * 1e38;
++        let before = vs.clone();
++        let mut c = contact(0, 1, 0);
++        c.ra = Vec3::ZERO;
++        c.rb = Vec3::ZERO;
++        c.normal = Vec3::Y;
++        c.k_normal = 2.0;
++        c.normal_impulse = f32::MAX;
++        c.tangent_impulse = [0.0; 2];
++        c.friction = 0.0;
++        c.friction_tangent = [0.0; 2];
++        c.rolling_friction = 0.0;
++        let mut cs = vec![c];
++        let mut memory = NormalDirectionMemory::default();
++        solve_velocity_contacts_memory(&mut cs, &mut vs, true, &mut memory);
++        assert_eq!(cs[0].normal_impulse.to_bits(), f32::MAX.to_bits());
++        for (a, b) in vs.iter().zip(before) {
++            assert_eq!(a.lin, b.lin);
++            assert_eq!(a.ang, b.ang);
++        }
++        println!(
++            "ROUND194_OVERFLOW unchanged=true retained_p={:?} retained_ap={:?}",
++            memory.p, memory.ap
++        );
++        assert!(
++            memory.p.is_empty() && memory.ap.is_empty(),
++            "rejected update retained an unapplied direction"
++        );
++    }
++
++    #[test]
++    fn global_normal_fresh_friction_coupled_oracle() {
++        let mut vs = vec![BodyView::frozen(); 2];
++        for v in &mut vs {
++            v.inv_m = 1.0;
++            v.inv_i_world_mat = Mat3::IDENTITY;
++        }
++        vs[1].lin = vec3(4.0, -2.0, 0.0);
++        let mut c = contact(0, 1, 0);
++        c.ra = vec3(1.0, 1.0, 0.0);
++        c.rb = Vec3::Y;
++        c.k_normal = 3.0;
++        c.k_tangent = [4.0, 5.0];
++        c.friction = 1.0;
++        c.friction_tangent = [1.0; 2];
++        c.normal_impulse = 2.0;
++        c.tangent_impulse = [0.0; 2];
++        let mut cs = vec![c];
++        let mut memory = NormalDirectionMemory::default();
++        solve_velocity_contacts_memory(&mut cs, &mut vs, true, &mut memory);
++        assert!((cs[0].normal_impulse - (2.0 + 1.0 / 3.0)).abs() < 2e-6);
++        assert!((cs[0].tangent_impulse[0] + 1.0).abs() < 1e-6);
++        assert!((vs[0].lin + vs[1].lin - vec3(4.0, -2.0, 0.0)).length() < 2e-6);
++    }
++    #[test]
++    fn global_normal_dense_spatial_operator_and_momentum() {
++        fn arr(v: Vec3) -> [f64; 3] {
++            [v.x as f64, v.y as f64, v.z as f64]
++        }
++        fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
++            [
++                a[1] * b[2] - a[2] * b[1],
++                a[2] * b[0] - a[0] * b[2],
++                a[0] * b[1] - a[1] * b[0],
++            ]
++        }
++        fn inverse(a: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
++            let mut m = [[0.0; 6]; 3];
++            for i in 0..3 {
++                for j in 0..3 {
++                    m[i][j] = a[i][j];
++                }
++                m[i][3 + i] = 1.0;
++            }
++            for k in 0..3 {
++                let d = m[k][k];
++                assert!(d > 0.0);
++                for j in 0..6 {
++                    m[k][j] /= d;
++                }
++                for i in 0..3 {
++                    if i != k {
++                        let f = m[i][k];
++                        for j in 0..6 {
++                            m[i][j] -= f * m[k][j];
++                        }
++                    }
++                }
++            }
++            let mut out = [[0.0; 3]; 3];
++            for i in 0..3 {
++                for j in 0..3 {
++                    out[i][j] = m[i][3 + j];
++                }
++            }
++            out
++        }
++        let centers = [
++            vec3(-0.7, 0.3, 0.2),
++            vec3(0.4, -0.5, 0.1),
++            vec3(0.2, 0.6, -0.4),
++        ];
++        let masses = [0.5, 1.25, 0.8];
++        let mut vs = vec![BodyView::frozen(); 3];
++        let mut w = [[[0.0f64; 6]; 6]; 3];
++        for b in 0..3 {
++            let r = Mat3::from_axis_angle(vec3(0.3, 0.7, 0.2).normalize(), 0.4 + b as f32 * 0.3);
++            let tensor =
++                r * Mat3::from_diagonal(vec3(0.7 + b as f32 * 0.2, 1.3, 2.1)) * r.transpose();
++            vs[b].inv_m = masses[b];
++            vs[b].inv_i_world_mat = tensor;
++            let a = tensor.to_cols_array();
++            for i in 0..3 {
++                w[b][i][i] = masses[b] as f64;
++                for j in 0..3 {
++                    w[b][3 + i][3 + j] = a[j * 3 + i] as f64;
++                }
++            }
++        }
++        let definitions = [
++            (0, 1, vec3(0.1, 0.2, 0.3), vec3(0.3, 0.8, -0.2)),
++            (1, 2, vec3(-0.2, 0.1, 0.4), vec3(-0.4, 0.2, 0.7)),
++            (0, 2, vec3(0.3, -0.1, 0.2), vec3(0.6, -0.5, 0.2)),
++            (0, 1, vec3(-0.4, 0.3, -0.2), vec3(-0.1, 0.4, 0.9)),
++        ];
++        let mut cs = Vec::new();
++        let mut j = [[[0.0f64; 6]; 3]; 4];
++        for (i, (a, b, q, n)) in definitions.into_iter().enumerate() {
++            let mut c = contact(a, b, i);
++            c.normal = n.normalize();
++            c.ra = q - centers[a];
++            c.rb = q - centers[b];
++            for (body, sign, arm) in [(a, -1.0, c.ra), (b, 1.0, c.rb)] {
++                let n = arr(c.normal);
++                let torque = cross(arr(arm), n);
++                for k in 0..3 {
++                    j[i][body][k] = sign * n[k];
++                    j[i][body][3 + k] = sign * torque[k];
++                }
++            }
++            cs.push(c);
++        }
++        let mut dense = [[0.0; 4]; 4];
++        let mut absolute = [[0.0; 4]; 4];
++        for i in 0..4 {
++            for k in 0..4 {
++                for b in 0..3 {
++                    for u in 0..6 {
++                        for v in 0..6 {
++                            let t = j[i][b][u] * w[b][u][v] * j[k][b][v];
++                            dense[i][k] += t;
++                            absolute[i][k] += t.abs();
++                        }
++                    }
++                }
++            }
++        }
++        let probes = [
++            [1.0, 0.0, 0.0, 0.0],
++            [0.0, 1.0, 0.0, 0.0],
++            [0.0, 0.0, 1.0, 0.0],
++            [0.0, 0.0, 0.0, 1.0],
++            [0.7, -1.2, 0.4, -0.9],
++        ];
++        for p in probes {
++            let got = normal_product(&cs, &vs, &p);
++            for i in 0..4 {
++                let expected = (0..4).map(|k| dense[i][k] * p[k]).sum::<f64>();
++                let bound = 128.0
++                    * f32::EPSILON as f64
++                    * (0..4)
++                        .map(|k| absolute[i][k] * p[k].abs())
++                        .sum::<f64>()
++                        .max(1.0);
++                assert!(
++                    (got[i] - expected).abs() <= bound,
++                    "row={i} got={} expected={expected} bound={bound}",
++                    got[i]
++                );
++            }
++        }
++        let impulses = [0.7f64, -1.2, 0.4, -0.9];
++        for (c, p) in cs.iter().zip(impulses) {
++            let (a, b) = split_body_pair(&mut vs, c.a, c.b).unwrap();
++            pair_apply_impulse(a, b, c.ra, c.rb, c.normal * p as f32);
++        }
++        let mut momentum = [0.0; 3];
++        let mut angular = [0.0; 3];
++        for b in 0..3 {
++            let actual = [
++                vs[b].lin.x,
++                vs[b].lin.y,
++                vs[b].lin.z,
++                vs[b].ang.x,
++                vs[b].ang.y,
++                vs[b].ang.z,
++            ]
++            .map(f64::from);
++            for u in 0..6 {
++                let expected = (0..4)
++                    .map(|i| {
++                        (0..6)
++                            .map(|v| w[b][u][v] * j[i][b][v] * impulses[i])
++                            .sum::<f64>()
++                    })
++                    .sum::<f64>();
++                assert!(
++                    (actual[u] - expected).abs()
++                        < 128.0 * f32::EPSILON as f64 * expected.abs().max(1.0)
++                );
++            }
++            let mut it = [[0.0; 3]; 3];
++            for i in 0..3 {
++                for k in 0..3 {
++                    it[i][k] = w[b][3 + i][3 + k];
++                }
++            }
++            let inertia = inverse(it);
++            let linear = arr(vs[b].lin).map(|x| x / masses[b] as f64);
++            let orbital = cross(arr(centers[b]), linear);
++            for i in 0..3 {
++                momentum[i] += linear[i];
++                angular[i] +=
++                    orbital[i] + (0..3).map(|k| inertia[i][k] * actual[3 + k]).sum::<f64>();
++            }
++        }
++        for x in momentum.into_iter().chain(angular) {
++            assert!(
++                x.abs() < 128.0 * f32::EPSILON as f64,
++                "momentum residual={x}"
++            );
++        }
++    }
++
++    #[test]
+     fn global_normal_rolling_two_round_stall() {
+         for rolling in [0.0, 0.2] {
+             let mut vs = vec![BodyView::frozen(); 2];
+@@ -2859,6 +3102,12 @@
+         }
+     }
+     if !alpha.is_finite() || alpha <= 0.0 {
++        *memory = NormalDirectionMemory::default();
++        return;
++    }
++    let next = projected_line_update(&lambda, &p, alpha);
++    if next.iter().any(|x| !x.is_finite()) {
++        *memory = NormalDirectionMemory::default();
+         return;
+     }
+     let hitbound = (0..p.len()).any(|i| p[i] < 0.0 && alpha == -lambda[i] / p[i]);
+@@ -2871,10 +3120,6 @@
+         };
+     } else {
+         *memory = NormalDirectionMemory::default();
+-    }
+-    let next = projected_line_update(&lambda, &p, alpha);
+-    if next.iter().any(|x| !x.is_finite()) {
+-        return;
+     }
+     for (c, new) in cs.iter_mut().zip(next) {
+         let delta = new - c.normal_impulse;
