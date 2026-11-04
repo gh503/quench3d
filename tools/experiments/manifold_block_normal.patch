@@ -1,0 +1,493 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -78,6 +78,8 @@
+     /// 打开后更接近 PhysX/Rapier 的圆形摩擦锥。需要每步按配置解析，不能只存在
+     /// 接触里（配置可能在步之间改）。
+     pub friction_cone: bool,
++    /// Opt in to coupled normal impulses for compatible coplanar manifolds.
++    pub manifold_block_normal: bool,
+ }
+ 
+ impl Default for SolverConfig {
+@@ -100,6 +102,7 @@
+             static_friction_speed: 0.02,
+             speculative_margin: 0.0,
+             friction_cone: false,
++            manifold_block_normal: false,
+         }
+     }
+ }
+@@ -449,6 +452,8 @@
+ /// 求解器内部使用的接触点。
+ #[derive(Clone, Copy, Debug)]
+ pub(crate) struct SolverContact {
++    /// Original manifold identity, retained through island-local remapping.
++    pub manifold: usize,
+     /// A 的刚体下标。
+     pub a: usize,
+     /// B 的刚体下标。
+@@ -590,7 +595,7 @@
+         #[cfg(test)]
+         let mut pair_searches = 0;
+         self.contacts.clear();
+-        for m in manifolds {
++        for (manifold, m) in manifolds.iter().enumerate() {
+             let (a, b) = (m.a, m.b);
+             let ma = match materials.get(a) {
+                 Some(x) => *x,
+@@ -738,6 +743,7 @@
+                     }
+                 }
+                 self.contacts.push(SolverContact {
++                    manifold,
+                     a,
+                     b,
+                     normal: n,
+@@ -783,7 +789,7 @@
+         precompute: bool,
+     ) {
+         self.contacts.clear();
+-        for m in manifolds {
++        for (manifold, m) in manifolds.iter().enumerate() {
+             let (a, b) = (m.a, m.b);
+             let ma = match materials.get(a) {
+                 Some(x) => *x,
+@@ -922,6 +928,7 @@
+                     }
+                 }
+                 self.contacts.push(SolverContact {
++                    manifold,
+                     a,
+                     b,
+                     normal: n,
+@@ -965,8 +972,8 @@
+     }
+ 
+     /// 一轮速度迭代。
+-    pub fn solve_velocity(&mut self, views: &mut [BodyView]) {
+-        solve_velocity_contacts(&mut self.contacts, views);
++    pub fn solve_velocity(&mut self, views: &mut [BodyView], block_normal: bool) {
++        solve_velocity_contacts(&mut self.contacts, views, block_normal);
+     }
+ 
+     /// 松弛：只在仍然相互接近时补一点冲量，绝不抽走能量。
+@@ -1027,13 +1034,183 @@
+ /// 串行路径传整张接触表，并行路径传某个 island 的接触切片——**同一份实现**，
+ /// 避免两条路径的浮点运算顺序悄悄分叉。调用方必须保证切片内接触的下标
+ /// 已经映射到 `views` 的局部下标。
+-pub(crate) fn solve_velocity_contacts(contacts: &mut [SolverContact], views: &mut [BodyView]) {
++pub(crate) fn solve_velocity_contacts(
++    contacts: &mut [SolverContact],
++    views: &mut [BodyView],
++    block_normal: bool,
++) {
++    if block_normal {
++        let mut start = 0;
++        while start < contacts.len() {
++            let mut end = start + 1;
++            while end < contacts.len() && contacts[end].manifold == contacts[start].manifold {
++                end += 1;
++            }
++            let group = &mut contacts[start..end];
++            let (a, b) = (group[0].a, group[0].b);
++            if let Some((va, vb)) = split_body_pair(views, a, b) {
++                if !solve_normal_block(group, va, vb) {
++                    for c in group {
++                        solve_velocity_contact(c, va, vb);
++                    }
++                }
++            }
++            start = end;
++        }
++        return;
++    }
+     for c in contacts.iter_mut() {
+         let Some((va, vb)) = split_body_pair(views, c.a, c.b) else {
+             continue;
+         };
+         solve_velocity_contact(c, va, vb);
+     }
++}
++
++/// Solve a small PSD normal LCP using deterministic independent active subsets.
++fn block_lcp(k: [[f64; 4]; 4], b: [f64; 4], count: usize) -> Option<[f64; 4]> {
++    let scale = (0..count).map(|i| k[i][i].abs()).fold(0.0, f64::max);
++    if !scale.is_finite() || scale <= 1e-12 || b[..count].iter().any(|x| !x.is_finite()) {
++        return None;
++    }
++    let tolerance = 1e-8 * (1.0 + b[..count].iter().map(|x| x.abs()).fold(0.0, f64::max));
++    for cardinality in (0..=3.min(count)).rev() {
++        for mask in 0u32..(1 << count) {
++            if mask.count_ones() as usize != cardinality {
++                continue;
++            }
++            let mut indices = [0; 3];
++            let mut n = 0;
++            for i in 0..count {
++                if mask & (1 << i) != 0 {
++                    indices[n] = i;
++                    n += 1;
++                }
++            }
++            let mut matrix = [[0.0; 4]; 3];
++            for i in 0..n {
++                for j in 0..n {
++                    matrix[i][j] = k[indices[i]][indices[j]];
++                }
++                matrix[i][n] = -b[indices[i]];
++            }
++            let mut valid = true;
++            for col in 0..n {
++                let pivot = (col..n)
++                    .max_by(|a, b| matrix[*a][col].abs().total_cmp(&matrix[*b][col].abs()))
++                    .unwrap();
++                if !matrix[pivot][col].is_finite() || matrix[pivot][col].abs() <= scale * 1e-9 {
++                    valid = false;
++                    break;
++                }
++                matrix.swap(col, pivot);
++                let divisor = matrix[col][col];
++                for j in col..=n {
++                    matrix[col][j] /= divisor;
++                }
++                for i in 0..n {
++                    if i == col {
++                        continue;
++                    }
++                    let factor = matrix[i][col];
++                    for j in col..=n {
++                        matrix[i][j] -= factor * matrix[col][j];
++                    }
++                }
++            }
++            if !valid {
++                continue;
++            }
++            let mut lambda = [0.0; 4];
++            for i in 0..n {
++                lambda[indices[i]] = matrix[i][n];
++            }
++            if lambda[..count].iter().any(|x| !x.is_finite() || *x < 0.0) {
++                continue;
++            }
++            if (0..count).all(|i| {
++                let w = b[i] + (0..count).map(|j| k[i][j] * lambda[j]).sum::<f64>();
++                w.is_finite()
++                    && if mask & (1 << i) != 0 {
++                        w.abs() <= tolerance
++                    } else {
++                        w >= -tolerance
++                    }
++            }) {
++                return Some(lambda);
++            }
++        }
++    }
++    None
++}
++
++fn solve_normal_block(
++    contacts: &mut [SolverContact],
++    va: &mut BodyView,
++    vb: &mut BodyView,
++) -> bool {
++    let count = contacts.len();
++    if !(2..=4).contains(&count) {
++        return false;
++    }
++    let first = contacts[0];
++    if contacts.iter().any(|c| {
++        c.a != first.a
++            || c.b != first.b
++            || c.normal != first.normal
++            || c.rolling_friction != 0.0
++            || !c.ra.is_finite()
++            || !c.rb.is_finite()
++            || (c.ra - first.ra).dot(first.normal).abs() > 1e-5
++            || (c.rb - first.rb).dot(first.normal).abs() > 1e-5
++    }) {
++        return false;
++    }
++    let mut k = [[0.0; 4]; 4];
++    for i in 0..count {
++        for j in 0..count {
++            let a = contacts[i].ra.cross(first.normal);
++            let b = contacts[i].rb.cross(first.normal);
++            k[i][j] = f64::from(va.inv_m + vb.inv_m)
++                + f64::from(a.dot(va.inv_i_world(contacts[j].ra.cross(first.normal))))
++                + f64::from(b.dot(vb.inv_i_world(contacts[j].rb.cross(first.normal))));
++        }
++    }
++    let saved_a = *va;
++    let saved_b = *vb;
++    let saved: [SolverContact; 4] = std::array::from_fn(|i| contacts[i.min(count - 1)]);
++    for c in contacts.iter_mut() {
++        solve_block_friction(c, va, vb);
++    }
++    let mut b = [0.0; 4];
++    for i in 0..count {
++        b[i] = f64::from(
++            pair_relative_velocity(va, vb, contacts[i].ra, contacts[i].rb).dot(first.normal)
++                - contacts[i].restitution_bias
++                - contacts[i].speculative_bias,
++        ) - (0..count)
++            .map(|j| k[i][j] * f64::from(contacts[j].normal_impulse))
++            .sum::<f64>();
++    }
++    let Some(lambda) = block_lcp(k, b, count) else {
++        *va = saved_a;
++        *vb = saved_b;
++        contacts.copy_from_slice(&saved[..count]);
++        return false;
++    };
++    for (i, c) in contacts.iter_mut().enumerate() {
++        let new = lambda[i] as f32;
++        let delta = new - c.normal_impulse;
++        c.normal_impulse = new;
++        if delta != 0.0 {
++            if c.precomputed {
++                apply_precomputed(va, vb, c.normal, c.normal_arm, delta);
++            } else {
++                pair_apply_impulse(va, vb, c.ra, c.rb, c.normal * delta);
++            }
++        }
++    }
++    true
+ }
+ 
+ #[inline(always)]
+@@ -1746,6 +1923,7 @@
+ 
+     fn contact(a: usize, b: usize, i: usize) -> SolverContact {
+         SolverContact {
++            manifold: i,
+             a,
+             b,
+             normal: Vec3::Y,
+@@ -1785,6 +1963,48 @@
+             c.feature_id,
+         ]);
+         out
++    }
++
++    #[test]
++    fn manifold_block_independent_kkt_and_empty_support() {
++        // Normal translation plus both rocking axes, asymmetric rectangle/COM.
++        let points = [[-0.7, -0.2], [0.5, -0.2], [0.5, 0.6], [-0.7, 0.6]];
++        let mut k = [[0.0; 4]; 4];
++        let b: [f64; 4] = points.map(|[x, z]| -1.0 + 0.3 * x - 0.4 * z);
++        for i in 0..4 {
++            for j in 0..4 {
++                k[i][j] =
++                    1.0 + 2.0 * points[i][0] * points[j][0] + 3.0 * points[i][1] * points[j][1];
++            }
++        }
++        let lambda = block_lcp(k, b, 4).expect("rank3 support");
++        for i in 0..4 {
++            let w = b[i] + (0..4).map(|j| k[i][j] * lambda[j]).sum::<f64>();
++            assert!(lambda[i] >= 0.0 && w >= -1e-7 && (lambda[i] * w).abs() < 1e-7);
++        }
++        assert!((lambda.iter().sum::<f64>() - 1.0).abs() < 1e-7);
++        assert!(
++            (lambda
++                .iter()
++                .zip(points)
++                .map(|(l, p)| l * p[0])
++                .sum::<f64>()
++                + 0.15)
++                .abs()
++                < 1e-7
++        );
++        assert!(
++            (lambda
++                .iter()
++                .zip(points)
++                .map(|(l, p)| l * p[1])
++                .sum::<f64>()
++                - 0.4 / 3.0)
++                .abs()
++                < 1e-7
++        );
++        assert_eq!(block_lcp(k, [1.0; 4], 4), Some([0.0; 4]));
++        assert!(block_lcp([[0.0; 4]; 4], b, 4).is_none());
+     }
+ 
+     #[test]
+@@ -1970,8 +2190,8 @@
+             let mut v1 = views;
+             let mut v2 = views;
+             for _ in 0..10 {
+-                opt.solve_velocity(&mut v1);
+-                old.solve_velocity(&mut v2);
++                opt.solve_velocity(&mut v1, false);
++                old.solve_velocity(&mut v2, false);
+             }
+             for (a, b) in v1.iter().zip(v2) {
+                 for (va, vb) in [(a.lin, b.lin), (a.ang, b.ang)] {
+@@ -2030,3 +2250,74 @@
+         assert_eq!(CACHE_PAIR_SEARCHES.get(), 40);
+     }
+ }
++
++// Opt-in block scheduling uses the identical scalar friction prefix.
++fn solve_block_friction(c: &mut SolverContact, va: &mut BodyView, vb: &mut BodyView) {
++    let mut vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
++    // 摩擦（用上一轮的法向冲量作为上界）
++    let max_friction = c.friction * c.normal_impulse;
++    // 各向异性时两个切向的上界不同；ratio=0 时两值逐位等于 friction，
++    // 下面仍走原来的标量路径，旧场景/旧测试逐位不变。
++    let anisotropic = c.friction_tangent[0].to_bits() != c.friction.to_bits()
++        || c.friction_tangent[1].to_bits() != c.friction.to_bits();
++    if c.friction_cone {
++        // 圆形摩擦锥：两个切向方向一起投影，再按总量缩放。旧路径的
++        // 逐轴 clamp 在对角线方向允许 √2·μ·N。
++        if c.k_tangent[0] > 1e-12 && c.k_tangent[1] > 1e-12 {
++            let d0 = -vrel.dot(c.tangent[0]) / c.k_tangent[0];
++            let d1 = -vrel.dot(c.tangent[1]) / c.k_tangent[1];
++            let mut next = [c.tangent_impulse[0] + d0, c.tangent_impulse[1] + d1];
++            let len = (next[0] * next[0] + next[1] * next[1]).sqrt();
++            // 各向异性 + 圆形锥没有单一 μ：取两个方向上限的平均值作为
++            // 保守上界。真正沿椭圆锥的投影留给后续版本。
++            let cone_limit = if anisotropic {
++                (c.friction_tangent[0] + c.friction_tangent[1]) * 0.5 * c.normal_impulse
++            } else {
++                max_friction
++            };
++            if len > cone_limit {
++                let scale = cone_limit / len;
++                next[0] *= scale;
++                next[1] *= scale;
++            }
++            for (i, n) in next.iter().enumerate() {
++                let d = *n - c.tangent_impulse[i];
++                c.tangent_impulse[i] = *n;
++                if d != 0.0 {
++                    if c.precomputed {
++                        apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
++                    } else {
++                        pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
++                    }
++                }
++            }
++            vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
++        }
++    } else {
++        for i in 0..2 {
++            let k = c.k_tangent[i];
++            if k <= 1e-12 {
++                continue;
++            }
++            let vt = vrel.dot(c.tangent[i]);
++            let mut d = -vt / k;
++            let limit = if anisotropic {
++                c.friction_tangent[i] * c.normal_impulse
++            } else {
++                max_friction
++            };
++            let new = clamp(c.tangent_impulse[i] + d, -limit, limit);
++            d = new - c.tangent_impulse[i];
++            c.tangent_impulse[i] = new;
++            // 冲量没变时不需要再乘一遍/重算相对速度；结果逐位相同。
++            if d != 0.0 {
++                if c.precomputed {
++                    apply_precomputed(va, vb, c.tangent[i], c.tangent_arm[i], d);
++                } else {
++                    pair_apply_impulse(va, vb, c.ra, c.rb, c.tangent[i] * d);
++                }
++                vrel = pair_relative_velocity(va, vb, c.ra, c.rb);
++            }
++        }
++    }
++}
+--- a/crates/quench3d-physics/src/parallel.rs
++++ b/crates/quench3d-physics/src/parallel.rs
+@@ -393,7 +393,7 @@
+     ) {
+         self.run_workers(move |cs, vs| {
+             for _ in 0..iters {
+-                solve_velocity_contacts(cs, vs);
++                solve_velocity_contacts(cs, vs, cfg.manifold_block_normal);
+             }
+             relax_contacts(cs, vs, relax_iters, gain);
+             solve_position_contacts(cs, vs, dt, cfg, pos_iters);
+@@ -401,8 +401,8 @@
+     }
+ 
+     /// 并行跑一轮速度迭代。
+-    pub fn solve_velocity(&mut self) {
+-        self.run_workers(solve_velocity_contacts);
++    pub fn solve_velocity(&mut self, block_normal: bool) {
++        self.run_workers(move |cs, vs| solve_velocity_contacts(cs, vs, block_normal));
+     }
+ 
+     /// 并行松弛。
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -2088,7 +2088,8 @@
+                     break;
+                 }
+                 self.parallel.sync_from(&views);
+-                self.parallel.solve_velocity();
++                self.parallel
++                    .solve_velocity(self.config.manifold_block_normal);
+                 self.parallel.sync_to(&mut views);
+                 self.joint_solver.solve_velocity(&mut views, dt);
+             }
+@@ -2105,7 +2106,8 @@
+             }
+         } else {
+             for _ in 0..iters {
+-                self.contact_solver.solve_velocity(&mut views);
++                self.contact_solver
++                    .solve_velocity(&mut views, self.config.manifold_block_normal);
+                 self.joint_solver.solve_velocity(&mut views, dt);
+             }
+             #[cfg(test)]
+--- a/crates/quench3d-physics/tests/stack_precision.rs
++++ b/crates/quench3d-physics/tests/stack_precision.rs
+@@ -260,6 +260,15 @@
+     steps: usize,
+     velocity_iterations: usize,
+ ) -> (f64, f64) {
++    run_duration_block_fixture(layers, steps, velocity_iterations, false)
++}
++
++fn run_duration_block_fixture(
++    layers: usize,
++    steps: usize,
++    velocity_iterations: usize,
++    block_normal: bool,
++) -> (f64, f64) {
+     let started = std::time::Instant::now();
+     let floor = Obb {
+         center: [0.0, -0.25, 0.0],
+@@ -271,6 +280,7 @@
+     world.set_fixed_dt(1.0 / 60.0);
+     world.config.speculative_margin = 0.005;
+     world.config.velocity_iterations = velocity_iterations;
++    world.config.manifold_block_normal = block_normal;
+     world.config.position_iterations = 8;
+     world.add_builder(
+         BodyBuilder::r#static(Shape::Box {
+@@ -396,6 +406,21 @@
+         started.elapsed().as_secs_f64()
+     );
+     (max_pair, max_floor)
++}
++
++#[test]
++#[ignore = "registered opt-in manifold block30s precision acceptance"]
++fn manifold_block_normal_sustained_precision_target() {
++    let mut results = Vec::new();
++    for layers in [4, 12, 32] {
++        let (pair, floor) = run_duration_block_fixture(layers, 1800, 20, true);
++        println!("ROUND179_BLOCK layers={layers} pair={pair:.12} floor={floor:.12}");
++        results.push((layers, pair, floor));
++    }
++    assert!(
++        results.iter().all(|r| r.1 <= 0.00501 && r.2 <= 0.00501),
++        "registered manifold block target unmet: {results:?}"
++    );
+ }
+ 
+ #[test]

@@ -1,0 +1,43 @@
+# Global normal projection: registered candidate
+
+Status: registered before implementation. No production configuration or algorithm has been added. Source edits and builds are prohibited until the parent completes its current full gate/commit and explicitly releases the source freeze. This registration is an experiment, not a delivered product capability or a promise of passing32layers.
+
+## Candidate and immutable acceptance
+
+New runtime option `global_normal_projection: bool`, defaultfalse. Defaultfalse executes the historical per-point velocity solve with unchanged floating arithmetic/order. Enabled candidate uses TRUE effective inverse mass and world inverse inertia for every contact response and every applied delta. Equal/opposite normal impulses are applied to both bodies; no dynamic mass freezing, shock propagation, artificial support anchors or physical approximation is allowed. No changes to materials, sleep, timestep, position solver, relaxation, slop or speculative targets.
+
+Before algorithm implementation, add configuration/call plumbing and the fixed acceptance while enabled behavior is still scalar. The stub must compile and actually run all worlds to produce a real precision assertion failure; compilation errors are not behavior red.
+
+Precision acceptance: original side0.5/mass1 boxes, initial2mm gaps, finite floor half extents(4,.25,4) centered at(0,-.25,0), margin.005, slop.005, velocity budget20, position8, relaxation1,60Hz1800actualpublicsteps30seconds. All4/12/32layer worlds execute fully before final acceptance. Independent f64 OBB SAT checks EVERY body pair and finite floor after EVERY step, including sleeping states: both peak overlaps must be<=.00501m at each scale. Maintain finite state/mass/bodycount/actualstep/contact checks. No smaller layer count, shorter duration, larger floor, wider threshold, extra substeps, altered friction/sleep or larger iteration budget can replace this target.
+
+## First implementation: fresh projected gradient
+
+For each island, matrixfree normal operator A=J M^-1 J^T uses the same true M as impulse application. Accumulated normal impulses lambda>=0 retain existing cache semantics. At each of the20velocity rounds: perform enabled friction updates in deterministic original order; compute FRESH gradient g=Jv_current-target from actual velocities; choose feasible preconditioned projected descent direction; perform at most ONEAp; take the bounded quadratic step; apply actual delta=newlambda-oldlambda with true mechanics. Joint iterations keep their established placement and their changes are included in the next fresh gradient. Do not retain CG history or use stale friction-before gradients/b between rounds.
+
+At lambda_i=0 mask infeasible negative direction components BEFORE checking g dot p<0. If the masked preconditioned direction is not descending, choose feasible diagonal projected descent BEFORE the soleAp. If no finite descent/positive curvature exists, safely consume/skip the scheduled iteration; no extra matvec, backtracking or inner convergence loop. For descending p use alpha=min(-g dot p/(p dot Ap),min_{p_i<0}(-lambda_i/p_i)). Roundoff handling must keep newlambda nonnegative and velocity update exactly consistent with the stored actual impulse delta. No uncounted correction impulse or extra scalar normal pass follows the global step. Zero-lambda separating coordinates remain fixed unless their gradient requires release; positivelambda with positivegradient can retract to0.
+
+## SPD preconditioner and fixed fallback
+
+Prepare a deterministic static-rooted UNBRANCHED support chain coarse representation. P aggregates compatible interface contacts to one normal force coefficient per chain edge using fixed normalized distributions. T=P^TAP uses true mass and inertia, including aggregate lever arms. For an unbranched chain T is tridiagonal because only adjacent interfaces share a dynamic body. Factor by deterministic LDL^T with relative positive pivot threshold1e-9*maxdiag; invalid/nonfinite/nonpositive/too-small pivots fall back to diagonal preconditioning. No eta or other regularization is added to either A or the preconditioner in this first candidate.
+
+Use additive B=D^-1+P T^-1 P^T where D contains positive normal diagonal entries; symmetric free-set masking M_F B M_F preserves positivity on the free subspace. Bound-feasibility clipping and descent check are still necessary. Branching support graphs, rootless islands, ambiguous/cyclic chain topology or incompatible geometry use diagonal preconditioning ONLY. Every true contact remains in the full A regardless of coarse eligibility; no discarded sibling edges or ghost static constraints. Rebuild topology each step so removing support releases it. Do not call the coarse inverse exact for arbitrary branching trees: sibling contacts share a body and introduce nontridiagonal coupling.
+
+## Explicit work and performance budget
+
+Each round has one fresh-gradient gather contactpass, at most oneAproduct(two contactpasses plus onebodypass), onepreconditioner application(twochainpasses), and bounded projection/vector updates. Twenty rounds therefore include about60contactpasses+20bodypasses+40chainpasses, plus friction and once-per-step setup; this is more work than20scalar sweeps and must not be hidden under identical iteration labels. No extra inner active-set/CG iterations or retry products are allowed.
+
+Only if ALL precision scales pass, run production-library cost comparison for12/32layers, eightwarmup plus120measuredsteps, fivetrials per mode/scale in the same release binary, alternating trial order. Include preparation, topology/factorization and all solver work. Median regression must be<=15% for EACH scale. Independent SAT/logging diagnostic walltime is not a performance measurement. Precision failure stops performance and rejects the candidate without threshold or parameter tuning.
+
+## Independent required verification
+
+- SPD boundary trap: B=[[1,2],[2,5]],lambda=(0,1),g=(-1,1),A=I. Raw p=(-1,-3) is descending but gives zeroboundstep. Feasibility clipping yields(0,-3), alpha=1/3,newlambda=(0,0), and true objective decrease for b=(-1,0). Check positive step, nonnegativity and actual QP descent.
+- Release cases: A=I,lambda=0,g=(-1,+1) releases only the first coordinate; positive lambda/positive gradient retracts to0; empty active set and mixed boundary changes. Validate actual velocity delta matches stored impulse delta.
+- MatrixfreeAp versus independently assembled denseJ M^-1 J^T on small islands, using true inverse inertia and offset COM; equal/opposite impulse response and both tangent-axis torques. IndependentJn/Jt offcenter friction impulse must change normal gradient as dense mechanics predicts, including a signflip case, proving freshg is used. Cover speculative/restitution targets, not an invalid universal zero-energy claim; energy nonincrease only under suitable zero-restitution/zerobias/noexternal assumptions.
+- Rootless free dynamic collision/chain total linear and angular momentum, including spin plus orbital angular momentum about a fixed world origin. Static support removal/motion, branch/bridge/cycle fallback, redundant fourcoplanar point PSD modes, degenerate/ill-conditioned diagonals, finite values and no artificial support forces.
+- If precision passes, defaultoff bits against prechange golden/reference trajectories; enabled actual nativeparallel with multipleactiveislands and arena holes must assertparallel_used=true, including joint/no-joint routes. A single32tower fallback is not parallel execution evidence. Same shared solver helper is used by all paths.
+
+## Evidence, rejection and scope
+
+Record exact baseline/source hashes, stub and candidate compile/execution results, allworld counts/first excess/footprint evidence, mathematical tests, compatibility and actualparallel outcomes, and conditional performance. Analytic green cannot substitute for30second acceptance. If candidate precision fails, archive complete reproducible patch including option/plumbing/tests and restore production byteexact while retaining prior diagnostic tests and independent peer changes. Clearly list unperformed verification and known limitations. No full gate/package/commit is authorized by this registration alone; the parent controls those stages.
+
+Anticipated implementation scope after source release: solver.rs(configuration, matrixfree workspace/projected iteration/coarse preconditioner/test helpers), world.rs and parallel.rs(call plumbing/workspace ownership and shared iteration scheduling), stack_precision.rs(fixed acceptance via existing independent oracle). No fluid production edits or unrelated UI/source changes.

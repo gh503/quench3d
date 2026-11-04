@@ -252,6 +252,14 @@ fn audit() -> Vec<Summary> {
     summaries
 }
 fn run_duration_fixture(layers: usize, steps: usize) -> (f64, f64) {
+    run_duration_velocity_fixture(layers, steps, 20)
+}
+
+fn run_duration_velocity_fixture(
+    layers: usize,
+    steps: usize,
+    velocity_iterations: usize,
+) -> (f64, f64) {
     let started = std::time::Instant::now();
     let floor = Obb {
         center: [0.0, -0.25, 0.0],
@@ -262,7 +270,7 @@ fn run_duration_fixture(layers: usize, steps: usize) -> (f64, f64) {
     let mut world = PhysicsWorld::new();
     world.set_fixed_dt(1.0 / 60.0);
     world.config.speculative_margin = 0.005;
-    world.config.velocity_iterations = 20;
+    world.config.velocity_iterations = velocity_iterations;
     world.config.position_iterations = 8;
     world.add_builder(
         BodyBuilder::r#static(Shape::Box {
@@ -388,6 +396,28 @@ fn run_duration_fixture(layers: usize, steps: usize) -> (f64, f64) {
         started.elapsed().as_secs_f64()
     );
     (max_pair, max_floor)
+}
+
+#[test]
+#[ignore = "controlled80vs20velocity30s32layer precision diagnostic, not solver implementation"]
+fn stack_velocity_budget_80_controlled_diagnostic() {
+    let mut results = Vec::new();
+    for velocity_iterations in [20, 80] {
+        for layers in [4, 12, 32] {
+            let (pair, floor) = run_duration_velocity_fixture(layers, 1800, velocity_iterations);
+            println!("ROUND178_BUDGET velocity={velocity_iterations} position=8 layers={layers} steps=1800 seconds=30 pair={pair:.12} floor={floor:.12} precision_pass={}", pair <= 0.00501 && floor <= 0.00501);
+            results.push((velocity_iterations, layers, pair, floor));
+        }
+    }
+    // All six worlds complete before evaluating the candidate. The20 baseline
+    // is known unmet at32 layers; it is measured without pretending it passes.
+    assert!(
+        results
+            .iter()
+            .filter(|r| r.0 == 80)
+            .all(|r| r.2 <= 0.00501 && r.3 <= 0.00501),
+        "fixed80/8 precision diagnostic unmet: {results:?}"
+    );
 }
 
 #[test]

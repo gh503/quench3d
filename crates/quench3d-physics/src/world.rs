@@ -1138,6 +1138,11 @@ impl PhysicsWorld {
         self.bodies.iter().filter(|s| s.body.is_some()).count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn fluid_test_body_slots(&self) -> &[BodySlot] {
+        &self.bodies
+    }
+
     /// 遍历所有存活刚体（按槽位下标升序，确定）。
     pub fn bodies(&self) -> impl Iterator<Item = (BodyHandle, &RigidBody)> + '_ {
         self.bodies.iter().enumerate().filter_map(|(i, s)| {
@@ -2397,8 +2402,35 @@ impl PhysicsWorld {
     fn trace_stack_solver(&self, phase: &str, views: &[BodyView]) {
         if std::env::var_os("Q3D_STACK_SOLVER_TRACE").is_none()
             || self.step_count >= 16
-            || self.body_count() != 13
+            || !matches!(self.body_count(), 13 | 33)
         {
+            return;
+        }
+        if self.body_count() == 33 {
+            let mut worst = std::collections::BTreeMap::new();
+            for (index, c) in self.contact_solver.contacts.iter().enumerate() {
+                let a = &views[c.a];
+                let b = &views[c.b];
+                let rel = b.velocity_at(c.rb) - a.velocity_at(c.ra);
+                let vn = rel.dot(c.normal);
+                let residual = (c.speculative_bias + c.restitution_bias - vn).max(0.0);
+                let entry = worst.entry((c.a, c.b)).or_insert((index, residual));
+                if residual > entry.1 {
+                    *entry = (index, residual);
+                }
+            }
+            for ((a, b), (index, residual)) in worst {
+                let c = &self.contact_solver.contacts[index];
+                let rel = views[b].velocity_at(c.rb) - views[a].velocity_at(c.ra);
+                let pv = (views[b].pseudo_velocity_at(c.rb) - views[a].pseudo_velocity_at(c.ra))
+                    .dot(c.normal);
+                let vn = rel.dot(c.normal);
+                let vt = [rel.dot(c.tangent[0]), rel.dot(c.tangent[1])];
+                println!("ROUND178_PAIR step={} phase={phase} pair={a},{b} worst_point={index} pen={} vn={vn} target={} residual={residual} normal_impulse={} pseudo_vn={pv} pseudo_impulse={} vt={vt:?} tangent_impulse={:?} friction_limit={} feature={}", self.step_count + 1, c.penetration, c.speculative_bias + c.restitution_bias, c.normal_impulse, c.pseudo_impulse, c.tangent_impulse, c.friction * c.normal_impulse, c.feature_id);
+            }
+            for (index, b) in views.iter().enumerate().skip(1) {
+                println!("ROUND178_BODY step={} phase={phase} body={index} y={} lin={:?} ang={:?} pseudo_lin={:?} pseudo_ang={:?}", self.step_count + 1, b.pos.y, b.lin, b.ang, b.pseudo_lin, b.pseudo_ang);
+            }
             return;
         }
         for (index, c) in self.contact_solver.contacts.iter().enumerate() {
@@ -4640,6 +4672,80 @@ mod tests {
             }
             assert_eq!(world.step_count, 16);
         }
+    }
+
+    #[test]
+    #[ignore = "bounded32layer16step solver phase diagnostic, not precision acceptance"]
+    fn stack_solver_32_layer_phase_replay() {
+        let mut worlds: Vec<_> = [false, true]
+            .into_iter()
+            .map(|parallel| {
+                let mut world = PhysicsWorld::new();
+                world.set_fixed_dt(1.0 / 60.0);
+                world.config.parallel = parallel;
+                world.config.speculative_margin = 0.005;
+                world.config.velocity_iterations = 20;
+                world.config.position_iterations = 8;
+                world.add_builder(
+                    BodyBuilder::r#static(Shape::Box {
+                        half_extents: vec3(4.0, 0.25, 4.0),
+                    })
+                    .position(vec3(0.0, -0.25, 0.0)),
+                );
+                for i in 0..32 {
+                    world.add_builder(
+                        BodyBuilder::dynamic(Shape::Box {
+                            half_extents: Vec3::splat(0.25),
+                        })
+                        .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
+                        .mass(1.0),
+                    );
+                }
+                world
+            })
+            .collect();
+        let mut parallel_steps = 0;
+        for step in 1..=16 {
+            for world in &mut worlds {
+                println!(
+                    "ROUND178_PATH step={step} parallel_config={}",
+                    world.config.parallel
+                );
+                world.step(1.0 / 60.0);
+                assert_eq!(world.step_count, step);
+                assert_eq!(world.body_count(), 33);
+                assert!(!world.contacts().is_empty());
+                println!(
+                    "ROUND178_POST step={step} parallel_config={} parallel_used={} contacts={}",
+                    world.config.parallel,
+                    world.parallel_used,
+                    world.contacts().len()
+                );
+            }
+            parallel_steps += usize::from(worlds[1].parallel_used);
+            for (a, b) in worlds[0].bodies.iter().zip(&worlds[1].bodies) {
+                let (a, b) = (a.body.as_ref().unwrap(), b.body.as_ref().unwrap());
+                let bits = |body: &RigidBody| {
+                    let p = body.position();
+                    let q = body.rotation();
+                    let v = body.linear_velocity;
+                    let w = body.angular_velocity;
+                    [
+                        p.x, p.y, p.z, q.x, q.y, q.z, q.w, v.x, v.y, v.z, w.x, w.y, w.z,
+                    ]
+                    .map(f32::to_bits)
+                };
+                assert!(
+                    a.position().is_finite()
+                        && a.linear_velocity.is_finite()
+                        && a.angular_velocity.is_finite()
+                );
+                assert_eq!(bits(a), bits(b), "public state bits step={step}");
+                assert_eq!(a.is_sleeping(), b.is_sleeping());
+                assert_eq!(a.mass().to_bits(), b.mass().to_bits());
+            }
+        }
+        println!("ROUND178_RESULT steps=16 layers=32 state_bits_equal=true actual_parallel_steps={parallel_steps} diagnostic_not_acceptance=true");
     }
 
     #[test]

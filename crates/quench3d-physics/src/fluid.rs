@@ -12188,6 +12188,171 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "registered single-visit floor separation target"]
+    fn boundary_floor_single_visit_target() {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+        world.add_builder(
+            BodyBuilder::r#static(Shape::Box {
+                half_extents: vec3(0.6, 0.05, 0.6),
+            })
+            .position(vec3(0.0, -0.05, 0.0)),
+        );
+        let initial = vec![vec3(0.0, 0.04, 0.0), vec3(0.0, 0.10, 0.0)];
+        let radius = 0.04f32;
+        let mut fluid = Fluid::new(FluidDesc {
+            initial_positions: Some(initial.clone()),
+            max_particles: 2,
+            radius,
+            spacing: 0.1,
+            particle_collision: true,
+            collision_mode: FluidCollisionMode::SweptMeshes,
+            separation_mode: FluidSeparationMode::BoundaryConstrained,
+            ..FluidDesc::default()
+        })
+        .unwrap();
+        fluid.predicted = initial;
+        fluid.neighbors = vec![vec![1], vec![0]];
+        fluid.separate_particles(radius, world.fluid_test_body_slots(), None, None, None);
+        let a = fluid.predicted[0];
+        let b = fluid.predicted[1];
+        let distance = overlap_distance(a, b);
+        let target = 2.0 * f64::from(radius) - 1e-4;
+        println!(
+            "FLOOR_SINGLE_VISIT distance={distance:.12} target={target:.12} positions={:?}",
+            fluid.predicted
+        );
+        assert_eq!(fluid.predicted.len(), 2);
+        assert!(fluid
+            .predicted
+            .iter()
+            .all(|p| p.is_finite() && f64::from(p.y) - f64::from(radius) >= -1e-4));
+        assert!(
+            distance >= target,
+            "single-visit floor separation unmet: {distance:.12} < {target:.12}"
+        );
+    }
+
+    /// Registered strong target; the existing boundary audit does not promise this.
+    #[test]
+    #[ignore = "unmet diameter-level separation target in the fixed sealed 125-particle fixture"]
+    fn sealed_container_diameter_separation_target() {
+        let dt = 1.0 / 60.0;
+        let mut world = PhysicsWorld::with_gravity(vec3(0.0, -9.81, 0.0));
+        world.set_fixed_dt(dt);
+        for (position, half_extents) in [
+            (vec3(0.0, -0.05, 0.0), vec3(0.6, 0.05, 0.6)),
+            (vec3(0.0, 1.05, 0.0), vec3(0.6, 0.05, 0.6)),
+            (vec3(-0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+            (vec3(0.55, 0.5, 0.0), vec3(0.05, 0.6, 0.6)),
+            (vec3(0.0, 0.5, -0.55), vec3(0.6, 0.6, 0.05)),
+            (vec3(0.0, 0.5, 0.55), vec3(0.6, 0.6, 0.05)),
+        ] {
+            world
+                .add_builder(BodyBuilder::r#static(Shape::Box { half_extents }).position(position));
+        }
+        let desc = FluidDesc {
+            center: vec3(0.0, 0.5, 0.0),
+            half_extents: Vec3::splat(0.2),
+            spacing: 0.1,
+            radius: 0.04,
+            max_particles: 2000,
+            initial_velocity: vec3(0.15, 0.0, -0.1),
+            particle_collision: true,
+            collision_mode: FluidCollisionMode::SweptMeshes,
+            separation_mode: FluidSeparationMode::BoundaryConstrained,
+            ..FluidDesc::default()
+        };
+        assert_eq!(desc.iterations, 4);
+        assert_eq!(desc.estimated_particles(), 125);
+        let radius = f64::from(desc.radius);
+        let target = 2.0 * radius - 1e-4;
+        world.add_fluid(desc).unwrap();
+        let mass_bits = world.fluids()[0].mass.to_bits();
+        let total_mass = f64::from(world.fluids()[0].mass) * 125.0;
+        assert!(total_mass.is_finite() && total_mass > 0.0);
+        let mut first_bad_pair = None;
+        let mut worst = (f64::INFINITY, 0, 0, 0, Vec3::ZERO, Vec3::ZERO);
+        let mut minimum_clearance = f64::INFINITY;
+        let mut invariant_failure = None;
+        let mut pair_samples = 0usize;
+        let mut contacts = 0usize;
+        let mut density_nonzero = 0usize;
+        SEPARATION_PUSHES.with(|n| n.set(0));
+        for step in 1..=120 {
+            MESH_DENSITY_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
+            world.step(dt);
+            let trace = MESH_DENSITY_TRACE.with(|t| t.borrow_mut().take().unwrap());
+            density_nonzero += trace.iter().filter(|(_, a, b, _)| a != b).count();
+            let fluid = &world.fluids()[0];
+            let positions = fluid.particles();
+            let velocities = fluid.velocities();
+            if (world.step_count != step
+                || world.accumulator() != 0.0
+                || positions.len() != 125
+                || velocities.len() != 125
+                || fluid.mass.to_bits() != mass_bits
+                || f64::from(fluid.mass) * positions.len() as f64 != total_mass
+                || trace.len() != 125 * 4)
+                && invariant_failure.is_none()
+            {
+                invariant_failure = Some(format!("step={step} count/mass/step/work invariant"));
+            }
+            contacts += fluid.contacts.iter().filter(|c| c.is_some()).count();
+            for (i, &p) in positions.iter().enumerate() {
+                let [x, y, z] = p.to_array().map(f64::from);
+                let clearance = [
+                    x + 0.5 - radius,
+                    0.5 - x - radius,
+                    y - radius,
+                    1.0 - y - radius,
+                    z + 0.5 - radius,
+                    0.5 - z - radius,
+                ]
+                .into_iter()
+                .fold(f64::INFINITY, f64::min);
+                minimum_clearance = minimum_clearance.min(clearance);
+                let valid_velocity = velocities.get(i).is_some_and(|v| {
+                    let [vx, vy, vz] = v.to_array().map(f64::from);
+                    v.is_finite()
+                        && (vx * vx + vy * vy + vz * vz).sqrt() <= f64::from(MAX_SPEED) + 1e-4
+                });
+                if (!p.is_finite() || !valid_velocity || clearance < -1e-4)
+                    && invariant_failure.is_none()
+                {
+                    invariant_failure = Some(format!(
+                        "step={step} particle={i} p={p:?} clearance={clearance:.12}"
+                    ));
+                }
+                for (j, &q) in positions.iter().enumerate().skip(i + 1) {
+                    let [qx, qy, qz] = q.to_array().map(f64::from);
+                    let distance = ((x - qx).powi(2) + (y - qy).powi(2) + (z - qz).powi(2)).sqrt();
+                    pair_samples += 1;
+                    if !distance.is_finite() && invariant_failure.is_none() {
+                        invariant_failure =
+                            Some(format!("step={step} pair=({i},{j}) nonfinite distance"));
+                    }
+                    let sample = (distance, step, i, j, p, q);
+                    if distance < worst.0 {
+                        worst = sample;
+                    }
+                    if distance < target && first_bad_pair.is_none() {
+                        first_bad_pair = Some(sample);
+                    }
+                }
+            }
+        }
+        let pushes = SEPARATION_PUSHES.with(|n| n.get());
+        println!("SEALED_SEPARATION steps={} samples={pair_samples} target={target:.12} worst={worst:?} first_bad={first_bad_pair:?} clearance={minimum_clearance:.12} total_mass={total_mass:.12} contacts={contacts} pushes={pushes} density_nonzero={density_nonzero} invariant_failure={invariant_failure:?}", world.step_count);
+        assert_eq!(pair_samples, 120 * 125 * 124 / 2);
+        assert!(
+            contacts > 0 && pushes > 0 && density_nonzero > 0,
+            "non-vacuous solver work"
+        );
+        assert!(invariant_failure.is_none(), "{invariant_failure:?}");
+        assert!(first_bad_pair.is_none(), "diameter separation unmet: target={target:.12} first={first_bad_pair:?} worst={worst:?}");
+    }
+
+    #[test]
     fn wall_and_ground_keep_particles_out() {
         let mut world = PhysicsWorld::new();
         world.set_fixed_dt(1.0 / 60.0);

@@ -1,0 +1,129 @@
+diff --git a/crates/quench3d-physics/src/fluid.rs b/crates/quench3d-physics/src/fluid.rs
+index 986dcaa..ade2a26 100644
+--- a/crates/quench3d-physics/src/fluid.rs
++++ b/crates/quench3d-physics/src/fluid.rs
+@@ -179,6 +179,8 @@ pub enum FluidSeparationMode {
+     /// Opt in to bounded boundary-constrained pair corrections.
+     /// Requires particle collision and swept primitive or mesh collision.
+     BoundaryConstrained,
++    /// Experimental bounded residual allocation by boundary mobility.
++    BoundaryMobility,
+ }
+ 
+ /// Temporal motion policy for rigid liquid boundaries.
+@@ -1322,13 +1324,19 @@ impl Fluid {
+                 });
+                 #[cfg(test)]
+                 let continuity_before = (predicted[i], predicted[j]);
+-                if self.desc.separation_mode == FluidSeparationMode::BoundaryConstrained {
++                if matches!(
++                    self.desc.separation_mode,
++                    FluidSeparationMode::BoundaryConstrained
++                        | FluidSeparationMode::BoundaryMobility
++                ) {
+                     let context = SweepQueryContext {
+                         mesh_cache,
+                         bounds,
+                         index,
+                         meshes: self.desc.collision_mode == FluidCollisionMode::SweptMeshes,
+                     };
++                    let initial_a = predicted[i];
++                    let initial_b = predicted[j];
+                     let (a, blocked_a) = sweep_separation_slide(
+                         predicted[i],
+                         dir * push,
+@@ -1356,13 +1364,40 @@ impl Fluid {
+                             #[cfg(test)]
+                             separation_cost_add(3, 1);
+                             let correction = delta / distance * ((min_dist - distance) * 0.5);
++                            let (correction_a, correction_b) = if self.desc.separation_mode
++                                == FluidSeparationMode::BoundaryMobility
++                            {
++                                let normal = delta / distance;
++                                // A rejected initial displacement estimates the active wall
++                                // normal. Only remove inward motion, preserving outward freedom.
++                                let feasible = |request: Vec3, rejected: Vec3| {
++                                    let wall = (-rejected).normalize_or_zero();
++                                    request - wall * request.dot(wall).min(0.0)
++                                };
++                                let projected_a = feasible(normal, initial_a + dir * push - a);
++                                let projected_b = feasible(-normal, initial_b - dir * push - b);
++                                let weight = normal.dot(projected_a) - normal.dot(projected_b);
++                                if weight.is_finite() && weight > 1e-6 {
++                                    let scale = (min_dist - distance) / weight;
++                                    (projected_a * scale, projected_b * scale)
++                                } else {
++                                    (Vec3::ZERO, Vec3::ZERO)
++                                }
++                            } else {
++                                (correction, -correction)
++                            };
+                             predicted[i] = sweep_separation_slide(
+-                                a, correction, bodies, radius, &self.desc, context,
++                                a,
++                                correction_a,
++                                bodies,
++                                radius,
++                                &self.desc,
++                                context,
+                             )
+                             .0;
+                             predicted[j] = sweep_separation_slide(
+                                 b,
+-                                -correction,
++                                correction_b,
+                                 bodies,
+                                 radius,
+                                 &self.desc,
+@@ -12190,6 +12225,16 @@ mod tests {
+     #[test]
+     #[ignore = "registered single-visit floor separation target"]
+     fn boundary_floor_single_visit_target() {
++        floor_single_visit_target(FluidSeparationMode::BoundaryConstrained);
++    }
++
++    #[test]
++    #[ignore = "experimental mobility precision target"]
++    fn mobility_floor_single_visit_target() {
++        floor_single_visit_target(FluidSeparationMode::BoundaryMobility);
++    }
++
++    fn floor_single_visit_target(mode: FluidSeparationMode) {
+         let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+         world.add_builder(
+             BodyBuilder::r#static(Shape::Box {
+@@ -12206,7 +12251,7 @@ mod tests {
+             spacing: 0.1,
+             particle_collision: true,
+             collision_mode: FluidCollisionMode::SweptMeshes,
+-            separation_mode: FluidSeparationMode::BoundaryConstrained,
++            separation_mode: mode,
+             ..FluidDesc::default()
+         })
+         .unwrap();
+@@ -12236,6 +12281,16 @@ mod tests {
+     #[test]
+     #[ignore = "unmet diameter-level separation target in the fixed sealed 125-particle fixture"]
+     fn sealed_container_diameter_separation_target() {
++        sealed_separation_target(FluidSeparationMode::BoundaryConstrained);
++    }
++
++    #[test]
++    #[ignore = "experimental mobility precision target"]
++    fn mobility_sealed_diameter_target() {
++        sealed_separation_target(FluidSeparationMode::BoundaryMobility);
++    }
++
++    fn sealed_separation_target(mode: FluidSeparationMode) {
+         let dt = 1.0 / 60.0;
+         let mut world = PhysicsWorld::with_gravity(vec3(0.0, -9.81, 0.0));
+         world.set_fixed_dt(dt);
+@@ -12259,7 +12314,7 @@ mod tests {
+             initial_velocity: vec3(0.15, 0.0, -0.1),
+             particle_collision: true,
+             collision_mode: FluidCollisionMode::SweptMeshes,
+-            separation_mode: FluidSeparationMode::BoundaryConstrained,
++            separation_mode: mode,
+             ..FluidDesc::default()
+         };
+         assert_eq!(desc.iterations, 4);
