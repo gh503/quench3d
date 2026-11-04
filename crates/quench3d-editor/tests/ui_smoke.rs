@@ -48,6 +48,128 @@ fn headless_engine() -> Option<Engine> {
 }
 
 #[test]
+fn transform_space_submenu_changes_setting_and_closes() {
+    transform_submenu_click(false);
+}
+
+#[test]
+fn transform_pivot_submenu_changes_setting_and_closes() {
+    transform_submenu_click(true);
+}
+
+fn transform_submenu_click(pivot: bool) {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let mut view = Viewport::default();
+    let mut gizmo = Gizmo::default();
+    let mut camera = CameraFeed::default();
+    let ctx = egui::Context::default();
+    let mut time = 0.0;
+    let mut run = |engine: &mut Engine, gizmo: &mut Gizmo, events| {
+        time += 0.1;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                ui::panels(ui, engine, &mut doc, &mut view, gizmo, &mut camera);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let click = |pos| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]
+    };
+    run(&mut engine, &mut gizmo, vec![]);
+    let shapes = run(&mut engine, &mut gizmo, vec![]);
+    let root = text_shape_rect(&shapes, "变换").unwrap().center();
+    run(&mut engine, &mut gizmo, click(root));
+    let shapes = run(&mut engine, &mut gizmo, vec![]);
+    let label = if pivot { "选中中心" } else { "世界" };
+    // Exclude the quick-toolbar selectors at the top and the property panel.
+    let row = text_shape_rect(&shapes, if pivot { "轴心" } else { "坐标系" })
+        .expect("transform setting row");
+    let menus: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), label).is_some_and(|r| {
+                (r.center().y - row.center().y).abs() < 8.0
+                    && r.center().x > row.max.x
+                    && r.center().x < 900.0
+            })
+        })
+        .collect();
+    let parent = text_shape_rect(&menus, label)
+        .expect("selector in transform menu")
+        .center();
+    run(
+        &mut engine,
+        &mut gizmo,
+        vec![egui::Event::PointerMoved(parent)],
+    );
+    run(&mut engine, &mut gizmo, click(parent));
+    let shapes = run(&mut engine, &mut gizmo, vec![]);
+    assert!(
+        shapes_contain_text(&shapes, "坐标系"),
+        "opening nested choices retains transform menu"
+    );
+    let target = if pivot { "世界原点" } else { "局部" };
+    let choices: Vec<_> = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), target)
+                .is_some_and(|r| r.center().y > 100.0 && r.center().x < 900.0)
+        })
+        .collect();
+    let leaf = text_shape_rect(&choices, target)
+        .expect("nested choices visible")
+        .center();
+    run(&mut engine, &mut gizmo, click(leaf));
+    let shapes = run(&mut engine, &mut gizmo, vec![]);
+    if pivot {
+        assert_eq!(gizmo.pivot, quench3d_editor::gizmo::Pivot::WorldOrigin);
+    } else {
+        assert_eq!(gizmo.space, quench3d_editor::gizmo::Space::Local);
+    }
+    assert!(
+        !shapes_contain_text(&shapes, "坐标系"),
+        "leaf selection closes transform menu"
+    );
+    let remaining = shapes
+        .into_iter()
+        .filter(|s| {
+            text_shape_rect(std::slice::from_ref(s), target)
+                .is_some_and(|r| r.center().distance(leaf) < 8.0)
+        })
+        .count();
+    assert_eq!(remaining, 0, "leaf selection closes nested menu");
+}
+
+#[test]
 fn view_camera_submenu_click_switches_mode_and_closes_both_menus() {
     let Some(mut engine) = headless_engine() else {
         return;

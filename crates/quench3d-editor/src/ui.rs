@@ -590,22 +590,33 @@ fn transform_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, gizmo: &mut G
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("坐标系");
-            egui::ComboBox::from_id_salt("gizmo-space")
-                .selected_text(gizmo.space.label())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut gizmo.space, GizmoSpace::World, "世界");
-                    ui.selectable_value(&mut gizmo.space, GizmoSpace::Local, "局部");
-                });
+            ui.menu_button(gizmo.space.label(), |ui| {
+                if ui
+                    .selectable_value(&mut gizmo.space, GizmoSpace::World, "世界")
+                    .clicked()
+                {
+                    ui.close();
+                }
+                if ui
+                    .selectable_value(&mut gizmo.space, GizmoSpace::Local, "局部")
+                    .clicked()
+                {
+                    ui.close();
+                }
+            });
         });
         ui.horizontal(|ui| {
             ui.label("轴心");
-            egui::ComboBox::from_id_salt("gizmo-pivot")
-                .selected_text(gizmo.pivot.label())
-                .show_ui(ui, |ui| {
-                    for pivot in GizmoPivot::ALL {
-                        ui.selectable_value(&mut gizmo.pivot, pivot, pivot.label());
+            ui.menu_button(gizmo.pivot.label(), |ui| {
+                for pivot in GizmoPivot::ALL {
+                    if ui
+                        .selectable_value(&mut gizmo.pivot, pivot, pivot.label())
+                        .clicked()
+                    {
+                        ui.close();
                     }
-                });
+                }
+            });
         });
         if gizmo.pivot == GizmoPivot::Cursor {
             let mut cursor = gizmo.cursor.to_array();
