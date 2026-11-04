@@ -1,0 +1,20 @@
+# Global normal per-round workspace fill fusion proposal
+
+Round203 review/registrationafter202correctnesscompatible12cost1.506265FAIL. Actualperformancefailureisred;do notinventsemanticred. Sourcecurrentlypassing202(no197angularregroup/no201timers).
+
+Readsolver4208–4228:lambda=f64(c.normal_impulse);gradient=f64(pair_relative_velocity.dot(normal)-restitution_bias-speculative_bias);free=lambda>0||gradient<0;residual=-gradient;diagonal=f64(c.k_normal). Fullcontactfrictionpassfinishesfirst4188–4192. These5fillsreadonlycontacts/viewsandhavenointercontactreduction/stateupdate. Proposedclear5Vecsandoneoriginalindexcontactloop,pushsameexpressionsusinglocall/g;preservef32dot/subtraction→f64cast,negativezeroandNaNcomparisons/unaryminus. No reciprocal/reassociation/impulseapplyduringfill.
+
+Allsubsequentcache.apply/historymask/conjugate/clipping/reductions/order/Ap/line/normalimpulseapplicationuntouched. Existingnonzero-friction40roundcachedreferencebits/overflow/freshcoupling/rollingguardbehavior;allfullprecision/defaultbytes/paritybeforeunchangedcost. Fivepushcapacitycheckspercontactcouldoutweighremovedpasses—noperformancepromise. Leadformallyauthorizedminimal5fillfusionafterexpressionproof;implementedonlythosefillswithclear+pushusinglocall/g. No reserve/resize/capacitypolicychangeexplicitlyrequested;pushmaygrowfirstwarmroundthenstabilize. Ifcostshowsnobenefitorregressionrestore202andarchiveactualfailure;do notretainfusionmerelybecausecorrectnesspasses. Validationjob bash-4c223abb7d2c446f runningfullquery/math/precision/defaultbytes/paritybeforesinglefixedcostset. Mainproductionunchanged.
+
+## Actual result: compatible but no observed cost benefit, restored 202
+
+[global_normal_round_fill.patch](../../tools/experiments/global_normal_round_fill.patch),SHA256 `866833c3ac2173f1f8e3ce8b5140977806bcdec167e5561ce77fdea206a08729`,incrementalagainstpassing202,applycheck0. Compatjob bash-4c223abb7d2c446f formallycollected0:query0/globalmath8(includingnonzero-friction40roundbits)/direction2/local1/projection2PASS;full5400precisionPASS1.14sallreportedpeaks/sleep/driftunchanged;193full1240states/931616648bytesPASS4.66s;192threevariants1800paired/1800actualparallel/maxthreads2/hardware4eachPASS68.01s.
+
+Onlyafterallcompatibilitypasses,job bash-0ef9058db90e421b ranunchangedcost195exampleSHAa2d02863c9b35f5f27abe6d04fd895e348b692ae79e344283fd22b920bc21f97sameproductionreleasebinary/twoflags/W8M120/fivealternatingABBAtrials. Formallycollectedexit1,compile8.55s.
+
+|Layers|Legacy median s|Candidate median s|Ratio|Limit|Result|
+|---:|---:|---:|---:|---:|---|
+|12|.019486730|.029561765|1.517020|1.15|FAIL|
+|32|.051613760|.020578576|.398703|1.15|PASS|
+
+No observedbenefitversus202candidate.028979216/ratio1.506265inseparatemeasurementsets;notpairedstatisticalproofthatfusionisslower. Refactorunnecessarywithoutbenefit,soasregisteredREJECT203andrestoreexact202solverbytes. Archive/source/rejected-solver/binarySHA/rawtrials/statusunder target/tmp/round203-round-fill/. Allfive202costsourcehashchecksPASSafterrestore. No repeatcostselection/mainproductionunchanged/alljobscollected/no runningbuilder. 12performancegoalstillunmet202ratio1.506265.

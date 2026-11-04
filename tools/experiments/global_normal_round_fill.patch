@@ -1,0 +1,42 @@
+--- a/crates/quench3d-physics/src/solver.rs
++++ b/crates/quench3d-physics/src/solver.rs
+@@ -4206,26 +4206,23 @@
+         ..
+     } = work;
+     lambda.clear();
+-    lambda.extend(cs.iter().map(|c| f64::from(c.normal_impulse)));
+     gradient.clear();
+-    gradient.extend(cs.iter().map(|c| {
+-        f64::from(
++    free.clear();
++    residual.clear();
++    diagonal.clear();
++    for c in cs.iter() {
++        let l = f64::from(c.normal_impulse);
++        let g = f64::from(
+             pair_relative_velocity(&vs[c.a], &vs[c.b], c.ra, c.rb).dot(c.normal)
+                 - c.restitution_bias
+                 - c.speculative_bias,
+-        )
+-    }));
+-    free.clear();
+-    free.extend(
+-        lambda
+-            .iter()
+-            .zip(gradient.iter())
+-            .map(|(l, g)| *l > 0.0 || *g < 0.0),
+-    );
+-    residual.clear();
+-    residual.extend(gradient.iter().map(|x| -x));
+-    diagonal.clear();
+-    diagonal.extend(cs.iter().map(|c| f64::from(c.k_normal)));
++        );
++        lambda.push(l);
++        gradient.push(g);
++        free.push(l > 0.0 || g < 0.0);
++        residual.push(-g);
++        diagonal.push(f64::from(c.k_normal));
++    }
+     z.clone_from(cache.apply(cs, vs, residual, free));
+     if memory.free != *free {
+         memory.clear();
