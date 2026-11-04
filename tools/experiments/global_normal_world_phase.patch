@@ -1,0 +1,131 @@
+--- a/crates/quench3d-physics/src/parallel.rs
++++ b/crates/quench3d-physics/src/parallel.rs
+@@ -440,11 +440,17 @@
+         pos_iters: usize,
+     ) {
+         self.run_workers(move |cs, vs, memory| {
++            let timer201 = std::time::Instant::now();
+             for _ in 0..iters {
+                 solve_velocity_contacts_state(cs, vs, cfg.global_normal_projection, memory);
+             }
++            diag201_add(0, timer201);
++            let timer201 = std::time::Instant::now();
+             relax_contacts(cs, vs, relax_iters, gain);
++            diag201_add(1, timer201);
++            let timer201 = std::time::Instant::now();
+             solve_position_contacts(cs, vs, dt, cfg, pos_iters);
++            diag201_add(2, timer201);
+         });
+     }
+ 
+@@ -465,3 +471,11 @@
+         self.run_workers(|cs, vs, _| solve_position_contacts(cs, vs, dt, cfg, iterations));
+     }
+ }
++
++thread_local! {static DIAG201:std::cell::RefCell<[u128;5]>=const{std::cell::RefCell::new([0;5])};}
++pub(crate) fn diag201_add(i: usize, t: std::time::Instant) {
++    DIAG201.with(|d| d.borrow_mut()[i] += t.elapsed().as_nanos());
++}
++pub(crate) fn diag201_take() -> [u128; 5] {
++    DIAG201.with(|d| std::mem::replace(&mut *d.borrow_mut(), [0; 5]))
++}
+--- a/crates/quench3d-physics/src/world.rs
++++ b/crates/quench3d-physics/src/world.rs
+@@ -2057,6 +2057,7 @@
+         let iters = self.config.velocity_iterations.max(1);
+         let pos_iters = self.config.position_iterations;
+         let relax_iters = self.config.relaxation_iterations;
++        let timer201 = std::time::Instant::now();
+         let use_global_layout = if self.config.global_normal_projection {
+             self.parallel.build_global(
+                 &self.islands,
+@@ -2080,18 +2081,23 @@
+             );
+         #[cfg(target_arch = "wasm32")]
+         let use_parallel = false;
++        crate::parallel::diag201_add(3, timer201);
+         self.parallel_used = use_parallel || (use_global_layout && self.parallel.threads() > 1);
+         if use_parallel || use_global_layout {
+             // 没有关节时（绝大多数纯刚体场景）：一次分发跑完全部迭代，
+             // 每个岛内部保持「速度迭代 → 松弛 → 位置修正」的原顺序。
+             let no_joints = self.scratch_joint_entries.is_empty();
+             if no_joints {
++                let timer201 = std::time::Instant::now();
+                 self.parallel.sync_from(&views);
++                crate::parallel::diag201_add(4, timer201);
+                 self.parallel
+                     .solve_all(iters, relax_iters, 0.5, dt, &self.config, pos_iters);
++                let timer201 = std::time::Instant::now();
+                 self.parallel.sync_to(&mut views);
+                 self.parallel
+                     .flush_impulses(&mut self.contact_solver.contacts);
++                crate::parallel::diag201_add(4, timer201);
+             }
+             // 有关节时：每个迭代里「先全部接触（岛间并行）再全部关节（串行）」，
+             // 与串行版的顺序完全一致。
+@@ -8754,3 +8760,10 @@
+ 
+ #[cfg(test)]
+ mod default_bits_193;
++
++impl PhysicsWorld {
++    #[doc(hidden)]
++    pub fn diagnostic_world_201() -> [u128; 5] {
++        crate::parallel::diag201_take()
++    }
++}
+--- /dev/null
++++ b/crates/quench3d-physics/examples/global_normal_world_201.rs
+@@ -0,0 +1,51 @@
++use quench3d_math::{vec3, Vec3};
++use quench3d_physics::{BodyBuilder, PhysicsWorld, Shape};
++fn sample(layers: usize, global: bool) -> f64 {
++    let mut w = PhysicsWorld::new();
++    w.set_fixed_dt(1.0 / 60.0);
++    w.config.global_normal_projection = global;
++    w.config.speculative_margin = 0.005;
++    w.config.velocity_iterations = 20;
++    w.config.position_iterations = 8;
++    w.add_builder(
++        BodyBuilder::r#static(Shape::Box {
++            half_extents: vec3(4.0, 0.25, 4.0),
++        })
++        .position(vec3(0.0, -0.25, 0.0)),
++    );
++    for i in 0..layers {
++        w.add_builder(
++            BodyBuilder::dynamic(Shape::Box {
++                half_extents: Vec3::splat(0.25),
++            })
++            .position(vec3(0.0, 0.25 + i as f32 * 0.502, 0.0))
++            .mass(1.0),
++        );
++    }
++    for _ in 0..8 {
++        w.step(1.0 / 60.0);
++    }
++    w.set_phase_timing(true);
++    w.reset_phase_timings();
++    PhysicsWorld::diagnostic_world_201();
++    let start = std::time::Instant::now();
++    for _ in 0..120 {
++        w.step(1.0 / 60.0);
++    }
++    let elapsed = start.elapsed().as_secs_f64();
++    println!("ROUND201 layers={layers} global={global} total_s={elapsed:.9} world={:?} local_ns_vel_relax_pos_layout_sync={:?}",w.phase_timings(),PhysicsWorld::diagnostic_world_201());
++    assert_eq!(w.step_count, 128);
++    std::hint::black_box(
++        w.bodies()
++            .map(|(_, b)| (b.position(), b.linear_velocity))
++            .collect::<Vec<_>>(),
++    );
++    elapsed
++}
++fn main() {
++    for layers in [12, 32] {
++        for global in [false, true] {
++            sample(layers, global);
++        }
++    }
++}
