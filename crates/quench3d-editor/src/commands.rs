@@ -420,6 +420,10 @@ fn execute(
         }
         if let Some(axes) = axes {
             engine.debug.axes = axes;
+            doc.layout.show_axes = axes;
+            if let Err(error) = doc.layout.save() {
+                doc.status = format!("坐标轴偏好保存失败：{error}");
+            }
         }
         if let Some(grid) = grid {
             engine.renderer.options.grid = grid;

@@ -821,7 +821,10 @@ fn view_menu(
             .on_hover_text("画出 probes[] 的球形/盒形区域线框；探针本身只读，不碰物理");
         ui.checkbox(&mut doc.show_selection, "选中包围盒")
             .on_hover_text("给选中物体画橙色世界包围盒（快捷键 H）");
-        ui.checkbox(&mut engine.debug.axes, "坐标轴");
+        if ui.checkbox(&mut engine.debug.axes, "坐标轴").changed() {
+            doc.layout.show_axes = engine.debug.axes;
+            save_layout(doc);
+        }
         ui.checkbox(&mut engine.debug.lights, "灯光 gizmo");
         ui.separator();
         ui.label(RichText::new("相机").small().weak());

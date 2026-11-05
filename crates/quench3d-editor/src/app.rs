@@ -438,6 +438,7 @@ impl Inner {
 
         let mut doc = Doc::new();
         doc.layout = crate::layout::Layout::load();
+        engine.debug.axes = doc.layout.show_axes;
         // 启动即载入：只有桌面端有真实文件系统，Web 端靠页面上的「打开」按钮上传。
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = &config.startup_scene {

@@ -48,6 +48,9 @@ pub struct Layout {
     /// 右栏当前页签。
     #[serde(default)]
     pub sidebar_tab: SidebarTab,
+    /// World axes visibility, restored independently of scene contents.
+    #[serde(default)]
+    pub show_axes: bool,
     /// 桌面窗口左上角的物理 X 坐标；`None` = 交给窗口系统决定。
     ///
     /// 只在桌面端写；Web 端窗口由浏览器管，读到也忽略。两个坐标必须同时存在，
@@ -78,6 +81,7 @@ impl Default for Layout {
             outliner_expanded: true,
             inspector_expanded: true,
             sidebar_tab: SidebarTab::default(),
+            show_axes: false,
             window_x: None,
             window_y: None,
         }
@@ -252,6 +256,19 @@ mod tests {
             ..legacy
         };
         assert_eq!(Layout::from_json(&properties.to_json()), properties);
+    }
+
+    #[test]
+    fn axes_default_hidden_and_explicit_preference_roundtrips() {
+        assert!(!Layout::default().show_axes);
+        assert!(!Layout::from_json(r#"{"outliner_width":190}"#).show_axes);
+        for visible in [true, false] {
+            let layout = Layout {
+                show_axes: visible,
+                ..Layout::default()
+            };
+            assert_eq!(Layout::from_json(&layout.to_json()).show_axes, visible);
+        }
     }
 
     #[test]
