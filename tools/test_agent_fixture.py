@@ -34,6 +34,7 @@ class ModelScript:
         self.errors = []
         self.completed = False
         self.cancel_requests = 0
+        self.followup_requests = []
         self.late_sent = threading.Event()
 
     def report(self):
@@ -41,7 +42,8 @@ class ModelScript:
             return {'requests': self.requests.copy(), 'errors': self.errors.copy(),
                     'completed': self.completed, 'delayed': self.delayed.is_set(),
                     'cancel_requests': self.cancel_requests, 'late_sent': self.late_sent.is_set(),
-                    'models_requests': self.models_requests.copy()}
+                    'models_requests': self.models_requests.copy(),
+                    'followup_requests': self.followup_requests.copy()}
 
     @staticmethod
     def result(body, call_id):
@@ -60,19 +62,40 @@ class ModelScript:
 
     @classmethod
     def call(cls, index, name, args):
-        return cls.response({'content': None, 'tool_calls': [{
+        message = {'tool_calls': [{
             'id': f'fixture_{index}', 'type': 'function',
-            'function': {'name': name, 'arguments': json.dumps(args, ensure_ascii=False)}}]})
+            'function': {'name': name, 'arguments': json.dumps(args, ensure_ascii=False)}}]}
+        # Both forms are valid OpenAI tool messages. Exercise omission through
+        # the real HTTP/WASM path, rather than only a parser unit test.
+        if index not in (0, 1):
+            message['content'] = None
+        return cls.response(message)
 
     def reply(self, body):
         prompts = [m.get('content', '') for m in body['messages'] if m.get('role') == 'user']
-        if any('fixture-cancel' in str(p) for p in prompts):
+        latest_prompt = str(prompts[-1]) if prompts else ''
+        if 'fixture-followup' in latest_prompt:
+            if not any('fixture-main' in str(p) for p in prompts[:-1]):
+                raise AssertionError('followup lost the original user prompt')
+            results = [self.result(body, f'fixture_{index}') for index in range(len(self.STEPS))]
+            final_scene = results[-1].get('result', {})
+            objects = final_scene.get('objects', [])
+            if not any(o.get('name') == 'AI球' and o.get('position') == [2, 3, 4] for o in objects):
+                raise AssertionError('followup lost actual model-created AI球 tool results')
+            if not any(m.get('role') == 'assistant' and '已创建 AI球' in str(m.get('content', ''))
+                       for m in body['messages']):
+                raise AssertionError('followup lost the assistant completion')
+            with self.lock:
+                self.followup_requests.append({'user_prompts': prompts.copy(),
+                    'tool_results': len(results), 'message_count': len(body['messages'])})
+            return self.response({'content': 'fixture-followup-ok：AI球位于 [2,3,4]，此前工具结果和对话均已保留。'})
+        if 'fixture-cancel' in latest_prompt:
             with self.lock:
                 self.cancel_requests += 1
             self.delayed.set()
             if not self.release.wait(20):
                 raise AssertionError('cancel response was never released by probe')
-            cancel_prompt = next(str(p) for p in prompts if 'fixture-cancel:' in str(p))
+            cancel_prompt = latest_prompt
             revision = json.loads(cancel_prompt.split('fixture-cancel:', 1)[1])['revision']
             if not isinstance(revision, str) or not revision:
                 raise AssertionError('cancel fixture needs a valid actual scene revision')
@@ -217,13 +240,16 @@ class FixtureTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
-    def test_script_uses_actual_tool_result_revision_and_preserves_null(self):
+    def test_script_uses_actual_tool_result_revision_and_accepts_omitted_content(self):
         script = ModelScript()
         body = {'messages': [{'role': 'user', 'content': 'fixture-main'}],
                 'tools': [{'function': {'name': name}} for name in set(script.STEPS)]}
         for index, expected in enumerate(script.STEPS):
             message = script.reply(body)['choices'][0]['message']
-            self.assertIsNone(message['content'])
+            if index < 2:
+                self.assertNotIn('content', message)
+            else:
+                self.assertIsNone(message['content'])
             call = message['tool_calls'][0]
             self.assertEqual(call['function']['name'], expected)
             args = json.loads(call['function']['arguments'])
@@ -233,6 +259,27 @@ class FixtureTests(unittest.TestCase):
                 'content': json.dumps({'ok': True, 'revision': f'actual-{index}'})}])
         self.assertIn('AI球', script.reply(body)['choices'][0]['message']['content'])
         self.assertTrue(script.report()['completed'])
+
+    def test_followup_requires_original_context_and_latest_user_selects_route(self):
+        script = ModelScript()
+        body = {'messages': [{'role': 'user', 'content': 'fixture-main'}],
+                'tools': [{'function': {'name': name}} for name in set(script.STEPS)]}
+        for index in range(len(script.STEPS)):
+            message = script.reply(body)['choices'][0]['message']
+            receipt = {'ok': True, 'revision': f'actual-{index}', 'result': {
+                'objects': [{'name': 'AI球', 'position': [2, 3, 4]}]}}
+            body['messages'].extend([message, {'role': 'tool', 'tool_call_id': f'fixture_{index}',
+                'content': json.dumps(receipt)}])
+        body['messages'].append(script.reply(body)['choices'][0]['message'])
+        # An earlier cancel marker must not hijack a later followup request.
+        body['messages'].extend([{'role': 'user', 'content': 'fixture-cancel:old'},
+                                 {'role': 'user', 'content': 'fixture-followup'}])
+        self.assertIn('fixture-followup-ok', script.reply(body)['choices'][0]['message']['content'])
+        self.assertEqual(script.report()['cancel_requests'], 0)
+        self.assertEqual(script.report()['followup_requests'][0]['tool_results'], 9)
+        body['messages'] = [m for m in body['messages'] if m.get('content') != 'fixture-main']
+        with self.assertRaisesRegex(AssertionError, 'original user'):
+            script.reply(body)
 
     def test_failed_or_duplicate_tool_results_stop_script(self):
         body = {'messages': [{'role': 'tool', 'tool_call_id': 'fixture_0',

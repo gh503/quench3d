@@ -1232,6 +1232,9 @@ fn publish_camera_controls(shapes: &[egui::epaint::ClippedShape]) {
             egui::epaint::Shape::Text(text) => {
                 if [
                     "AI 助手",
+                    "新建会话",
+                    "新会话",
+                    "fixture-main",
                     "本地模型配置",
                     "获取可用模型",
                     "添加所选",

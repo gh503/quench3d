@@ -14,6 +14,14 @@ For Ollama, use provider URL `http://127.0.0.1:11434/v1` and the exact installed
 
 A useful first goal is: “创建半径 0.4 米的红球，放在 [0,3,0]，聚焦它，运行仿真。” Tool support by the chosen model is required.
 
+## Conversations and history
+
+The right sidebar supports **新建会话**, history selection, and continuous follow-up messages within the current conversation. User/assistant messages appear separately; tool calls and actual receipts can be expanded. Conversation titles come from the first user prompt. Drafts, messages, tool receipts and errors are saved locally and restored on startup. Switching conversations cancels in-flight work; restoring history never replays scene tools. Continue with a new message to inspect and act on the current scene.
+
+Native history uses `ai-history.json` beside `ai.json`, with atomic owner-only writes. Web history uses `quench3d.ai.history.v1` in the same browser profile and origin. Provider credentials remain in the separate model configuration. History is local, independent between Native/Web, and contains the user's conversation and tool output. The history store is limited to 16 MiB; save failures are displayed without silently dropping conversations.
+
+The Chat Completions parser accepts tool-call responses with omitted, null or empty content and text content segments from compatible gateways. Truncated, filtered, refused, empty reasoning-only and unsupported Responses API replies produce explicit errors rather than claiming execution success.
+
 ## Current tools and contracts
 
 `inspect_scene`, `spawn_primitive`, `set_transform`, `set_shape`, `set_color`, `delete_object`, `select_object`, `focus_object`, `set_playback`, `step`, `undo`, `redo`.

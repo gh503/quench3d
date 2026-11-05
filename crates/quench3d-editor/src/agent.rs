@@ -37,6 +37,9 @@ pub struct AgentPanel {
     goal: String,
     configuration: crate::agent_config::ConfigLibrary,
     config_error: Option<String>,
+    history: crate::agent_history::History,
+    history_error: Option<String>,
+    history_saved: String,
     catalog_pending: Vec<String>,
     catalog_active: Option<CatalogRequest>,
     catalog_token: u64,
@@ -50,16 +53,41 @@ pub struct AgentPanel {
 }
 impl Default for AgentPanel {
     fn default() -> Self {
+        #[cfg(test)]
+        let (configuration, config_error) = (crate::agent_config::ConfigLibrary::default(), None);
+        #[cfg(not(test))]
         let (configuration, config_error) = match crate::agent_config::ConfigLibrary::load() {
             Ok(configuration) => (configuration, None),
             Err(error) => (crate::agent_config::ConfigLibrary::default(), Some(error)),
         };
+        #[cfg(test)]
+        let (mut history, history_error) = (crate::agent_history::History::default(), None);
+        #[cfg(not(test))]
+        let (mut history, history_error) = match crate::agent_history::History::load() {
+            Ok(history) => (history, None),
+            Err(error) => (crate::agent_history::History::default(), Some(error)),
+        };
+        if history.active().is_none() {
+            history.new_chat();
+        }
+        let session = history
+            .active()
+            .map(Session::from_conversation)
+            .unwrap_or_default();
+        let goal = history
+            .active()
+            .map(|c| c.draft.clone())
+            .unwrap_or_default();
+        let history_saved = serde_json::to_string(&history).unwrap_or_default();
         Self {
             open: false,
-            session: Session::default(),
-            goal: String::new(),
+            session,
+            goal,
             configuration,
             config_error,
+            history,
+            history_error,
+            history_saved,
             catalog_pending: Vec::new(),
             catalog_active: None,
             catalog_token: 0,
@@ -81,19 +109,127 @@ impl AgentPanel {
         if let Some(abort) = self.abort.take() {
             abort.abort();
         }
+        self.persist_history();
+    }
+
+    fn persist_history(&mut self) {
+        if let Some(conversation) = self.history.active_mut() {
+            if conversation.messages != self.session.messages
+                || conversation.trace != self.session.trace
+                || conversation.draft != self.goal
+                || conversation.error != self.session.error
+            {
+                conversation.messages = self.session.messages.clone();
+                conversation.trace = self.session.trace.clone();
+                conversation.draft = self.goal.clone();
+                conversation.error = self.session.error.clone();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    conversation.updated_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64;
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    conversation.updated_at = js_sys::Date::now().max(0.0) as u64;
+                }
+            }
+        }
+        let Ok(snapshot) = serde_json::to_string(&self.history) else {
+            self.history_error = Some("无法保存会话记录".into());
+            return;
+        };
+        if snapshot == self.history_saved {
+            return;
+        }
+        // Unit tests exercise in-memory conversations without touching user stores.
+        #[cfg(test)]
+        let save_result: Result<(), String> = Ok(());
+        #[cfg(not(test))]
+        let save_result = self.history.save();
+        match save_result {
+            Ok(()) => {
+                self.history_saved = snapshot;
+                self.history_error = None;
+            }
+            Err(error) => {
+                // Retain the dirty snapshot to avoid retrying a failed disk write each frame.
+                self.history_saved = snapshot;
+                self.history_error = Some(error);
+            }
+        }
+    }
+
+    fn restore_active_conversation(&mut self) {
+        let generation = self.session.generation;
+        self.session = self
+            .history
+            .active()
+            .map(Session::from_conversation)
+            .unwrap_or_default();
+        self.session.generation = generation;
+        self.goal = self
+            .history
+            .active()
+            .map(|c| c.draft.clone())
+            .unwrap_or_default();
+        self.persist_history();
+    }
+
+    fn new_conversation(&mut self) {
+        self.cancel();
+        self.history.new_chat();
+        self.restore_active_conversation();
+    }
+
+    fn select_conversation(&mut self, id: &str) {
+        if self.history.active_id.as_deref() == Some(id) {
+            return;
+        }
+        self.cancel();
+        if self.history.select(id) {
+            self.restore_active_conversation();
+        }
+    }
+
+    fn remove_current_conversation(&mut self) {
+        self.cancel();
+        if let Some(id) = self.history.active_id.clone() {
+            self.history.remove(&id);
+        }
+        if self.history.active().is_none() {
+            self.history.new_chat();
+        }
+        self.restore_active_conversation();
     }
 
     /// Start a goal using the same session machinery as the visible Send button.
     pub fn start_goal(&mut self, prompt: &str) {
+        if prompt.trim().is_empty() {
+            return;
+        }
         self.cancel();
+        if self.history.active().is_none() {
+            self.history.new_chat();
+        }
+        if !self.session.messages.iter().any(|m| m["role"] == "user") {
+            if let Some(conversation) = self.history.active_mut() {
+                conversation.title = crate::agent_history::Conversation::title_from_prompt(prompt);
+            }
+        }
         self.session.start(prompt);
+        self.goal.clear();
+        self.persist_history();
     }
 
     /// Return observable session state without connection credentials.
     pub fn snapshot(&self) -> Value {
         json!({"status":self.session.status,"messages":self.session.messages,
             "trace":self.session.trace,"error":self.session.error,
-            "rounds":self.session.rounds,"generation":self.session.generation})
+            "rounds":self.session.rounds,"generation":self.session.generation,
+            "conversation_id":self.history.active_id,"conversation_count":self.history.conversations.len()})
     }
 
     /// Draw the assistant inside the editor's right sidebar.
@@ -103,6 +239,49 @@ impl AgentPanel {
         let mut stop = false;
         let mut configuration_changed = false;
         ui.heading("AI 助手");
+        let mut selected_chat = None;
+        let mut new_chat = false;
+        let mut delete_chat = false;
+        ui.horizontal(|ui| {
+            new_chat = ui.button("新建会话").clicked();
+            delete_chat = ui.button("删除会话").clicked();
+        });
+        let active_title = self
+            .history
+            .active()
+            .map(|c| c.title.as_str())
+            .unwrap_or("新会话");
+        ui.label("历史会话");
+        egui::ComboBox::from_id_salt("agent-conversation-history")
+            .selected_text(active_title)
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for conversation in self.history.conversations.iter().rev() {
+                    if ui
+                        .selectable_label(
+                            self.history.active_id.as_deref() == Some(&conversation.id),
+                            &conversation.title,
+                        )
+                        .clicked()
+                    {
+                        selected_chat = Some(conversation.id.clone());
+                    }
+                }
+            });
+        if new_chat {
+            self.new_conversation();
+        } else if delete_chat {
+            self.remove_current_conversation();
+        } else if let Some(id) = selected_chat {
+            self.select_conversation(&id);
+        }
+        if let Some(error) = &self.history_error {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("会话保存失败：{error}"));
+            if ui.button("重试保存会话").clicked() {
+                self.history_saved.clear();
+                self.persist_history();
+            }
+        }
         ui.collapsing("本地模型配置", |ui| {
             ui.small("有效修改会自动保存到本机，启动时自动加载。");
             configuration_changed = self.configuration.ui(ui);
@@ -122,27 +301,75 @@ impl AgentPanel {
             "状态：{} · 请求轮数 {}/{}",
             self.session.status, self.session.rounds, MAX_ROUNDS
         ));
+        let transcript_height = (ui.available_height() - 130.0).max(100.0);
         egui::ScrollArea::vertical()
-            .max_height(330.0)
+            .id_salt("agent-transcript")
+            .max_height(transcript_height)
+            .stick_to_bottom(true)
             .show(ui, |ui| {
-                for message in &self.session.messages {
+                for (index, message) in self.session.messages.iter().enumerate() {
                     let role = message["role"].as_str().unwrap_or("");
                     if role == "system" {
                         continue;
                     }
-                    if let Some(text) = message["content"].as_str() {
-                        if !text.is_empty() {
-                            ui.label(format!("{role}: {text}"));
+                    ui.push_id(index, |ui| {
+                        if role == "tool" {
+                            let id = message["tool_call_id"].as_str().unwrap_or("");
+                            let name = self
+                                .session
+                                .trace
+                                .iter()
+                                .find(|t| t["id"] == id)
+                                .and_then(|t| t["name"].as_str())
+                                .unwrap_or("工具");
+                            ui.collapsing(format!("执行回执 · {name}"), |ui| {
+                                ui.add(
+                                    egui::Label::new(message["content"].as_str().unwrap_or(""))
+                                        .wrap()
+                                        .selectable(true),
+                                );
+                            });
+                            return;
                         }
-                    }
-                    if let Some(calls) = message["tool_calls"].as_array() {
-                        for call in calls {
-                            ui.label(format!(
-                                "工具：{}",
-                                call["function"]["name"].as_str().unwrap_or("?")
-                            ));
-                        }
-                    }
+                        let fill = if role == "user" {
+                            ui.visuals().faint_bg_color
+                        } else {
+                            ui.visuals().extreme_bg_color
+                        };
+                        egui::Frame::new()
+                            .fill(fill)
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                ui.set_max_width(ui.available_width());
+                                ui.strong(if role == "user" { "你" } else { "AI 助手" });
+                                if let Some(text) =
+                                    message["content"].as_str().filter(|s| !s.is_empty())
+                                {
+                                    ui.add(egui::Label::new(text).wrap().selectable(true));
+                                }
+                                if let Some(calls) = message["tool_calls"].as_array() {
+                                    for call in calls {
+                                        let name =
+                                            call["function"]["name"].as_str().unwrap_or("工具");
+                                        ui.collapsing(format!("调用 · {name}"), |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    call["function"]["arguments"]
+                                                        .as_str()
+                                                        .unwrap_or(""),
+                                                )
+                                                .wrap()
+                                                .selectable(true),
+                                            );
+                                        });
+                                    }
+                                }
+                            });
+                        ui.add_space(6.0);
+                    });
+                }
+                if self.session.messages.is_empty() {
+                    ui.weak("开始新对话，或从历史会话继续。");
                 }
             });
         if let Some(error) = &self.session.error {
@@ -166,6 +393,7 @@ impl AgentPanel {
             let goal = self.goal.clone();
             self.start_goal(&goal);
         }
+        self.persist_history();
         self.collect_catalog_requests();
         if matches!(self.session.status, "requesting" | "tools") || self.catalog_busy() {
             ui.ctx().request_repaint();
@@ -174,6 +402,11 @@ impl AgentPanel {
 
     /// Advance at most one editor tool per frame; network work stays off thread.
     pub fn poll(&mut self, engine: &mut Engine, doc: &mut Doc) {
+        self.poll_session(engine, doc);
+        self.persist_history();
+    }
+
+    fn poll_session(&mut self, engine: &mut Engine, doc: &mut Doc) {
         #[cfg(not(target_arch = "wasm32"))]
         self.workers.retain(|worker| !worker.is_finished());
         let completed: Vec<_> = match self.mailbox.lock() {
@@ -615,17 +848,67 @@ impl Default for Session {
     }
 }
 impl Session {
+    fn from_conversation(conversation: &crate::agent_history::Conversation) -> Self {
+        let mut session = Self {
+            messages: conversation.messages.clone(),
+            trace: conversation.trace.clone(),
+            error: conversation.error.clone(),
+            ..Self::default()
+        };
+        // A transcript is data, never a queue of work to resume after reload.
+        session.close_unresolved_tools();
+        session.status = if session.messages.is_empty() {
+            "idle"
+        } else {
+            "ready"
+        };
+        session
+    }
+
+    fn close_unresolved_tools(&mut self) {
+        let mut unresolved: Vec<(String, String)> = Vec::new();
+        for message in &self.messages {
+            if message["role"] == "assistant" {
+                if let Some(calls) = message["tool_calls"].as_array() {
+                    for call in calls {
+                        if let Some(id) = call["id"].as_str() {
+                            unresolved.push((
+                                id.to_owned(),
+                                call["function"]["name"]
+                                    .as_str()
+                                    .unwrap_or("tool")
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                }
+            } else if message["role"] == "tool" {
+                if let Some(id) = message["tool_call_id"].as_str() {
+                    unresolved.retain(|(pending, _)| pending != id);
+                }
+            }
+        }
+        for (id, name) in unresolved {
+            let result = json!({"ok":false,"error":"cancelled","message":"This tool call was cancelled; no execution was resumed."});
+            self.messages
+                .push(json!({"role":"tool","tool_call_id":id,"content":result.to_string()}));
+            self.trace
+                .push(json!({"id":id,"name":name,"result":result}));
+        }
+    }
+
     fn start(&mut self, prompt: &str) {
-        self.messages.clear();
-        self.trace.clear();
+        self.cancel();
         self.error = None;
         self.rounds = 0;
         if prompt.trim().is_empty() {
             self.fail("Goal must not be empty".into());
             return;
         }
-        self.messages
-            .push(json!({"role":"system","content":SYSTEM}));
+        if self.messages.is_empty() {
+            self.messages
+                .push(json!({"role":"system","content":SYSTEM}));
+        }
         self.messages.push(json!({"role":"user","content":prompt}));
         self.status = "requesting";
     }
@@ -634,6 +917,7 @@ impl Session {
         self.status = "error";
         self.inflight = false;
         self.pending.clear();
+        self.close_unresolved_tools();
     }
     fn accept(&mut self, generation: u64, response: Value) -> Result<(), String> {
         if generation != self.generation {
@@ -690,6 +974,7 @@ impl Session {
     }
     fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.close_unresolved_tools();
         self.pending.clear();
         self.inflight = false;
         self.status = "cancelled";
@@ -835,6 +1120,77 @@ mod tests {
     }
 
     #[test]
+    fn followup_keeps_transcript_and_resets_per_turn_rounds() {
+        let mut session = Session::default();
+        session.start("first request");
+        let first_generation = session.generation;
+        session
+            .accept(
+                first_generation,
+                json!({"choices":[{"message":{"role":"assistant","content":"first answer"}}]}),
+            )
+            .unwrap();
+        session.rounds = 5;
+        session.start("followup request");
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.messages[0]["role"], "system");
+        assert_eq!(session.messages[1]["content"], "first request");
+        assert_eq!(session.messages[2]["content"], "first answer");
+        assert_eq!(session.messages[3]["content"], "followup request");
+        assert_eq!(session.rounds, 0);
+        assert!(!session.inflight);
+        assert_ne!(session.generation, first_generation);
+    }
+
+    #[test]
+    fn restored_tool_transcript_never_executes_and_can_continue() {
+        let mut history = crate::agent_history::History::default();
+        history.new_chat();
+        let conversation = history.active_mut().unwrap();
+        conversation.messages = vec![
+            json!({"role":"user","content":"inspect"}),
+            response("{}")["choices"][0]["message"].clone(),
+        ];
+        let mut session = Session::from_conversation(conversation);
+        assert_eq!(session.status, "ready");
+        assert!(!session.inflight);
+        assert!(session.pending.is_empty());
+        assert_eq!(session.messages[2]["tool_call_id"], "call-real-17");
+        let receipt: Value =
+            serde_json::from_str(session.messages[2]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(receipt["error"], "cancelled");
+        session.start("continue");
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.messages[3]["content"], "continue");
+    }
+
+    #[test]
+    fn switching_conversations_isolates_late_responses_and_restores_draft() {
+        let mut panel = AgentPanel::default();
+        let first = panel.history.active_id.clone().unwrap();
+        panel.start_goal("first conversation");
+        let old_generation = panel.session.generation;
+        panel.goal = "unfinished draft".into();
+        panel.new_conversation();
+        assert!(panel.session.messages.is_empty());
+        assert!(!panel.session.inflight);
+        panel
+            .session
+            .accept(old_generation, response("{}"))
+            .unwrap();
+        assert!(panel.session.messages.is_empty());
+        panel.start_goal("second conversation");
+        panel.select_conversation(&first);
+        assert_eq!(panel.goal, "unfinished draft");
+        assert_eq!(
+            panel.session.messages.last().unwrap()["content"],
+            "first conversation"
+        );
+        assert_eq!(panel.session.status, "ready");
+        assert!(panel.session.pending.is_empty());
+    }
+
+    #[test]
     fn agent_session_tool_result_reaches_next_request() {
         let mut s = Session::default();
         s.accept(0, response("{}")).unwrap();
@@ -886,7 +1242,9 @@ mod tests {
         panel.start_goal("new goal");
         assert!(panel.session.pending.is_empty());
         assert_eq!(panel.snapshot()["status"], "requesting");
-        assert_eq!(panel.snapshot()["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(panel.snapshot()["messages"].as_array().unwrap().len(), 4);
+        assert_eq!(panel.session.messages[2]["tool_call_id"], "second");
+        assert_eq!(panel.session.messages[3]["content"], "new goal");
     }
     #[test]
     fn agent_browser_request_obeys_same_origin_proxy_contract() {

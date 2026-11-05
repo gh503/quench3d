@@ -892,10 +892,48 @@ pub fn parse_chat_response(raw: &str, fallback_model: &str) -> Result<ChatOutcom
             .with_hint("检查 base_url / model 名 / API Key 是否正确（本地服务不需要 Key）"));
     }
 
-    let assistant_message = value
-            .pointer("/choices/0/message")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({ "role": "assistant", "content": value.pointer("/choices/0/text").and_then(|v| v.as_str()).unwrap_or("") }));
+    let finish_reason = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(|v| v.as_str());
+    match finish_reason {
+        Some("length") => return Err(LlmError::parse("模型输出达到 token 上限，响应不完整；请提高输出 token 上限后重试（推理模型可能先消耗推理 token）")),
+        Some("content_filter") => return Err(LlmError::parse("模型服务过滤了本轮输出，未执行本轮工具；请调整请求后重试")),
+        _ => {}
+    }
+    if value.get("choices").is_none()
+        && (value.get("output").is_some()
+            || value.get("object").and_then(|v| v.as_str()) == Some("response"))
+    {
+        return Err(LlmError::parse("收到 Responses API 响应；当前供应商需要 OpenAI Chat Completions 兼容端点 /chat/completions"));
+    }
+    let mut assistant_message = match value.pointer("/choices/0/message") {
+        Some(message) if message.is_object() => message.clone(),
+        Some(_) => return Err(LlmError::parse("模型响应的 message 不是对象")),
+        None => match value.pointer("/choices/0/text").and_then(|v| v.as_str()) {
+            Some(text) => serde_json::json!({"role":"assistant", "content":text}),
+            None => {
+                return Err(LlmError::parse(
+                    "模型响应缺少 choices[0].message；请检查供应商是否支持 Chat Completions",
+                ))
+            }
+        },
+    };
+    if assistant_message
+        .get("refusal")
+        .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+    {
+        return Err(LlmError::parse(
+            "模型拒绝了本轮请求，未执行本轮工具；请调整请求后重试",
+        ));
+    }
+    if assistant_message
+        .get("tool_calls")
+        .is_some_and(|v| !v.is_null() && !v.is_array())
+    {
+        return Err(LlmError::parse(
+            "模型返回的 tool_calls 不是数组，未执行本轮工具",
+        ));
+    }
     let tool_calls = assistant_message
         .get("tool_calls")
         .and_then(|c| c.as_array())
@@ -924,22 +962,43 @@ pub fn parse_chat_response(raw: &str, fallback_model: &str) -> Result<ChatOutcom
         })
         .unwrap_or_default();
 
-    let text = value
-        .pointer("/choices/0/message/content")
-        .and_then(|c| c.as_str())
-        .or_else(|| value.pointer("/choices/0/text").and_then(|c| c.as_str()))
-        .or_else(|| {
-            (value
-                .pointer("/choices/0/message/content")
-                .is_some_and(serde_json::Value::is_null)
-                && !tool_calls.is_empty())
-            .then_some("")
-        })
-        .ok_or_else(|| {
-            LlmError::parse("响应里没有 choices[0].message.content".to_string())
-                .with_hint("该服务可能不是 OpenAI 兼容协议")
-        })?
-        .to_string();
+    if assistant_message.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+        return Err(LlmError::parse(
+            "Model response role must be assistant; no tools were executed",
+        ));
+    }
+    if assistant_message
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .is_some_and(|calls| calls.len() != tool_calls.len())
+    {
+        return Err(LlmError::parse(
+            "模型返回了不完整或无效的工具调用，未执行本轮工具",
+        ));
+    }
+    let text = match assistant_message.get("content") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        None | Some(serde_json::Value::Null) if !tool_calls.is_empty() => String::new(),
+        Some(serde_json::Value::Array(parts)) => {
+            let mut text = String::new();
+            for part in parts {
+                match (part.get("type").and_then(|v| v.as_str()), part.get("text").and_then(|v| v.as_str())) {
+                    (Some("text" | "output_text"), Some(segment)) => text.push_str(segment),
+                    _ => return Err(LlmError::parse("模型返回了不支持的内容分段；当前仅支持文本与函数调用")),
+                }
+            }
+            // Normalize gateway text parts for subsequent editor history/tool rounds.
+            assistant_message["content"] = serde_json::Value::String(text.clone());
+            text
+        }
+        None | Some(serde_json::Value::Null) => return Err(LlmError::parse("模型本轮未返回文本或工具调用；请提高输出 token 上限后重试，并确认供应商支持 Chat Completions（仅推理内容不能作为执行结果）")),
+        _ => return Err(LlmError::parse("模型响应 content 类型无效；需要文本或函数调用")),
+    };
+    if text.trim().is_empty() && tool_calls.is_empty() {
+        return Err(LlmError::parse(
+            "模型本轮输出为空，未返回可执行工具；请提高输出 token 上限或重试",
+        ));
+    }
 
     Ok(ChatOutcome {
         text,
@@ -1154,6 +1213,85 @@ printf '{"data":[]}\n200'
         assert_eq!(types, ["application/json"]);
         assert_eq!(received, body.as_bytes());
         assert_eq!(response, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn parser_accepts_tool_only_content_variants_and_normalizes_text_parts() {
+        for content in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("")),
+        ] {
+            let mut message = serde_json::json!({"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"set_playback","arguments":"{}"}}]});
+            if let Some(content) = content {
+                message["content"] = content;
+            }
+            let raw =
+                serde_json::json!({"choices":[{"message":message,"finish_reason":"tool_calls"}]})
+                    .to_string();
+            let result = parse_chat_response(&raw, "fixture").unwrap();
+            assert_eq!(result.tool_calls.len(), 1);
+            assert_eq!(result.text, "");
+            assert_eq!(result.assistant_message, message);
+        }
+        let result = parse_chat_response(r#"{"choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"实验"},{"type":"output_text","text":"场景"}]}}]}"#, "fixture").unwrap();
+        assert_eq!(result.text, "实验场景");
+        assert_eq!(result.assistant_message["content"], "实验场景");
+    }
+
+    #[test]
+    fn parser_reports_empty_reasoning_truncation_filter_refusal_and_wrong_protocol() {
+        for (raw, expected) in [
+            (
+                r#"{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":null,"reasoning_content":"private"}}]}"#,
+                "token 上限",
+            ),
+            (
+                r#"{"choices":[{"finish_reason":"content_filter","message":{"role":"assistant","content":null}}]}"#,
+                "过滤",
+            ),
+            (
+                r#"{"choices":[{"message":{"role":"assistant","content":null,"refusal":"private refusal"}}]}"#,
+                "拒绝",
+            ),
+            (
+                r#"{"choices":[{"message":{"role":"assistant","content":null,"reasoning_content":"private"}}]}"#,
+                "未返回文本或工具调用",
+            ),
+            (
+                r#"{"choices":[{"message":{"role":"assistant","content":""}}]}"#,
+                "输出为空",
+            ),
+            (r#"{"object":"response","output":[]}"#, "Responses API"),
+            (
+                r#"{"error":{"message":"quota exhausted"}}"#,
+                "quota exhausted",
+            ),
+        ] {
+            let error = parse_chat_response(raw, "fixture").unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("private"));
+        }
+    }
+
+    #[test]
+    fn parser_rejects_malformed_tools_roles_and_content_instead_of_silent_success() {
+        for message in [
+            serde_json::json!({"role":"assistant","content":"plan","tool_calls":{}}),
+            serde_json::json!({"role":"assistant","tool_calls":[{"id":"call","type":"function","function":{"name":"spawn"}}]}),
+            serde_json::json!({"role":"user","content":"plan"}),
+            serde_json::json!({"content":"plan"}),
+            serde_json::json!({"role":"assistant","content":42}),
+            serde_json::json!({"role":"assistant","content":[{"type":"image_url","image_url":"private"}]}),
+        ] {
+            assert!(parse_chat_response(
+                &serde_json::json!({"choices":[{"message":message}]}).to_string(),
+                "fixture"
+            )
+            .is_err());
+        }
+        let legacy = parse_chat_response(r#"{"choices":[{"text":"legacy"}]}"#, "fixture").unwrap();
+        assert_eq!(legacy.text, "legacy");
     }
 
     #[test]

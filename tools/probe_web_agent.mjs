@@ -148,7 +148,7 @@ async function main() {
   const status = () => request({ action: 'status' });
   const before = scene(await request({ action: 'inspect' }));
   assert.equal(before.objects.some(object => object.name === 'AI球'), false);
-  assert.equal((await request({ action: 'start', prompt: 'fixture-main: 创建 AI球，移动到 [2,3,4]，检查并撤销重做。' })).ok, true);
+  assert.equal((await request({ action: 'start', prompt: 'fixture-main' })).ok, true);
   const done = await until(async () => {
     const value = await status();
     if (value.agent.status === 'error') throw new Error(JSON.stringify(value));
@@ -171,6 +171,24 @@ async function main() {
   assert.equal(scene(report.requests[7].tool_results.at(-1)).history.can_redo, true, 'undo must make redo available');
   evidence.stages.push({ stage: 'model-loop', before, final, agent: done.agent, http: report });
 
+  const followupPrompt = 'fixture-followup: AI球刚才移动到了哪里？沿用之前的场景工具结果回答。';
+  assert.equal((await request({ action: 'start', prompt: followupPrompt })).ok, true);
+  const followed = await until(async () => {
+    const value = await status();
+    if (value.agent.status === 'error') throw new Error(JSON.stringify(value));
+    return value.agent.status === 'done' && value.agent.messages.some(m =>
+      m.role === 'assistant' && String(m.content).includes('fixture-followup-ok')) && value;
+  }, 'continued conversation HTTP context', 60000);
+  const followupReport = await (await fetch(`${control}/fixture/status`)).json();
+  assert.deepEqual(followupReport.errors, []);
+  assert.equal(followupReport.followup_requests.length, 1);
+  assert.equal(followupReport.followup_requests[0].tool_results, 9);
+  assert.ok(followed.agent.messages.some(m => m.role === 'user' && String(m.content).includes('fixture-main')));
+  assert.ok(followed.agent.messages.some(m => m.role === 'user' && m.content === followupPrompt));
+  assert.equal(followed.agent.messages.filter(m => m.role === 'tool').length, 9);
+  assert.deepEqual(scene(await request({ action: 'inspect' })), final, 'a text followup must not edit the scene');
+  evidence.stages.push({ stage: 'ongoing-conversation', agent: followed.agent, http: followupReport.followup_requests });
+
   const cancelBefore = await request({ action: 'inspect' });
   assert.equal((await request({ action: 'start', prompt: `fixture-cancel:${JSON.stringify({ revision: cancelBefore.revision })}` })).ok, true);
   await until(async () => (await (await fetch(`${control}/fixture/status`)).json()).delayed, 'delayed model HTTP request');
@@ -192,10 +210,79 @@ async function main() {
   assert.deepEqual(cancelReport.errors, []);
   assert.equal(cancelReport.cancel_requests, 1);
   evidence.stages.push({ stage: 'nonblocking-cancel', waiting, cancelled, cancelBefore, cancelAfter });
+  const historyBefore = await until(async () => {
+    const history = await evaluate(send, `JSON.parse(localStorage.getItem('quench3d.ai.history.v1') || 'null')`);
+    const active = history?.conversations?.find(c => c.id === history.active_id);
+    return active?.messages?.some(m => String(m.content).includes('fixture-followup-ok')) && history;
+  }, 'conversation history saved locally');
+  const activeBefore = historyBefore.conversations.find(c => c.id === historyBefore.active_id);
+  assert.equal(typeof activeBefore.title, 'string');
+  assert.ok(activeBefore.title.length > 0);
+  const historyText = JSON.stringify(historyBefore);
+  assert.equal(historyText.includes('fixture-client-only-key'), false, 'history must never contain provider credentials');
+  assert.equal(historyText.includes('"api_key"'), false, 'history schema has no connection credentials');
+  const transcriptBefore = (await status()).agent.messages;
+  assert.deepEqual(activeBefore.messages, transcriptBefore, 'stored active transcript matches the running conversation');
+  await send('Page.reload');
+  await until(() => evaluate(send, 'document.getElementById("overlay")?.classList.contains("hidden") === true'), 'reloaded editor frame', 60000);
+  // A new WASM instance requires re-importing the bridge after navigation.
+  await evaluate(send, `(async () => { window.__agentProbeModule = await import('/pkg/quench3d_web.js'); })()`);
+  const restored = await status();
+  assert.deepEqual(restored.agent.messages, transcriptBefore, 'reload restores complete messages including tool receipts and followup');
+  assert.ok(!['requesting', 'tools'].includes(restored.agent.status), 'history restoration never resumes execution');
+  await until(async () => (await status()).frame > restored.frame + 12, 'restored history remains idle for rendered frames');
+  const reportAfterReload = await (await fetch(`${control}/fixture/status`)).json();
+  assert.equal(reportAfterReload.requests.length, cancelReport.requests.length, 'reload must not restart main model loop');
+  assert.equal(reportAfterReload.followup_requests.length, 1, 'reload must not resend the followup');
+  assert.equal(reportAfterReload.cancel_requests, 1, 'reload must not resume cancelled request');
+  assert.deepEqual(reportAfterReload.errors, []);
+  const historyAfter = await evaluate(send, `JSON.parse(localStorage.getItem('quench3d.ai.history.v1'))`);
+  assert.equal(historyAfter.active_id, historyBefore.active_id, 'active conversation selection survives reload');
+  evidence.stages.push({ stage: 'history-reload', history: historyAfter, restored: restored.agent, upstream: reportAfterReload });
+
+  const controls = () => evaluate(send, `JSON.parse(document.body?.getAttribute('data-quench3d-model-controls') || '[]')`);
+  const rendered = async () => {
+    const frame = (await status()).frame;
+    await until(async () => (await status()).frame > frame + 2, 'pointer rendering frames');
+  };
+  const click = async text => {
+    const item = await until(async () => (await controls()).find(c => c.text === text), `visible history control ${text}`);
+    const [x0, y0, x1, y1] = item.rect;
+    const x = (x0 + x1) / 2, y = (y0 + y1) / 2;
+    const viewport = await evaluate(send, '({w:innerWidth,h:innerHeight})');
+    assert.ok(x > 0 && y > 0 && x < viewport.w && y < viewport.h, `offscreen history control ${text}`);
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await rendered();
+    await Promise.all([
+      send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, x, y }),
+      send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x, y }),
+    ]);
+    await rendered();
+  };
+  await click('新建会话');
+  const newChat = await until(async () => {
+    const h = await evaluate(send, `JSON.parse(localStorage.getItem('quench3d.ai.history.v1'))`);
+    return h.active_id !== historyBefore.active_id && h;
+  }, 'new conversation selected and persisted');
+  assert.equal(newChat.conversations.length, historyAfter.conversations.length + 1);
+  assert.equal((await status()).agent.messages.some(m => m.role === 'user'), false, 'new conversation has no previous prompts');
+  await click('新会话'); // The actual history ComboBox's selected title.
+  await click('fixture-main');
+  const switched = await until(async () => {
+    const h = await evaluate(send, `JSON.parse(localStorage.getItem('quench3d.ai.history.v1'))`);
+    return h.active_id === historyBefore.active_id && (await status());
+  }, 'switch back to previous conversation through history UI');
+  assert.deepEqual(switched.agent.messages, transcriptBefore, 'switching conversations restores the complete original transcript');
+  const finalReport = await (await fetch(`${control}/fixture/status`)).json();
+  assert.equal(finalReport.requests.length, cancelReport.requests.length);
+  assert.equal(finalReport.followup_requests.length, 1);
+  assert.equal(finalReport.cancel_requests, 1);
+  evidence.stages.push({ stage: 'new-and-switch-conversations-ui', newChat, switched: switched.agent });
+
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(out, 'agent-final.png'), Buffer.from(screenshot.data, 'base64'));
   assert.deepEqual(evidence.errors, [], 'browser runtime exceptions');
-  console.log('PASS probe-web-agent: real model HTTP tool loop, body/history, frame progress and cancelled HTTP result causes no edits');
+  console.log('PASS probe-web-agent: real HTTP tools with omitted content, followup context, cancellation, persisted transcript reload without re-execution');
 }
 
 try { await main(); }
