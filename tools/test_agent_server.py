@@ -96,6 +96,40 @@ class AgentServerTests(unittest.TestCase):
         self.assertEqual(body, {'messages':messages,'tools':tools,'model':'test-model','stream':False})
         self.assertNotIn(b'secret-test-key', data)
 
+    def test_client_connection_overrides_server_and_forwards_model_options(self):
+        connection = {'base_url': self.config.base_url, 'model': 'client-model',
+                      'api_key': 'client-only-key', 'temperature': 0.35,
+                      'max_tokens': 4096, 'timeout_secs': 2}
+        status, data = self.request(payload={'messages': [], 'tools': [], 'connection': connection})
+        self.assertEqual(status, 200)
+        _, headers, body = self.requests[-1]
+        self.assertEqual(headers['Authorization'], 'Bearer client-only-key')
+        self.assertEqual(body['model'], 'client-model')
+        self.assertEqual(body['temperature'], 0.35)
+        self.assertEqual(body['max_tokens'], 4096)
+        self.assertNotIn('connection', body)
+        self.assertNotIn(b'client-only-key', data)
+
+    def test_invalid_client_connection_does_not_contact_upstream(self):
+        base = {'base_url': self.config.base_url, 'model': 'client-model', 'api_key': '',
+                'temperature': 0.2, 'max_tokens': 2048, 'timeout_secs': 30}
+        for patch in [{'base_url': 'file:///etc/passwd'}, {'api_key': 'key\r\ninjected'},
+                      {'timeout_secs': 0}, {'temperature': float('nan')},
+                      {'max_tokens': True}, {'base_url': 'https://user:pass@example.test/v1'}]:
+            status, _ = self.request(payload={'messages': [], 'tools': [], 'connection': dict(base, **patch)})
+            self.assertEqual(status, 400)
+        self.assertEqual(self.requests, [])
+
+    def test_default_server_requires_client_configuration(self):
+        local = create_server(port=0, web_root=self.root)
+        self.start(local)
+        self.server = local
+        self.origin = f'http://127.0.0.1:{local.server_port}'
+        status, data = self.request('GET', '/api/agent/config')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)['configuration'], 'client')
+        self.assertEqual(self.request()[0], 400)
+
     def test_config_and_static_root_never_expose_key_or_parent(self):
         status, data = self.request('GET', '/api/agent/config')
         self.assertEqual(status, 200)

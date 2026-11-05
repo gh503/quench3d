@@ -12,18 +12,14 @@ const SYSTEM: &str = "You operate the live Quench3D editor through the provided 
 
 type Mailbox = Arc<Mutex<VecDeque<(u64, Result<Value, String>)>>>;
 
-/// A session-local AI panel. Connection credentials are never persisted.
+/// AI panel using the client's explicitly saved local provider/model library.
 pub struct AgentPanel {
     /// Whether the panel is visible.
     pub open: bool,
     session: Session,
     goal: String,
-    #[cfg(not(target_arch = "wasm32"))]
-    endpoint: String,
-    #[cfg(not(target_arch = "wasm32"))]
-    model: String,
-    #[cfg(not(target_arch = "wasm32"))]
-    config: quench3d_cli::llm::LlmConfig,
+    configuration: crate::agent_config::ConfigLibrary,
+    config_error: Option<String>,
     mailbox: Mailbox,
     #[cfg(not(target_arch = "wasm32"))]
     workers: Vec<std::thread::JoinHandle<()>>,
@@ -32,18 +28,16 @@ pub struct AgentPanel {
 }
 impl Default for AgentPanel {
     fn default() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let config = quench3d_cli::llm::LlmConfig::from_env();
+        let (configuration, config_error) = match crate::agent_config::ConfigLibrary::load() {
+            Ok(configuration) => (configuration, None),
+            Err(error) => (crate::agent_config::ConfigLibrary::default(), Some(error)),
+        };
         Self {
             open: false,
             session: Session::default(),
             goal: String::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            endpoint: config.base_url.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
-            model: config.model.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
-            config,
+            configuration,
+            config_error,
             mailbox: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(not(target_arch = "wasm32"))]
             workers: Vec::new(),
@@ -83,27 +77,20 @@ impl AgentPanel {
         let mut open = self.open;
         let mut send = false;
         let mut stop = false;
+        let mut configuration_changed = false;
         egui::Window::new("AI 助手")
             .open(&mut open)
             .default_width(460.0)
             .show(ctx, |ui| {
-                ui.collapsing("连接设置", |ui| {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        ui.label("OpenAI compatible endpoint");
-                        ui.text_edit_singleline(&mut self.endpoint);
-                        ui.label("Model");
-                        ui.text_edit_singleline(&mut self.model);
-                        ui.label("API key（仅当前会话）");
-                        let key = self.config.api_key.get_or_insert_with(String::new);
-                        ui.add(egui::TextEdit::singleline(key).password(true));
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        ui.label("同源代理：/api/agent/chat");
-                        ui.label("模型与凭据由服务器配置，浏览器不保存密钥。");
+                ui.collapsing("本地模型配置", |ui| {
+                    configuration_changed = self.configuration.ui(ui);
+                    if let Some(error) = &self.config_error {
+                        ui.colored_label(egui::Color32::LIGHT_RED, error);
                     }
                 });
+                if let Ok(selected) = self.configuration.selected() {
+                    ui.label(format!("当前模型：{}", selected.model));
+                }
                 ui.label(format!(
                     "状态：{} · 请求轮数 {}/{}",
                     self.session.status, self.session.rounds, MAX_ROUNDS
@@ -147,7 +134,10 @@ impl AgentPanel {
                 });
             });
         self.open = open;
-        if stop {
+        if configuration_changed {
+            self.config_error = None;
+        }
+        if stop || configuration_changed {
             self.cancel();
         }
         if send {
@@ -209,12 +199,21 @@ impl AgentPanel {
     #[cfg(not(target_arch = "wasm32"))]
     fn launch(&mut self) {
         use quench3d_cli::llm::{LlmClient, Message};
-        let mut config = self.config.clone();
-        config.base_url = self.endpoint.clone();
-        config.model = self.model.clone();
-        if config.api_key.as_deref() == Some("") {
-            config.api_key = None;
-        }
+        let selected = match self.configuration.selected() {
+            Ok(selected) => selected,
+            Err(error) => {
+                self.session.fail(error);
+                return;
+            }
+        };
+        let config = quench3d_cli::llm::LlmConfig {
+            base_url: selected.base_url,
+            model: selected.model,
+            api_key: selected.api_key,
+            temperature: selected.temperature,
+            max_tokens: selected.max_tokens,
+            timeout_secs: selected.timeout_secs,
+        };
         let key = config.api_key.clone();
         let messages: Vec<_> = self
             .session
@@ -265,7 +264,15 @@ impl AgentPanel {
         };
         let signal = controller.signal();
         self.abort = Some(controller);
-        let body = browser_request(&self.session.messages, crate::commands::tools()).to_string();
+        let config = match self.configuration.selected() {
+            Ok(config) => config,
+            Err(error) => {
+                self.session.fail(error);
+                return;
+            }
+        };
+        let body =
+            browser_request(&self.session.messages, crate::commands::tools(), &config).to_string();
         wasm_bindgen_futures::spawn_local(async move {
             let result: Result<Value, String> = async {
                 let init = web_sys::RequestInit::new();
@@ -313,9 +320,17 @@ impl AgentPanel {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn browser_request(messages: &[Value], tools: Value) -> Value {
-    // The same-origin proxy owns provider/model/stream configuration.
-    json!({"messages": messages, "tools": tools})
+fn browser_request(
+    messages: &[Value],
+    tools: Value,
+    config: &crate::agent_config::LlmConfig,
+) -> Value {
+    json!({"messages": messages, "tools": tools, "connection": {
+        "base_url": config.base_url, "model": config.model,
+        "api_key": config.api_key.as_deref().unwrap_or(""),
+        "temperature": config.temperature, "max_tokens": config.max_tokens,
+        "timeout_secs": config.timeout_secs,
+    }})
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -520,7 +535,12 @@ mod tests {
     #[test]
     fn agent_browser_request_obeys_same_origin_proxy_contract() {
         let messages = vec![json!({"role":"user","content":"inspect"})];
-        let request = browser_request(&messages, crate::commands::tools());
+        let config = crate::agent_config::ConfigLibrary::default()
+            .selected()
+            .unwrap();
+        let request = browser_request(&messages, crate::commands::tools(), &config);
+        assert_eq!(request["connection"]["base_url"], config.base_url);
+        assert_eq!(request["connection"]["model"], config.model);
         assert_eq!(request["messages"], json!(messages));
         assert!(request["tools"]
             .as_array()
@@ -531,7 +551,10 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["messages", "tools"].into_iter().collect());
+        assert_eq!(
+            keys,
+            ["connection", "messages", "tools"].into_iter().collect()
+        );
     }
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -657,14 +680,12 @@ mod tests {
             }
             receipts
         });
+        let mut configuration = crate::agent_config::ConfigLibrary::default();
+        configuration.providers[0].base_url = format!("http://{address}/v1");
+        configuration.models[0].model = "native-test".into();
+        configuration.models[0].timeout_secs = 2;
         let mut panel = AgentPanel {
-            endpoint: format!("http://{address}/v1"),
-            model: "native-test".into(),
-            config: quench3d_cli::llm::LlmConfig {
-                api_key: None,
-                timeout_secs: 2,
-                ..quench3d_cli::llm::LlmConfig::from_env()
-            },
+            configuration,
             ..AgentPanel::default()
         };
         panel.start_goal(

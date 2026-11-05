@@ -118,6 +118,15 @@ async function main() {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Page.bringToFront');
+  await until(() => evaluate(send, `location.origin === ${JSON.stringify(new URL(ready.url).origin)} && document.readyState !== 'loading'`), 'same-origin document ready before local configuration');
+  const clientConfig = {
+    version: 1,
+    providers: [{ id: 'fixture', name: 'Local test proxy', base_url: `${control}/v1`, api_key: 'fixture-client-only-key' }],
+    models: [{ id: 'fixture-model', name: 'Fixture model', provider_id: 'fixture', model: 'loopback-fixture', temperature: 0.2, max_tokens: 2048, timeout_secs: 25 }],
+    selected_model: 'fixture-model',
+  };
+  await evaluate(send, `localStorage.setItem('quench3d.ai.config.v1', ${JSON.stringify(JSON.stringify(clientConfig))})`);
+  await send('Page.reload');
   await until(() => evaluate(send, 'document.getElementById("overlay")?.classList.contains("hidden") === true'), 'first rendered editor frame', 60000);
   const browserResources = await evaluate(send, `(async () => {
     const paths = ['/', '/pkg/quench3d_web.js', '/api/agent/config'];

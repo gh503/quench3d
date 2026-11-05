@@ -16,7 +16,7 @@ import sys
 import threading
 import unittest
 
-from agent_server import Config, create_server
+from agent_server import create_server
 
 
 class ModelScript:
@@ -139,6 +139,10 @@ def make_upstream(script):
                 return
             try:
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                if self.headers.get('Authorization') != 'Bearer fixture-client-only-key':
+                    raise AssertionError('model request must use the client-saved provider credential')
+                if body.get('model') != 'loopback-fixture' or body.get('max_tokens') != 2048:
+                    raise AssertionError('model options must come from the client configuration')
                 response = script.reply(body)
                 self.send_json(response)
                 if response['choices'][0]['message'].get('tool_calls', [{}])[0].get('id') == 'fixture_late':
@@ -153,9 +157,7 @@ def make_upstream(script):
 def serve(web_root):
     script = ModelScript()
     upstream = make_upstream(script)
-    proxy = create_server(port=0, web_root=web_root, config=Config(
-        base_url=f'http://127.0.0.1:{upstream.server_port}/v1',
-        model='loopback-fixture', api_key='fixture-only-no-provider-key', timeout=25))
+    proxy = create_server(port=0, web_root=web_root)
     threads = []
     for server in (upstream, proxy):
         thread = threading.Thread(target=server.serve_forever, daemon=True)

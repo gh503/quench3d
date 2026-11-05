@@ -4,17 +4,13 @@ The desktop and Web editor share an AI panel, a conversation state machine and t
 
 ## Connect
 
-Desktop: configure an OpenAI-compatible API base URL, model and optional session key in the panel, or set `QUENCH3D_LLM_BASE_URL`, `QUENCH3D_LLM_MODEL`, `QUENCH3D_LLM_API_KEY` before launching. Credentials are not persisted by the panel.
+Desktop and Web use the same **AI 助手 → 本地模型配置** UI. Configure a model proxy/provider with a display name, OpenAI Chat Completions base URL and optional API key. Add one or more concrete models, assign each to a provider, set its upstream model ID, temperature, output token limit and timeout, then select the active model. Click **保存到本机** to persist. Changes cancel any active agent goal so subsequent requests cannot silently switch providers mid-goal.
 
-Web: run `python3 tools/agent_server.py` from the repository or extracted package root. The server serves the editor and `/api/agent/chat` on `http://127.0.0.1:8765`. Configure the same environment variables on the server. Loopback model endpoints may omit the key; cloud endpoints require it. The proxy supports an API base path or a complete `/chat/completions` endpoint. A static server alone does not provide the model endpoint. The development proxy binds only to localhost.
+Desktop saves the library to `$XDG_CONFIG_HOME/quench3d/ai.json` (default `~/.config/quench3d/ai.json`), using an atomic write with owner-only permissions on Unix. Web saves it in this browser profile and origin's localStorage under `quench3d.ai.config.v1`. The key is masked in the UI and omitted from agent status/scene exports; the saved local file/browser storage contains the key and is not encrypted. Clearing browser site data removes the Web configuration. Desktop and browser stores are independent local stores, with the same schema and controls.
 
-Example with a local OpenAI-compatible provider:
+Web: run `python3 tools/agent_server.py` from the repository or extracted package root, then open `http://127.0.0.1:8765`. Configure the model in the client UI. The same-origin `/api/agent/chat` endpoint only forwards that request's selected client connection; it does not choose or persist credentials/models from server environment variables. Loopback model endpoints may omit the key; cloud endpoints require it. A base path or complete `/chat/completions` endpoint is accepted. A static server alone does not provide the model transport. The proxy binds only to localhost and rejects cross-origin requests.
 
-```bash
-QUENCH3D_LLM_BASE_URL=http://localhost:11434/v1 \
-QUENCH3D_LLM_MODEL=qwen2.5:7b \
-python3 tools/agent_server.py
-```
+For Ollama, use provider URL `http://127.0.0.1:11434/v1` and the exact installed model ID, for example `qwen2.5:7b`. For a gateway, enter its OpenAI-compatible API URL, key and actual upstream model ID. Other wire protocols are not currently implemented; a compatible gateway can expose those models through Chat Completions. Existing CLI environment configuration remains available for CLI use, separately from editor configuration.
 
 A useful first goal is: “创建半径 0.4 米的红球，放在 [0,3,0]，聚焦它，运行仿真。” Tool support by the chosen model is required.
 

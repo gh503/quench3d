@@ -620,6 +620,8 @@ impl Inner {
         let keys_enabled = !self.egui_ctx.egui_wants_keyboard_input();
         self.egui_state
             .handle_platform_output(&self.window, full_output.platform_output.clone());
+        #[cfg(target_arch = "wasm32")]
+        publish_camera_controls(&full_output.shapes);
         let paint_jobs = self
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -1207,6 +1209,58 @@ pub struct EditorApp {
     exit_deadline: Option<std::time::Instant>,
     #[cfg(target_arch = "wasm32")]
     pending: crate::PendingSlot,
+}
+
+// Read-only camera control coordinates for real browser pointer regression tests.
+// Only whitelisted camera labels are published, never scene/model/key text.
+#[cfg(target_arch = "wasm32")]
+fn publish_camera_controls(shapes: &[egui::epaint::ClippedShape]) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if !window
+        .location()
+        .search()
+        .unwrap_or_default()
+        .split('&')
+        .any(|p| p.trim_start_matches('?') == "ui_debug=1")
+    {
+        return;
+    }
+    fn collect(shape: &egui::epaint::Shape, out: &mut Vec<serde_json::Value>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => {
+                if [
+                    "视图",
+                    "摄像头预览…",
+                    "摄像头（Web 预览）",
+                    "开启摄像头",
+                    "停止摄像头",
+                ]
+                .contains(&text.galley.text())
+                {
+                    let rect = text.galley.rect.translate(text.pos.to_vec2());
+                    out.push(serde_json::json!({"text": text.galley.text(), "rect": [rect.min.x, rect.min.y, rect.max.x, rect.max.y]}));
+                }
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut controls = Vec::new();
+    for shape in shapes {
+        collect(&shape.shape, &mut controls);
+    }
+    if let Some(body) = window.document().and_then(|d| d.body()) {
+        let _ = body.set_attribute(
+            "data-quench3d-camera-controls",
+            &serde_json::to_string(&controls).unwrap_or_default(),
+        );
+    }
 }
 
 /// 仅当 URL 带 `ui_debug=1` 时，把编辑器关键状态挂到 `<body data-quench3d-ui>` 上。

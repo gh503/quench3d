@@ -1592,13 +1592,15 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 #[cfg(target_arch = "wasm32")]
 use egui::{ColorImage, TextureHandle, TextureOptions};
 #[cfg(target_arch = "wasm32")]
+use js_sys::{Function, Reflect};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 #[cfg(target_arch = "wasm32")]
 use web_sys::{
     CanvasRenderingContext2d, HtmlCanvasElement, HtmlMediaElement, HtmlVideoElement, MediaStream,
-    MediaStreamConstraints,
+    MediaStreamConstraints, MediaStreamTrack,
 };
 
 /// 把归一化姿态点映射到预览图矩形（越界夹到图像内）。
@@ -2031,10 +2033,13 @@ pub fn rebuild_web_depth_surface(voxel: f32) -> Result<usize, String> {
 #[derive(Default)]
 struct WebCameraState {
     video: Option<HtmlVideoElement>,
+    stream: Option<MediaStream>,
     canvas: Option<HtmlCanvasElement>,
     context: Option<CanvasRenderingContext2d>,
     error: Option<String>,
     starting: bool,
+    /// Invalidates an in-flight permission request when the user stops it.
+    start_generation: u64,
     /// 最近一帧的 RGBA（给 3D 背景用，和 egui 预览纹理分开存）。
     rgba: Vec<u8>,
     width: u32,
@@ -2080,7 +2085,12 @@ impl CameraFeed {
     pub fn new() -> Self {
         let autostart = web_sys::window()
             .and_then(|w| w.location().search().ok())
-            .is_some_and(|search| search.split('&').any(|part| part == "camera=1"));
+            .is_some_and(|search| {
+                search
+                    .trim_start_matches('?')
+                    .split('&')
+                    .any(|part| part == "camera=1")
+            });
         Self {
             state: Rc::new(RefCell::new(WebCameraState::default())),
             texture: None,
@@ -2094,15 +2104,12 @@ impl CameraFeed {
         }
     }
 
-    /// 顶部工具栏入口：打开预览窗口（真正申请权限在窗口里的按钮）。
-    pub fn toolbar(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .button("摄像头")
-            .on_hover_text("浏览器摄像头预览（getUserMedia；外部 JS 可注入 2D 骨架）")
-            .clicked()
-        {
-            self.show = true;
-        }
+    /// 顶部工具栏入口：打开预览窗口；真正申请权限在窗口里的按钮。
+    ///
+    /// The shared desktop menu already owns the visible command button. Keeping
+    /// this method side-effect-only avoids nesting a second button in that menu.
+    pub fn toolbar(&mut self, _ui: &mut egui::Ui) {
+        self.show = true;
     }
 
     /// 无 3D 骨架可叠；Web 端只画预览图上的外部注入 2D 骨架。
@@ -2135,26 +2142,58 @@ impl CameraFeed {
     }
 
     fn start(&mut self, ctx: &egui::Context) {
-        if self.state.borrow().starting {
+        let mut current = self.state.borrow_mut();
+        if current.starting || current.video.is_some() {
             return;
         }
-        self.state.borrow_mut().starting = true;
-        self.state.borrow_mut().error = None;
+        current.starting = true;
+        current.error = None;
+        current.start_generation = current.start_generation.wrapping_add(1);
+        let generation = current.start_generation;
+        drop(current);
         let state = Rc::clone(&self.state);
         let ctx = ctx.clone();
         spawn_local(async move {
             let result = open_camera().await;
             let mut state = state.borrow_mut();
-            state.starting = false;
+            let stale = state.start_generation != generation;
+            if !stale {
+                state.starting = false;
+            }
             match result {
-                Ok(video) => state.video = Some(video),
-                Err(e) => {
+                Ok((video, stream)) if !stale => {
+                    state.stream = Some(stream);
+                    state.video = Some(video);
+                }
+                Ok((_video, stream)) => stop_stream(&stream),
+                Err(e) if !stale => {
                     web_sys::console::error_1(&format!("quench3d camera: {e}").into());
                     state.error = Some(e);
                 }
+                Err(_) => {}
             }
             ctx.request_repaint();
         });
+    }
+
+    fn stop(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.start_generation = state.start_generation.wrapping_add(1);
+        state.starting = false;
+        if let Some(stream) = state.stream.take() {
+            stop_stream(&stream);
+        }
+        state.video = None;
+        state.canvas = None;
+        state.context = None;
+        state.rgba.clear();
+        state.width = 0;
+        state.height = 0;
+        state.frame = state.frame.wrapping_add(1);
+        self.texture = None;
+        self.background_frame = u64::MAX;
+        clear_web_depth();
+        clear_web_pose();
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -2304,7 +2343,11 @@ impl CameraFeed {
                     });
                 }
                 if has_video {
-                    self.poll(ctx);
+                    if ui.button("停止摄像头").clicked() {
+                        self.stop();
+                    } else {
+                        self.poll(ctx);
+                    }
                     if let Some(texture) = &self.texture {
                         let size = texture.size_vec2();
                         let scale = (400.0 / size.x).min(1.0);
@@ -2372,7 +2415,22 @@ impl CameraFeed {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn open_camera() -> Result<HtmlVideoElement, String> {
+fn stop_stream(stream: &MediaStream) {
+    let tracks = stream.get_tracks();
+    for track in tracks.iter() {
+        if let Ok(native_track) = track.clone().dyn_into::<MediaStreamTrack>() {
+            native_track.stop();
+        }
+        if let Ok(stop) = Reflect::get(&track, &JsValue::from_str("stop"))
+            .and_then(|value| value.dyn_into::<Function>())
+        {
+            let _ = stop.call0(&track);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn open_camera() -> Result<(HtmlVideoElement, MediaStream), String> {
     let window = web_sys::window().ok_or("没有 window")?;
     let devices = window
         .navigator()
@@ -2389,23 +2447,36 @@ async fn open_camera() -> Result<HtmlVideoElement, String> {
     let stream = stream
         .dyn_into::<MediaStream>()
         .map_err(|_| "getUserMedia 没有返回 MediaStream".to_string())?;
-    let document = window.document().ok_or("没有 document")?;
-    let video = document
-        .create_element("video")
-        .map_err(|e| format!("创建 video 失败：{e:?}"))?
-        .dyn_into::<HtmlVideoElement>()
-        .map_err(|_| "video 类型不对".to_string())?;
-    let media: &HtmlMediaElement = video.unchecked_ref();
-    media.set_autoplay(true);
-    media.set_muted(true);
-    media.set_src_object(Some(&stream));
-    let play = media
-        .play()
-        .map_err(|e| format!("启动 video 失败：{e:?}"))?;
-    JsFuture::from(play)
-        .await
-        .map_err(|e| format!("video.play 被拒：{e:?}"))?;
-    Ok(video)
+    let result = async {
+        let document = window.document().ok_or("没有 document")?;
+        let video = document
+            .create_element("video")
+            .map_err(|e| format!("创建 video 失败：{e:?}"))?
+            .dyn_into::<HtmlVideoElement>()
+            .map_err(|_| "video 类型不对".to_string())?;
+        video
+            .set_attribute("playsinline", "")
+            .map_err(|_| "无法设置视频内联播放")?;
+        let media: &HtmlMediaElement = video.unchecked_ref();
+        media.set_autoplay(true);
+        media.set_muted(true);
+        media.set_src_object(Some(&stream));
+        let play = media
+            .play()
+            .map_err(|e| format!("启动 video 失败：{e:?}"))?;
+        JsFuture::from(play)
+            .await
+            .map_err(|e| format!("video.play 被拒：{e:?}"))?;
+        Ok::<_, String>(video)
+    }
+    .await;
+    match result {
+        Ok(video) => Ok((video, stream)),
+        Err(error) => {
+            stop_stream(&stream);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
