@@ -1543,3 +1543,125 @@ fn camera_clipping_and_ortho_round_trip() {
     assert!((engine2.orbit.far - 2500.0).abs() < 1e-3);
     assert_eq!(engine2.orbit.orthographic_height, Some(13.5));
 }
+
+/// Exercise the real renderer materials as well as JSON: instance emission is a
+/// multiplier, whereas MaterialDoc.emissive is the material's absolute strength.
+fn emission_roundtrip_fixture(explicit_color: bool) {
+    let Some(mut engine) = headless_engine() else {
+        return;
+    };
+    let mut doc = Doc::new();
+    let mut source = serde_json::json!({
+        "gravity":[0,0,0],
+        "materials": {
+            "earth":{"color":[0.08,0.25,0.85],"emissive":0},
+            "sun":{"color":[1,0.65,0.1],"emissive":2}
+        },
+        "objects":[
+            {"name":"地球","body":"static","shape":{"type":"sphere","radius":0.3},"material":"earth"},
+            {"name":"太阳","body":"static","position":[3,0,0],"shape":{"type":"sphere","radius":0.7},"material":"sun"}
+        ]
+    });
+    if explicit_color {
+        source["materials"]["sun"]["emissive_color"] = serde_json::json!([1, 0.2, 0.05]);
+    }
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &source.to_string()).unwrap();
+    engine
+        .scene
+        .objects
+        .iter_mut()
+        .find(|o| o.name == "太阳")
+        .unwrap()
+        .emissive_strength = 0.4;
+
+    let appearance = |engine: &Engine, name: &str| {
+        let object = engine
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.name == name)
+            .unwrap();
+        let material = engine.renderer.material(object.material).unwrap();
+        (
+            material.base_color * object.color,
+            material.emissive * material.emissive_strength * object.emissive_strength,
+        )
+    };
+    let earth_before = appearance(&engine, "地球");
+    let sun_before = appearance(&engine, "太阳");
+    assert_eq!(earth_before.1, Vec3::ZERO);
+    let expected_color = if explicit_color {
+        Vec3::new(
+            1.0,
+            quench3d::render::color::srgb_to_linear(0.2),
+            quench3d::render::color::srgb_to_linear(0.05),
+        )
+    } else {
+        // Legacy emission without emissive_color uses the original RGB values
+        // directly, unlike explicitly authored sRGB emission colors.
+        Vec3::new(1.0, 0.65, 0.1)
+    };
+    assert!((sun_before.1 - expected_color * 0.8).abs().max_element() < 1e-6);
+
+    for cycle in 1..=3 {
+        let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+        let parsed = SceneDoc::from_json(&saved.json).unwrap();
+        let material_for = |name: &str| {
+            let object = parsed
+                .objects
+                .iter()
+                .find(|o| o.name.as_deref() == Some(name))
+                .unwrap();
+            parsed
+                .materials
+                .get(object.material.as_ref().unwrap())
+                .unwrap()
+        };
+        let earth = material_for("地球");
+        assert_eq!(
+            earth.emissive, 0.0,
+            "ordinary blue Earth gained emission in cycle {cycle}"
+        );
+        assert!(
+            earth.emissive_color.is_none(),
+            "ordinary material gained an emission color"
+        );
+        let sun = material_for("太阳");
+        assert!(
+            (sun.emissive - 0.8).abs() < 1e-6,
+            "emission strength drifted in cycle {cycle}"
+        );
+        assert!(
+            sun.emissive_color.is_some(),
+            "save the actual emission color, independently of gold base color"
+        );
+        scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+        for (name, expected) in [("地球", earth_before), ("太阳", sun_before)] {
+            let actual = appearance(&engine, name);
+            assert!(
+                actual
+                    .0
+                    .to_array()
+                    .iter()
+                    .zip(expected.0.to_array())
+                    .all(|(a, b)| (a - b).abs() < 2e-6),
+                "{name} base RGB changed in cycle {cycle}"
+            );
+            assert!(
+                (actual.1 - expected.1).abs().max_element() < 2e-6,
+                "{name} effective emission changed in cycle {cycle}"
+            );
+        }
+        assert_eq!(appearance(&engine, "地球").1, Vec3::ZERO);
+    }
+}
+
+#[test]
+fn explicit_emission_and_instance_strength_survive_three_save_reload_cycles() {
+    emission_roundtrip_fixture(true);
+}
+
+#[test]
+fn legacy_emission_color_and_non_emissive_planet_survive_three_save_reload_cycles() {
+    emission_roundtrip_fixture(false);
+}

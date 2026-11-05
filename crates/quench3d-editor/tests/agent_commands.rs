@@ -1713,3 +1713,163 @@ fn viewport_display_rejects_invalid_missing_stale_and_running_requests_without_m
         history
     );
 }
+
+fn rendered_planet_color(engine: &Engine, name: &str) -> Vec4 {
+    let object = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == name)
+        .unwrap();
+    let base = engine
+        .renderer
+        .material(object.material)
+        .unwrap()
+        .base_color;
+    Vec4::new(
+        base.x * object.color.x,
+        base.y * object.color.y,
+        base.z * object.color.z,
+        base.w * object.color.w,
+    )
+}
+
+fn assert_rendered_planet_color(engine: &Engine, name: &str, expected: Vec4) {
+    let actual = rendered_planet_color(engine, name);
+    for channel in 0..4 {
+        assert!((actual.to_array()[channel] - expected.to_array()[channel]).abs() < 2e-5,
+            "{name} rendered material × object tint changed: actual={actual:?}, expected={expected:?}");
+    }
+}
+
+#[test]
+fn planet_rendered_colors_survive_repeated_save_load_and_recolor_in_same_engine() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{"gravity":[0,0,0],"objects":[]}"#)
+        .unwrap();
+    let names = ["太阳", "地球", "月球"];
+    let initial = [
+        Vec4::new(1.0, 0.6, 0.05, 1.0),
+        Vec4::new(0.04, 0.25, 0.8, 1.0),
+        Vec4::new(0.4, 0.45, 0.5, 1.0),
+    ];
+    for (index, name) in names.iter().enumerate() {
+        let rev = revision(&mut engine, &mut doc);
+        let spawned = call(
+            &mut engine,
+            &mut doc,
+            "spawn_primitive",
+            json!({
+                "name":name,"shape":{"type":"sphere","radius":0.3},
+                "position":[index as f32 * 2.0,3.0,0.0],"expected_revision":rev
+            }),
+        );
+        call(
+            &mut engine,
+            &mut doc,
+            "set_color",
+            json!({
+                "name":name,"color":initial[index].to_array(),"expected_revision":spawned["revision"]
+            }),
+        );
+    }
+    let mut expected = initial;
+    for round in 0..3 {
+        for (index, name) in names.iter().enumerate() {
+            assert_rendered_planet_color(&engine, name, expected[index]);
+        }
+        let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+        scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+        for (index, name) in names.iter().enumerate() {
+            // Saved materials contain baked color. Loaded instance tint may be
+            // white; it is not the final rendered color used by this assertion.
+            assert_rendered_planet_color(&engine, name, expected[index]);
+        }
+        if round < 2 {
+            expected = if round == 0 {
+                [
+                    Vec4::new(0.8, 0.3, 0.02, 1.0),
+                    Vec4::new(0.02, 0.6, 0.3, 1.0),
+                    Vec4::new(0.6, 0.3, 0.15, 1.0),
+                ]
+            } else {
+                [
+                    Vec4::new(0.9, 0.7, 0.1, 1.0),
+                    Vec4::new(0.15, 0.3, 0.9, 1.0),
+                    Vec4::new(0.25, 0.35, 0.45, 1.0),
+                ]
+            };
+            for (index, name) in names.iter().enumerate() {
+                let rev = revision(&mut engine, &mut doc);
+                call(
+                    &mut engine,
+                    &mut doc,
+                    "set_color",
+                    json!({
+                        "name":name,"color":expected[index].to_array(),"expected_revision":rev
+                    }),
+                );
+                assert_rendered_planet_color(&engine, name, expected[index]);
+            }
+        }
+    }
+}
+
+#[test]
+fn loading_other_document_with_same_material_name_uses_its_own_planet_color() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    // Generated mat0 names recur across saved documents. They must not reuse
+    // another document's descriptor even when loaded through the same engine.
+    for color in [[1, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0]] {
+        let text = json!({"gravity":[0,0,0],"materials":{"mat0":{"color":color}},
+            "objects":[{"name":"地球","body":"static","material":"mat0",
+                "position":[0,3,0],"shape":{"type":"sphere","radius":0.3}}]})
+        .to_string();
+        scene_io::load_text_into_doc(&mut engine, &mut doc, &text).unwrap();
+        let expected = Vec4::new(color[0] as f32, color[1] as f32, color[2] as f32, 1.0);
+        assert_rendered_planet_color(&engine, "地球", expected);
+        let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+        let value: Value = serde_json::from_str(&saved.json).unwrap();
+        assert!(
+            value["materials"]["mat0"].is_object(),
+            "exercise generated mat0 names"
+        );
+        scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+        assert_rendered_planet_color(&engine, "地球", expected);
+    }
+}
+
+#[test]
+fn inspect_loaded_planet_color_matches_effective_material_color_instead_of_white_tint() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    scene_io::load_text_into_doc(
+        &mut engine,
+        &mut doc,
+        r#"{
+        "gravity":[0,0,0],"materials":{"mat0":{"color":[0,0,1]}},
+        "objects":[{"name":"地球","body":"static","material":"mat0",
+            "shape":{"type":"sphere","radius":0.3}}]
+    }"#,
+    )
+    .unwrap();
+    let expected = Vec4::new(0.0, 0.0, 1.0, 1.0);
+    assert_rendered_planet_color(&engine, "地球", expected);
+    let inspected = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    let earth = inspected["result"]["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["name"] == "地球")
+        .unwrap();
+    let channels = earth["color"].as_array().unwrap();
+    for (index, expected) in expected.to_array().iter().enumerate() {
+        assert!((channels[index].as_f64().unwrap() - f64::from(*expected)).abs() < 2e-5,
+            "inspect_scene must expose effective rendered planet color, not the loaded white instance tint: {earth}");
+    }
+}

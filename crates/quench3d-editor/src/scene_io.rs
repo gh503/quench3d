@@ -557,7 +557,23 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
         material.roughness = object
             .roughness
             .unwrap_or_else(|| source.map(|m| m.roughness).unwrap_or(0.5));
-        material.emissive = object.emissive_strength;
+        // Instance strength multiplies material emission; a multiplier of one
+        // must never turn a non-emissive material into an emitting surface.
+        material.emissive =
+            source.map(|m| m.emissive_strength).unwrap_or(1.0) * object.emissive_strength;
+        material.emissive_color = source.and_then(|m| {
+            let color = m.emissive;
+            (color.max_element() > 0.0).then(|| {
+                [
+                    quench3d::render::color::linear_to_srgb(color.x),
+                    quench3d::render::color::linear_to_srgb(color.y),
+                    quench3d::render::color::linear_to_srgb(color.z),
+                ]
+            })
+        });
+        if material.emissive_color.is_none() {
+            material.emissive = 0.0;
+        }
         material.alpha = if linear.w < 1.0 {
             Some(linear.w.clamp(0.0, 1.0))
         } else {
