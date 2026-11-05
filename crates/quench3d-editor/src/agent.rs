@@ -6,7 +6,6 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-const MAX_ROUNDS: usize = 32;
 const MAX_CALLS: usize = 16;
 const SYSTEM: &str = "You operate the live Quench3D editor through the provided tools. Explain a short plan, then execute it. Before editing, call set_playback with paused:true, then inspect_scene. Reference exact unique names from inspect_scene. All tools except inspect_scene and set_playback require expected_revision from the most recent inspection or tool receipt; never guess revisions. If stale_revision occurs inspect again and reconsider. Use real tools to complete the goal, report errors honestly, and do not claim an edit without a successful tool receipt. Keep requests small. Never request secrets or credentials through scene tools.";
 
@@ -229,6 +228,7 @@ impl AgentPanel {
         json!({"status":self.session.status,"messages":self.session.messages,
             "trace":self.session.trace,"error":self.session.error,
             "rounds":self.session.rounds,"generation":self.session.generation,
+            "context_compressed":self.session.context_compressed,"context_bytes":self.session.context_bytes,
             "conversation_id":self.history.active_id,"conversation_count":self.history.conversations.len()})
     }
 
@@ -298,9 +298,18 @@ impl AgentPanel {
             ui.label(format!("当前模型：{}", selected.model));
         }
         ui.label(format!(
-            "状态：{} · 请求轮数 {}/{}",
-            self.session.status, self.session.rounds, MAX_ROUNDS
+            "状态：{} · 已请求 {} 次",
+            self.session.status, self.session.rounds
         ));
+        if self.session.context_compressed {
+            if let Some((before, after)) = self.session.context_bytes {
+                ui.small(format!(
+                    "上下文已自动压缩：{} → {} KiB，完整历史保留",
+                    before / 1024,
+                    after / 1024
+                ));
+            }
+        }
         let transcript_height = (ui.available_height() - 130.0).max(100.0);
         egui::ScrollArea::vertical()
             .id_salt("agent-transcript")
@@ -447,14 +456,7 @@ impl AgentPanel {
             if self.workers.len() >= 2 {
                 return;
             }
-            if self.session.rounds >= MAX_ROUNDS {
-                self.session.fail(
-                    "Agent reached the 32-request limit; inspect the scene before continuing."
-                        .into(),
-                );
-                return;
-            }
-            self.session.rounds += 1;
+            self.session.rounds = self.session.rounds.saturating_add(1);
             self.session.inflight = true;
             self.launch();
         }
@@ -585,6 +587,13 @@ impl AgentPanel {
         true
     }
 
+    fn request_context(&mut self) -> crate::agent_context::Context {
+        let context = crate::agent_context::compact(&self.session.messages);
+        self.session.context_bytes = Some((context.original_bytes, context.sent_bytes));
+        self.session.context_compressed = context.compressed;
+        context
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn launch(&mut self) {
         use quench3d_cli::llm::{LlmClient, Message};
@@ -604,8 +613,8 @@ impl AgentPanel {
             timeout_secs: selected.timeout_secs,
         };
         let key = config.api_key.clone();
-        let messages: Vec<_> = self
-            .session
+        let context = self.request_context();
+        let messages: Vec<_> = context
             .messages
             .iter()
             .map(|raw| {
@@ -660,8 +669,9 @@ impl AgentPanel {
                 return;
             }
         };
+        let context = self.request_context();
         let body =
-            browser_request(&self.session.messages, crate::commands::tools(), &config).to_string();
+            browser_request(&context.messages, crate::commands::tools(), &config).to_string();
         wasm_bindgen_futures::spawn_local(async move {
             let result: Result<Value, String> = async {
                 let init = web_sys::RequestInit::new();
@@ -832,6 +842,8 @@ struct Session {
     error: Option<String>,
     rounds: usize,
     inflight: bool,
+    context_compressed: bool,
+    context_bytes: Option<(usize, usize)>,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -844,6 +856,8 @@ impl Default for Session {
             error: None,
             rounds: 0,
             inflight: false,
+            context_compressed: false,
+            context_bytes: None,
         }
     }
 }

@@ -279,6 +279,39 @@ async function main() {
   assert.equal(finalReport.cancel_requests, 1);
   evidence.stages.push({ stage: 'new-and-switch-conversations-ui', newChat, switched: switched.agent });
 
+  // Continue the restored conversation past the former 32-request ceiling.
+  // Large assistant progress text forces request compaction while the persisted
+  // transcript must retain every assistant/tool receipt pair.
+  assert.equal((await request({ action: 'start', prompt: 'fixture-long: 完成40次检查，保持当前目标和最新工具回执。' })).ok, true);
+  const longDone = await until(async () => {
+    const current = await status();
+    if (current.agent.status === 'error') throw new Error(JSON.stringify(current));
+    return current.agent.status === 'done' && current.agent.messages.some(message =>
+      message.role === 'assistant' && String(message.content).includes('fixture-long-done')) && current;
+  }, '40-tool long-context conversation completion', 120000);
+  const longReport = await (await fetch(`${control}/fixture/status`)).json();
+  assert.deepEqual(longReport.errors, []);
+  assert.equal(longReport.long_completed, true);
+  assert.equal(longReport.long_requests.length, 41, '40 tools require 41 actual model requests');
+  assert.deepEqual(longReport.long_requests.map(item => item.round), Array.from({ length: 41 }, (_, i) => i));
+  assert.ok(longReport.long_requests.length > 32, 'long conversation must pass the former request ceiling');
+  assert.equal(longReport.seen_compaction, true, 'requests must contain additional summary system context');
+  const compressed = longReport.long_requests.filter(item => item.system_count > 1);
+  assert.ok(compressed.length > 0);
+  assert.ok(compressed.every(item => item.message_bytes < 48000), 'compressed message contexts stay below trigger budget');
+  assert.ok(longReport.long_requests.at(-1).request_bytes < 48000, 'final full request including tools is bounded');
+  const longHistory = await until(async () => {
+    const history = await evaluate(send, `JSON.parse(localStorage.getItem('quench3d.ai.history.v1'))`);
+    const active = history.conversations.find(c => c.id === history.active_id);
+    return active.messages.some(m => String(m.content).includes('fixture-long-done')) && history;
+  }, 'complete long conversation saved');
+  const longActive = longHistory.conversations.find(c => c.id === longHistory.active_id);
+  assert.ok(longActive.messages.length > 80, 'history keeps the full transcript rather than compact request context');
+  assert.equal(longActive.messages.filter(m => m.role === 'tool' && /^long_\d+$/.test(m.tool_call_id)).length, 40);
+  assert.deepEqual(longActive.messages, longDone.agent.messages);
+  evidence.stages.push({ stage: 'long-context-compaction', agent: longDone.agent,
+    http: longReport.long_requests, full_message_count: longActive.messages.length });
+
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(out, 'agent-final.png'), Buffer.from(screenshot.data, 'base64'));
   assert.deepEqual(evidence.errors, [], 'browser runtime exceptions');

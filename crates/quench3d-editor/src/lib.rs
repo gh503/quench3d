@@ -25,6 +25,7 @@
 pub mod agent;
 pub mod agent_bridge;
 pub mod agent_config;
+mod agent_context;
 mod agent_history;
 pub mod app;
 pub mod autosave;

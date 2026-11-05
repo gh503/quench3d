@@ -35,6 +35,9 @@ class ModelScript:
         self.completed = False
         self.cancel_requests = 0
         self.followup_requests = []
+        self.long_requests = []
+        self.long_completed = False
+        self.seen_compaction = False
         self.late_sent = threading.Event()
 
     def report(self):
@@ -43,7 +46,10 @@ class ModelScript:
                     'completed': self.completed, 'delayed': self.delayed.is_set(),
                     'cancel_requests': self.cancel_requests, 'late_sent': self.late_sent.is_set(),
                     'models_requests': self.models_requests.copy(),
-                    'followup_requests': self.followup_requests.copy()}
+                    'followup_requests': self.followup_requests.copy(),
+                    'long_requests': self.long_requests.copy(),
+                    'long_completed': self.long_completed,
+                    'seen_compaction': self.seen_compaction}
 
     @staticmethod
     def result(body, call_id):
@@ -74,6 +80,37 @@ class ModelScript:
     def reply(self, body):
         prompts = [m.get('content', '') for m in body['messages'] if m.get('role') == 'user']
         latest_prompt = str(prompts[-1]) if prompts else ''
+        if latest_prompt.startswith('fixture-long'):
+            # Infer progress from the latest surviving call, not total transcript
+            # length: older calls are intentionally removed from request context.
+            calls = [call for message in body['messages']
+                     if message.get('role') == 'assistant'
+                     for call in message.get('tool_calls', [])
+                     if str(call.get('id', '')).startswith('long_')]
+            index = int(calls[-1]['id'].removeprefix('long_')) + 1 if calls else 0
+            if not 0 <= index <= 40:
+                raise AssertionError('unexpected long fixture round')
+            if calls:
+                self.result(body, calls[-1]['id'])
+            if 'inspect_scene' not in {tool['function']['name'] for tool in body.get('tools', [])}:
+                raise AssertionError('long fixture needs inspect_scene tool')
+            systems = sum(message.get('role') == 'system' for message in body['messages'])
+            message_bytes = len(json.dumps(body['messages'], ensure_ascii=False,
+                                          separators=(',', ':')).encode())
+            request_bytes = len(json.dumps(body, ensure_ascii=False,
+                                          separators=(',', ':')).encode())
+            with self.lock:
+                self.long_requests.append({'round': index, 'message_count': len(body['messages']),
+                    'message_bytes': message_bytes, 'request_bytes': request_bytes,
+                    'system_count': systems})
+                self.seen_compaction |= systems > 1
+                if index == 40:
+                    self.long_completed = True
+            if index == 40:
+                return self.response({'content': 'fixture-long-done: 40 次检查已完成，长上下文和工具回执保持一致。'})
+            return self.response({'content': f'progress {index}: ' + 'x' * 2000,
+                'tool_calls': [{'id': f'long_{index}', 'type': 'function',
+                    'function': {'name': 'inspect_scene', 'arguments': '{}'}}]})
         if 'fixture-followup' in latest_prompt:
             if not any('fixture-main' in str(p) for p in prompts[:-1]):
                 raise AssertionError('followup lost the original user prompt')
@@ -280,6 +317,36 @@ class FixtureTests(unittest.TestCase):
         body['messages'] = [m for m in body['messages'] if m.get('content') != 'fixture-main']
         with self.assertRaisesRegex(AssertionError, 'original user'):
             script.reply(body)
+
+    def test_long_script_progress_survives_compressed_context(self):
+        script = ModelScript()
+        body = {'messages': [{'role': 'system', 'content': 'rules'},
+                             {'role': 'user', 'content': 'fixture-long'}],
+                'tools': [{'function': {'name': 'inspect_scene'}}]}
+        for index in range(40):
+            message = script.reply(body)['choices'][0]['message']
+            call = message['tool_calls'][0]
+            self.assertEqual(call['id'], f'long_{index}')
+            self.assertEqual(call['function']['name'], 'inspect_scene')
+            self.assertGreaterEqual(len(message['content']), 2000)
+            receipt = {'role': 'tool', 'tool_call_id': call['id'],
+                       'content': json.dumps({'ok': True, 'revision': f'actual-long-{index}'})}
+            # Simulate a bounded sender preserving only the latest call/receipt.
+            body['messages'] = [body['messages'][0],
+                {'role': 'system', 'content': 'synthetic automatic historical summary'},
+                {'role': 'user', 'content': 'fixture-long'}, message, receipt]
+        done = script.reply(body)['choices'][0]['message']
+        self.assertIn('fixture-long-done', done['content'])
+        report = script.report()
+        self.assertEqual(len(report['long_requests']), 41)
+        self.assertEqual([r['round'] for r in report['long_requests']], list(range(41)))
+        self.assertTrue(report['long_completed'])
+        self.assertTrue(report['seen_compaction'])
+        self.assertLess(report['long_requests'][-1]['request_bytes'], 48000)
+        # A previous long marker cannot hijack the next user turn.
+        body['messages'].append({'role': 'user', 'content': 'fixture-cancel:{"revision":"actual-last"}'})
+        script.release.set()
+        self.assertEqual(script.reply(body)['choices'][0]['message']['tool_calls'][0]['id'], 'fixture_late')
 
     def test_failed_or_duplicate_tool_results_stop_script(self):
         body = {'messages': [{'role': 'tool', 'tool_call_id': 'fixture_0',
