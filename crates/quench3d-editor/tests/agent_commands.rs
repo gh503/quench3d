@@ -1058,3 +1058,326 @@ fn object_label_metadata_is_removed_on_delete_clear_and_default_scene_rebuild() 
         );
     }
 }
+
+fn relative_orbit_position(engine: &Engine, name: &str) -> Vec3 {
+    let index = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == name)
+        .unwrap();
+    let position = engine.scene.world_transform(index).position;
+    let body = engine
+        .world
+        .body(engine.scene.objects[index].body.unwrap())
+        .unwrap();
+    assert!(
+        (body.position() - position).length() < 1e-4,
+        "{name} visual/body mismatch"
+    );
+    position
+}
+
+fn relative_orbit_fixture() -> Option<(Engine, Doc, Value)> {
+    let (mut engine, mut doc) = fixture()?;
+    let mut rev = revision(&mut engine, &mut doc);
+    for (name, radius, position) in [
+        ("太阳", 0.4, [0.0, 5.0, 0.0]),
+        ("地球", 0.2, [5.0, 5.0, 0.0]),
+        ("月球", 0.1, [6.0, 5.0, 0.0]),
+    ] {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "spawn_primitive",
+            json!({
+                "name":name,"shape":{"type":"sphere","radius":radius},
+                "position":position,"expected_revision":rev
+            }),
+        )["revision"]
+            .clone();
+    }
+    rev = call(
+        &mut engine,
+        &mut doc,
+        "set_body_mode",
+        json!({
+            "name":"太阳","mode":"static","expected_revision":rev
+        }),
+    )["revision"]
+        .clone();
+    rev = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"地球","center":[0,5,0],"radius":5,"period_secs":4,
+            "expected_revision":rev
+        }),
+    )["revision"]
+        .clone();
+    rev = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"月球","center_name":"地球","radius":1,"period_secs":1,
+            "expected_revision":rev
+        }),
+    )["revision"]
+        .clone();
+    rev = call(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"月球","visible":true,"expected_revision":rev
+        }),
+    )["revision"]
+        .clone();
+    Some((engine, doc, rev))
+}
+
+#[test]
+fn relative_orbit_follows_moving_center_for_multiple_revolutions_and_reload() {
+    let Some((mut engine, mut doc, mut rev)) = relative_orbit_fixture() else {
+        return;
+    };
+    let center = Vec3::new(0.0, 5.0, 0.0);
+    let initial_relative =
+        relative_orbit_position(&engine, "月球") - relative_orbit_position(&engine, "地球");
+    assert!((initial_relative.length() - 1.0).abs() < 0.002);
+    let dt = engine.world.fixed_dt();
+    let steps = (9.0 / dt).ceil() as usize; // More than two four-second Earth orbits.
+    let quarter_moon = (0.25 / dt).round() as usize;
+    for step in 1..=steps {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "step",
+            json!({"expected_revision":rev}),
+        )["revision"]
+            .clone();
+        let earth = relative_orbit_position(&engine, "地球");
+        let moon = relative_orbit_position(&engine, "月球");
+        let relative = moon - earth;
+        assert!(
+            (relative.length() - 1.0).abs() < 0.002,
+            "relative radius at step {step}: {relative:?}"
+        );
+        assert!(
+            ((earth - center).length() - 5.0).abs() < 0.002,
+            "Earth radius at step {step}: {earth:?}"
+        );
+        assert!((earth.y - 5.0).abs() < 1e-4);
+        assert!((relative.y).abs() < 1e-4);
+        assert!(doc.label_visible("月球"));
+        if step == quarter_moon {
+            assert!(
+                (relative - initial_relative).length() > 1.0,
+                "Moon must move relative to Earth"
+            );
+            assert!(
+                (relative - Vec3::Z).length() < 0.03,
+                "quarter relative orbit: {relative:?}"
+            );
+            assert!(
+                (earth - (center + Vec3::X * 5.0)).length() > 0.5,
+                "center must move too"
+            );
+        }
+    }
+    assert_eq!(relative_orbit_position(&engine, "太阳"), center);
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let value: Value = serde_json::from_str(&saved.json).unwrap();
+    let animation = value["animations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["target"] == "月球")
+        .unwrap();
+    assert_eq!(
+        animation["position_relative_to"], "地球",
+        "persist the center reference, not a frozen position"
+    );
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    assert!(doc.label_visible("月球"));
+    rev = revision(&mut engine, &mut doc);
+    let before = relative_orbit_position(&engine, "地球");
+    for _ in 0..30 {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "step",
+            json!({"expected_revision":rev}),
+        )["revision"]
+            .clone();
+        let earth = relative_orbit_position(&engine, "地球");
+        let moon = relative_orbit_position(&engine, "月球");
+        assert!(((moon - earth).length() - 1.0).abs() < 0.002);
+        assert!(((earth - center).length() - 5.0).abs() < 0.002);
+    }
+    assert!((relative_orbit_position(&engine, "地球") - before).length() > 0.5);
+}
+
+#[test]
+fn relative_orbit_validates_center_graph_before_mutation_and_protects_dependencies() {
+    let Some((mut engine, mut doc, rev)) = relative_orbit_fixture() else {
+        return;
+    };
+    let before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let history = doc.history.len();
+    for args in [
+        json!({"name":"月球","center_name":"月球","radius":1,"period_secs":1,"expected_revision":rev}),
+        json!({"name":"地球","center_name":"月球","radius":5,"period_secs":4,"expected_revision":rev}),
+        json!({"name":"月球","center_name":"不存在","radius":1,"period_secs":1,"expected_revision":rev}),
+        json!({"name":"月球","center_name":"地球","center":[0,5,0],"radius":1,"period_secs":1,"expected_revision":rev}),
+        json!({"name":"月球","radius":1,"period_secs":1,"expected_revision":rev}),
+        json!({"name":"月球","center_name":3,"radius":1,"period_secs":1,"expected_revision":rev}),
+    ] {
+        let rejected = commands::dispatch(&mut engine, &mut doc, "set_orbit", args);
+        assert_eq!(rejected["ok"], false, "{rejected}");
+        assert!(
+            rejected["error"]["code"]
+                .as_str()
+                .is_some_and(|c| !c.is_empty()),
+            "explicit error: {rejected}"
+        );
+        assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+        assert_eq!(doc.history.len(), history);
+    }
+    let duplicate = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == "target")
+        .unwrap();
+    engine.scene.objects[duplicate].name = "地球".into();
+    let duplicate_rev = revision(&mut engine, &mut doc);
+    let duplicate_before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let rejected = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"月球","center_name":"地球","radius":1,"period_secs":1,"expected_revision":duplicate_rev
+        }),
+    );
+    assert_eq!(
+        rejected["ok"], false,
+        "duplicate center must fail: {rejected}"
+    );
+    assert_eq!(
+        scene_io::scene_to_json(&engine, &doc).unwrap().json,
+        duplicate_before
+    );
+    assert_eq!(doc.history.len(), history);
+    engine.scene.objects[duplicate].name = "target".into();
+    let rev = revision(&mut engine, &mut doc);
+    let rejected = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "delete_object",
+        json!({
+            "name":"地球","expected_revision":rev
+        }),
+    );
+    assert_eq!(
+        rejected["ok"], false,
+        "referenced center deletion must fail: {rejected}"
+    );
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("月球")
+                || m.to_lowercase().contains("depend")
+                || m.to_lowercase().contains("referenc")),
+        "explain dependency: {rejected}"
+    );
+    assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+    assert_eq!(doc.history.len(), history);
+    let cleared = call(
+        &mut engine,
+        &mut doc,
+        "clear_orbit",
+        json!({"name":"月球","expected_revision":rejected["revision"]}),
+    );
+    call(
+        &mut engine,
+        &mut doc,
+        "delete_object",
+        json!({"name":"地球","expected_revision":cleared["revision"]}),
+    );
+    assert!(!engine.scene.objects.iter().any(|o| o.name == "地球"));
+    assert!(engine.scene.objects.iter().any(|o| o.name == "月球"));
+}
+
+#[test]
+fn relative_orbit_undo_redo_restores_reference_and_kinematic_mode() {
+    let Some((mut engine, mut doc, rev)) = relative_orbit_fixture() else {
+        return;
+    };
+    let cleared = call(
+        &mut engine,
+        &mut doc,
+        "clear_orbit",
+        json!({"name":"月球","expected_revision":rev}),
+    );
+    let dynamic = call(
+        &mut engine,
+        &mut doc,
+        "set_body_mode",
+        json!({"name":"月球","mode":"dynamic","expected_revision":cleared["revision"]}),
+    );
+    let configured = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"月球","center_name":"地球","radius":1,"period_secs":1,"expected_revision":dynamic["revision"]
+        }),
+    );
+    let moon_mode = |engine: &Engine| {
+        let moon = engine
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.name == "月球")
+            .unwrap();
+        engine.world.body(moon.body.unwrap()).unwrap().body_type
+    };
+    assert_eq!(moon_mode(&engine), quench3d::physics::BodyType::Kinematic);
+    let undone = call(
+        &mut engine,
+        &mut doc,
+        "undo",
+        json!({"expected_revision":configured["revision"]}),
+    );
+    assert_eq!(moon_mode(&engine), quench3d::physics::BodyType::Dynamic);
+    let undone_json: Value =
+        serde_json::from_str(&scene_io::scene_to_json(&engine, &doc).unwrap().json).unwrap();
+    assert!(!undone_json["animations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["target"] == "月球"));
+    call(
+        &mut engine,
+        &mut doc,
+        "redo",
+        json!({"expected_revision":undone["revision"]}),
+    );
+    assert_eq!(moon_mode(&engine), quench3d::physics::BodyType::Kinematic);
+    let redone_json: Value =
+        serde_json::from_str(&scene_io::scene_to_json(&engine, &doc).unwrap().json).unwrap();
+    assert_eq!(
+        redone_json["animations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["target"] == "月球")
+            .unwrap()["position_relative_to"],
+        "地球"
+    );
+    assert!(doc.label_visible("月球"));
+}

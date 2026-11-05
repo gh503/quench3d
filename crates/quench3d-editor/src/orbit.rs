@@ -55,7 +55,42 @@ pub(crate) fn prepare(
         weight: Some(1.0),
         position: Some(TrackDoc { times, values }),
         rotation: None,
+        position_relative_to: None,
     })
+}
+
+/// Reject any cycle in the authored relative-position graph, including when
+/// multiple tracks for a target introduce more than one dependency.
+pub(crate) fn validate_dependencies(animations: &[AnimationDoc]) -> Result<(), String> {
+    fn visit<'a>(
+        name: &'a str,
+        animations: &'a [AnimationDoc],
+        visiting: &mut std::collections::HashSet<&'a str>,
+        done: &mut std::collections::HashSet<&'a str>,
+    ) -> Result<(), String> {
+        if done.contains(name) {
+            return Ok(());
+        }
+        if !visiting.insert(name) {
+            return Err(format!("Relative orbit cycle includes {name}"));
+        }
+        for center in animations
+            .iter()
+            .filter(|a| a.target == name)
+            .filter_map(|a| a.position_relative_to.as_deref())
+        {
+            visit(center, animations, visiting, done)?;
+        }
+        visiting.remove(name);
+        done.insert(name);
+        Ok(())
+    }
+    let mut visiting = std::collections::HashSet::new();
+    let mut done = std::collections::HashSet::new();
+    for animation in animations {
+        visit(&animation.target, animations, &mut visiting, &mut done)?;
+    }
+    Ok(())
 }
 
 /// Rebuild mass properties through BodyBuilder, preserving public material/filter data.

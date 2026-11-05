@@ -1228,6 +1228,7 @@ struct PreparedAnimation {
     handle: BodyHandle,
     /// 混合权重：0 = 完全不生效，1 = 完全生效（缺省）。
     weight: f32,
+    position_relative_to: Option<BodyHandle>,
 }
 /// 场景里的"行为与探针"：定时动作 + 只读区域探针。
 ///
@@ -1250,6 +1251,8 @@ pub struct Script {
     step: u32,
     /// 关键帧动画（目标已解析成句柄）。
     animations: Vec<PreparedAnimation>,
+    /// Exact pre-physics targets, including relative centers and ordered blending.
+    last_animation_targets: Vec<(BodyHandle, Transform)>,
     /// 已经过的时间（秒），动画采样用。
     time: f32,
     /// 每个外层步内部切几个物理子步。
@@ -1412,6 +1415,12 @@ impl Script {
             let handle = *handles
                 .get(&a.target)
                 .ok_or_else(|| RunError::scene(format!("动画目标 \"{}\" 不存在", a.target)))?;
+            let position_relative_to = a.position_relative_to.as_ref().map(|center| {
+                if center.trim().is_empty() || center == &a.target || a.position.is_none() {
+                    return Err(RunError::scene("position_relative_to requires a position track and a different nonempty body name"));
+                }
+                handles.get(center).copied().ok_or_else(|| RunError::scene(format!("动画中心 \"{center}\" 不存在")))
+            }).transpose()?;
             let position = match &a.position {
                 Some(tr) => Some(
                     quench3d::animation::Track::new(
@@ -1446,8 +1455,38 @@ impl Script {
                 anim,
                 handle,
                 weight: a.weight.unwrap_or(1.0),
+                position_relative_to,
             });
         }
+
+        // Resolve complete target groups in stable dependency order. All tracks
+        // for a body retain their authored blend order, even if declarations for
+        // that target are interleaved with another body's tracks.
+        let mut targets = Vec::new();
+        for animation in &animations {
+            if !targets.contains(&animation.handle) {
+                targets.push(animation.handle);
+            }
+        }
+        let mut ordered = Vec::with_capacity(animations.len());
+        let mut resolved = Vec::new();
+        while resolved.len() < targets.len() {
+            let next = targets
+                .iter()
+                .copied()
+                .find(|target| {
+                    !resolved.contains(target)
+                        && animations.iter().filter(|a| a.handle == *target).all(|a| {
+                            a.position_relative_to.is_none_or(|center| {
+                                !targets.contains(&center) || resolved.contains(&center)
+                            })
+                        })
+                })
+                .ok_or_else(|| RunError::scene("动画 position_relative_to 中心引用形成循环"))?;
+            ordered.extend(animations.iter().filter(|a| a.handle == next).cloned());
+            resolved.push(next);
+        }
+        let animations = ordered;
 
         Ok(Self {
             actions,
@@ -1455,12 +1494,20 @@ impl Script {
             sensors,
             names,
             animations,
+            last_animation_targets: Vec::new(),
             time: 0.0,
             step: 0,
             substeps: doc.physics.substeps.unwrap_or(1).max(1),
             joint_moves: Vec::new(),
             welds: BTreeMap::new(),
         })
+    }
+
+    /// Exact animation targets computed before the most recent physics step.
+    /// Includes same-step relative centers and all ordered blend weights. This
+    /// does not resample or blend against post-step state. Empty before step.
+    pub fn last_animation_targets(&self) -> &[(BodyHandle, Transform)] {
+        &self.last_animation_targets
     }
 
     /// 是否什么都没配（此时 [`Script::step`] 就是纯粹的物理步进）。
@@ -1646,6 +1693,7 @@ impl Script {
     /// 让接触/摩擦看到真实运动；不能先设目标姿态再积分一次，否则会越过目标。
     /// 静态和动态刚体保留直接覆盖姿态的既有行为，后续动作仍可覆盖本步动画。
     fn apply_animations(&mut self, world: &mut PhysicsWorld, dt: f32) {
+        self.last_animation_targets.clear();
         if self.animations.is_empty() {
             return;
         }
@@ -1671,6 +1719,21 @@ impl Script {
                     acc.len() - 1
                 }
             };
+            let pos = pos.map(|offset| {
+                if let Some(center) = pa.position_relative_to {
+                    // Centers already precede dependents in stable topological
+                    // order, so use their fully blended SAME STEP target pose.
+                    let center_position = acc
+                        .iter()
+                        .find(|e| e.0 == center)
+                        .map(|e| e.1)
+                        .or_else(|| world.body(center).map(|b| b.position()))
+                        .unwrap_or(Vec3::ZERO);
+                    center_position + offset
+                } else {
+                    offset
+                }
+            });
             let e = &mut acc[idx];
             if let Some(p) = pos {
                 e.1 = quench3d::animation::blend_position(e.1, p, pa.weight);
@@ -1681,6 +1744,10 @@ impl Script {
                 e.4 = true;
             }
         }
+        self.last_animation_targets
+            .extend(acc.iter().map(|(handle, position, rotation, _, _)| {
+                (*handle, Transform::new(*position, *rotation, Vec3::ONE))
+            }));
         for (handle, want_pos, want_rot, had_pos, had_rot) in acc {
             let Some(body) = world.body_mut(handle) else {
                 continue;
@@ -6567,6 +6634,80 @@ pub fn run_doctor() -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_relative_animation_centers_use_same_step_targets_in_reverse_order() {
+        let doc = SceneDoc::from_json(r#"{
+            "gravity":[0,0,0],
+            "objects":[
+                {"name":"sun","body":"static","position":[3,0,0],"shape":{"type":"sphere","radius":0.1}},
+                {"name":"earth","body":"kinematic","position":[5,0,0],"shape":{"type":"sphere","radius":0.1}},
+                {"name":"moon","body":"kinematic","position":[6,0,0],"shape":{"type":"sphere","radius":0.1}}],
+            "animations":[
+                {"target":"moon","position_relative_to":"earth","loop":true,"position":{"times":[0,1,2,3,4],"values":[[1,0,0],[0,0,1],[-1,0,0],[0,0,-1],[1,0,0]]}},
+                {"target":"earth","position_relative_to":"sun","loop":true,"position":{"times":[0,1,2,3,4],"values":[[2,0,0],[0,0,2],[-2,0,0],[0,0,-2],[2,0,0]]}}]
+        }"#).unwrap();
+        let mut build = build_world(&doc).unwrap();
+        let mut script = Script::new(&doc, &build.world, &build.handles).unwrap();
+        let earth = build.handles["earth"];
+        let moon = build.handles["moon"];
+        assert!(script.last_animation_targets().is_empty());
+        for step in 1..=40 {
+            script.step(&mut build.world, 0.25);
+            let time = step as f32 * 0.25;
+            let phase = time.rem_euclid(4.0);
+            let quadrant = phase.floor() as usize;
+            let fraction = phase.fract();
+            let corners = [Vec3::X, Vec3::Z, -Vec3::X, -Vec3::Z, Vec3::X];
+            let offset = corners[quadrant].lerp(corners[quadrant + 1], fraction);
+            let want_earth = Vec3::new(3.0, 0.0, 0.0) + offset * 2.0;
+            let want_moon = want_earth + offset;
+            let cached = script.last_animation_targets();
+            assert_eq!(cached[0].0, earth);
+            assert_eq!(cached[1].0, moon);
+            assert!((cached[0].1.position - want_earth).length() < 1e-5);
+            assert!((cached[1].1.position - want_moon).length() < 1e-5);
+            assert!((build.world.body(earth).unwrap().position() - want_earth).length() < 1e-4);
+            assert!((build.world.body(moon).unwrap().position() - want_moon).length() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn relative_animation_centers_reject_missing_self_and_cycles() {
+        let base = r#"{"objects":[{"name":"a","body":"kinematic","shape":{"type":"sphere"}},{"name":"b","body":"kinematic","shape":{"type":"sphere"}}]}"#;
+        for (center_a, center_b) in [("missing", None), ("a", None), ("b", Some("a"))] {
+            let mut doc = SceneDoc::from_json(base).unwrap();
+            let track = |target: &str, center: &str| {
+                serde_json::from_value(serde_json::json!({"target":target,"position_relative_to":center,"position":{"times":[0,1],"values":[[1,0,0],[0,0,1]]}})).unwrap()
+            };
+            doc.animations.push(track("a", center_a));
+            if let Some(center) = center_b {
+                doc.animations.push(track("b", center));
+            }
+            let build = build_world(&SceneDoc::from_json(base).unwrap()).unwrap();
+            assert!(Script::new(&doc, &build.world, &build.handles).is_err());
+        }
+    }
+
+    #[test]
+    fn relative_animation_keeps_authored_blend_order_per_target() {
+        let doc = SceneDoc::from_json(r#"{
+            "objects":[{"name":"a","body":"kinematic","shape":{"type":"sphere"}},{"name":"b","body":"kinematic","shape":{"type":"sphere"}}],
+            "animations":[
+                {"target":"a","position_relative_to":"b","position":{"times":[0],"values":[[1,0,0]]}},
+                {"target":"b","position":{"times":[0],"values":[[10,0,0]]}},
+                {"target":"a","weight":0.5,"position":{"times":[0],"values":[[1,0,0]]}}]
+        }"#).unwrap();
+        let mut build = build_world(&doc).unwrap();
+        let mut script = Script::new(&doc, &build.world, &build.handles).unwrap();
+        script.step(&mut build.world, 1.0 / 60.0);
+        let target = script
+            .last_animation_targets()
+            .iter()
+            .find(|(h, _)| *h == build.handles["a"])
+            .unwrap();
+        assert_eq!(target.1.position, Vec3::new(6.0, 0.0, 0.0));
+    }
 
     fn assert_script_circle_tracks_target(steps: usize, dt: f32, substeps: u32) {
         let doc = SceneDoc::from_json(&format!(

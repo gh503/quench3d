@@ -103,8 +103,13 @@ class ModelScript:
                     'shape': {'type': 'sphere', 'radius': 0.2}, 'position': [3, 5, 0]}),
                 ('set_orbit', {'name': '地球', 'center': [0, 5, 0],
                     'radius': 3, 'period_secs': 2, 'plane': 'xz', 'phase_deg': 0}),
+                ('spawn_primitive', {'name': '月球',
+                    'shape': {'type': 'sphere', 'radius': 0.1}, 'position': [4, 5, 0]}),
+                ('set_orbit', {'name': '月球', 'center_name': '地球',
+                    'radius': 1, 'period_secs': 0.5, 'plane': 'xz', 'phase_deg': 0}),
                 ('set_object_label', {'name': '太阳', 'visible': True}),
                 ('set_object_label', {'name': '地球', 'visible': True}),
+                ('set_object_label', {'name': '月球', 'visible': True}),
                 ('set_playback', {'paused': False})]
             if not 0 <= index <= len(steps):
                 raise AssertionError('unexpected orbit fixture round')
@@ -366,7 +371,8 @@ class FixtureTests(unittest.TestCase):
         body = {'messages': [{'role': 'user', 'content': 'fixture-orbit'}],
                 'tools': [{'function': {'name': name}} for name in names]}
         expected = ['set_playback', 'inspect_scene', 'spawn_primitive', 'set_body_mode',
-                    'spawn_primitive', 'set_orbit', 'set_object_label', 'set_object_label', 'set_playback']
+                    'spawn_primitive', 'set_orbit', 'spawn_primitive', 'set_orbit',
+                    'set_object_label', 'set_object_label', 'set_object_label', 'set_playback']
         for index, name in enumerate(expected):
             message = script.reply(body)['choices'][0]['message']
             call = message['tool_calls'][0]
@@ -378,15 +384,23 @@ class FixtureTests(unittest.TestCase):
             else:
                 self.assertEqual(args['expected_revision'], f'orbit-rev-{index - 1}')
             if name == 'spawn_primitive':
-                self.assertEqual(args['name'], '太阳' if index == 2 else '地球')
+                self.assertEqual(args['name'], {2: '太阳', 4: '地球', 6: '月球'}[index])
             if name == 'set_object_label':
-                self.assertEqual(args['name'], '太阳' if index == 6 else '地球')
+                self.assertEqual(args['name'], {8: '太阳', 9: '地球', 10: '月球'}[index])
                 self.assertIs(args['visible'], True)
             if name == 'set_orbit':
-                self.assertEqual(args['name'], '地球')
-                self.assertEqual(args['center'], [0, 5, 0])
-                self.assertEqual(args['radius'], 3)
-                self.assertEqual(args['period_secs'], 2)
+                if index == 5:
+                    self.assertEqual(args['name'], '地球')
+                    self.assertEqual(args['center'], [0, 5, 0])
+                    self.assertNotIn('center_name', args)
+                    self.assertEqual(args['radius'], 3)
+                    self.assertEqual(args['period_secs'], 2)
+                else:
+                    self.assertEqual(args['name'], '月球')
+                    self.assertEqual(args['center_name'], '地球')
+                    self.assertNotIn('center', args)
+                    self.assertEqual(args['radius'], 1)
+                    self.assertEqual(args['period_secs'], 0.5)
                 self.assertEqual(args['plane'], 'xz')
             body['messages'].extend([message, {'role': 'tool', 'tool_call_id': call['id'],
                 'content': json.dumps({'ok': True, 'revision': f'orbit-rev-{index}'})}])
@@ -399,7 +413,7 @@ class FixtureTests(unittest.TestCase):
         body['messages'].extend([stop, {'role': 'tool', 'tool_call_id': call['id'],
             'content': json.dumps({'ok': True, 'revision': 'orbit-stopped'})}])
         self.assertEqual(script.reply(body)['choices'][0]['message']['content'], 'fixture-orbit-stopped')
-        self.assertEqual(len(script.report()['orbit_requests']), 10)
+        self.assertEqual([item['round'] for item in script.report()['orbit_requests']], list(range(13)))
         self.assertEqual(len(script.report()['orbit_stop_requests']), 2)
 
     def test_long_script_progress_survives_compressed_context(self):

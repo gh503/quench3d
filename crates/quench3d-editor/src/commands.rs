@@ -51,9 +51,9 @@ pub fn tools() -> Value {
         ),
         (
             "set_orbit",
-            "Animate a standalone primitive in a stable circular kinematic orbit (not gravity). Resume playback to animate. Rejects conflicting non-orbit tracks.",
-            json!({"name":{"type":"string"},"center":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"radius":{"type":"number","minimum":0.001,"maximum":10000},"period_secs":{"type":"number","minimum":0.1,"maximum":86400},"phase_deg":{"type":"number","minimum":-360000,"maximum":360000},"plane":{"type":"string","enum":["xz","xy","yz"]}}),
-            vec!["name","center","radius","period_secs"],
+            "Animate a standalone primitive in a stable circular kinematic orbit (not gravity). Supply exactly one fixed center or center_name referencing a unique body's moving center. Resume playback to animate. Rejects cycles and conflicting non-orbit tracks.",
+            json!({"name":{"type":"string"},"center":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"center_name":{"type":"string"},"radius":{"type":"number","minimum":0.001,"maximum":10000},"period_secs":{"type":"number","minimum":0.1,"maximum":86400},"phase_deg":{"type":"number","minimum":-360000,"maximum":360000},"plane":{"type":"string","enum":["xz","xy","yz"]}}),
+            vec!["name","radius","period_secs"],
         ),
         (
             "clear_orbit",
@@ -121,7 +121,11 @@ pub fn tools() -> Value {
             properties["expected_revision"]=json!({"type":"string"});
             required.push(json!("expected_revision"));
         }
-        json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}})
+        let mut parameters = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+        if name == "set_orbit" {
+            parameters["oneOf"] = json!([{"required":["center"],"not":{"required":["center_name"]}},{"required":["center_name"],"not":{"required":["center"]}}]);
+        }
+        json!({"type":"function","function":{"name":name,"description":description,"parameters":parameters}})
     }).collect())
 }
 
@@ -301,7 +305,7 @@ fn inspect(engine: &Engine, doc: &Doc) -> Value {
         let t=engine.scene.world_transform(i);
         let body=o.body.and_then(|h|engine.world.body(h));
         let orbit=doc.base_doc().and_then(|d|d.animations.iter().find(|a|a.target==o.name && a.name.as_deref()==Some(crate::orbit::owned_name(&o.name).as_str())));
-        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"label_visible":doc.label_visible(&o.name),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
+        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"label_visible":doc.label_visible(&o.name),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"center_name":a.position_relative_to,"center":if a.position_relative_to.is_none(){a.position.as_ref().and_then(|p| p.values.first().zip(p.values.get(128))).map(|(a,b)| [(a[0]+b[0])*0.5,(a[1]+b[1])*0.5,(a[2]+b[2])*0.5])}else{None},"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
     }).collect();
     json!({"objects":objects,"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
 }
@@ -330,6 +334,7 @@ fn execute(
         "set_orbit" => &[
             "name",
             "center",
+            "center_name",
             "radius",
             "period_secs",
             "phase_deg",
@@ -498,6 +503,24 @@ fn execute(
         doc.status = format!("Agent: label {name} {visible}");
         return Ok(json!({"name":name,"label_visible":visible,"text":name}));
     }
+    if command == "delete_object" {
+        let dependents: Vec<_> = doc
+            .base_doc()
+            .into_iter()
+            .flat_map(|d| &d.animations)
+            .filter(|a| a.position_relative_to.as_deref() == Some(name) && a.target != name)
+            .map(|a| a.target.clone())
+            .collect();
+        if !dependents.is_empty() {
+            return Err((
+                "orbit_dependents",
+                format!(
+                    "Clear or reassign dependent orbits before deleting {name}: {}",
+                    dependents.join(", ")
+                ),
+            ));
+        }
+    }
     editable(engine, doc, index)?;
     if matches!(command, "set_orbit" | "clear_orbit" | "set_body_mode") {
         doc.editable_shape(engine, index)
@@ -540,7 +563,31 @@ fn execute(
                     .map(|n| n as f32)
                     .ok_or_else(|| invalid(format!("{key} must be a number")))
             };
-            let center = array::<3>(&args["center"], "center")?;
+            if args.get("center").is_some() == args.get("center_name").is_some() {
+                return Err(invalid("Supply exactly one of center or center_name"));
+            }
+            let center_name = args.get("center_name").map(object_name).transpose()?;
+            if let Some(center_name) = center_name {
+                if center_name == name {
+                    return Err(invalid("An orbit cannot reference itself"));
+                }
+                let center_index = resolve(engine, center_name)?;
+                if engine.scene.objects[center_index]
+                    .body
+                    .and_then(|h| engine.world.body(h))
+                    .is_none()
+                {
+                    return Err((
+                        "unsupported_target",
+                        "Orbit center must have a rigid body".into(),
+                    ));
+                }
+            }
+            let center = if center_name.is_some() {
+                [0.0; 3]
+            } else {
+                array::<3>(&args["center"], "center")?
+            };
             let phase = if args.get("phase_deg").is_some() {
                 numeric("phase_deg")?
             } else {
@@ -552,17 +599,24 @@ fn execute(
                     .as_str()
                     .ok_or_else(|| invalid("plane must be a string"))?,
             };
-            prepared = Some(
-                crate::orbit::prepare(
-                    name,
-                    center,
-                    numeric("radius")?,
-                    numeric("period_secs")?,
-                    phase,
-                    plane,
-                )
-                .map_err(|e| invalid(&e))?,
-            );
+            let mut animation = crate::orbit::prepare(
+                name,
+                center,
+                numeric("radius")?,
+                numeric("period_secs")?,
+                phase,
+                plane,
+            )
+            .map_err(|e| invalid(&e))?;
+            animation.position_relative_to = center_name.map(str::to_owned);
+            let mut proposed: Vec<_> = animations
+                .iter()
+                .filter(|a| a.target != name || a.name.as_deref() != Some(owned.as_str()))
+                .cloned()
+                .collect();
+            proposed.push(animation.clone());
+            crate::orbit::validate_dependencies(&proposed).map_err(invalid)?;
+            prepared = Some(animation);
             BodyType::Kinematic
         } else if command == "clear_orbit" {
             if !animations
@@ -599,7 +653,23 @@ fn execute(
         if let Some(animation) = prepared {
             let first = animation.position.as_ref().unwrap().values[0];
             let mut pose = replacement.transform();
-            pose.position = Vec3::from_array(first);
+            let center_position = animation
+                .position_relative_to
+                .as_deref()
+                .map(|center| {
+                    let center_index = resolve(engine, center).expect("validated center");
+                    engine
+                        .world
+                        .body(
+                            engine.scene.objects[center_index]
+                                .body
+                                .expect("validated center body"),
+                        )
+                        .expect("validated center body")
+                        .position()
+                })
+                .unwrap_or(Vec3::ZERO);
+            pose.position = Vec3::from_array(first) + center_position;
             replacement.set_transform(pose);
             let mut t = engine.scene.world_transform(index);
             t.position = pose.position;

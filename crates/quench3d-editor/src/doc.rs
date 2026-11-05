@@ -1342,29 +1342,66 @@ impl Doc {
         // Orbit edits define their own phase anchor, independent of an older
         // object baseline. Reset immediately previews that anchor while paused.
         if let Some(base) = &self.base_doc {
-            for animation in &base.animations {
-                if animation.name.as_deref()
-                    != Some(crate::orbit::owned_name(&animation.target).as_str())
-                {
-                    continue;
-                }
-                let Some(first) = animation.position.as_ref().and_then(|t| t.values.first()) else {
-                    continue;
-                };
-                let Some(object) = engine
-                    .scene
-                    .objects
-                    .iter()
-                    .find(|o| o.name == animation.target)
-                else {
-                    continue;
-                };
-                if let Some(body) = object.body.and_then(|h| engine.world.body_mut(h)) {
-                    let mut pose = body.transform();
-                    pose.position = Vec3::from_array(*first);
-                    body.set_transform(pose);
-                    body.set_linear_velocity(Vec3::ZERO);
-                    body.set_angular_velocity(Vec3::ZERO);
+            let mut pending: Vec<_> = base
+                .animations
+                .iter()
+                .filter(|a| a.name.as_deref() == Some(crate::orbit::owned_name(&a.target).as_str()))
+                .collect();
+            let mut resolved = std::collections::HashSet::new();
+            while !pending.is_empty() {
+                let mut progress = false;
+                pending.retain(|animation| {
+                    if let Some(center) = animation.position_relative_to.as_deref() {
+                        if base.animations.iter().any(|a| {
+                            a.target == center
+                                && a.name.as_deref()
+                                    == Some(crate::orbit::owned_name(&a.target).as_str())
+                        }) && !resolved.contains(center)
+                        {
+                            return true;
+                        }
+                    }
+                    let center = match animation.position_relative_to.as_deref() {
+                        None => Vec3::ZERO,
+                        Some(center) => {
+                            let Some(position) = engine
+                                .scene
+                                .objects
+                                .iter()
+                                .find(|o| o.name == center)
+                                .and_then(|o| o.body)
+                                .and_then(|h| engine.world.body(h))
+                                .map(|b| b.position())
+                            else {
+                                return false;
+                            };
+                            position
+                        }
+                    };
+                    if let Some(first) = animation.position.as_ref().and_then(|t| t.values.first())
+                    {
+                        if let Some(handle) = engine
+                            .scene
+                            .objects
+                            .iter()
+                            .find(|o| o.name == animation.target)
+                            .and_then(|o| o.body)
+                        {
+                            if let Some(body) = engine.world.body_mut(handle) {
+                                let mut pose = body.transform();
+                                pose.position = Vec3::from_array(*first) + center;
+                                body.set_transform(pose);
+                                body.set_linear_velocity(Vec3::ZERO);
+                                body.set_angular_velocity(Vec3::ZERO);
+                            }
+                        }
+                    }
+                    resolved.insert(animation.target.as_str());
+                    progress = true;
+                    false
+                });
+                if !progress {
+                    break;
                 }
             }
             engine.scene.sync_from_physics(&engine.world);
@@ -2012,6 +2049,30 @@ impl Doc {
             self.select_only(None);
             return;
         };
+        let selected_names: Vec<_> = indices
+            .iter()
+            .map(|&i| engine.scene.objects[i].name.as_str())
+            .collect();
+        let dependents: Vec<_> = self
+            .base_doc
+            .as_ref()
+            .into_iter()
+            .flat_map(|base| &base.animations)
+            .filter(|a| {
+                a.position_relative_to
+                    .as_deref()
+                    .is_some_and(|center| selected_names.contains(&center))
+                    && !selected_names.contains(&a.target.as_str())
+            })
+            .map(|a| a.target.as_str())
+            .collect();
+        if !dependents.is_empty() {
+            self.status = format!(
+                "无法删除轨道中心：请先清除或改设依赖轨道 {}",
+                dependents.join(", ")
+            );
+            return;
+        }
         let count = indices.len();
         let mut names = Vec::with_capacity(count);
         let mut children = 0usize;

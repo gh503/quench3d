@@ -17,8 +17,6 @@ pub(crate) struct Runtime {
     script: Option<Script>,
     prepared: bool,
     last_step: u64,
-    time: f32,
-    tracks: Vec<(BodyHandle, quench3d::animation::Animation, f32)>,
 }
 
 impl Runtime {
@@ -35,8 +33,10 @@ impl Runtime {
             .iter()
             .filter_map(|object| {
                 let handle = object.body?;
-                (animations.iter().any(|a| a.target == object.name)
-                    && engine.world.body(handle).is_some())
+                (animations.iter().any(|a| {
+                    a.target == object.name
+                        || a.position_relative_to.as_deref() == Some(object.name.as_str())
+                }) && engine.world.body(handle).is_some())
                 .then(|| (object.name.clone(), handle))
             })
             .collect();
@@ -62,8 +62,6 @@ impl Runtime {
         self.prepared = true;
         self.last_step = world.step_count;
         self.script = None;
-        self.tracks.clear();
-        self.time = 0.0;
         if animations.is_empty() {
             return None;
         }
@@ -72,43 +70,6 @@ impl Runtime {
         animation_doc.animations = self.animations.clone();
         match Script::new(&animation_doc, world, &self.handles) {
             Ok(script) => {
-                // Script has already validated these exact tracks.
-                for a in animations {
-                    let position = a.position.as_ref().map(|track| {
-                        quench3d::animation::Track::new(
-                            track.times.clone(),
-                            track
-                                .values
-                                .iter()
-                                .map(|v| Vec3::new(v[0], v[1], v[2]))
-                                .collect(),
-                        )
-                        .expect("validated position track")
-                    });
-                    let rotation = a.rotation.as_ref().map(|track| {
-                        quench3d::animation::RotationTrack::new(
-                            track.times.clone(),
-                            track
-                                .values
-                                .iter()
-                                .map(|v| Vec3::new(v[0], v[1], v[2]))
-                                .collect(),
-                        )
-                        .expect("validated rotation track")
-                    });
-                    let animation = quench3d::animation::Animation::new(
-                        a.name.clone(),
-                        a.target.clone(),
-                        a.start.unwrap_or(0.0),
-                        a.speed.unwrap_or(1.0),
-                        a.looping.unwrap_or(false),
-                        position,
-                        rotation,
-                    )
-                    .expect("validated animation");
-                    self.tracks
-                        .push((self.handles[&a.target], animation, a.weight.unwrap_or(1.0)));
-                }
                 self.script = Some(script);
                 None
             }
@@ -119,38 +80,10 @@ impl Runtime {
     /// Script owns the physics step too: calling world.step afterwards doubles time.
     pub(crate) fn step(&mut self, world: &mut PhysicsWorld, dt: f32) {
         if let Some(script) = &mut self.script {
-            self.time += dt;
-            // The shared Script supplies physical velocities for moving contacts.
-            // Physics also integrates kinematic velocities; restore the exact
-            // authored pose afterwards so it cannot overshoot the sampled path.
-            let mut poses: Vec<(BodyHandle, Transform)> = Vec::new();
-            for (handle, animation, weight) in &self.tracks {
-                let Some(body) = world.body(*handle) else {
-                    continue;
-                };
-                let (position, rotation) = animation.sample(self.time);
-                if position.is_none() && rotation.is_none() {
-                    continue;
-                }
-                let index = match poses.iter().position(|(h, _)| h == handle) {
-                    Some(index) => index,
-                    None => {
-                        poses.push((*handle, body.transform()));
-                        poses.len() - 1
-                    }
-                };
-                let transform = &mut poses[index].1;
-                if let Some(position) = position {
-                    transform.position =
-                        quench3d::animation::blend_position(transform.position, position, *weight);
-                }
-                if let Some(rotation) = rotation {
-                    transform.rotation =
-                        quench3d::animation::blend_rotation(transform.rotation, rotation, *weight);
-                }
-            }
             script.step(world, dt);
-            for (handle, transform) in poses {
+            // Use the exact weighted, dependency-resolved targets sampled by the
+            // shared runtime before physics. Do not independently resample tracks.
+            for &(handle, transform) in script.last_animation_targets() {
                 if let Some(body) = world.body_mut(handle) {
                     body.set_transform(transform);
                 }
@@ -209,6 +142,54 @@ mod tests {
         runtime.prepare_tracks(&build.world, &doc.animations, build.handles.clone());
         runtime.step(&mut build.world, 0.25);
         assert!((build.world.body(handle).unwrap().position() - position).length() < 1e-4);
+    }
+
+    #[test]
+    fn nested_relative_tracks_follow_centers_in_reverse_authoring_order() {
+        let doc = SceneDoc::from_json(r#"{
+            "gravity":[0,0,0],
+            "objects":[
+                {"name":"sun","body":"static","position":[10,4,0],"shape":{"type":"sphere","radius":0.1}},
+                {"name":"earth","body":"kinematic","position":[12,4,0],"shape":{"type":"sphere","radius":0.1}},
+                {"name":"moon","body":"kinematic","position":[12.5,4,0],"shape":{"type":"sphere","radius":0.1}}],
+            "animations":[
+                {"target":"moon","position_relative_to":"earth","loop":true,"position":{"times":[0,0.25,0.5,0.75,1],"values":[[0.5,0,0],[0,0,0.5],[-0.5,0,0],[0,0,-0.5],[0.5,0,0]]}},
+                {"target":"earth","position_relative_to":"sun","loop":true,"position":{"times":[0,0.25,0.5,0.75,1],"values":[[2,0,0],[0,0,2],[-2,0,0],[0,0,-2],[2,0,0]]}}]
+        }"#).unwrap();
+        let mut build = build_world(&doc).unwrap();
+        let mut runtime = Runtime::default();
+        assert!(runtime
+            .prepare_tracks(&build.world, &doc.animations, build.handles.clone())
+            .is_none());
+        for step in 1..=12 {
+            runtime.step(&mut build.world, 0.25);
+            let earth = build.world.body(build.handles["earth"]).unwrap().position();
+            let moon = build.world.body(build.handles["moon"]).unwrap().position();
+            assert!(((earth - Vec3::new(10.0, 4.0, 0.0)).length() - 2.0).abs() < 1e-4);
+            assert!(((moon - earth).length() - 0.5).abs() < 1e-4, "step {step}");
+            if step == 1 {
+                assert!((moon - Vec3::new(10.0, 4.0, 2.5)).length() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn relative_tracks_reject_missing_self_and_cycles() {
+        let (mut doc, build) = fixture();
+        for center in ["missing", "orbiter"] {
+            doc.animations[0].position_relative_to = Some(center.into());
+            let mut runtime = Runtime::default();
+            assert!(runtime
+                .prepare_tracks(&build.world, &doc.animations, build.handles.clone())
+                .is_some());
+        }
+        let mut a = doc.animations[0].clone();
+        a.target = "a".into();
+        a.position_relative_to = Some("b".into());
+        let mut b = a.clone();
+        b.target = "b".into();
+        b.position_relative_to = Some("a".into());
+        assert!(crate::orbit::validate_dependencies(&[a, b]).is_err());
     }
 
     #[test]

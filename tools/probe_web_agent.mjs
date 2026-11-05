@@ -314,7 +314,7 @@ async function main() {
 
   // Exercise the advertised orbit tools through actual model HTTP, not direct
   // scene mutation. Only inspect while playing because revisions change per step.
-  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit: 创建静态太阳和绕其公转的地球，显示两个物体的中文名称标签，然后播放。' })).ok, true);
+  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit: 创建静态太阳、绕太阳公转的地球和绕移动地球公转的月球，显示三个物体的中文名称标签，然后播放。' })).ok, true);
   const orbitDone = await until(async () => {
     const current = await status();
     if (current.agent.status === 'error') throw new Error(JSON.stringify(current));
@@ -323,8 +323,21 @@ async function main() {
   }, 'actual AI orbit setup', 60000);
   const labelCalls = orbitDone.agent.messages.flatMap(message => message.tool_calls ?? [])
     .filter(call => /^orbit_\d+$/.test(call.id) && call.function.name === 'set_object_label');
-  assert.equal(labelCalls.length, 2, 'AI executes both label tools');
-  assert.deepEqual(labelCalls.map(call => JSON.parse(call.function.arguments).name), ['太阳', '地球']);
+  assert.equal(labelCalls.length, 3, 'AI executes all three label tools');
+  assert.deepEqual(labelCalls.map(call => JSON.parse(call.function.arguments).name), ['太阳', '地球', '月球']);
+  const moonOrbitCalls = orbitDone.agent.messages.flatMap(message => message.tool_calls ?? [])
+    .filter(call => /^orbit_\d+$/.test(call.id) && call.function.name === 'set_orbit'
+      && JSON.parse(call.function.arguments).name === '月球');
+  assert.equal(moonOrbitCalls.length, 1, 'AI configures one moving-center lunar orbit');
+  const moonOrbitArgs = JSON.parse(moonOrbitCalls[0].function.arguments);
+  assert.equal(moonOrbitArgs.center_name, '地球');
+  assert.equal(moonOrbitArgs.radius, 1);
+  assert.equal(moonOrbitArgs.period_secs, 0.5);
+  assert.equal(moonOrbitArgs.center, undefined, 'lunar center follows Earth instead of fixed coordinates');
+  const moonOrbitReceipts = orbitDone.agent.messages.filter(message => message.role === 'tool'
+    && message.tool_call_id === moonOrbitCalls[0].id);
+  assert.equal(moonOrbitReceipts.length, 1);
+  assert.equal(JSON.parse(moonOrbitReceipts[0].content).ok, true, 'moving-center lunar orbit tool succeeds');
   for (const call of labelCalls) {
     const args = JSON.parse(call.function.arguments);
     assert.equal(args.visible, true);
@@ -342,19 +355,26 @@ async function main() {
     assert.ok(Math.abs(object.shape.radius - radius) < 1e-5, `${name} sphere radius`);
     assert.ok(Array.isArray(object.body_position), `${name} has physical body`);
     const visualLag = Math.hypot(...object.position.map((value, index) => value - object.body_position[index]));
-    // Live rendering interpolates adjacent 60 Hz physical poses. At radius 3
-    // and period 2 the maximum one-step chord is ~0.157 m.
-    assert.ok(visualLag < (snapshot.paused ? 1e-4 : 0.17), `${name} interpolation stays within one physical step: ${visualLag}`);
+    // Live rendering interpolates adjacent 60 Hz physical poses. Earth moves
+    // ~0.157 m/step; Moon adds ~0.209 m/step relative to its moving center.
+    const interpolationLimit = name === '月球' ? 0.4 : 0.17;
+    assert.ok(visualLag < (snapshot.paused ? 1e-4 : interpolationLimit), `${name} interpolation stays within one physical step: ${visualLag}`);
     return object;
   };
   const checkOrbit = snapshot => {
     const sun = orbitObject(snapshot, '太阳', 0.8);
     const planet = orbitObject(snapshot, '地球', 0.2);
+    const moon = orbitObject(snapshot, '月球', 0.1);
     sun.position.forEach((value, index) => assert.ok(Math.abs(value - [0, 5, 0][index]) < 1e-4, 'sun stays fixed'));
     assert.ok(Math.abs(Math.hypot(planet.body_position[0], planet.body_position[2]) - 3) < 1e-3, 'physical orbital radius stays 3');
     assert.ok(Math.abs(Math.hypot(planet.position[0], planet.position[2]) - 3) < 0.002, 'interpolated orbital radius stays near 3');
     assert.ok(Math.abs(planet.position[1] - 5) < 1e-4, 'xz orbit stays at height 5');
-    return { sun, planet };
+    const moonRelative = moon.body_position.map((value, index) => value - planet.body_position[index]);
+    const moonVisualRelative = moon.position.map((value, index) => value - planet.position[index]);
+    assert.ok(Math.abs(Math.hypot(...moonRelative) - 1) < 0.02, 'Moon stays at radius 1 relative to moving Earth');
+    assert.ok(Math.abs(Math.hypot(...moonVisualRelative) - 1) < 0.02, 'interpolated Moon stays near its relative orbit');
+    assert.ok(Math.abs(moon.body_position[1] - 5) < 1e-4, 'lunar xz orbit stays at height 5');
+    return { sun, planet, moon, moonRelative };
   };
   const orbitFirst = scene(await request({ action: 'inspect' }));
   assert.equal(orbitFirst.paused, false);
@@ -363,8 +383,9 @@ async function main() {
     const snapshot = scene(await request({ action: 'inspect' }));
     const objects = checkOrbit(snapshot);
     const distance = Math.hypot(...objects.planet.position.map((value, i) => value - firstOrbitObjects.planet.position[i]));
-    return distance > 0.3 && { snapshot, objects, distance };
-  }, 'orbit advances with actual simulation time', 30000);
+    const moonRelativeDistance = Math.hypot(...objects.moonRelative.map((value, i) => value - firstOrbitObjects.moonRelative[i]));
+    return distance > 0.3 && moonRelativeDistance > 0.2 && { snapshot, objects, distance, moonRelativeDistance };
+  }, 'Earth and relative lunar orbit both advance with actual simulation time', 30000);
   assert.equal((await request({ action: 'start', prompt: 'fixture-orbit-stop: 暂停公转。' })).ok, true);
   await until(async () => {
     const current = await status();
@@ -380,14 +401,17 @@ async function main() {
   const stillOrbit = scene(await request({ action: 'inspect' }));
   const stillObjects = checkOrbit(stillOrbit);
   assert.deepEqual(stillObjects.planet.position, pausedObjects.planet.position, 'pause stops orbital motion');
+  assert.deepEqual(stillObjects.moon.position, pausedObjects.moon.position, 'pause stops lunar motion');
+  assert.deepEqual(stillObjects.moon.body_position, pausedObjects.moon.body_position, 'paused lunar body remains fixed');
   assert.deepEqual(stillObjects.sun.position, pausedObjects.sun.position, 'paused sun remains fixed');
   const orbitReport = await (await fetch(`${control}/fixture/status`)).json();
   assert.deepEqual(orbitReport.errors, []);
-  assert.deepEqual(orbitReport.orbit_requests.map(item => item.round), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.deepEqual(orbitReport.orbit_requests.map(item => item.round), Array.from({ length: 13 }, (_, index) => index));
   assert.equal(orbitReport.orbit_stop_requests.length, 2);
   assert.equal(orbitReport.long_requests.length, 41, 'orbit stage does not rerun the long task');
   evidence.stages.push({ stage: 'actual-ai-orbit', agent: orbitDone.agent, first: orbitFirst,
-    moved, paused: pausedOrbit, still: stillOrbit, label_calls: labelCalls, http: orbitReport.orbit_requests });
+    moved, paused: pausedOrbit, still: stillOrbit, label_calls: labelCalls,
+    moon_orbit_call: moonOrbitCalls[0], http: orbitReport.orbit_requests });
 
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(out, 'agent-final.png'), Buffer.from(screenshot.data, 'base64'));

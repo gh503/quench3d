@@ -674,6 +674,9 @@ pub struct AnimationDoc {
     /// 位置轨道（米）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<TrackDoc>,
+    /// 位置关键帧是相对指定刚体同一步目标位置的世界轴对齐偏移；缺省为世界坐标。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_relative_to: Option<String>,
     /// 朝向轨道（欧拉角 XYZ，度）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<TrackDoc>,
@@ -5051,6 +5054,15 @@ impl SceneDoc {
                     "动画的 target 不能为空",
                 ));
             }
+            if let Some(center) = &a.position_relative_to {
+                if center.trim().is_empty() || center == &a.target || a.position.is_none() {
+                    cam_diags.push(Diagnostic::error_code(
+                        ErrorCode::InvalidValue,
+                        "animations.position_relative_to",
+                        "position_relative_to 必须指向其他非空刚体名，并且需要 position 轨道",
+                    ));
+                }
+            }
             if a.position.is_none() && a.rotation.is_none() {
                 cam_diags.push(Diagnostic::error_code(
                     ErrorCode::MissingField,
@@ -8752,6 +8764,27 @@ pub fn arr(v: Vec3) -> [f32; 3] {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn relative_position_animation_metadata_roundtrips_and_legacy_is_omitted() {
+        let base = json!({"target":"moon","position":{"times":[0,1],"values":[[1,0,0],[0,0,1]]}});
+        let legacy: AnimationDoc = serde_json::from_value(base.clone()).unwrap();
+        assert!(legacy.position_relative_to.is_none());
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("position_relative_to")
+            .is_none());
+        let mut relative = base;
+        relative["position_relative_to"] = json!("地球");
+        let animation: AnimationDoc = serde_json::from_value(relative.clone()).unwrap();
+        assert_eq!(animation.position_relative_to.as_deref(), Some("地球"));
+        assert_eq!(
+            serde_json::to_value(animation).unwrap()["position_relative_to"],
+            "地球"
+        );
+        relative["position_relative_to"] = json!(7);
+        assert!(serde_json::from_value::<AnimationDoc>(relative).is_err());
+    }
 
     #[test]
     fn viewport_labels_roundtrip_inherit_and_allow_explicit_disable() {
