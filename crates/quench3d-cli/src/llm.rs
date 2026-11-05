@@ -822,6 +822,34 @@ fn post_via_curl(
     timeout: Duration,
     curl_program: Option<&std::path::Path>,
 ) -> Result<String, LlmError> {
+    let deadline = std::time::Instant::now() + timeout;
+    for attempt in 0..3 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(LlmError::network("模型请求超时，连接重试未能恢复"));
+        }
+        let result = post_via_curl_once(url, headers, body, remaining, curl_program);
+        match result {
+            Err((error, true)) if attempt < 2 => {
+                let delay = Duration::from_millis(250 * (attempt + 1));
+                if deadline.saturating_duration_since(std::time::Instant::now()) <= delay {
+                    return Err(error);
+                }
+                std::thread::sleep(delay);
+            }
+            result => return result.map_err(|(error, _)| error),
+        }
+    }
+    unreachable!("bounded curl attempts always return")
+}
+
+fn post_via_curl_once(
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    timeout: Duration,
+    curl_program: Option<&std::path::Path>,
+) -> Result<String, (LlmError, bool)> {
     use std::process::{Command, Stdio};
     // url 与 header 走配置文件（其中含密钥），请求体仍然走 stdin：提示词不落盘。
     let mut config = String::new();
@@ -839,11 +867,11 @@ fn post_via_curl(
             curl_config_escape(v)
         ));
     }
-    let config_file = CurlConfigFile::create(&config)?;
+    let config_file = CurlConfigFile::create(&config).map_err(|error| (error, false))?;
     let mut cmd = Command::new(curl_program.unwrap_or(std::path::Path::new("curl")));
     cmd.arg("-sS")
         .arg("--max-time")
-        .arg(timeout.as_secs().to_string())
+        .arg(format!("{:.3}", timeout.as_secs_f64()))
         .arg("-X")
         .arg("POST")
         .arg("--data-binary")
@@ -856,24 +884,34 @@ fn post_via_curl(
         .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| {
-        LlmError::network(format!("调用 curl 失败: {e}"))
-            .with_hint("https 端点需要系统 curl；也可以把 --base-url 指向本地 http 推理服务")
+        (
+            LlmError::network(format!("调用 curl 失败: {e}"))
+                .with_hint("https 端点需要系统 curl；也可以把 --base-url 指向本地 http 推理服务"),
+            false,
+        )
     })?;
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(body.as_bytes())
-            .map_err(|e| LlmError::network(format!("写入 curl 标准输入失败: {e}")))?;
+        stdin.write_all(body.as_bytes()).map_err(|e| {
+            (
+                LlmError::network(format!("写入 curl 标准输入失败: {e}")),
+                false,
+            )
+        })?;
     }
     let output = child
         .wait_with_output()
-        .map_err(|e| LlmError::network(format!("等待 curl 结束失败: {e}")))?;
+        .map_err(|e| (LlmError::network(format!("等待 curl 结束失败: {e}")), false))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(LlmError::network(format!(
-            "curl 退出码 {:?}: {}",
-            output.status.code(),
-            truncate(err.trim(), 300)
-        )));
+        let retryable = matches!(output.status.code(), Some(18 | 52 | 55 | 56 | 92));
+        return Err((
+            LlmError::network(format!(
+                "curl 退出码 {:?}: {}",
+                output.status.code(),
+                truncate(err.trim(), 300)
+            )),
+            retryable,
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -1143,6 +1181,57 @@ printf '{"data":[]}\n200'
             curl_config_escape("Bearer sk-abc_123.456"),
             "Bearer sk-abc_123.456"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curl_post_retries_transient_disconnect_with_identical_body() {
+        let counter = CurlConfigFile::create("").unwrap();
+        let script = fake_get_curl(&format!(
+            "body=$(cat)\nprintf '%s\\n' \"$body\" >> '{}'\nn=$(wc -l < '{}')\nif [ \"$n\" -lt 3 ]; then printf 'unexpected eof' >&2; exit 56; fi\nprintf '{{\"ok\":true}}'",
+            counter.path.display(), counter.path.display()
+        ));
+        let response = post_via_curl(
+            "https://fixture.invalid",
+            &[],
+            "request-body",
+            Duration::from_secs(5),
+            Some(&script.path),
+        )
+        .unwrap();
+        assert_eq!(response, r#"{"ok":true}"#);
+        assert_eq!(
+            std::fs::read_to_string(&counter.path).unwrap(),
+            "request-body\nrequest-body\nrequest-body\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curl_post_bounds_retries_and_does_not_retry_certificate_errors() {
+        for (code, expected_attempts) in [(56, 3), (60, 1)] {
+            let counter = CurlConfigFile::create("").unwrap();
+            let script = fake_get_curl(&format!(
+                "cat >/dev/null\nprintf 'attempt\\n' >> '{}'\nexit {code}",
+                counter.path.display()
+            ));
+            let error = post_via_curl(
+                "https://fixture.invalid",
+                &[],
+                "body",
+                Duration::from_secs(5),
+                Some(&script.path),
+            )
+            .unwrap_err();
+            assert!(error.message.contains(&format!("Some({code})")));
+            assert_eq!(
+                std::fs::read_to_string(&counter.path)
+                    .unwrap()
+                    .lines()
+                    .count(),
+                expected_attempts
+            );
+        }
     }
 
     #[test]
