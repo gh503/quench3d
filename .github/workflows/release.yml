@@ -1,11 +1,11 @@
-# 发布流水线：打 tag（`v*`）时自动构建三平台二进制 + Web 客户端，并挂到 GitHub Release。
+# main 推送自动递增补丁版本并创建 tag；tag 推送也可发布指定版本。
 #
 # 设计要点（都是有意为之，不要"顺手简化"）：
 # 1. **只用第一方 action + `gh` CLI**：不引入 softprops/action-gh-release 之类的第三方
 #    发布 action（供应链面大、行为不透明）。runner 自带 `gh`，够用。
 # 2. **工具链钉 `1.99.0`**：与 ci.yml 一致。不钉版会让"今天能编、明天编不过"变成发布事故。
 # 3. **`--locked`**：发布必须用仓库里那份 Cargo.lock，否则产出的二进制与 CI 验证过的依赖树不一致。
-# 4. **tag 是唯一版本来源**：release 名与产物名都从 `GITHUB_REF_NAME` 派生（去掉前缀 `v`），
+# 4. **tag 是唯一版本来源**：版本 job 分配或读取 tag，release 名与产物名都从它派生，
 #    不在 workflow 里另写一份版本号（两份版本号迟早不一致）。
 # 5. `workflow_dispatch` 只做"构建 + 传 artifact"，**不创建 release**（除非你手动在 tag 上跑）：
 #    避免手动点一下就在仓库里留下一个奇怪版本的 release。
@@ -13,6 +13,7 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   # 手动跑：验证"发布能不能编出来"而不在仓库里留 release（见文件头第 5 条）。
   workflow_dispatch:
@@ -25,10 +26,50 @@ env:
   # 发布产物要能复现：不做增量缓存，减少"上次的中间产物混进来"的可能。
   CARGO_INCREMENTAL: "0"
 
+# Serialize automatic version allocation; never cancel a partially published release.
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'publish' }}
+  cancel-in-progress: false
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Allocate immutable release tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            EXISTING=$(git tag --points-at "$GITHUB_SHA" --list 'v[0-9]*' --sort=-version:refname | head -n 1)
+            if [[ -n "$EXISTING" ]]; then
+              TAG="$EXISTING"
+            else
+              LATEST=$(git tag --list 'v[0-9]*' | python3 -c 'import re,sys; tags=[tuple(map(int,m.groups())) for s in sys.stdin if (m:=re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)",s.strip()))]; v=max(tags,default=(0,1,0)); print("v%d.%d.%d"%(v[0],v[1],v[2]+1))')
+              TAG="$LATEST"
+              git tag "$TAG" "$GITHUB_SHA"
+              git push origin "refs/tags/$TAG"
+            fi
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=preview-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # 三平台二进制：CLI（quench3d）+ 桌面编辑器（quench3d-editor）
   build:
     name: build (${{ matrix.label }})
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -67,7 +108,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${{ needs.version.outputs.tag }}"
+          VERSION="${TAG#v}"
           TARGET="${{ matrix.target }}"
           EXT=""
           case "$TARGET" in
@@ -96,6 +138,7 @@ jobs:
   # Web 客户端（wasm）：复用仓库里唯一的打包脚本，保证与 Pages 上那份同源同法
   web:
     name: web (wasm32)
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -117,7 +160,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${{ needs.version.outputs.tag }}"
+          VERSION="${TAG#v}"
           DIR="quench3d-web-client-${VERSION}"
           mkdir -p dist
           cp -r web "dist/${DIR}"
@@ -134,8 +178,8 @@ jobs:
   # 只有打 tag 才创建 Release；手动 dispatch 不会留下 release
   release:
     name: publish release
-    needs: [build, web]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, build, web]
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -157,7 +201,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ needs.version.outputs.tag }}"
           ls -l dist
           # 只发布归档：artifact 里还带着未压缩的目录，直接 `dist/*` 会把目录也当资产传。
           mapfile -t ASSETS < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
