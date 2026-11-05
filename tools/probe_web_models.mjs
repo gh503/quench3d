@@ -146,7 +146,7 @@ async function main() {
   await capture('discovered-models');
   await click(['model-alpha']); await click(['model-beta']);
   await click(['添加所选', '添加选中模型']);
-  await click(['保存到本机']);
+  // No explicit save: this verifies automatic persistence before reloading.
   const persisted = await until(async () => { const c = await saved(); return c.models.length === 2 && c; }, 'UI saves discovered models');
   assert.deepEqual(persisted.models.map(m => m.model).sort(), ['model-alpha', 'model-beta']);
   assert.ok(persisted.models.every(m => m.provider_id === 'discovery'));

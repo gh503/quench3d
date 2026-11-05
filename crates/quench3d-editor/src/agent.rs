@@ -104,11 +104,17 @@ impl AgentPanel {
         let mut configuration_changed = false;
         ui.heading("AI 助手");
         ui.collapsing("本地模型配置", |ui| {
+            ui.small("有效修改会自动保存到本机，启动时自动加载。");
             configuration_changed = self.configuration.ui(ui);
-            if let Some(error) = &self.config_error {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
-            }
         });
+        if configuration_changed {
+            // Persist on the edit frame rather than on close or after a timer:
+            // switching tabs or immediately exiting must not lose valid edits.
+            self.config_error = self.configuration.save().err();
+        }
+        if let Some(error) = &self.config_error {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("本地配置：{error}"));
+        }
         if let Ok(selected) = self.configuration.selected() {
             ui.label(format!("当前模型：{}", selected.model));
         }
@@ -153,9 +159,6 @@ impl AgentPanel {
                 .clicked();
             stop = ui.button("停止").clicked();
         });
-        if configuration_changed {
-            self.config_error = None;
-        }
         if stop || configuration_changed {
             self.cancel();
         }

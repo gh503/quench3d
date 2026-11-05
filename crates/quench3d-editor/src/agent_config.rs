@@ -2,8 +2,8 @@
 //!
 //! The library is deliberately independent of the agent runtime: callers can load it,
 //! edit it in egui, and pass [`LlmConfig`] to whichever client owns the wire protocol.
-//! API keys are persisted only when the user explicitly saves this library. They are
-//! omitted from `Debug` output.
+//! API keys are persisted locally when the UI saves valid edits automatically or
+//! the user requests a save. They are omitted from `Debug` output.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
