@@ -15,6 +15,8 @@ from pathlib import Path
 import sys
 import threading
 import unittest
+import urllib.error
+import urllib.request
 
 from agent_server import create_server
 
@@ -28,6 +30,7 @@ class ModelScript:
         self.release = threading.Event()
         self.delayed = threading.Event()
         self.requests = []
+        self.models_requests = []
         self.errors = []
         self.completed = False
         self.cancel_requests = 0
@@ -37,7 +40,8 @@ class ModelScript:
         with self.lock:
             return {'requests': self.requests.copy(), 'errors': self.errors.copy(),
                     'completed': self.completed, 'delayed': self.delayed.is_set(),
-                    'cancel_requests': self.cancel_requests, 'late_sent': self.late_sent.is_set()}
+                    'cancel_requests': self.cancel_requests, 'late_sent': self.late_sent.is_set(),
+                    'models_requests': self.models_requests.copy()}
 
     @staticmethod
     def result(body, call_id):
@@ -126,6 +130,17 @@ def make_upstream(script):
         def do_GET(self):
             if self.path == '/fixture/status':
                 self.send_json(script.report())
+            elif self.path == '/v1/models':
+                authenticated = self.headers.get('Authorization') == 'Bearer fixture-client-only-key'
+                with script.lock:
+                    script.models_requests.append({'path': self.path, 'authenticated': authenticated})
+                if not authenticated:
+                    self.send_json({'error': 'client provider credential required'}, 401)
+                    return
+                self.send_json({'object': 'list', 'data': [
+                    {'id': 'model-alpha', 'object': 'model', 'owned_by': 'fixture'},
+                    {'id': 'model-beta', 'object': 'model', 'owned_by': 'fixture'},
+                ]})
             else:
                 self.send_json({'error': 'unknown route'}, 404)
 
@@ -178,6 +193,30 @@ def serve(web_root):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_model_catalog_requires_client_auth_and_reports_requests(self):
+        script = ModelScript()
+        server = make_upstream(script)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f'http://127.0.0.1:{server.server_port}/v1/models'
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(url, timeout=2)
+            self.assertEqual(rejected.exception.code, 401)
+            request = urllib.request.Request(url, headers={
+                'Authorization': 'Bearer fixture-client-only-key'})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                catalog = json.load(response)
+            self.assertEqual([model['id'] for model in catalog['data']],
+                             ['model-alpha', 'model-beta'])
+            self.assertEqual(script.report()['models_requests'], [
+                {'path': '/v1/models', 'authenticated': False},
+                {'path': '/v1/models', 'authenticated': True}])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_script_uses_actual_tool_result_revision_and_preserves_null(self):
         script = ModelScript()
         body = {'messages': [{'role': 'user', 'content': 'fixture-main'}],

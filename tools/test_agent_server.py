@@ -2,6 +2,8 @@
 import http.client
 import http.server
 import json
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
 import tempfile
 import threading
@@ -13,9 +15,29 @@ from agent_server import Config, create_server
 class AgentServerTests(unittest.TestCase):
     def setUp(self):
         self.requests = []
+        self.models_response = {'data': [{'id': 'model-b'}, {'id': 'model-a'}, {'id': 'model-b'}]}
+        self.models_status = 200
+        self.models_delay = 0
         owner = self
 
         class Upstream(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                owner.requests.append((self.path, dict(self.headers), None))
+                if owner.models_delay:
+                    threading.Event().wait(owner.models_delay)
+                self.send_response(owner.models_status)
+                if owner.models_status == 302:
+                    self.send_header('Location', '/credentials-must-not-follow')
+                data = (owner.models_response if isinstance(owner.models_response, bytes)
+                        else json.dumps(owner.models_response).encode())
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 owner.requests.append((self.path, dict(self.headers), body))
@@ -79,6 +101,93 @@ class AgentServerTests(unittest.TestCase):
         connection.request(method, path, body=body if method == 'POST' else None, headers=actual_headers)
         response = connection.getresponse()
         return response.status, response.read()
+
+    def models_request(self, connection=None, **kwargs):
+        if connection is None:
+            connection = {'base_url': self.config.base_url, 'api_key': 'discovery-key', 'timeout_secs': 1}
+        return self.request(path='/api/agent/models', payload={'connection': connection}, **kwargs)
+
+    def test_models_uses_client_connection_and_normalizes_endpoint(self):
+        local = create_server(port=0, web_root=self.root)
+        self.start(local)
+        self.server = local
+        self.origin = f'http://127.0.0.1:{local.server_port}'
+        for suffix in ['/v1', '/v1/', '/v1/chat/completions', '/v1/chat/completions/',
+                       '/v1/models', '/v1/models/']:
+            with self.subTest(suffix=suffix):
+                status, data = self.models_request({'base_url': f'http://127.0.0.1:{self.upstream.server_port}{suffix}',
+                                                   'api_key': 'discovery-key', 'timeout_secs': 1})
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(data), {'models': ['model-b', 'model-a']})
+                path, headers, body = self.requests[-1]
+                self.assertEqual(path, '/v1/models')
+                self.assertEqual(headers['Authorization'], 'Bearer discovery-key')
+                self.assertIsNone(body)
+                self.assertNotIn(b'discovery-key', data)
+        self.assertEqual(self.models_request({'base_url': self.config.base_url, 'api_key': '', 'timeout_secs': 1})[0], 200)
+        self.assertNotIn('Authorization', self.requests[-1][1])
+        self.models_response = {'data': []}
+        self.assertEqual(json.loads(self.models_request()[1]), {'models': []})
+
+    def test_models_rejects_invalid_connections_without_upstream_requests(self):
+        base = {'base_url': self.config.base_url, 'api_key': '', 'timeout_secs': 1}
+        patches = [{'base_url': value} for value in ['file:///etc/passwd', 'https://user:pass@example.test/v1',
+                   'http://127.0.0.1:invalid', 'http://[broken', 'https://example.test/v1?key=x',
+                   'https://example.test/v1#fragment', 'https://example.test/\nheader']]
+        patches += [{'api_key': value} for value in ['key\r\ninjected', '\u2603', None]]
+        patches += [{'timeout_secs': value} for value in [0, 301, True, '1', float('nan'), float('inf'), 10 ** 400]]
+        for patch in patches:
+            with self.subTest(patch=patch):
+                self.assertEqual(self.models_request(dict(base, **patch))[0], 400)
+        for payload in [{}, [], {'connection': None}, {'connection': {}},
+                        {'connection': base, 'api_key': 'extra'},
+                        {'connection': dict(base, model='unneeded')}]:
+            self.assertEqual(self.request(path='/api/agent/models', payload=payload)[0], 400)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.models_request({'base_url': 'https://example.test/v1', 'api_key': '', 'timeout_secs': 1})[0], 503)
+        self.assertEqual(self.requests, [])
+
+    def test_models_enforces_origin_and_request_body_limits(self):
+        for headers in [{'Origin': 'https://attacker.test'}, {'Origin': 'null'},
+                        {'Sec-Fetch-Site': 'cross-site'}, {'Sec-Fetch-Site': 'same-site'}, {'Host': 'attacker.test'}]:
+            self.assertEqual(self.models_request(headers=headers)[0], 403)
+        self.assertEqual(self.request('GET', '/api/agent/models')[0], 404)
+        self.assertEqual(self.models_request(headers={'Transfer-Encoding': 'chunked'})[0], 400)
+        self.assertEqual(self.models_request(headers={'Content-Type': 'text/plain'})[0], 415)
+        self.assertEqual(self.models_request(headers={'Content-Length': '-1'})[0], 400)
+        # Declare the oversized body without racing a 1 MiB send against early close.
+        self.assertEqual(self.models_request(headers={'Content-Length': str(1024 * 1024 + 1)})[0], 413)
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
+        self.addCleanup(connection.close)
+        connection.request('POST', '/api/agent/models', body=b'{', headers={'Origin': self.origin, 'Content-Type': 'application/json'})
+        self.assertEqual(connection.getresponse().status, 400)
+        self.assertEqual(self.requests, [])
+
+    def test_models_rejects_bad_upstream_payloads_and_hides_errors(self):
+        bad_responses = [b'not-json discovery-key', [], {}, {'data': {}}, {'data': [None]},
+                         {'data': [{'id': None}]}, {'data': [{'id': ''}]}, {'data': [{'id': 'x' * 257}]},
+                         {'data': [{'id': 'bad\nmodel'}]}, b'x' * (1024 * 1024 + 1)]
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            for response in bad_responses:
+                self.models_response = response
+                status, data = self.models_request()
+                self.assertEqual(status, 502)
+                self.assertNotIn(b'discovery-key', data)
+            self.models_response = b'discovery-key upstream details'
+            for status_code in [401, 500, 302]:
+                self.models_status = status_code
+                status, data = self.models_request()
+                self.assertEqual(status, 502)
+                self.assertNotIn(b'discovery-key', data)
+                self.assertNotIn(b'upstream details', data)
+        self.assertNotIn('discovery-key', captured.getvalue())
+        self.assertFalse(any(r[0] == '/credentials-must-not-follow' for r in self.requests))
+        self.models_status = 200
+        self.models_delay = 0.2
+        status, data = self.models_request({'base_url': self.config.base_url, 'api_key': 'discovery-key', 'timeout_secs': 0.03})
+        self.assertEqual(status, 504)
+        self.assertNotIn(b'discovery-key', data)
 
     def test_http_tool_response_preserves_null_and_forwards_exact_history_schema(self):
         messages = [{'role':'user','content':'inspect'}, {'role':'assistant','content':None,

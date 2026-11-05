@@ -519,6 +519,116 @@ pub fn http_post_json_with_curl(
     }
 }
 
+/// GET 一个完整的 HTTP(S) URL，返回成功响应的 UTF-8 JSON 文本。
+///
+/// 调用者负责拼接 `/models` 等路径与解析 JSON。两种协议都使用 curl，以便统一
+/// 处理分块响应和整个请求的超时；响应体最多 1 MiB，且只接受 2xx 状态。
+/// URL 和所有请求头仅写入临时配置文件，API key 不会出现在 argv 中。
+/// `curl_program` 为 `None` 时使用 PATH 中的 curl，也可指定可执行文件供测试使用。
+pub fn http_get_json_with_curl(
+    url: &str,
+    headers: &[(String, String)],
+    timeout: Duration,
+    curl_program: Option<&std::path::Path>,
+) -> Result<String, LlmError> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    const MAX_BODY: usize = 1024 * 1024;
+    // write-out 在 body 后附加一个换行和三位 HTTP 状态码。
+    const STATUS_SUFFIX: usize = 4;
+    Url::parse(url)?;
+    if timeout.is_zero() {
+        return Err(LlmError::config("GET 请求超时必须大于零"));
+    }
+    if url.chars().any(char::is_control)
+        || headers.iter().any(|(name, value)| {
+            name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+                || value.chars().any(char::is_control)
+        })
+    {
+        return Err(LlmError::config("GET URL 或请求头包含不合法字符"));
+    }
+    let mut config = format!(
+        "url = \"{}\"\nheader = \"Accept: application/json\"\n",
+        curl_config_escape(url)
+    );
+    for (name, value) in headers {
+        config.push_str(&format!(
+            "header = \"{}: {}\"\n",
+            curl_config_escape(name),
+            curl_config_escape(value)
+        ));
+    }
+    let config_file = CurlConfigFile::create(&config)?;
+    let mut child = Command::new(curl_program.unwrap_or(std::path::Path::new("curl")))
+        // 必须是第一个参数：禁止用户 curlrc 开启重定向、额外输出或其他副作用。
+        .arg("--disable")
+        .args(["--silent", "--globoff", "--proto", "=http,https"])
+        .arg("--max-time")
+        .arg(timeout.as_secs_f64().to_string())
+        .arg("--max-filesize")
+        .arg(MAX_BODY.to_string())
+        .args([
+            "--request",
+            "GET",
+            "--write-out",
+            "\n%{http_code}",
+            "--config",
+        ])
+        .arg(&config_file.path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        // 不回显 curl 错误：服务地址或凭据可能被包含在诊断信息里。
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| LlmError::network(format!("调用 curl GET 失败: {e}")))?;
+    let mut output = Vec::new();
+    let read_result = child
+        .stdout
+        .take()
+        .expect("curl stdout is piped")
+        .take((MAX_BODY + STATUS_SUFFIX + 1) as u64)
+        .read_to_end(&mut output);
+    if read_result.is_err() || output.len() > MAX_BODY + STATUS_SUFFIX {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(LlmError::network(if read_result.is_err() {
+            "读取 curl GET 响应失败"
+        } else {
+            "GET 响应超过 1 MiB 上限"
+        }));
+    }
+    let status = child
+        .wait()
+        .map_err(|e| LlmError::network(format!("等待 curl GET 结束失败: {e}")))?;
+    if !status.success() {
+        return Err(LlmError::network(format!(
+            "curl GET 失败（退出码 {:?}；请检查网络、超时或 1 MiB 响应上限）",
+            status.code()
+        )));
+    }
+    let split = output
+        .len()
+        .checked_sub(STATUS_SUFFIX)
+        .filter(|&i| output[i] == b'\n')
+        .ok_or_else(|| LlmError::http("curl GET 没有返回 HTTP 状态码"))?;
+    let code = &output[split + 1..];
+    if !code.iter().all(u8::is_ascii_digit) {
+        return Err(LlmError::http("curl GET 返回了不合法的 HTTP 状态码"));
+    }
+    let code =
+        (code[0] - b'0') as u16 * 100 + (code[1] - b'0') as u16 * 10 + (code[2] - b'0') as u16;
+    if !(200..300).contains(&code) {
+        return Err(LlmError::http(format!("HTTP {code}")));
+    }
+    output.truncate(split);
+    String::from_utf8(output).map_err(|_| LlmError::parse("GET 响应不是合法 UTF-8"))
+}
+
 fn post_http(
     url: &Url,
     headers: &[(String, String)],
@@ -849,6 +959,112 @@ pub fn parse_chat_response(raw: &str, fallback_model: &str) -> Result<ChatOutcom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fake_get_curl(script: &str) -> CurlConfigFile {
+        use std::os::unix::fs::PermissionsExt;
+        let file = CurlConfigFile::create(&format!("#!/bin/sh\nset -eu\n{script}\n")).unwrap();
+        std::fs::set_permissions(&file.path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_curl_keeps_key_in_config_and_preserves_complete_url() {
+        let fake = fake_get_curl(
+            r#"
+[ "$1" = --disable ] || exit 10
+previous=''
+config=''
+for arg in "$@"; do
+    case "$arg" in *test-secret*) exit 11 ;; esac
+    if [ "$previous" = --max-time ]; then [ "$arg" = 0.25 ] || exit 12; fi
+    if [ "$previous" = --config ]; then config="$arg"; fi
+    previous="$arg"
+done
+[ -n "$config" ] || exit 13
+key_seen=0
+url_seen=0
+while IFS= read -r line; do
+    case "$line" in
+        'header = "Authorization: Bearer test-secret"') key_seen=1 ;;
+        'url = "https://example.invalid/v1/models?scope=all"') url_seen=1 ;;
+    esac
+done < "$config"
+[ "$key_seen$url_seen" = 11 ] || exit 14
+printf '{"data":[]}\n200'
+"#,
+        );
+        let body = http_get_json_with_curl(
+            "https://example.invalid/v1/models?scope=all",
+            &[("Authorization".into(), "Bearer test-secret".into())],
+            Duration::from_millis(250),
+            Some(&fake.path),
+        )
+        .unwrap();
+        assert_eq!(body, r#"{"data":[]}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_curl_requires_successful_process_and_http_status() {
+        for (script, kind) in [
+            ("printf 'redirect\\n302'", "http"),
+            ("printf 'unauthorized\\n401'", "http"),
+            ("printf '{}\\n200'; exit 28", "network"),
+            ("printf '{}'", "http"),
+        ] {
+            let fake = fake_get_curl(script);
+            let err = http_get_json_with_curl(
+                "http://localhost/v1/models",
+                &[],
+                Duration::from_secs(1),
+                Some(&fake.path),
+            )
+            .unwrap_err();
+            assert_eq!(err.kind, kind);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_curl_caps_response_even_without_content_length() {
+        let fake = fake_get_curl("dd if=/dev/zero bs=1048581 count=1 2>/dev/null; printf '\\n200'");
+        let err = http_get_json_with_curl(
+            "http://localhost/v1/models",
+            &[],
+            Duration::from_secs(1),
+            Some(&fake.path),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, "network");
+        assert!(err.message.contains("1 MiB"));
+    }
+
+    #[test]
+    fn get_rejects_invalid_configuration_before_spawning_curl() {
+        for (url, headers, timeout) in [
+            ("file:///tmp/models", vec![], Duration::from_secs(1)),
+            ("http://localhost/models", vec![], Duration::ZERO),
+            (
+                "http://localhost/models",
+                vec![(
+                    "Authorization".into(),
+                    "Bearer key\r\nX-Injected: yes".into(),
+                )],
+                Duration::from_secs(1),
+            ),
+        ] {
+            let err = http_get_json_with_curl(
+                url,
+                &headers,
+                timeout,
+                Some(std::path::Path::new("/missing-curl")),
+            )
+            .unwrap_err();
+            assert_eq!(err.kind, "config");
+        }
+    }
 
     #[test]
     fn curl_config_escaping_neutralizes_quotes_and_control_chars() {

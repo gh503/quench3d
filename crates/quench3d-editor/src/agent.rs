@@ -11,6 +11,23 @@ const MAX_CALLS: usize = 16;
 const SYSTEM: &str = "You operate the live Quench3D editor through the provided tools. Explain a short plan, then execute it. Before editing, call set_playback with paused:true, then inspect_scene. Reference exact unique names from inspect_scene. All tools except inspect_scene and set_playback require expected_revision from the most recent inspection or tool receipt; never guess revisions. If stale_revision occurs inspect again and reconsider. Use real tools to complete the goal, report errors honestly, and do not claim an edit without a successful tool receipt. Keep requests small. Never request secrets or credentials through scene tools.";
 
 type Mailbox = Arc<Mutex<VecDeque<(u64, Result<Value, String>)>>>;
+const MAX_CATALOG_QUEUE: usize = 32;
+const MAX_CATALOG_BYTES: usize = 1024 * 1024;
+const MAX_CATALOG_MODELS: usize = 2048;
+
+// Intentionally no Debug: connection snapshots contain credentials.
+#[derive(Clone, PartialEq, Eq)]
+struct CatalogRequest {
+    token: u64,
+    provider: String,
+    base_url: String,
+    api_key: Option<String>,
+}
+struct CatalogCompletion {
+    request: CatalogRequest,
+    result: Result<Vec<String>, String>,
+}
+type CatalogMailbox = Arc<Mutex<VecDeque<CatalogCompletion>>>;
 
 /// AI panel using the client's explicitly saved local provider/model library.
 pub struct AgentPanel {
@@ -20,6 +37,11 @@ pub struct AgentPanel {
     goal: String,
     configuration: crate::agent_config::ConfigLibrary,
     config_error: Option<String>,
+    catalog_pending: Vec<String>,
+    catalog_active: Option<CatalogRequest>,
+    catalog_token: u64,
+    catalog_mailbox: CatalogMailbox,
+    repaint_context: Option<egui::Context>,
     mailbox: Mailbox,
     #[cfg(not(target_arch = "wasm32"))]
     workers: Vec<std::thread::JoinHandle<()>>,
@@ -38,6 +60,11 @@ impl Default for AgentPanel {
             goal: String::new(),
             configuration,
             config_error,
+            catalog_pending: Vec::new(),
+            catalog_active: None,
+            catalog_token: 0,
+            catalog_mailbox: Arc::new(Mutex::new(VecDeque::new())),
+            repaint_context: None,
             mailbox: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(not(target_arch = "wasm32"))]
             workers: Vec::new(),
@@ -71,6 +98,7 @@ impl AgentPanel {
 
     /// Draw the assistant inside the editor's right sidebar.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        self.repaint_context = Some(ui.ctx().clone());
         let mut send = false;
         let mut stop = false;
         let mut configuration_changed = false;
@@ -135,7 +163,8 @@ impl AgentPanel {
             let goal = self.goal.clone();
             self.start_goal(&goal);
         }
-        if matches!(self.session.status, "requesting" | "tools") {
+        self.collect_catalog_requests();
+        if matches!(self.session.status, "requesting" | "tools") || self.catalog_busy() {
             ui.ctx().request_repaint();
         }
     }
@@ -164,12 +193,20 @@ impl AgentPanel {
                 Err(error) => self.session.fail(error),
             }
         }
+        self.collect_catalog_requests();
+        self.receive_catalog_completions();
+        let catalog_launched = self.launch_catalog();
+        if self.catalog_busy() {
+            if let Some(ctx) = &self.repaint_context {
+                ctx.request_repaint();
+            }
+        }
         if !self.session.pending.is_empty() {
             self.session
                 .tool_tick(|name, args| crate::commands::dispatch(engine, doc, name, args));
             return;
         }
-        if self.session.status == "requesting" && !self.session.inflight {
+        if self.session.status == "requesting" && !self.session.inflight && !catalog_launched {
             #[cfg(not(target_arch = "wasm32"))]
             if self.workers.len() >= 2 {
                 return;
@@ -185,6 +222,131 @@ impl AgentPanel {
             self.session.inflight = true;
             self.launch();
         }
+    }
+
+    fn catalog_busy(&self) -> bool {
+        self.catalog_active.is_some() || !self.catalog_pending.is_empty()
+    }
+
+    fn collect_catalog_requests(&mut self) {
+        for provider in self.configuration.take_catalog_requests() {
+            if self.catalog_pending.contains(&provider) {
+                continue;
+            }
+            // Editing the connection clears Loading and permits a new request;
+            // retain that retry until the old connection's response is discarded.
+            if self.catalog_pending.len() < MAX_CATALOG_QUEUE {
+                self.catalog_pending.push(provider);
+            } else {
+                self.configuration
+                    .receive_catalog(&provider, Err("待获取的服务商过多，请稍后重试".into()));
+            }
+        }
+    }
+
+    fn catalog_matches(&self, request: &CatalogRequest) -> bool {
+        self.configuration
+            .catalog_connection(&request.provider)
+            .is_ok_and(|(url, key, _)| url == request.base_url && key == request.api_key)
+    }
+
+    fn receive_catalog_completions(&mut self) {
+        let completed: Vec<_> = match self.catalog_mailbox.lock() {
+            Ok(mut queue) => queue.drain(..).collect(),
+            Err(_) => return,
+        };
+        for completion in completed {
+            if self.catalog_active.as_ref() != Some(&completion.request) {
+                continue;
+            }
+            self.catalog_active = None;
+            if self.catalog_matches(&completion.request) {
+                self.configuration
+                    .receive_catalog(&completion.request.provider, completion.result);
+            }
+        }
+    }
+
+    fn launch_catalog(&mut self) -> bool {
+        if self.catalog_active.is_some() || self.catalog_pending.is_empty() {
+            return false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.workers.len() >= 2 {
+            return false;
+        }
+        let provider = self.catalog_pending.remove(0);
+        let (base_url, api_key, timeout_secs) =
+            match self.configuration.catalog_connection(&provider) {
+                Ok(connection) => connection,
+                Err(_) => {
+                    // A removed provider must not be recreated by a late error.
+                    if self
+                        .configuration
+                        .providers
+                        .iter()
+                        .any(|p| p.id == provider)
+                    {
+                        self.configuration
+                            .receive_catalog(&provider, Err("服务商连接配置无效".into()));
+                    }
+                    return false;
+                }
+            };
+        self.catalog_token = self.catalog_token.wrapping_add(1);
+        let request = CatalogRequest {
+            token: self.catalog_token,
+            provider,
+            base_url,
+            api_key,
+        };
+        self.configuration.catalog_loading(&request.provider);
+        self.catalog_active = Some(request.clone());
+        let mailbox = self.catalog_mailbox.clone();
+        let repaint = self.repaint_context.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let worker = std::thread::spawn(move || {
+                let url = models_url(&request.base_url);
+                let mut headers = vec![("Accept".into(), "application/json".into())];
+                if let Some(key) = &request.api_key {
+                    headers.push(("Authorization".into(), format!("Bearer {key}")));
+                }
+                let result = quench3d_cli::llm::http_get_json_with_curl(
+                    &url,
+                    &headers,
+                    std::time::Duration::from_secs(timeout_secs.min(30)),
+                    None,
+                )
+                .map_err(|_| "获取模型列表失败，请检查地址、密钥和网络".to_owned())
+                .and_then(|text| parse_model_ids(&text));
+                if let Ok(mut queue) = mailbox.lock() {
+                    if queue.len() < MAX_CATALOG_QUEUE {
+                        queue.push_back(CatalogCompletion { request, result });
+                    }
+                }
+                if let Some(ctx) = repaint {
+                    ctx.request_repaint();
+                }
+            });
+            self.workers.push(worker);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let body = json!({"connection":{"base_url":request.base_url,"api_key":request.api_key.as_deref().unwrap_or(""),"timeout_secs":timeout_secs.min(30)}}).to_string();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = fetch_models(&body).await;
+                if let Ok(mut queue) = mailbox.lock() {
+                    if queue.len() < MAX_CATALOG_QUEUE {
+                        queue.push_back(CatalogCompletion { request, result });
+                    }
+                }
+                if let Some(ctx) = repaint {
+                    ctx.request_repaint();
+                }
+            });
+        }
+        true
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -308,6 +470,99 @@ impl AgentPanel {
             }
         });
     }
+}
+
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn models_url(base: &str) -> String {
+    let mut url = base.trim_end_matches('/').to_owned();
+    if url.ends_with("/chat/completions") {
+        url.truncate(url.len() - "/chat/completions".len());
+    }
+    if !url.ends_with("/models") {
+        url.push_str("/models");
+    }
+    url
+}
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn parse_model_ids(text: &str) -> Result<Vec<String>, String> {
+    if text.len() > MAX_CATALOG_BYTES {
+        return Err("模型列表超过 1 MiB 限制".into());
+    }
+    let value: Value = serde_json::from_str(text).map_err(|_| "模型列表格式无效")?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("模型列表格式无效")?;
+    validated_model_ids(
+        data.iter()
+            .map(|item| item.get("id").and_then(Value::as_str)),
+    )
+}
+
+fn validated_model_ids<'a>(
+    items: impl Iterator<Item = Option<&'a str>>,
+) -> Result<Vec<String>, String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for (index, item) in items.enumerate() {
+        if index >= MAX_CATALOG_MODELS {
+            return Err("模型数量超过 2048 限制".into());
+        }
+        let id = item.ok_or("模型列表格式无效")?;
+        if id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+            return Err("模型列表包含无效模型 ID".into());
+        }
+        ids.insert(id.to_owned());
+    }
+    Ok(ids.into_iter().collect())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_models(body: &str) -> Result<Vec<String>, String> {
+    use wasm_bindgen::{JsCast, JsValue};
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_mode(web_sys::RequestMode::SameOrigin);
+    init.set_body(&JsValue::from_str(body));
+    let request = web_sys::Request::new_with_str_and_init("/api/agent/models", &init)
+        .map_err(|_| "无法创建模型列表请求".to_owned())?;
+    request
+        .headers()
+        .set("Content-Type", "application/json")
+        .map_err(|_| "无法设置请求头".to_owned())?;
+    let window = web_sys::window().ok_or_else(|| "浏览器不可用".to_owned())?;
+    let value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|_| "模型列表请求失败".to_owned())?;
+    let response: web_sys::Response = value.dyn_into().map_err(|_| "代理响应无效".to_owned())?;
+    if !response.ok() {
+        return Err(format!("模型代理 HTTP {}", response.status()));
+    }
+    if response
+        .headers()
+        .get("Content-Length")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some_and(|size| size > MAX_CATALOG_BYTES)
+    {
+        return Err("模型列表超过 1 MiB 限制".into());
+    }
+    let text = wasm_bindgen_futures::JsFuture::from(
+        response.text().map_err(|_| "读取模型列表失败".to_owned())?,
+    )
+    .await
+    .map_err(|_| "读取模型列表失败".to_owned())?
+    .as_string()
+    .ok_or_else(|| "模型列表响应无效".to_owned())?;
+    if text.len() > MAX_CATALOG_BYTES {
+        return Err("模型列表超过 1 MiB 限制".into());
+    }
+    let value: Value = serde_json::from_str(&text).map_err(|_| "模型列表响应无效".to_owned())?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "模型列表响应无效".to_owned())?;
+    validated_model_ids(models.iter().map(Value::as_str))
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -469,6 +724,113 @@ mod tests {
             {"id":"call-real-17","type":"function","function":{"name":"inspect_scene","arguments":arguments}}
         ]}}]})
     }
+    #[test]
+    fn catalog_parser_bounds_and_validates_every_id() {
+        assert_eq!(
+            parse_model_ids(r#"{"data":[{"id":"z"},{"id":"a"},{"id":"z"}]}"#).unwrap(),
+            vec!["a", "z"]
+        );
+        for invalid in [
+            r#"{"data":[{"id":"bad\nmodel"}]}"#,
+            r#"{"data":[{"id":7}]}"#,
+            r#"{"data":[{"id":" "}]}"#,
+        ] {
+            assert!(parse_model_ids(invalid).is_err());
+        }
+        let excessive =
+            json!({"data": vec![json!({"id":"same"}); MAX_CATALOG_MODELS + 1]}).to_string();
+        assert!(parse_model_ids(&excessive).is_err());
+        assert!(parse_model_ids(&" ".repeat(MAX_CATALOG_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn catalog_endpoint_handles_chat_base_and_complete_url() {
+        assert_eq!(
+            models_url("http://localhost:11434/v1/"),
+            "http://localhost:11434/v1/models"
+        );
+        assert_eq!(
+            models_url("https://example.test/v1/chat/completions/"),
+            "https://example.test/v1/models"
+        );
+        assert_eq!(
+            models_url("https://example.test/v1/models"),
+            "https://example.test/v1/models"
+        );
+    }
+
+    #[test]
+    fn catalog_snapshot_rejects_changed_credentials_endpoint_and_deleted_provider() {
+        let mut panel = AgentPanel {
+            configuration: crate::agent_config::ConfigLibrary::default(),
+            ..AgentPanel::default()
+        };
+        let provider = panel.configuration.providers[0].id.clone();
+        let (base_url, api_key, _) = panel.configuration.catalog_connection(&provider).unwrap();
+        let request = CatalogRequest {
+            token: 4,
+            provider,
+            base_url,
+            api_key,
+        };
+        assert!(panel.catalog_matches(&request));
+        panel.configuration.providers[0].api_key = Some("new-secret".into());
+        assert!(!panel.catalog_matches(&request));
+        panel.configuration.providers[0].api_key = request.api_key.clone();
+        panel.configuration.providers[0]
+            .base_url
+            .push_str("/changed");
+        assert!(!panel.catalog_matches(&request));
+        panel.configuration.providers.remove(0);
+        assert!(!panel.catalog_matches(&request));
+    }
+
+    #[test]
+    fn catalog_completion_token_is_separate_from_chat_generation() {
+        let mut panel = AgentPanel {
+            configuration: crate::agent_config::ConfigLibrary::default(),
+            ..AgentPanel::default()
+        };
+        let provider = panel.configuration.providers[0].id.clone();
+        let (base_url, api_key, _) = panel.configuration.catalog_connection(&provider).unwrap();
+        let request = CatalogRequest {
+            token: 4,
+            provider,
+            base_url,
+            api_key,
+        };
+        panel.catalog_active = Some(request.clone());
+        let mut stale = request.clone();
+        stale.token = 3;
+        panel
+            .catalog_mailbox
+            .lock()
+            .unwrap()
+            .push_back(CatalogCompletion {
+                request: stale,
+                result: Err("stale".into()),
+            });
+        let generation = panel.session.generation;
+        panel.receive_catalog_completions();
+        assert!(panel.catalog_active.is_some());
+        panel.configuration.providers[0]
+            .base_url
+            .push_str("/changed");
+        panel
+            .catalog_mailbox
+            .lock()
+            .unwrap()
+            .push_back(CatalogCompletion {
+                request,
+                result: Ok(vec!["old-endpoint-model".into()]),
+            });
+        panel.receive_catalog_completions();
+        assert!(panel.catalog_active.is_none());
+        assert_eq!(panel.session.generation, generation);
+        assert!(panel.session.error.is_none());
+        assert!(panel.mailbox.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn agent_session_tool_result_reaches_next_request() {
         let mut s = Session::default();

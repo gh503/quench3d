@@ -1212,7 +1212,7 @@ pub struct EditorApp {
 }
 
 // Read-only camera control coordinates for real browser pointer regression tests.
-// Only whitelisted camera labels are published, never scene/model/key text.
+// Only fixed camera/AI controls and fixture-only labels are published; never keys or user fields.
 #[cfg(target_arch = "wasm32")]
 fn publish_camera_controls(shapes: &[egui::epaint::ClippedShape]) {
     let Some(window) = web_sys::window() else {
@@ -1231,6 +1231,15 @@ fn publish_camera_controls(shapes: &[egui::epaint::ClippedShape]) {
         match shape {
             egui::epaint::Shape::Text(text) => {
                 if [
+                    "AI 助手",
+                    "本地模型配置",
+                    "获取可用模型",
+                    "添加所选",
+                    "添加选中模型",
+                    "保存到本机",
+                    "服务商：Discovery fixture",
+                    "model-alpha",
+                    "model-beta",
                     "视图",
                     "摄像头预览…",
                     "摄像头（Web 预览）",
@@ -1256,10 +1265,9 @@ fn publish_camera_controls(shapes: &[egui::epaint::ClippedShape]) {
         collect(&shape.shape, &mut controls);
     }
     if let Some(body) = window.document().and_then(|d| d.body()) {
-        let _ = body.set_attribute(
-            "data-quench3d-camera-controls",
-            &serde_json::to_string(&controls).unwrap_or_default(),
-        );
+        let json = serde_json::to_string(&controls).unwrap_or_default();
+        let _ = body.set_attribute("data-quench3d-camera-controls", &json);
+        let _ = body.set_attribute("data-quench3d-model-controls", &json);
     }
 }
 

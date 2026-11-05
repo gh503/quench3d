@@ -7,6 +7,7 @@ persist credentials or select a model from server environment variables.
 Loopback providers may omit the key. This server binds only to loopback.
 """
 import argparse
+import http.client
 import http.server
 import json
 import math
@@ -137,12 +138,67 @@ def create_server(host="127.0.0.1", port=8765, web_root=None, config=None):
             self.send_error(403, 'Directory listing disabled')
             return None
 
+        def discover_models(self, payload):
+            try:
+                if not isinstance(payload, dict) or set(payload) != {'connection'}:
+                    raise ValueError()
+                connection = payload['connection']
+                if not isinstance(connection, dict) or set(connection) != {'base_url', 'api_key', 'timeout_secs'}:
+                    raise ValueError()
+                base_url, api_key = connection['base_url'], connection['api_key']
+                timeout = connection['timeout_secs']
+                # Share chat's URL, credential and timeout validation without
+                # requiring a selected model in order to discover one.
+                chat_url, available = validate_connection(base_url, 'discovery', api_key, timeout)
+                models_url = chat_url.removesuffix('/chat/completions')
+                if not models_url.endswith('/models'):
+                    models_url += '/models'
+                # urllib encodes headers as latin-1; reject unusable keys safely.
+                api_key.encode('latin-1')
+            except (ValueError, TypeError, UnicodeError, OverflowError):
+                self.error(400, 'Configure a valid provider in the local client settings')
+                return
+            if not available:
+                self.error(503, 'Model provider unavailable')
+                return
+            headers = {'Accept': 'application/json'}
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+            try:
+                request = urllib.request.Request(models_url, headers=headers, method='GET')
+                with opener.open(request, timeout=timeout) as response:
+                    data = response.read(MAX_BODY + 1)
+                if len(data) > MAX_BODY:
+                    raise ValueError()
+                result = json.loads(data)
+                if not isinstance(result, dict) or not isinstance(result.get('data'), list):
+                    raise ValueError()
+                models = []
+                seen = set()
+                for entry in result['data']:
+                    if not isinstance(entry, dict):
+                        raise ValueError()
+                    model = entry.get('id')
+                    if (not isinstance(model, str) or not model.strip() or len(model) > 256
+                            or any(ord(c) < 32 or ord(c) == 127 for c in model)):
+                        raise ValueError()
+                    if model not in seen:
+                        models.append(model)
+                        seen.add(model)
+            except (TimeoutError, socket.timeout):
+                self.error(504, 'Model provider timed out')
+                return
+            except (urllib.error.URLError, ValueError, UnicodeError, OSError, http.client.HTTPException):
+                self.error(502, 'Model provider request failed')
+                return
+            self.reply(200, {'models': models})
+
         def do_POST(self):
             self.close_connection = True
             if not self.same_origin():
                 self.error(403, 'Same-origin requests only')
                 return
-            if self.path != '/api/agent/chat':
+            if self.path not in ('/api/agent/chat', '/api/agent/models'):
                 self.error(404, 'Unknown endpoint')
                 return
             if self.headers.get('Transfer-Encoding'):
@@ -166,13 +222,16 @@ def create_server(host="127.0.0.1", port=8765, web_root=None, config=None):
                 if len(data) != length:
                     raise ValueError()
                 payload = json.loads(data)
+                if self.path == '/api/agent/models':
+                    self.discover_models(payload)
+                    return
                 if (not isinstance(payload, dict) or set(payload) - {'messages', 'tools', 'model', 'connection'}
                         or not isinstance(payload.get('messages'), list)
                         or not isinstance(payload.get('tools'), list)
                         or ('model' in payload and (not isinstance(payload['model'], str) or not payload['model']))):
                     raise ValueError()
             except (ValueError, UnicodeError, socket.timeout):
-                self.error(400, 'Invalid chat request')
+                self.error(400, 'Invalid models request' if self.path == '/api/agent/models' else 'Invalid chat request')
                 return
             try:
                 connection = payload.get('connection')
