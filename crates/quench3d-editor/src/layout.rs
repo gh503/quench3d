@@ -1,6 +1,6 @@
 //! 编辑器面板布局的持久化（桌面 JSON 文件 / Web localStorage）。
 //!
-//! 只存两个宽度与桌面窗口位置，不存场景内容。写失败/文件损坏/旧版本都静默回默认值
+//! 只存面板宽度、右栏页签与桌面窗口位置，不存场景内容。写失败/文件损坏/旧版本都静默回默认值
 //! ——布局是使用偏好，不应该阻止编辑器启动。桌面沿用自动保存的目录：
 //! `$XDG_STATE_HOME/quench3d/layout.json`（没有则 `$HOME/.local/state/...`）。
 //!
@@ -21,7 +21,18 @@ pub const INSPECTOR_MIN: f32 = 180.0;
 /// 右栏最大宽度。
 pub const INSPECTOR_MAX: f32 = 420.0;
 
-/// 两个面板的宽度。
+/// 右栏显示的内容；旧布局缺少此字段时默认显示 AI 助手。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarTab {
+    /// AI 对话与模型配置。
+    #[default]
+    Agent,
+    /// 场景与选中物体的属性。
+    Properties,
+}
+
+/// 面板宽度、右栏页签与窗口位置。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     /// 左栏（场景树）宽度。
@@ -30,6 +41,9 @@ pub struct Layout {
     /// 右栏（属性）宽度。
     #[serde(default = "default_inspector")]
     pub inspector_width: f32,
+    /// 右栏当前页签。
+    #[serde(default)]
+    pub sidebar_tab: SidebarTab,
     /// 桌面窗口左上角的物理 X 坐标；`None` = 交给窗口系统决定。
     ///
     /// 只在桌面端写；Web 端窗口由浏览器管，读到也忽略。两个坐标必须同时存在，
@@ -53,6 +67,7 @@ impl Default for Layout {
         Self {
             outliner_width: default_outliner(),
             inspector_width: default_inspector(),
+            sidebar_tab: SidebarTab::default(),
             window_x: None,
             window_y: None,
         }
@@ -194,6 +209,20 @@ mod tests {
         assert_eq!(nan.outliner_width, default_outliner());
         assert_eq!(nan.inspector_width, INSPECTOR_MIN);
         assert_eq!(Layout::from_json("not json"), Layout::default());
+    }
+
+    #[test]
+    fn sidebar_defaults_to_agent_and_preserves_explicit_choice() {
+        assert_eq!(Layout::default().sidebar_tab, SidebarTab::Agent);
+        let legacy = Layout::from_json(r#"{"outliner_width":240,"inspector_width":320}"#);
+        assert_eq!(legacy.sidebar_tab, SidebarTab::Agent);
+        assert_eq!(legacy.outliner_width, 240.0);
+        assert_eq!(legacy.inspector_width, 320.0);
+        let properties = Layout {
+            sidebar_tab: SidebarTab::Properties,
+            ..legacy
+        };
+        assert_eq!(Layout::from_json(&properties.to_json()), properties);
     }
 
     #[test]

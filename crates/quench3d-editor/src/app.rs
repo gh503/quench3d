@@ -583,18 +583,18 @@ impl Inner {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
         let mut full_output = ctx.run_ui(raw_input, |ui| {
-            let requests = ui::panels(
+            let requests = ui::panels_with_agent(
                 ui,
                 &mut self.engine,
                 &mut self.doc,
                 &mut self.viewport,
                 &mut self.gizmo,
                 &mut self.camera,
+                &mut self.agent,
             );
             if requests.open_agent {
                 self.agent.open = true;
             }
-            self.agent.window(ui.ctx());
             if requests.screenshot {
                 self.screenshot();
             }

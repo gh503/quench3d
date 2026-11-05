@@ -69,71 +69,62 @@ impl AgentPanel {
             "rounds":self.session.rounds,"generation":self.session.generation})
     }
 
-    /// Draw the shared native/Web window.
-    pub fn window(&mut self, ctx: &egui::Context) {
-        if !self.open {
-            return;
-        }
-        let mut open = self.open;
+    /// Draw the assistant inside the editor's right sidebar.
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
         let mut send = false;
         let mut stop = false;
         let mut configuration_changed = false;
-        egui::Window::new("AI 助手")
-            .open(&mut open)
-            .default_width(460.0)
-            .show(ctx, |ui| {
-                ui.collapsing("本地模型配置", |ui| {
-                    configuration_changed = self.configuration.ui(ui);
-                    if let Some(error) = &self.config_error {
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+        ui.heading("AI 助手");
+        ui.collapsing("本地模型配置", |ui| {
+            configuration_changed = self.configuration.ui(ui);
+            if let Some(error) = &self.config_error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+        });
+        if let Ok(selected) = self.configuration.selected() {
+            ui.label(format!("当前模型：{}", selected.model));
+        }
+        ui.label(format!(
+            "状态：{} · 请求轮数 {}/{}",
+            self.session.status, self.session.rounds, MAX_ROUNDS
+        ));
+        egui::ScrollArea::vertical()
+            .max_height(330.0)
+            .show(ui, |ui| {
+                for message in &self.session.messages {
+                    let role = message["role"].as_str().unwrap_or("");
+                    if role == "system" {
+                        continue;
                     }
-                });
-                if let Ok(selected) = self.configuration.selected() {
-                    ui.label(format!("当前模型：{}", selected.model));
-                }
-                ui.label(format!(
-                    "状态：{} · 请求轮数 {}/{}",
-                    self.session.status, self.session.rounds, MAX_ROUNDS
-                ));
-                egui::ScrollArea::vertical()
-                    .max_height(330.0)
-                    .show(ui, |ui| {
-                        for message in &self.session.messages {
-                            let role = message["role"].as_str().unwrap_or("");
-                            if role == "system" {
-                                continue;
-                            }
-                            if let Some(text) = message["content"].as_str() {
-                                if !text.is_empty() {
-                                    ui.label(format!("{role}: {text}"));
-                                }
-                            }
-                            if let Some(calls) = message["tool_calls"].as_array() {
-                                for call in calls {
-                                    ui.label(format!(
-                                        "工具：{}",
-                                        call["function"]["name"].as_str().unwrap_or("?")
-                                    ));
-                                }
-                            }
+                    if let Some(text) = message["content"].as_str() {
+                        if !text.is_empty() {
+                            ui.label(format!("{role}: {text}"));
                         }
-                    });
-                if let Some(error) = &self.session.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    }
+                    if let Some(calls) = message["tool_calls"].as_array() {
+                        for call in calls {
+                            ui.label(format!(
+                                "工具：{}",
+                                call["function"]["name"].as_str().unwrap_or("?")
+                            ));
+                        }
+                    }
                 }
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.goal)
-                        .desired_rows(3)
-                        .hint_text("描述要在当前场景完成的操作"),
-                );
-                ui.horizontal(|ui| {
-                    send = ui
-                        .add_enabled(!self.goal.trim().is_empty(), egui::Button::new("发送"))
-                        .clicked();
-                    stop = ui.button("停止").clicked();
-                });
             });
-        self.open = open;
+        if let Some(error) = &self.session.error {
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+        }
+        ui.add(
+            egui::TextEdit::multiline(&mut self.goal)
+                .desired_rows(3)
+                .hint_text("描述要在当前场景完成的操作"),
+        );
+        ui.horizontal(|ui| {
+            send = ui
+                .add_enabled(!self.goal.trim().is_empty(), egui::Button::new("发送"))
+                .clicked();
+            stop = ui.button("停止").clicked();
+        });
         if configuration_changed {
             self.config_error = None;
         }
@@ -145,7 +136,7 @@ impl AgentPanel {
             self.start_goal(&goal);
         }
         if matches!(self.session.status, "requesting" | "tools") {
-            ctx.request_repaint();
+            ui.ctx().request_repaint();
         }
     }
 

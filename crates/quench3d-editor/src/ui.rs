@@ -90,13 +90,38 @@ pub fn panels(
     gizmo: &mut Gizmo,
     camera: &mut CameraFeed,
 ) -> Requests {
+    panels_impl(ui, engine, doc, view, gizmo, camera, None)
+}
+
+/// 画带有右栏 AI 助手的完整界面。
+pub fn panels_with_agent(
+    ui: &mut Ui,
+    engine: &mut Engine,
+    doc: &mut Doc,
+    view: &mut Viewport,
+    gizmo: &mut Gizmo,
+    camera: &mut CameraFeed,
+    agent: &mut crate::agent::AgentPanel,
+) -> Requests {
+    panels_impl(ui, engine, doc, view, gizmo, camera, Some(agent))
+}
+
+fn panels_impl(
+    ui: &mut Ui,
+    engine: &mut Engine,
+    doc: &mut Doc,
+    view: &mut Viewport,
+    gizmo: &mut Gizmo,
+    camera: &mut CameraFeed,
+    agent: Option<&mut crate::agent::AgentPanel>,
+) -> Requests {
     let mut req = Requests::default();
     view.click = None;
     view.additive = false;
     top_bar(ui, engine, doc, gizmo, &mut req, camera);
     status_bar(ui, engine, doc, gizmo);
     outliner(ui, engine, doc, &mut req);
-    inspector(ui, engine, doc, &mut req);
+    inspector(ui, engine, doc, &mut req, agent);
     viewport(ui, engine, doc, view, gizmo);
     let ctx = ui.ctx().clone();
     help_window(&ctx, doc);
@@ -196,6 +221,10 @@ fn top_bar(
                     .clicked()
                 {
                     req.open_agent = true;
+                    doc.layout.sidebar_tab = crate::layout::SidebarTab::Agent;
+                    if let Err(e) = doc.layout.save() {
+                        doc.status = format!("布局保存失败：{e}");
+                    }
                 }
                 ui.separator();
                 file_menu(ui, doc, req);
@@ -4887,7 +4916,13 @@ fn primitive_shape_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, inde
         });
 }
 
-fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
+fn inspector(
+    ui: &mut Ui,
+    engine: &mut Engine,
+    doc: &mut Doc,
+    req: &mut Requests,
+    agent: Option<&mut crate::agent::AgentPanel>,
+) {
     let width = doc
         .layout
         .inspector_width
@@ -4897,6 +4932,34 @@ fn inspector(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests
         .min_size(width)
         .max_size(width)
         .show(ui, |ui| {
+            if let Some(agent) = agent {
+                let previous_tab = doc.layout.sidebar_tab;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut doc.layout.sidebar_tab,
+                        crate::layout::SidebarTab::Agent,
+                        "AI 助手",
+                    );
+                    ui.selectable_value(
+                        &mut doc.layout.sidebar_tab,
+                        crate::layout::SidebarTab::Properties,
+                        "属性",
+                    );
+                });
+                if doc.layout.sidebar_tab != previous_tab {
+                    if let Err(e) = doc.layout.save() {
+                        doc.status = format!("布局保存失败：{e}");
+                    }
+                }
+                ui.separator();
+                if doc.layout.sidebar_tab == crate::layout::SidebarTab::Agent {
+                    egui::ScrollArea::vertical()
+                        .id_salt("quench3d-agent-sidebar")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| agent.ui(ui));
+                    return;
+                }
+            }
             // 属性内容比一屏高（尤其展开相机/材质之后）；固定面板必须能滚，
             // 否则小窗口里下半截控件根本够不到。
             egui::ScrollArea::vertical()

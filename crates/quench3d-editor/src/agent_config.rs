@@ -418,21 +418,41 @@ impl ConfigLibrary {
         for provider in &mut self.providers {
             let provider_id = provider.id.clone();
             ui.push_id(&provider_id, |ui| {
-                ui.collapsing(format!("服务商：{}", provider.name), |ui| {
-                    changed |= ui.text_edit_singleline(&mut provider.name).changed();
-                    ui.label("OpenAI 兼容地址");
-                    changed |= ui.text_edit_singleline(&mut provider.base_url).changed();
-                    ui.label("API key（可选）");
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(provider.api_key.get_or_insert_default())
+                let collapse_id = ui.make_persistent_id(("provider-collapse", &provider_id));
+                let mut collapse = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    collapse_id,
+                    true,
+                );
+                let mut provider_changed = false;
+                collapse
+                    .clone()
+                    .show_header(ui, |ui| {
+                        ui.label(format!("服务商：{}", provider.name));
+                    })
+                    .body(|ui| {
+                        provider_changed |= ui.text_edit_singleline(&mut provider.name).changed();
+                        ui.label("OpenAI 兼容地址");
+                        provider_changed |=
+                            ui.text_edit_singleline(&mut provider.base_url).changed();
+                        ui.label("API key（可选）");
+                        provider_changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(
+                                    provider.api_key.get_or_insert_default(),
+                                )
                                 .password(true),
-                        )
-                        .changed();
-                    if ui.button("删除服务商").clicked() {
-                        remove_provider = Some(provider_id.clone());
-                    }
-                });
+                            )
+                            .changed();
+                        if ui.button("删除服务商").clicked() {
+                            remove_provider = Some(provider_id.clone());
+                        }
+                    });
+                if provider_changed {
+                    changed = true;
+                    collapse.set_open(false);
+                    collapse.store(ui.ctx());
+                }
             });
         }
         if let Some(provider_id) = remove_provider {
