@@ -1,6 +1,6 @@
 # Quench3D 开发指南（从零到能改）
 
-> 这份文档假设你已经能跑起来。没跑起来先看 [README](../README.md) §2 与 §3。
+> 这份文档假设你已经能跑起来。首次启动先看 [README 快速上手](../README.md#三分钟上手)和[编辑器与 Web 指南](editor_guide.md)。
 > 想直接看代码：先打开 [`crates/quench3d/examples/starter_game.rs`](../crates/quench3d/examples/starter_game.rs)
 > ——那是本指南的「可执行版本」，一个能跑、能改、能进 CI 的完整骨架。
 
