@@ -828,6 +828,11 @@ fn post_via_curl(
     config.push_str(&format!("url = \"{}\"\n", curl_config_escape(url)));
     config.push_str("header = \"Content-Type: application/json\"\n");
     for (k, v) in headers {
+        // This JSON transport owns Content-Type. curl sends repeated custom
+        // headers verbatim; gateways may join them and reject the media type.
+        if k.eq_ignore_ascii_case("Content-Type") {
+            continue;
+        }
         config.push_str(&format!(
             "header = \"{}: {}\"\n",
             curl_config_escape(k),
@@ -1079,6 +1084,76 @@ printf '{"data":[]}\n200'
             curl_config_escape("Bearer sk-abc_123.456"),
             "Bearer sk-abc_123.456"
         );
+    }
+
+    #[test]
+    fn curl_post_sends_one_json_content_type_and_preserves_body() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut types = Vec::new();
+            let mut size = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-type") {
+                        types.push(value.trim().to_owned());
+                    }
+                    if name.eq_ignore_ascii_case("content-length") {
+                        size = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut body = vec![0; size];
+            reader.read_exact(&mut body).unwrap();
+            let response = if types == ["application/json"] {
+                "{\"ok\":true}"
+            } else {
+                "{\"error\":{\"message\":\"Unsupported content type\"}}"
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+            (types, body)
+        });
+        let body = r#"{"model":"fixture","messages":[{"role":"user","content":"创建碰撞场景"}]}"#;
+        // Exercise the same curl backend used for HTTPS, against a local HTTP fixture.
+        let response = post_via_curl(
+            &url,
+            &[
+                ("Content-Type".into(), "application/json".into()),
+                (
+                    "content-type".into(),
+                    "application/json; charset=utf-8".into(),
+                ),
+            ],
+            body,
+            Duration::from_secs(5),
+            None,
+        )
+        .unwrap();
+        let (types, received) = server.join().unwrap();
+        assert_eq!(types, ["application/json"]);
+        assert_eq!(received, body.as_bytes());
+        assert_eq!(response, r#"{"ok":true}"#);
     }
 
     #[test]
