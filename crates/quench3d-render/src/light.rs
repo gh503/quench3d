@@ -233,6 +233,9 @@ pub struct SkyParams {
     pub ground: Vec3,
     /// 是否绘制天空。
     pub enabled: bool,
+    /// Draw a dark, world-direction-anchored procedural star field instead of atmosphere.
+    /// Colors remain configurable; use near-black zenith/ground for a space environment.
+    pub space: bool,
     /// 地面网格高度（`grid_y`）。
     pub grid_height: f32,
     /// 是否绘制无限地面网格。
@@ -246,6 +249,7 @@ impl Default for SkyParams {
             horizon: Vec3::new(0.36, 0.46, 0.63),
             ground: Vec3::new(0.055, 0.06, 0.075),
             enabled: true,
+            space: false,
             grid_height: 0.0,
             show_grid: true,
         }

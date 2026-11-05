@@ -2757,6 +2757,9 @@ pub struct LightingDoc {
     /// 是否绘制天空，缺省 true。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sky: Option<bool>,
+    /// 是否使用宇宙星空背景，缺省 false；与天空显示、参考网格开关分别保存。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<bool>,
     /// 是否绘制无限地面网格，缺省 true。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<bool>,
@@ -8764,6 +8767,32 @@ pub fn arr(v: Vec3) -> [f32; 3] {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn lighting_space_roundtrips_optional_bool_and_preserves_other_flags() {
+        let legacy = SceneDoc::from_json(r#"{"lighting":{"sky":false,"grid":true}}"#).unwrap();
+        assert_eq!(legacy.lighting.space, None);
+        assert!(serde_json::to_value(&legacy.lighting)
+            .unwrap()
+            .get("space")
+            .is_none());
+        for space in [true, false] {
+            let doc = SceneDoc::from_json(
+                &json!({"lighting":{"space":space,"sky":false,"grid":true}}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(doc.lighting.space, Some(space));
+            let roundtrip = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
+            assert_eq!(roundtrip.lighting.space, Some(space));
+            assert_eq!(roundtrip.lighting.sky, Some(false));
+            assert_eq!(roundtrip.lighting.grid, Some(true));
+        }
+        for invalid in [json!("true"), json!(1), json!({}), json!([])] {
+            assert!(
+                SceneDoc::from_json(&json!({"lighting":{"space":invalid}}).to_string()).is_err()
+            );
+        }
+    }
 
     #[test]
     fn relative_position_animation_metadata_roundtrips_and_legacy_is_omitted() {

@@ -44,6 +44,12 @@ pub fn tools() -> Value {
             vec!["name", "color"],
         ),
         (
+            "set_environment",
+            "Set a saved visual environment preset: space uses a dark procedural star sky, no grid/fog and modest ambient light; studio restores default sky, grid and ambient settings. Geometry, authored lights and physics are preserved.",
+            json!({"preset":{"type":"string","enum":["space","studio"]}}),
+            vec!["preset"],
+        ),
+        (
             "set_object_label",
             "Show or hide the named object's visible name label in the viewport. Saved with the scene and follows moving objects; Chinese names are supported.",
             json!({"name":{"type":"string"},"visible":{"type":"boolean"}}),
@@ -307,7 +313,7 @@ fn inspect(engine: &Engine, doc: &Doc) -> Value {
         let orbit=doc.base_doc().and_then(|d|d.animations.iter().find(|a|a.target==o.name && a.name.as_deref()==Some(crate::orbit::owned_name(&o.name).as_str())));
         json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"label_visible":doc.label_visible(&o.name),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"center_name":a.position_relative_to,"center":if a.position_relative_to.is_none(){a.position.as_ref().and_then(|p| p.values.first().zip(p.values.get(128))).map(|(a,b)| [(a[0]+b[0])*0.5,(a[1]+b[1])*0.5,(a[2]+b[2])*0.5])}else{None},"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
     }).collect();
-    json!({"objects":objects,"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
+    json!({"objects":objects,"environment":crate::environment::inspect(&engine.scene.lighting, engine.renderer.options.sky, engine.renderer.options.grid),"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
 }
 fn execute(
     engine: &mut Engine,
@@ -319,6 +325,7 @@ fn execute(
     let fields: &[&str] = match command {
         "inspect_scene" => &[],
         "set_playback" => &["paused"],
+        "set_environment" => &["preset", "expected_revision"],
         "spawn_primitive" => &[
             "name",
             "shape",
@@ -383,6 +390,21 @@ fn execute(
             "history_busy",
             "Finish the current editor transaction first".into(),
         ));
+    }
+    if command == "set_environment" {
+        let preset = crate::environment::Preset::parse(&args["preset"]).map_err(invalid)?;
+        history_ready(engine, doc)?;
+        doc.record_edit(engine);
+        crate::environment::apply(&mut engine.scene.lighting, preset);
+        // This renderer feature gate is independent of saved scene lighting.
+        // Keep it enabled for both presets; show_grid is controlled by the scene.
+        engine.renderer.options.sky = true;
+        engine.renderer.options.grid = true;
+        doc.record_edit(engine);
+        doc.status = format!("Agent: environment {}", args["preset"].as_str().unwrap());
+        return Ok(
+            json!({"environment":crate::environment::inspect(&engine.scene.lighting, engine.renderer.options.sky, engine.renderer.options.grid),"geometry_preserved":true,"physics_preserved":true,"message":"Visual environment updated; existing geometry, ground collisions and authored lights are preserved"}),
+        );
     }
     let position = args
         .get("position")

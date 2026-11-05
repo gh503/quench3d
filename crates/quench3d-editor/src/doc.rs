@@ -1610,6 +1610,7 @@ impl Doc {
             "地面",
         );
         engine.scene.objects[ground].body = Some(ground_body);
+        engine.scene.objects[ground].environment_ground = true;
 
         // ---- 一摞动态物体：掉下来、堆起来、可以拖 ----
         let palette = [

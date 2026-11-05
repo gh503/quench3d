@@ -4,9 +4,7 @@
 //! ——布局是使用偏好，不应该阻止编辑器启动。桌面沿用自动保存的目录：
 //! `$XDG_STATE_HOME/quench3d/layout.json`（没有则 `$HOME/.local/state/...`）。
 //!
-//! 宽度由 `ui::panels` 通过 `min_size/max_size` 强制到面板上；不依赖 egui 的拖拽
-//! 分隔条（Canvas 探针里那条命中区曾经不稳定），所以「布局」菜单里的滑杆是唯一入口，
-//! 也是可测试的入口。
+//! 面板支持拖动分隔条、布局菜单滑杆及展开/收起；释放拖动后保存宽度。
 
 use serde::{Deserialize, Serialize};
 
@@ -14,12 +12,12 @@ use serde::{Deserialize, Serialize};
 /// 左栏最小宽度。
 pub const OUTLINER_MIN: f32 = 140.0;
 /// 左栏最大宽度。
-pub const OUTLINER_MAX: f32 = 340.0;
+pub const OUTLINER_MAX: f32 = 520.0;
 /// 右栏允许宽度范围（逻辑像素）。
 /// 右栏最小宽度。
 pub const INSPECTOR_MIN: f32 = 180.0;
 /// 右栏最大宽度。
-pub const INSPECTOR_MAX: f32 = 420.0;
+pub const INSPECTOR_MAX: f32 = 640.0;
 
 /// 右栏显示的内容；旧布局缺少此字段时默认显示 AI 助手。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +39,12 @@ pub struct Layout {
     /// 右栏（属性）宽度。
     #[serde(default = "default_inspector")]
     pub inspector_width: f32,
+    /// 左栏是否展开；旧布局默认展开。
+    #[serde(default = "default_expanded")]
+    pub outliner_expanded: bool,
+    /// 右栏是否展开（包括 AI 助手）；旧布局默认展开。
+    #[serde(default = "default_expanded")]
+    pub inspector_expanded: bool,
     /// 右栏当前页签。
     #[serde(default)]
     pub sidebar_tab: SidebarTab,
@@ -55,6 +59,10 @@ pub struct Layout {
     pub window_y: Option<i32>,
 }
 
+fn default_expanded() -> bool {
+    true
+}
+
 fn default_outliner() -> f32 {
     190.0
 }
@@ -67,6 +75,8 @@ impl Default for Layout {
         Self {
             outliner_width: default_outliner(),
             inspector_width: default_inspector(),
+            outliner_expanded: true,
+            inspector_expanded: true,
             sidebar_tab: SidebarTab::default(),
             window_x: None,
             window_y: None,
@@ -209,6 +219,25 @@ mod tests {
         assert_eq!(nan.outliner_width, default_outliner());
         assert_eq!(nan.inspector_width, INSPECTOR_MIN);
         assert_eq!(Layout::from_json("not json"), Layout::default());
+    }
+
+    #[test]
+    fn collapsed_sidebars_keep_widths_and_legacy_layouts_expand() {
+        let legacy = Layout::from_json(r#"{"outliner_width":310,"inspector_width":500}"#);
+        assert!(legacy.outliner_expanded && legacy.inspector_expanded);
+        let hidden = Layout {
+            outliner_expanded: false,
+            inspector_expanded: false,
+            ..legacy
+        };
+        let mut restored = Layout::from_json(&hidden.to_json());
+        assert!(!restored.outliner_expanded && !restored.inspector_expanded);
+        assert_eq!(restored.outliner_width, 310.0);
+        assert_eq!(restored.inspector_width, 500.0);
+        restored.outliner_expanded = true;
+        restored.inspector_expanded = true;
+        assert_eq!(restored.outliner_width, 310.0);
+        assert_eq!(restored.inspector_width, 500.0);
     }
 
     #[test]

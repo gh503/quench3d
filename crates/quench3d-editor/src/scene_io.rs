@@ -275,6 +275,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
     ]);
     lighting.exposure = Some(light.exposure);
     lighting.sky = Some(light.sky.enabled);
+    lighting.space = light.sky.space.then_some(true);
     lighting.grid = Some(light.sky.show_grid);
     // 编辑器能改的雾 / 阴影质量 / 天空颜色也从引擎写回；不能改的（点光、bloom…）沿用底稿。
     let fog_linear = matches!(light.fog.mode, quench3d_render::light::FogMode::Linear);

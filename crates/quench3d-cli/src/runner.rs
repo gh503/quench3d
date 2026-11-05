@@ -4018,6 +4018,7 @@ pub fn setup_visuals(
             ),
         };
         engine.scene.objects[index].transform.scale = Vec3::splat(g.size);
+        engine.scene.objects[index].environment_ground = true;
     }
 
     let plane_size = doc.ground.as_ref().map(|g| g.size).unwrap_or(40.0);
@@ -5266,6 +5267,9 @@ pub fn apply_lighting(engine: &mut Engine, doc: &SceneDoc) -> Result<(), RunErro
     }
     if let Some(sky) = l.sky {
         lighting.sky.enabled = sky;
+    }
+    if let Some(space) = l.space {
+        lighting.sky.space = space;
     }
     if let Some(grid) = l.grid {
         lighting.sky.show_grid = grid;

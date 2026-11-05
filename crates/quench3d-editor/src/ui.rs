@@ -222,9 +222,22 @@ fn top_bar(
                 {
                     req.open_agent = true;
                     doc.layout.sidebar_tab = crate::layout::SidebarTab::Agent;
+                    doc.layout.inspector_expanded = true;
                     if let Err(e) = doc.layout.save() {
                         doc.status = format!("布局保存失败：{e}");
                     }
+                }
+                ui.separator();
+                let mut layout_changed = ui
+                    .toggle_value(&mut doc.layout.outliner_expanded, "场景栏")
+                    .on_hover_text("展开 / 收起左侧场景树；拖动内侧边界调整宽度")
+                    .changed();
+                layout_changed |= ui
+                    .toggle_value(&mut doc.layout.inspector_expanded, "右侧栏")
+                    .on_hover_text("展开 / 收起 AI 助手和属性栏；拖动内侧边界调整宽度")
+                    .changed();
+                if layout_changed {
+                    save_layout(doc);
                 }
                 ui.separator();
                 file_menu(ui, doc, req);
@@ -412,6 +425,50 @@ fn top_bar(
                             crate::navigation::switch(engine, CameraMode::Fly, None);
                         }
                     });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("视角");
+                for (label, yaw, pitch) in [
+                    ("前视", 0.0, 0.0),
+                    ("后视", std::f32::consts::PI, 0.0),
+                    ("左视", -std::f32::consts::FRAC_PI_2, 0.0),
+                    ("右视", std::f32::consts::FRAC_PI_2, 0.0),
+                    ("俯视", 0.0, std::f32::consts::FRAC_PI_2 - 0.01),
+                    ("仰视", 0.0, -std::f32::consts::FRAC_PI_2 + 0.01),
+                    ("立体", 0.7, 0.55),
+                ] {
+                    if ui
+                        .small_button(label)
+                        .on_hover_text("切换视角，保持当前观察中心和距离")
+                        .clicked()
+                    {
+                        let center = doc.selection_center(engine);
+                        crate::navigation::switch(engine, CameraMode::Orbit, center);
+                        engine.orbit.yaw = yaw;
+                        engine.orbit.pitch = pitch;
+                    }
+                }
+                ui.separator();
+                let orthographic = engine.camera_mode == CameraMode::Orbit
+                    && engine.orbit.orthographic_height.is_some();
+                if ui.selectable_label(!orthographic, "透视").clicked() {
+                    engine.orbit.orthographic_height = None;
+                }
+                if ui.selectable_label(orthographic, "正交").clicked() {
+                    crate::navigation::switch(engine, CameraMode::Orbit, None);
+                    engine.orbit.orthographic_height =
+                        Some(engine.orbit.orthographic_height.unwrap_or_else(|| {
+                            (2.0 * engine.orbit.distance * (engine.orbit.fov_y * 0.5).tan())
+                                .max(0.1)
+                        }));
+                }
+                if ui
+                    .small_button("聚焦选中")
+                    .on_hover_text("F：将观察中心对准选中物体")
+                    .clicked()
+                {
+                    doc.focus_selected(engine);
+                }
             });
             if doc.recovery.is_some() {
                 ui.separator();
@@ -993,11 +1050,62 @@ fn render_menu(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
         });
 }
 
+fn save_layout(doc: &mut Doc) {
+    doc.layout.clamp();
+    if let Err(error) = doc.layout.save() {
+        doc.status = format!("布局保存失败：{error}");
+    }
+}
+
+// Keep explicit menu sizes and persisted sizes in sync with egui's drag state.
+fn panel_width(ui: &Ui, salt: &str, width: f32) {
+    let id = ui.scope_id().with_salt(egui::IdSalt::new(salt));
+    let previous = ui
+        .ctx()
+        .data_mut(|data| data.get_persisted::<egui::containers::panel::PanelState>(id));
+    let rect = previous
+        .map(|state| state.outer_rect)
+        .unwrap_or(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width, 100.0),
+        ));
+    ui.ctx().data_mut(|data| {
+        data.insert_persisted(
+            id,
+            egui::containers::panel::PanelState {
+                outer_rect: egui::Rect::from_min_size(rect.min, egui::vec2(width, rect.height())),
+            },
+        )
+    });
+}
+
+fn persist_panel_resize(ui: &Ui, doc: &mut Doc, salt: &str, changed: bool) {
+    let dirty_id = ui
+        .scope_id()
+        .with_salt(egui::IdSalt::new(("panel-width-dirty", salt)));
+    if changed {
+        ui.ctx().data_mut(|data| data.insert_temp(dirty_id, true));
+    }
+    if !ui.input(|input| input.pointer.primary_down())
+        && ui
+            .ctx()
+            .data_mut(|data| data.remove_temp::<bool>(dirty_id))
+            .unwrap_or(false)
+    {
+        save_layout(doc);
+    }
+}
+
 fn layout_menu(ui: &mut Ui, doc: &mut Doc) {
     ui.menu_button("布局", |ui| {
         ui.set_min_width(230.0);
         ui.label(RichText::new("面板宽度（逻辑像素）").small().weak());
-        let mut changed = false;
+        let mut changed = ui
+            .checkbox(&mut doc.layout.outliner_expanded, "展开场景栏")
+            .changed();
+        changed |= ui
+            .checkbox(&mut doc.layout.inspector_expanded, "展开右侧栏")
+            .changed();
         changed |= ui
             .add(
                 egui::Slider::new(
@@ -1165,16 +1273,27 @@ fn object_row(ui: &mut Ui, engine: &Engine, doc: &mut Doc, index: usize) -> Opti
 ///   按 [`Doc::model_instances`] 收进 `模型 #i · 路径` 分组，成员照旧可点选、可 `⌖` 聚焦，
 ///   分组标题上还有"整组聚焦"。
 fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests) {
+    if !doc.layout.outliner_expanded {
+        return;
+    }
     let width = doc
         .layout
         .outliner_width
         .clamp(crate::layout::OUTLINER_MIN, crate::layout::OUTLINER_MAX);
+    panel_width(ui, "quench3d-outliner", width);
     let response = egui::Panel::left("quench3d-outliner")
         .default_size(width)
-        .min_size(width)
-        .max_size(width)
+        .min_size(crate::layout::OUTLINER_MIN)
+        .max_size(crate::layout::OUTLINER_MAX)
+        .resizable(true)
         .show(ui, |ui| {
-            ui.heading("场景");
+            ui.horizontal(|ui| {
+                ui.heading("场景");
+                if ui.small_button("收起场景栏").clicked() {
+                    doc.layout.outliner_expanded = false;
+                    save_layout(doc);
+                }
+            });
             ui.horizontal(|ui| {
                 ui.label("搜索");
                 ui.add(
@@ -1344,6 +1463,11 @@ fn outliner(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc, req: &mut Requests)
             }
         });
     req.outliner_width = response.response.rect.width();
+    let changed = (doc.layout.outliner_width - req.outliner_width).abs() > 0.5;
+    if changed {
+        doc.layout.outliner_width = req.outliner_width;
+    }
+    persist_panel_resize(ui, doc, "outliner", changed);
 }
 
 /// 搜索过滤的"后代向上传播"：自己匹配或任一后代匹配，就保留这一行。
@@ -2532,6 +2656,7 @@ fn light_section(ui: &mut Ui, engine: &mut Engine, doc: &mut Doc) {
                     changed = true;
                 }
                 changed |= ui.checkbox(&mut light.sky.enabled, "天空").changed();
+                changed |= ui.checkbox(&mut light.sky.space, "宇宙星空").changed();
                 changed |= ui.checkbox(&mut light.sky.show_grid, "参考网格").changed();
                 if light.sky.enabled {
                     // 天空/雾的颜色都是**线性空间**（引擎内部就是线性），所以用
@@ -4923,15 +5048,21 @@ fn inspector(
     req: &mut Requests,
     agent: Option<&mut crate::agent::AgentPanel>,
 ) {
+    if !doc.layout.inspector_expanded {
+        return;
+    }
     let width = doc
         .layout
         .inspector_width
         .clamp(crate::layout::INSPECTOR_MIN, crate::layout::INSPECTOR_MAX);
+    panel_width(ui, "quench3d-inspector", width);
     let response = egui::Panel::right("quench3d-inspector")
         .default_size(width)
-        .min_size(width)
-        .max_size(width)
+        .min_size(crate::layout::INSPECTOR_MIN)
+        .max_size(crate::layout::INSPECTOR_MAX)
+        .resizable(true)
         .show(ui, |ui| {
+            if ui.small_button("收起右侧栏").on_hover_text("顶部右侧栏按钮可重新展开").clicked() { doc.layout.inspector_expanded = false; save_layout(doc); }
             if let Some(agent) = agent {
                 let previous_tab = doc.layout.sidebar_tab;
                 ui.horizontal(|ui| {
@@ -5324,6 +5455,11 @@ fn inspector(
                 });
         });
     req.inspector_width = response.response.rect.width();
+    let changed = (doc.layout.inspector_width - req.inspector_width).abs() > 0.5;
+    if changed {
+        doc.layout.inspector_width = req.inspector_width;
+    }
+    persist_panel_resize(ui, doc, "inspector", changed);
 }
 
 /// 中央视口（3D 画面本身由引擎画，这里只放交互与叠加提示）。

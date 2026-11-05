@@ -1381,3 +1381,159 @@ fn relative_orbit_undo_redo_restores_reference_and_kinematic_mode() {
     );
     assert!(doc.label_visible("月球"));
 }
+
+#[test]
+fn space_environment_preserves_geometry_ground_and_physics_and_roundtrips() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    scene_io::load_text_into_doc(&mut engine, &mut doc, r#"{
+        "gravity":[0,-3,0], "ground":{"size":20,"y":-2,"friction":0.7},
+        "objects":[{"name":"太阳","body":"static","position":[0,5,0],"shape":{"type":"sphere","radius":1}},
+        {"name":"地球","body":"dynamic","position":[4,5,0],"velocity":[0,0,2],"shape":{"type":"sphere","radius":0.3}}]
+    }"#).unwrap();
+    engine.paused = true;
+    let gravity = engine.world.gravity();
+    let objects = engine
+        .scene
+        .objects
+        .iter()
+        .map(|o| {
+            (
+                o.name.clone(),
+                o.mesh,
+                o.material,
+                o.transform,
+                o.visible,
+                o.body,
+                o.body.map(|h| engine.world.body(h).unwrap().clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let before: Value =
+        serde_json::from_str(&scene_io::scene_to_json(&engine, &doc).unwrap().json).unwrap();
+    let rev = revision(&mut engine, &mut doc);
+    let changed = call(
+        &mut engine,
+        &mut doc,
+        "set_environment",
+        json!({"preset":"space","expected_revision":rev}),
+    );
+    assert_eq!(changed["result"]["geometry_preserved"], true);
+    assert_eq!(changed["result"]["physics_preserved"], true);
+    let inspected = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    let environment = &inspected["result"]["environment"];
+    assert_eq!(environment["space"], true);
+    assert_eq!(environment["sky_enabled"], true);
+    assert_eq!(environment["grid_enabled"], false);
+    assert_eq!(environment["fog"]["density"], 0.0);
+    assert_eq!(engine.world.gravity(), gravity);
+    assert_eq!(objects, engine.scene.objects.iter().map(|o| (
+        o.name.clone(), o.mesh, o.material, o.transform, o.visible, o.body,
+        o.body.map(|h| engine.world.body(h).unwrap().clone())
+    )).collect::<Vec<_>>(), "environment changes must preserve body handles, all velocities, poses, geometry and visible ground");
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let after: Value = serde_json::from_str(&saved.json).unwrap();
+    assert_eq!(after["objects"], before["objects"]);
+    assert_eq!(
+        after["ground"], before["ground"],
+        "the authored ground is not a disposable visual grid"
+    );
+    let parsed = quench3d_cli::scene_doc::SceneDoc::from_json(&saved.json).unwrap();
+    assert_eq!(parsed.lighting.space, Some(true));
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    let reloaded = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    assert_eq!(reloaded["result"]["environment"]["space"], true);
+    assert_eq!(reloaded["result"]["environment"]["sky_enabled"], true);
+    assert_eq!(reloaded["result"]["environment"]["grid_enabled"], false);
+    assert_eq!(reloaded["result"]["environment"]["fog"]["density"], 0.0);
+    assert_eq!(engine.world.gravity(), gravity);
+    let reloaded_json: Value =
+        serde_json::from_str(&scene_io::scene_to_json(&engine, &doc).unwrap().json).unwrap();
+    assert_eq!(reloaded_json["ground"], after["ground"]);
+    assert_eq!(reloaded_json["objects"], after["objects"]);
+}
+
+#[test]
+fn space_environment_undo_redo_restores_saved_preset() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let rev = revision(&mut engine, &mut doc);
+    let studio = call(
+        &mut engine,
+        &mut doc,
+        "set_environment",
+        json!({"preset":"studio","expected_revision":rev}),
+    );
+    let configured = call(
+        &mut engine,
+        &mut doc,
+        "set_environment",
+        json!({"preset":"space","expected_revision":studio["revision"]}),
+    );
+    assert_eq!(configured["result"]["environment"]["space"], true);
+    let undone = call(
+        &mut engine,
+        &mut doc,
+        "undo",
+        json!({"expected_revision":configured["revision"]}),
+    );
+    assert_eq!(undone["result"]["environment"]["space"], false);
+    let saved = quench3d_cli::scene_doc::SceneDoc::from_json(
+        &scene_io::scene_to_json(&engine, &doc).unwrap().json,
+    )
+    .unwrap();
+    assert_ne!(saved.lighting.space, Some(true));
+    let redone = call(
+        &mut engine,
+        &mut doc,
+        "redo",
+        json!({"expected_revision":undone["revision"]}),
+    );
+    assert_eq!(redone["result"]["environment"]["space"], true);
+    assert_eq!(redone["result"]["environment"]["sky_enabled"], true);
+    assert_eq!(redone["result"]["environment"]["grid_enabled"], false);
+    assert_eq!(
+        quench3d_cli::scene_doc::SceneDoc::from_json(
+            &scene_io::scene_to_json(&engine, &doc).unwrap().json
+        )
+        .unwrap()
+        .lighting
+        .space,
+        Some(true)
+    );
+}
+
+#[test]
+fn space_environment_invalid_preset_and_stale_revision_do_not_edit() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let rev = revision(&mut engine, &mut doc);
+    for args in [
+        json!({"preset":"galaxy","expected_revision":rev}),
+        json!({"preset":true,"expected_revision":rev}),
+        json!({"expected_revision":rev}),
+        json!({"preset":"space"}),
+        json!({"preset":"space","expected_revision":"stale"}),
+    ] {
+        let before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+        let history = (
+            doc.history.len(),
+            doc.history.can_undo(),
+            doc.history.can_redo(),
+        );
+        let result = commands::dispatch(&mut engine, &mut doc, "set_environment", args);
+        assert_eq!(result["ok"], false, "{result}");
+        assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+        assert_eq!(
+            (
+                doc.history.len(),
+                doc.history.can_undo(),
+                doc.history.can_redo()
+            ),
+            history
+        );
+    }
+}

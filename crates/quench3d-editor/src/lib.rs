@@ -32,6 +32,7 @@ pub mod autosave;
 pub mod camera;
 pub mod commands;
 pub mod doc;
+mod environment;
 pub mod gizmo;
 pub mod history;
 pub mod layout;

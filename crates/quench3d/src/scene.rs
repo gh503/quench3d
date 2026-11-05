@@ -54,6 +54,8 @@ pub struct SceneObject {
     /// 这类物体没有可序列化的源网格，场景 JSON 不导出它；否则打开时网格句柄悬空。
     /// 仍会参与渲染/选择/物理之外的编辑，用户可以在会话里移动它。
     pub generated: bool,
+    /// Built-in ground presentation, hidden in space environments without changing collisions.
+    pub environment_ground: bool,
     /// 关联的物理刚体（`None` 表示纯静态显示）。
     ///
     /// **带刚体的物体必须是根**（[`Scene::set_parent`] 会拒绝，场景校验器也会报错）：
@@ -1387,6 +1389,7 @@ impl Scene {
             parent: None,
             owner_part: None,
             generated: false,
+            environment_ground: false,
             body: None,
             visible: true,
             cast_shadows: true,
@@ -2778,7 +2781,7 @@ impl Scene {
         let (palette, skin_plan) = gpu_skin_plan(&self.animations, self.gpu_skinning);
         renderer.set_skin_palette(&palette);
         for (i, obj) in self.objects.iter().enumerate() {
-            if obj.visible {
+            if obj.visible && !(obj.environment_ground && self.lighting.sky.space) {
                 let mut instance = obj.instance(self.world_transform(i));
                 if let Some(&(base, count)) = skin_plan.get(&i) {
                     instance = instance.with_skin(base, count);

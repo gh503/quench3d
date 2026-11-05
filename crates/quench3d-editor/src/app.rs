@@ -624,6 +624,12 @@ impl Inner {
             .handle_platform_output(&self.window, full_output.platform_output.clone());
         #[cfg(target_arch = "wasm32")]
         publish_camera_controls(&full_output.shapes);
+        #[cfg(target_arch = "wasm32")]
+        publish_layout_debug(
+            &self.doc,
+            self.viewport.rect,
+            self.engine.orbit.orthographic_height.is_some(),
+        );
         let paint_jobs = self
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -1243,6 +1249,20 @@ fn publish_camera_controls(shapes: &[egui::epaint::ClippedShape]) {
             egui::epaint::Shape::Text(text) => {
                 if [
                     "AI 助手",
+                    "前视",
+                    "后视",
+                    "左视",
+                    "右视",
+                    "俯视",
+                    "仰视",
+                    "立体",
+                    "透视",
+                    "正交",
+                    "聚焦选中",
+                    "场景栏",
+                    "右侧栏",
+                    "收起场景栏",
+                    "收起右侧栏",
                     "新建会话",
                     "新会话",
                     "fixture-main",
@@ -1389,6 +1409,35 @@ fn publish_ui_debug_state(state: UiDebugState) {
 lod={lod};shadow_instances={shadow_instances};shadow_strength={shadow_strength};sun_cast={sun_cast};camera={camera_mode:?};gizmo={gizmo_mode:?};pivot={gizmo_pivot};cursor={cursor:?};contacts={contacts};bounds={bounds};query={query};bones={bones};joints={joints};probes={probes};selection={selection};hovered={hovered};motion_blur={motion_blur};tonemap={tonemap};recovery={recovery};objects={objects};selected={selected};parents={parents};camera_pose={camera_pose};camera_world={camera_world};camera_eye={camera_eye:?};camera_forward={camera_forward:?};orbit_focus={orbit_focus:?};orbit_distance={orbit_distance}"
     );
     let _ = body.set_attribute("data-quench3d-ui", &state);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn publish_layout_debug(doc: &Doc, viewport: egui::Rect, orthographic: bool) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if !window
+        .location()
+        .search()
+        .unwrap_or_default()
+        .contains("ui_debug=1")
+    {
+        return;
+    }
+    let Some(body) = window.document().and_then(|d| d.body()) else {
+        return;
+    };
+    let state = serde_json::json!({
+        "viewport_rect":[viewport.min.x,viewport.min.y,viewport.max.x,viewport.max.y],
+        "outliner_rect": if doc.layout.outliner_expanded { Some([viewport.min.x-doc.layout.outliner_width, viewport.min.y, viewport.min.x, viewport.max.y]) } else { None },
+        "inspector_rect": if doc.layout.inspector_expanded { Some([viewport.max.x, viewport.min.y, viewport.max.x+doc.layout.inspector_width, viewport.max.y]) } else { None },
+        "outliner_expanded":doc.layout.outliner_expanded,
+        "inspector_expanded":doc.layout.inspector_expanded,
+        "outliner_width":doc.layout.outliner_width,
+        "inspector_width":doc.layout.inspector_width,
+        "orthographic":orthographic
+    });
+    let _ = body.set_attribute("data-quench3d-layout", &state.to_string());
 }
 
 /// 调试探针：记录最近一条 winit 键盘事件（仅 `?ui_debug=1`）。

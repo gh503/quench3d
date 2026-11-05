@@ -314,13 +314,25 @@ async function main() {
 
   // Exercise the advertised orbit tools through actual model HTTP, not direct
   // scene mutation. Only inspect while playing because revisions change per step.
-  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit: 创建静态太阳、绕太阳公转的地球和绕移动地球公转的月球，显示三个物体的中文名称标签，然后播放。' })).ok, true);
+  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit: 先暂停并检查，再设置太空星空环境，创建静态太阳、绕太阳公转的地球和绕移动地球公转的月球，显示三个物体的中文名称标签，然后播放。' })).ok, true);
   const orbitDone = await until(async () => {
     const current = await status();
     if (current.agent.status === 'error') throw new Error(JSON.stringify(current));
     return current.agent.status === 'done' && current.agent.messages.some(m =>
       m.role === 'assistant' && m.content === 'fixture-orbit-done') && current;
   }, 'actual AI orbit setup', 60000);
+  const environmentCalls = orbitDone.agent.messages.flatMap(message => message.tool_calls ?? [])
+    .filter(call => /^orbit_\d+$/.test(call.id) && call.function.name === 'set_environment');
+  assert.equal(environmentCalls.length, 1, 'AI sets the space environment once before creating bodies');
+  assert.equal(environmentCalls[0].id, 'orbit_2');
+  const environmentArgs = JSON.parse(environmentCalls[0].function.arguments);
+  assert.equal(environmentArgs.preset, 'space');
+  assert.equal(typeof environmentArgs.expected_revision, 'string');
+  const environmentReceipts = orbitDone.agent.messages.filter(message => message.role === 'tool'
+    && message.tool_call_id === environmentCalls[0].id);
+  assert.equal(environmentReceipts.length, 1, 'one actual environment tool receipt');
+  const environmentReceipt = JSON.parse(environmentReceipts[0].content);
+  assert.equal(environmentReceipt.ok, true, 'space environment tool succeeds');
   const labelCalls = orbitDone.agent.messages.flatMap(message => message.tool_calls ?? [])
     .filter(call => /^orbit_\d+$/.test(call.id) && call.function.name === 'set_object_label');
   assert.equal(labelCalls.length, 3, 'AI executes all three label tools');
@@ -362,6 +374,10 @@ async function main() {
     return object;
   };
   const checkOrbit = snapshot => {
+    assert.equal(snapshot.environment.preset, 'space', 'space preset remains active while orbiting and paused');
+    assert.equal(snapshot.environment.space, true, 'procedural star background is enabled');
+    assert.equal(snapshot.environment.sky_enabled, true, 'space sky is rendered');
+    assert.equal(snapshot.environment.grid_enabled, false, 'space environment hides the editor ground grid');
     const sun = orbitObject(snapshot, '太阳', 0.8);
     const planet = orbitObject(snapshot, '地球', 0.2);
     const moon = orbitObject(snapshot, '月球', 0.1);
@@ -406,12 +422,126 @@ async function main() {
   assert.deepEqual(stillObjects.sun.position, pausedObjects.sun.position, 'paused sun remains fixed');
   const orbitReport = await (await fetch(`${control}/fixture/status`)).json();
   assert.deepEqual(orbitReport.errors, []);
-  assert.deepEqual(orbitReport.orbit_requests.map(item => item.round), Array.from({ length: 13 }, (_, index) => index));
+  assert.deepEqual(orbitReport.orbit_requests.map(item => item.round), Array.from({ length: 14 }, (_, index) => index));
   assert.equal(orbitReport.orbit_stop_requests.length, 2);
   assert.equal(orbitReport.long_requests.length, 41, 'orbit stage does not rerun the long task');
   evidence.stages.push({ stage: 'actual-ai-orbit', agent: orbitDone.agent, first: orbitFirst,
     moved, paused: pausedOrbit, still: stillOrbit, label_calls: labelCalls,
-    moon_orbit_call: moonOrbitCalls[0], http: orbitReport.orbit_requests });
+    moon_orbit_call: moonOrbitCalls[0], environment_call: environmentCalls[0],
+    environment_receipt: environmentReceipt, http: orbitReport.orbit_requests });
+
+  // Drive the actual viewport buttons and panel separators through CDP. These
+  // read-only debug attributes expose rendered bounds, never mutate editor state.
+  const uiState = () => evaluate(send, `document.body?.getAttribute('data-quench3d-ui') || ''`);
+  const layoutMetrics = async () => {
+    const metrics = await until(() => evaluate(send,
+      `JSON.parse(document.body?.getAttribute('data-quench3d-layout') || 'null')`), 'rendered panel layout metrics');
+    for (const key of ['viewport_rect']) assert.ok(Array.isArray(metrics[key]) && metrics[key].length === 4, `${key} has rendered bounds`);
+    return metrics;
+  };
+  const persistedLayout = () => evaluate(send, `JSON.parse(localStorage.getItem('quench3d.editor.layout.v1') || 'null')`);
+  const vectorState = (state, name) => {
+    const match = state.match(new RegExp(`${name}=\\[([^\\]]+)\\]`));
+    assert.ok(match, `published ${name}: ${state}`);
+    const value = match[1].split(',').map(Number);
+    assert.ok(value.length === 3 && value.every(Number.isFinite), `${name} is a finite vector`);
+    return value;
+  };
+  const cameraViews = [];
+  for (const [text, expected] of [
+    ['前视', [0, 0, -1]], ['后视', [0, 0, 1]],
+    ['左视', [1, 0, 0]], ['右视', [-1, 0, 0]],
+    ['俯视', [0, -1, 0]], ['仰视', [0, 1, 0]],
+  ]) {
+    await click(text);
+    const state = await until(async () => {
+      const current = await uiState();
+      const direction = vectorState(current, 'camera_forward');
+      return direction.every((value, index) => Math.abs(value - expected[index]) < 0.02) && current;
+    }, `${text} actual camera direction`);
+    assert.match(state, /camera=Orbit(?:;|$)/);
+    cameraViews.push({ text, forward: vectorState(state, 'camera_forward'), state });
+  }
+  await click('立体');
+  const perspectiveView = await uiState();
+  const oblique = vectorState(perspectiveView, 'camera_forward');
+  assert.ok(oblique.every(value => Math.abs(value) > 0.1), 'oblique view has three nonzero direction components');
+  await click('正交');
+  const orthographic = await until(async () => {
+    const value = await layoutMetrics();
+    return value.orthographic === true && value;
+  }, 'orthographic projection enabled by actual button');
+  await click('透视');
+  const perspective = await until(async () => {
+    const value = await layoutMetrics();
+    return value.orthographic === false && value;
+  }, 'perspective projection restored by actual button');
+  const focusReceipt = await request({ action: 'inspect' });
+  const selectedSun = await request({ action: 'command', name: 'select_object',
+    arguments: { name: '太阳', expected_revision: focusReceipt.revision } });
+  assert.equal(selectedSun.ok, true, 'select the existing sun before clicking focus');
+  await click('聚焦选中');
+  const focused = await until(async () => {
+    const state = await uiState();
+    return vectorState(state, 'orbit_focus').every((value, index) => Math.abs(value - [0, 5, 0][index]) < 1e-4) && state;
+  }, 'focus button points orbit center at the selected sun');
+
+  const width = rect => rect[2] - rect[0];
+  const panelResults = [];
+  for (const panel of [
+    { toggle: '场景栏', collapse: '收起场景栏', rect: 'outliner_rect', expanded: 'outliner_expanded', savedWidth: 'outliner_width', side: 'left' },
+    { toggle: '右侧栏', collapse: '收起右侧栏', rect: 'inspector_rect', expanded: 'inspector_expanded', savedWidth: 'inspector_width', side: 'right' },
+  ]) {
+    let initial = await layoutMetrics();
+    if (!initial[panel.expanded]) {
+      await click(panel.toggle);
+      initial = await until(async () => { const value = await layoutMetrics(); return value[panel.expanded] && value; }, `${panel.toggle} expanded before resize`);
+    }
+    assert.ok(Array.isArray(initial[panel.rect]), `${panel.toggle} rendered rectangle exists`);
+    const initialWidth = width(initial[panel.rect]);
+    const edge = panel.side === 'left' ? initial[panel.rect][2] - 1 : initial[panel.rect][0] + 1;
+    const y = (initial[panel.rect][1] + initial[panel.rect][3]) / 2;
+    const delta = panel.side === 'left' ? 48 : -48;
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: edge, y });
+    await rendered();
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, x: edge, y });
+    await rendered();
+    for (let step = 1; step <= 4; step++) {
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: edge + delta * step / 4, y });
+      await rendered();
+    }
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x: edge + delta, y });
+    await rendered();
+    const resized = await until(async () => {
+      const value = await layoutMetrics();
+      return value[panel.expanded] && width(value[panel.rect]) > initialWidth + 15 && value;
+    }, `${panel.toggle} divider drag changes actual width`);
+    const resizedWidth = width(resized[panel.rect]);
+    const savedResize = await until(async () => {
+      const value = await persistedLayout();
+      return value && Math.abs(value[panel.savedWidth] - resizedWidth) < 2 && value;
+    }, `${panel.toggle} resized width persisted`);
+    await click(panel.collapse);
+    const collapsed = await until(async () => {
+      const value = await layoutMetrics();
+      return value[panel.expanded] === false && width(value.viewport_rect) > width(resized.viewport_rect) + resizedWidth - 10 && value;
+    }, `${panel.toggle} header collapses and releases viewport space`);
+    await until(async () => (await persistedLayout())?.[panel.expanded] === false, `${panel.toggle} collapsed preference saved`);
+    assert.equal((await controls()).some(item => item.text === panel.collapse), false, `${panel.toggle} collapsed header is not rendered`);
+    await click(panel.toggle);
+    const reopened = await until(async () => {
+      const value = await layoutMetrics();
+      return value[panel.expanded] === true && Array.isArray(value[panel.rect])
+        && Math.abs(width(value[panel.rect]) - resizedWidth) < 2 && value;
+    }, `${panel.toggle} toolbar reopens at the resized width`);
+    await until(async () => (await persistedLayout())?.[panel.expanded] === true, `${panel.toggle} expanded preference saved`);
+    panelResults.push({ panel: panel.toggle, initial, resized, savedResize, collapsed, reopened });
+  }
+  const afterViewControls = scene(await request({ action: 'inspect' }));
+  assert.deepEqual(afterViewControls.objects, stillOrbit.objects, 'view, projection, focus and sidebar operations preserve all scene objects');
+  assert.equal(afterViewControls.paused, true, 'view controls do not restart simulation');
+  evidence.stages.push({ stage: 'viewport-buttons-and-resizable-sidebars', cameraViews,
+    oblique: perspectiveView, orthographic, perspective, focused, panels: panelResults });
 
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(out, 'agent-final.png'), Buffer.from(screenshot.data, 'base64'));

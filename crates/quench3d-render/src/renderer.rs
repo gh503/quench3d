@@ -5107,7 +5107,7 @@ impl Renderer {
                 lighting.sky.zenith.x,
                 lighting.sky.zenith.y,
                 lighting.sky.zenith.z,
-                1.0,
+                if lighting.sky.space { 1.0 } else { 0.0 },
             ],
             sky_horizon: [
                 lighting.sky.horizon.x,

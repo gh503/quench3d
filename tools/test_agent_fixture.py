@@ -96,6 +96,7 @@ class ModelScript:
             steps = [('set_playback', {'paused': True})] if stopping else [
                 ('set_playback', {'paused': True}),
                 ('inspect_scene', {}),
+                ('set_environment', {'preset': 'space'}),
                 ('spawn_primitive', {'name': '太阳',
                     'shape': {'type': 'sphere', 'radius': 0.8}, 'position': [0, 5, 0]}),
                 ('set_body_mode', {'name': '太阳', 'mode': 'static'}),
@@ -116,7 +117,7 @@ class ModelScript:
             receipt = self.result(body, calls[-1]['id']) if calls else None
             offered = {tool['function']['name'] for tool in body.get('tools', [])}
             if not {name for name, _args in steps}.issubset(offered):
-                raise AssertionError('editor did not advertise orbit/body-mode/label tools')
+                raise AssertionError('editor did not advertise environment/orbit/body-mode/label tools')
             with self.lock:
                 target = self.orbit_stop_requests if stopping else self.orbit_requests
                 target.append({'round': index, 'last_revision': receipt['revision'] if receipt else None})
@@ -367,10 +368,10 @@ class FixtureTests(unittest.TestCase):
 
     def test_orbit_script_uses_receipt_revisions_and_stop_has_no_revision(self):
         script = ModelScript()
-        names = ['set_playback', 'inspect_scene', 'spawn_primitive', 'set_body_mode', 'set_orbit', 'set_object_label']
+        names = ['set_playback', 'inspect_scene', 'set_environment', 'spawn_primitive', 'set_body_mode', 'set_orbit', 'set_object_label']
         body = {'messages': [{'role': 'user', 'content': 'fixture-orbit'}],
                 'tools': [{'function': {'name': name}} for name in names]}
-        expected = ['set_playback', 'inspect_scene', 'spawn_primitive', 'set_body_mode',
+        expected = ['set_playback', 'inspect_scene', 'set_environment', 'spawn_primitive', 'set_body_mode',
                     'spawn_primitive', 'set_orbit', 'spawn_primitive', 'set_orbit',
                     'set_object_label', 'set_object_label', 'set_object_label', 'set_playback']
         for index, name in enumerate(expected):
@@ -383,13 +384,16 @@ class FixtureTests(unittest.TestCase):
                 self.assertNotIn('expected_revision', args)
             else:
                 self.assertEqual(args['expected_revision'], f'orbit-rev-{index - 1}')
+            if name == 'set_environment':
+                self.assertEqual(index, 2)
+                self.assertEqual(args['preset'], 'space')
             if name == 'spawn_primitive':
-                self.assertEqual(args['name'], {2: '太阳', 4: '地球', 6: '月球'}[index])
+                self.assertEqual(args['name'], {3: '太阳', 5: '地球', 7: '月球'}[index])
             if name == 'set_object_label':
-                self.assertEqual(args['name'], {8: '太阳', 9: '地球', 10: '月球'}[index])
+                self.assertEqual(args['name'], {9: '太阳', 10: '地球', 11: '月球'}[index])
                 self.assertIs(args['visible'], True)
             if name == 'set_orbit':
-                if index == 5:
+                if index == 6:
                     self.assertEqual(args['name'], '地球')
                     self.assertEqual(args['center'], [0, 5, 0])
                     self.assertNotIn('center_name', args)
@@ -413,7 +417,7 @@ class FixtureTests(unittest.TestCase):
         body['messages'].extend([stop, {'role': 'tool', 'tool_call_id': call['id'],
             'content': json.dumps({'ok': True, 'revision': 'orbit-stopped'})}])
         self.assertEqual(script.reply(body)['choices'][0]['message']['content'], 'fixture-orbit-stopped')
-        self.assertEqual([item['round'] for item in script.report()['orbit_requests']], list(range(13)))
+        self.assertEqual([item['round'] for item in script.report()['orbit_requests']], list(range(14)))
         self.assertEqual(len(script.report()['orbit_stop_requests']), 2)
 
     def test_long_script_progress_survives_compressed_context(self):
