@@ -1537,3 +1537,179 @@ fn space_environment_invalid_preset_and_stale_revision_do_not_edit() {
         );
     }
 }
+
+#[test]
+fn viewport_display_toggles_axes_and_grid_without_scene_or_history_edits() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let objects = engine
+        .scene
+        .objects
+        .iter()
+        .map(|o| {
+            (
+                o.name.clone(),
+                o.mesh,
+                o.material,
+                o.transform,
+                o.visible,
+                o.body,
+                o.body.map(|h| engine.world.body(h).unwrap().clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let history = (
+        doc.history.len(),
+        doc.history.can_undo(),
+        doc.history.can_redo(),
+    );
+    let mut rev = revision(&mut engine, &mut doc);
+    for (axes, grid) in [
+        (true, None),
+        (false, None),
+        (true, None),
+        (true, Some(false)),
+    ] {
+        let mut args = json!({"axes":axes,"expected_revision":rev});
+        if let Some(grid) = grid {
+            args["grid"] = json!(grid);
+        }
+        let changed = call(&mut engine, &mut doc, "set_viewport_display", args);
+        let inspected = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+        assert_eq!(inspected["result"]["display"]["axes"], axes);
+        if let Some(grid) = grid {
+            assert_eq!(inspected["result"]["display"]["grid"], grid);
+        }
+        assert_eq!(changed["revision"], inspected["revision"]);
+        if !axes {
+            assert_ne!(
+                rev, inspected["revision"],
+                "axes changes must update the display fingerprint"
+            );
+        }
+        if rev != inspected["revision"] {
+            let stale = commands::dispatch(
+                &mut engine,
+                &mut doc,
+                "set_viewport_display",
+                json!({"axes":!axes,"expected_revision":rev}),
+            );
+            assert_eq!(
+                stale["ok"], false,
+                "old display fingerprint must be stale: {stale}"
+            );
+        }
+        rev = inspected["revision"].clone();
+        assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+        assert_eq!(
+            objects,
+            engine
+                .scene
+                .objects
+                .iter()
+                .map(|o| (
+                    o.name.clone(),
+                    o.mesh,
+                    o.material,
+                    o.transform,
+                    o.visible,
+                    o.body,
+                    o.body.map(|h| engine.world.body(h).unwrap().clone())
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            (
+                doc.history.len(),
+                doc.history.can_undo(),
+                doc.history.can_redo()
+            ),
+            history
+        );
+    }
+    // Grid alone is valid and must leave the axes flag unchanged.
+    call(
+        &mut engine,
+        &mut doc,
+        "set_viewport_display",
+        json!({"grid":false,"expected_revision":rev}),
+    );
+    let inspected = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    assert_eq!(inspected["result"]["display"]["axes"], true);
+    assert_eq!(inspected["result"]["display"]["grid"], false);
+    assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+    assert_eq!(
+        (
+            doc.history.len(),
+            doc.history.can_undo(),
+            doc.history.can_redo()
+        ),
+        history
+    );
+}
+
+#[test]
+fn viewport_display_rejects_invalid_missing_stale_and_running_requests_without_mutation() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let rev = revision(&mut engine, &mut doc);
+    for args in [
+        json!({"axes":"false","expected_revision":rev}),
+        json!({"axes":null,"expected_revision":rev}),
+        json!({"grid":"false","expected_revision":rev}),
+        json!({"grid":null,"expected_revision":rev}),
+        json!({"expected_revision":rev}),
+        json!({"axes":false,"expected_revision":"stale"}),
+        json!({"axes":false}),
+    ] {
+        let before = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+        let saved = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+        let history = (
+            doc.history.len(),
+            doc.history.can_undo(),
+            doc.history.can_redo(),
+        );
+        let response = commands::dispatch(&mut engine, &mut doc, "set_viewport_display", args);
+        assert_eq!(response["ok"], false, "{response}");
+        let after = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+        assert_eq!(after["result"], before["result"]);
+        assert_eq!(after["revision"], before["revision"]);
+        assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, saved);
+        assert_eq!(
+            (
+                doc.history.len(),
+                doc.history.can_undo(),
+                doc.history.can_redo()
+            ),
+            history
+        );
+    }
+    engine.paused = false;
+    let running = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    let history = (
+        doc.history.len(),
+        doc.history.can_undo(),
+        doc.history.can_redo(),
+    );
+    let rejected = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_viewport_display",
+        json!({"axes":false,"expected_revision":running["revision"]}),
+    );
+    assert_eq!(rejected["ok"], false, "must pause first: {rejected}");
+    let unchanged = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    assert_eq!(unchanged["result"], running["result"]);
+    assert_eq!(unchanged["revision"], running["revision"]);
+    assert_eq!(
+        (
+            doc.history.len(),
+            doc.history.can_undo(),
+            doc.history.can_redo()
+        ),
+        history
+    );
+}

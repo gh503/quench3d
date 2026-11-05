@@ -24,9 +24,11 @@ The Chat Completions parser accepts tool-call responses with omitted, null or em
 
 ## Current tools and contracts
 
-`inspect_scene`, `set_environment`, `spawn_primitive`, `set_transform`, `set_shape`, `set_color`, `set_object_label`, `set_body_mode`, `set_orbit`, `clear_orbit`, `delete_object`, `select_object`, `focus_object`, `set_playback`, `step`, `undo`, `redo`.
+`inspect_scene`, `set_viewport_display`, `set_environment`, `spawn_primitive`, `set_transform`, `set_shape`, `set_color`, `set_object_label`, `set_body_mode`, `set_orbit`, `clear_orbit`, `delete_object`, `select_object`, `focus_object`, `set_playback`, `step`, `undo`, `redo`.
 
 `set_environment` switches `preset` between `space` and `studio`. Space uses a dark procedural star field, disables the reference grid and fog, and reduces ambient light. The built-in ground is visually omitted in space and returns in studio; geometry, gravity, contacts, authored lights and orbits are preserved. `lighting.space` saves the mode with the scene and participates in history. The lighting panel also offers a space-sky checkbox.
+
+`inspect_scene.display` reports world `axes` and effective `grid` visibility independently. Use `set_viewport_display` with optional boolean `axes` and/or `grid` after pausing and obtaining a fresh revision. It changes editor display without editing scene objects, orbit animation or undo history. These viewport flags apply to the current editor session; the grid's saved scene gate remains controlled by lighting. Labels are independent and remain visible.
 
 The main toolbar provides front/back/left/right/top/bottom/isometric views, perspective/orthographic projection and focus selection. Drag either sidebar's inner boundary to resize it. The scene/right sidebar toolbar toggles and header collapse buttons hide or restore them; layout storage retains widths and expansion state.
 

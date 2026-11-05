@@ -44,6 +44,12 @@ pub fn tools() -> Value {
             vec!["name", "color"],
         ),
         (
+            "set_viewport_display",
+            "Show or hide editor world coordinate axes and reference grid. These are viewport helpers, not scene objects. This changes display only, without changing objects, orbit animations or history.",
+            json!({"axes":{"type":"boolean"},"grid":{"type":"boolean"}}),
+            vec![],
+        ),
+        (
             "set_environment",
             "Set a saved visual environment preset: space uses a dark procedural star sky, no grid/fog and modest ambient light; studio restores default sky, grid and ambient settings. Geometry, authored lights and physics are preserved.",
             json!({"preset":{"type":"string","enum":["space","studio"]}}),
@@ -158,7 +164,7 @@ fn fingerprint(engine: &Engine, doc: &Doc) -> String {
         let t=engine.scene.world_transform(i);
         json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"scale":t.scale.to_array(),"color":o.color.to_array(),"body":format!("{:?}",o.body)})
     }).collect();
-    let state = json!({"scene":crate::scene_io::scene_to_json(engine,doc).ok().map(|s|s.json),"objects":objects,"paused":engine.paused,"selection":doc.selection(),"orbit":format!("{:?}",engine.orbit),"fly":format!("{:?}",engine.fly),"mode":format!("{:?}",engine.camera_mode),"history":[doc.history.len(),usize::from(doc.history.can_undo()),usize::from(doc.history.can_redo())]});
+    let state = json!({"scene":crate::scene_io::scene_to_json(engine,doc).ok().map(|s|s.json),"objects":objects,"display":{"axes":engine.debug.axes,"grid":engine.renderer.options.grid && engine.scene.lighting.sky.show_grid},"paused":engine.paused,"selection":doc.selection(),"orbit":format!("{:?}",engine.orbit),"fly":format!("{:?}",engine.fly),"mode":format!("{:?}",engine.camera_mode),"history":[doc.history.len(),usize::from(doc.history.can_undo()),usize::from(doc.history.can_redo())]});
     let mut hash = 0xcbf29ce484222325u64;
     for byte in state.to_string().bytes() {
         hash ^= u64::from(byte);
@@ -313,7 +319,7 @@ fn inspect(engine: &Engine, doc: &Doc) -> Value {
         let orbit=doc.base_doc().and_then(|d|d.animations.iter().find(|a|a.target==o.name && a.name.as_deref()==Some(crate::orbit::owned_name(&o.name).as_str())));
         json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"label_visible":doc.label_visible(&o.name),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"center_name":a.position_relative_to,"center":if a.position_relative_to.is_none(){a.position.as_ref().and_then(|p| p.values.first().zip(p.values.get(128))).map(|(a,b)| [(a[0]+b[0])*0.5,(a[1]+b[1])*0.5,(a[2]+b[2])*0.5])}else{None},"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
     }).collect();
-    json!({"objects":objects,"environment":crate::environment::inspect(&engine.scene.lighting, engine.renderer.options.sky, engine.renderer.options.grid),"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
+    json!({"display":{"axes":engine.debug.axes,"grid":engine.renderer.options.grid && engine.scene.lighting.sky.show_grid},"objects":objects,"environment":crate::environment::inspect(&engine.scene.lighting, engine.renderer.options.sky, engine.renderer.options.grid),"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
 }
 fn execute(
     engine: &mut Engine,
@@ -325,6 +331,7 @@ fn execute(
     let fields: &[&str] = match command {
         "inspect_scene" => &[],
         "set_playback" => &["paused"],
+        "set_viewport_display" => &["axes", "grid", "expected_revision"],
         "set_environment" => &["preset", "expected_revision"],
         "spawn_primitive" => &[
             "name",
@@ -390,6 +397,30 @@ fn execute(
             "history_busy",
             "Finish the current editor transaction first".into(),
         ));
+    }
+    if command == "set_viewport_display" {
+        let flag = |name: &str| -> Result<Option<bool>, Failure> {
+            args.get(name)
+                .map(|v| {
+                    v.as_bool()
+                        .ok_or_else(|| invalid(format!("{name} must be a boolean")))
+                })
+                .transpose()
+        };
+        let axes = flag("axes")?;
+        let grid = flag("grid")?;
+        if axes.is_none() && grid.is_none() {
+            return Err(invalid("Supply axes or grid"));
+        }
+        if let Some(axes) = axes {
+            engine.debug.axes = axes;
+        }
+        if let Some(grid) = grid {
+            engine.renderer.options.grid = grid;
+        }
+        return Ok(
+            json!({"display":{"axes":engine.debug.axes,"grid":engine.renderer.options.grid && engine.scene.lighting.sky.show_grid},"scene_preserved":true}),
+        );
     }
     if command == "set_environment" {
         let preset = crate::environment::Preset::parse(&args["preset"]).map_err(invalid)?;
