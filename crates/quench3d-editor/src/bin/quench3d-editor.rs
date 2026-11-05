@@ -6,7 +6,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 支持 `quench3d-editor [场景.json]`：启动即载入。
     if let Some(path) = std::env::args().nth(1) {
         config.demo_scene = false;
-        config.title = format!("Quench3D 编辑器 — {path}");
+        // The native title bar uses system fonts, independent of the embedded
+        // Chinese UI font. Keep its title ASCII even for Unicode scene paths.
+        config.title = "Quench3D Editor".into();
         config.startup_scene = Some(std::path::PathBuf::from(path));
     }
     quench3d_editor::run(config)

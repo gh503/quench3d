@@ -95,7 +95,7 @@ pub struct EditorConfig {
 impl Default for EditorConfig {
     fn default() -> Self {
         Self {
-            title: "Quench3D 编辑器".to_string(),
+            title: "Quench3D Editor".to_string(),
             width: 1280,
             height: 800,
             msaa_samples: 4,
