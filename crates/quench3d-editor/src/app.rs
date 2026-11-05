@@ -668,6 +668,7 @@ impl Inner {
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、
         // render_to 之前加入。停更 2 秒会自动消失，不会留下僵尸骨架。
         self.camera.add_lines(&mut self.engine.renderer.lines);
+        crate::orbit_path::draw(&mut self.engine, &self.doc);
         if self.doc.show_probes {
             if let Some(base) = self.doc.base_doc() {
                 draw_probes(&mut self.engine.renderer.lines, &base.probes);

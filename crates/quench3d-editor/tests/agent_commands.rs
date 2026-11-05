@@ -1873,3 +1873,215 @@ fn inspect_loaded_planet_color_matches_effective_material_color_instead_of_white
             "inspect_scene must expose effective rendered planet color, not the loaded white instance tint: {earth}");
     }
 }
+
+fn orbit_path_visible(engine: &mut Engine, doc: &mut Doc, name: &str) -> bool {
+    let inspected = call(engine, doc, "inspect_scene", json!({}));
+    inspected["result"]["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["name"] == name)
+        .unwrap()["orbit"]["path_visible"]
+        .as_bool()
+        .expect("orbit.path_visible must be a boolean")
+}
+
+fn orbit_path_poses(engine: &Engine) -> Value {
+    json!({
+        "object_count":engine.scene.objects.len(),
+        "body_count":engine.world.body_count(),
+        "objects":engine.scene.objects.iter().map(|object| {
+            let body=object.body.and_then(|handle| engine.world.body(handle));
+            json!({"name":object.name,"transform":format!("{:?}",object.transform),
+                "body_transform":body.map(|body| format!("{:?}",body.transform())),
+                "body_type":body.map(|body| format!("{:?}",body.body_type)),
+                "velocity":body.map(|body| body.linear_velocity().to_array()),
+                "angular_velocity":body.map(|body| body.angular_velocity().to_array())})
+        }).collect::<Vec<_>>()
+    })
+}
+
+#[test]
+fn orbit_path_visibility_persists_for_earth_and_moon_and_survives_reconfiguration() {
+    let Some((mut engine, mut doc, mut rev)) = relative_orbit_fixture() else {
+        return;
+    };
+    let before = orbit_path_poses(&engine);
+    for name in ["地球", "月球"] {
+        assert!(!orbit_path_visible(&mut engine, &mut doc, name));
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "set_orbit_path",
+            json!({"name":name,"visible":true,"expected_revision":rev}),
+        )["revision"]
+            .clone();
+        assert!(orbit_path_visible(&mut engine, &mut doc, name));
+        assert_eq!(
+            orbit_path_poses(&engine),
+            before,
+            "path display must not create objects or move bodies"
+        );
+    }
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let parsed: quench3d_cli::scene_doc::SceneDoc = serde_json::from_str(&saved.json).unwrap();
+    for name in ["地球", "月球"] {
+        assert_eq!(
+            parsed
+                .animations
+                .iter()
+                .find(|animation| animation.target == name)
+                .unwrap()
+                .show_path,
+            Some(true)
+        );
+    }
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    engine.paused = true;
+    assert_eq!(orbit_path_poses(&engine), before);
+    for name in ["地球", "月球"] {
+        assert!(orbit_path_visible(&mut engine, &mut doc, name));
+    }
+    let rev = revision(&mut engine, &mut doc);
+    let changed = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({"name":"地球","center":[0,5,0],"radius":5,"period_secs":8,"expected_revision":rev}),
+    );
+    assert!(orbit_path_visible(&mut engine, &mut doc, "地球"));
+    assert!(orbit_path_visible(&mut engine, &mut doc, "月球"));
+    let rev = changed["revision"].clone();
+    call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({"name":"月球","center_name":"地球","radius":1,"period_secs":2,"expected_revision":rev}),
+    );
+    assert!(orbit_path_visible(&mut engine, &mut doc, "月球"));
+    assert_eq!(orbit_path_poses(&engine), before);
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let parsed: quench3d_cli::scene_doc::SceneDoc = serde_json::from_str(&saved.json).unwrap();
+    assert!(parsed
+        .animations
+        .iter()
+        .filter(|animation| ["地球", "月球"].contains(&animation.target.as_str()))
+        .all(|animation| animation.show_path == Some(true)));
+}
+
+#[test]
+fn orbit_path_undo_redo_changes_only_path_visibility_without_object_or_body_growth() {
+    let Some((mut engine, mut doc, rev)) = relative_orbit_fixture() else {
+        return;
+    };
+    let before = orbit_path_poses(&engine);
+    let enabled = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit_path",
+        json!({"name":"月球","visible":true,"expected_revision":rev}),
+    );
+    assert!(orbit_path_visible(&mut engine, &mut doc, "月球"));
+    assert_eq!(orbit_path_poses(&engine), before);
+    let disabled = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit_path",
+        json!({"name":"月球","visible":false,"expected_revision":enabled["revision"]}),
+    );
+    assert!(!orbit_path_visible(&mut engine, &mut doc, "月球"));
+    assert_eq!(orbit_path_poses(&engine), before);
+    let mut rev = disabled["revision"].clone();
+    for _ in 0..3 {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "undo",
+            json!({"expected_revision":rev}),
+        )["revision"]
+            .clone();
+        assert!(orbit_path_visible(&mut engine, &mut doc, "月球"));
+        assert!(!orbit_path_visible(&mut engine, &mut doc, "地球"));
+        assert_eq!(orbit_path_poses(&engine), before);
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "redo",
+            json!({"expected_revision":rev}),
+        )["revision"]
+            .clone();
+        assert!(!orbit_path_visible(&mut engine, &mut doc, "月球"));
+        assert_eq!(orbit_path_poses(&engine), before);
+    }
+}
+
+#[test]
+fn orbit_path_rejects_missing_orbit_wrong_types_names_stale_and_running_before_edit() {
+    let Some((mut engine, mut doc, rev)) = relative_orbit_fixture() else {
+        return;
+    };
+    for args in [
+        json!({"name":"太阳","visible":true,"expected_revision":rev}),
+        json!({"name":"不存在","visible":true,"expected_revision":rev}),
+        json!({"name":"","visible":true,"expected_revision":rev}),
+        json!({"name":42,"visible":true,"expected_revision":rev}),
+        json!({"name":"地球","visible":"true","expected_revision":rev}),
+        json!({"name":"地球","visible":null,"expected_revision":rev}),
+        json!({"name":"地球","visible":1,"expected_revision":rev}),
+        json!({"name":"地球","expected_revision":rev}),
+        json!({"visible":true,"expected_revision":rev}),
+        json!({"name":"地球","visible":true,"expected_revision":"stale"}),
+        json!({"name":"地球","visible":true}),
+    ] {
+        let before = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+        let saved = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+        let poses = orbit_path_poses(&engine);
+        let rejected = commands::dispatch(&mut engine, &mut doc, "set_orbit_path", args);
+        assert_eq!(rejected["ok"], false, "{rejected}");
+        assert_eq!(
+            call(&mut engine, &mut doc, "inspect_scene", json!({})),
+            before,
+            "rejection must preserve history and fingerprint"
+        );
+        assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, saved);
+        assert_eq!(orbit_path_poses(&engine), poses);
+    }
+    let duplicate_index = engine
+        .scene
+        .objects
+        .iter()
+        .position(|object| object.name == "target")
+        .unwrap();
+    engine.scene.objects[duplicate_index].name = "地球".into();
+    let ambiguous = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    let rejected = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_orbit_path",
+        json!({"name":"地球","visible":true,"expected_revision":ambiguous["revision"]}),
+    );
+    assert_eq!(
+        rejected["ok"], false,
+        "ambiguous target must fail: {rejected}"
+    );
+    assert_eq!(
+        call(&mut engine, &mut doc, "inspect_scene", json!({})),
+        ambiguous
+    );
+    engine.scene.objects[duplicate_index].name = "target".into();
+    engine.paused = false;
+    let before = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    let poses = orbit_path_poses(&engine);
+    let rejected = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_orbit_path",
+        json!({"name":"地球","visible":true,"expected_revision":before["revision"]}),
+    );
+    assert_eq!(rejected["ok"], false, "{rejected}");
+    assert_eq!(
+        call(&mut engine, &mut doc, "inspect_scene", json!({})),
+        before
+    );
+    assert_eq!(orbit_path_poses(&engine), poses);
+}

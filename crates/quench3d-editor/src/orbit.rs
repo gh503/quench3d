@@ -56,6 +56,7 @@ pub(crate) fn prepare(
         position: Some(TrackDoc { times, values }),
         rotation: None,
         position_relative_to: None,
+        show_path: None,
     })
 }
 

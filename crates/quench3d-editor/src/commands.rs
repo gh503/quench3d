@@ -56,6 +56,12 @@ pub fn tools() -> Value {
             vec!["preset"],
         ),
         (
+            "set_orbit_path",
+            "Show or hide the saved orbit line for an existing AI-owned orbit. Does not create or change orbital motion.",
+            json!({"name":{"type":"string"},"visible":{"type":"boolean"}}),
+            vec!["name", "visible"],
+        ),
+        (
             "set_object_label",
             "Show or hide the named object's visible name label in the viewport. Saved with the scene and follows moving objects; Chinese names are supported.",
             json!({"name":{"type":"string"},"visible":{"type":"boolean"}}),
@@ -317,7 +323,7 @@ fn inspect(engine: &Engine, doc: &Doc) -> Value {
         let t=engine.scene.world_transform(i);
         let body=o.body.and_then(|h|engine.world.body(h));
         let orbit=doc.base_doc().and_then(|d|d.animations.iter().find(|a|a.target==o.name && a.name.as_deref()==Some(crate::orbit::owned_name(&o.name).as_str())));
-        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":engine.renderer.material(o.material).map(|m| (m.base_color * o.color).to_array()).unwrap_or_else(|| o.color.to_array()),"color_multiplier":o.color.to_array(),"label_visible":doc.label_visible(&o.name),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"center_name":a.position_relative_to,"center":if a.position_relative_to.is_none(){a.position.as_ref().and_then(|p| p.values.first().zip(p.values.get(128))).map(|(a,b)| [(a[0]+b[0])*0.5,(a[1]+b[1])*0.5,(a[2]+b[2])*0.5])}else{None},"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
+        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":engine.renderer.material(o.material).map(|m| (m.base_color * o.color).to_array()).unwrap_or_else(|| o.color.to_array()),"color_multiplier":o.color.to_array(),"label_visible":doc.label_visible(&o.name),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"path_visible":a.show_path.unwrap_or(false),"center_name":a.position_relative_to,"center":if a.position_relative_to.is_none(){a.position.as_ref().and_then(|p| p.values.first().zip(p.values.get(128))).map(|(a,b)| [(a[0]+b[0])*0.5,(a[1]+b[1])*0.5,(a[2]+b[2])*0.5])}else{None},"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
     }).collect();
     json!({"display":{"axes":engine.debug.axes,"grid":engine.renderer.options.grid && engine.scene.lighting.sky.show_grid},"objects":objects,"environment":crate::environment::inspect(&engine.scene.lighting, engine.renderer.options.sky, engine.renderer.options.grid),"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
 }
@@ -344,7 +350,7 @@ fn execute(
         "set_transform" => &["name", "position", "rotation", "expected_revision"],
         "set_shape" => &["name", "shape", "expected_revision"],
         "set_color" => &["name", "color", "expected_revision"],
-        "set_object_label" => &["name", "visible", "expected_revision"],
+        "set_object_label" | "set_orbit_path" => &["name", "visible", "expected_revision"],
         "set_orbit" => &[
             "name",
             "center",
@@ -534,6 +540,29 @@ fn execute(
         doc.focus_selected(engine);
         return Ok(json!({"name":name}));
     }
+    if command == "set_orbit_path" {
+        let visible = args["visible"]
+            .as_bool()
+            .ok_or_else(|| invalid("visible boolean required"))?;
+        let owned = crate::orbit::owned_name(name);
+        let animation_index = doc
+            .base_doc()
+            .and_then(|d| {
+                d.animations
+                    .iter()
+                    .position(|a| a.target == name && a.name.as_deref() == Some(owned.as_str()))
+            })
+            .ok_or_else(|| ("no_orbit", "Target has no AI-owned orbit".into()))?;
+        history_ready(engine, doc)?;
+        doc.record_edit(engine);
+        doc.base_doc_mut()
+            .expect("validated orbit document")
+            .animations[animation_index]
+            .show_path = visible.then_some(true);
+        doc.record_edit(engine);
+        doc.status = format!("Agent: orbit path {name} {visible}");
+        return Ok(json!({"name":name,"path_visible":visible}));
+    }
     if command == "set_object_label" {
         let visible = args["visible"]
             .as_bool()
@@ -662,6 +691,10 @@ fn execute(
             )
             .map_err(|e| invalid(&e))?;
             animation.position_relative_to = center_name.map(str::to_owned);
+            animation.show_path = animations
+                .iter()
+                .find(|a| a.target == name && a.name.as_deref() == Some(owned.as_str()))
+                .and_then(|a| a.show_path);
             let mut proposed: Vec<_> = animations
                 .iter()
                 .filter(|a| a.target != name || a.name.as_deref() != Some(owned.as_str()))

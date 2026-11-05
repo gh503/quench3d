@@ -24,7 +24,9 @@ The Chat Completions parser accepts tool-call responses with omitted, null or em
 
 ## Current tools and contracts
 
-`inspect_scene`, `set_viewport_display`, `set_environment`, `spawn_primitive`, `set_transform`, `set_shape`, `set_color`, `set_object_label`, `set_body_mode`, `set_orbit`, `clear_orbit`, `delete_object`, `select_object`, `focus_object`, `set_playback`, `step`, `undo`, `redo`.
+`inspect_scene`, `set_viewport_display`, `set_environment`, `spawn_primitive`, `set_transform`, `set_shape`, `set_color`, `set_object_label`, `set_body_mode`, `set_orbit`, `set_orbit_path`, `clear_orbit`, `delete_object`, `select_object`, `focus_object`, `set_playback`, `step`, `undo`, `redo`.
+
+`set_orbit_path` accepts `name`, boolean `visible` and a fresh revision to show/hide the existing orbit's continuous path. The selected-object inspector offers “显示轨道线” too. The saved `animations[].show_path` flag defaults to hidden for legacy files; changing orbit parameters preserves it. Lines use the saved sampled curve and follow the current rendered position of a relative center, without creating scene objects or bodies. Clearing the orbit removes its line.
 
 `set_environment` switches `preset` between `space` and `studio`. Space uses a dark procedural star field, disables the reference grid and fog, and reduces ambient light. The built-in ground is visually omitted in space and returns in studio; geometry, gravity, contacts, authored lights and orbits are preserved. `lighting.space` saves the mode with the scene and participates in history. The lighting panel also offers a space-sky checkbox.
 

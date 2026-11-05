@@ -40,6 +40,7 @@ mod labels;
 mod navigation;
 mod motion;
 mod orbit;
+mod orbit_path;
 pub mod picker;
 pub mod reconstruct;
 pub mod scene_io;

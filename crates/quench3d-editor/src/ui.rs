@@ -5130,6 +5130,19 @@ fn inspector(
                 doc.set_label_visible(&label_name, label_visible);
                 doc.record_edit(engine);
             }
+            let owned_orbit = crate::orbit::owned_name(&label_name);
+            let orbit_path = doc.base_doc().and_then(|d| d.animations.iter().enumerate()
+                .find(|(_, a)| a.target == label_name && a.name.as_deref() == Some(owned_orbit.as_str()))
+                .map(|(i, a)| (i, a.show_path.unwrap_or(false))));
+            if let Some((animation_index, mut visible)) = orbit_path {
+                if ui.checkbox(&mut visible, "显示轨道线").changed() {
+                    doc.record_edit(engine);
+                    if let Some(base) = doc.base_doc_mut() {
+                        base.animations[animation_index].show_path = visible.then_some(true);
+                    }
+                    doc.record_edit(engine);
+                }
+            }
             // 改父物体要在拿到 `objects[index]` 的可变借用之前发出请求，
             // 因为它要同时改场景里的两个物体（还得保持世界位姿）。
             let mut parent_request: Option<Option<usize>> = None;

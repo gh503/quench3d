@@ -677,6 +677,9 @@ pub struct AnimationDoc {
     /// 位置关键帧是相对指定刚体同一步目标位置的世界轴对齐偏移；缺省为世界坐标。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position_relative_to: Option<String>,
+    /// 是否显示编辑器轨道线（缺省隐藏，不影响动画播放）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_path: Option<bool>,
     /// 朝向轨道（欧拉角 XYZ，度）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<TrackDoc>,
@@ -8813,6 +8816,33 @@ mod tests {
         );
         relative["position_relative_to"] = json!(7);
         assert!(serde_json::from_value::<AnimationDoc>(relative).is_err());
+    }
+
+    #[test]
+    fn animation_show_path_roundtrips_bool_and_legacy_defaults_hidden() {
+        let base = json!({"target":"地球","position":{"times":[0.0,1.0],"values":[[1.0,0.0,0.0],[0.0,0.0,1.0]]}});
+        let legacy: AnimationDoc = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(legacy.show_path, None);
+        assert!(!legacy.show_path.unwrap_or(false));
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("show_path")
+            .is_none());
+        for visible in [true, false] {
+            let mut value = base.clone();
+            value["show_path"] = json!(visible);
+            let animation: AnimationDoc = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(animation.show_path, Some(visible));
+            assert_eq!(serde_json::to_value(animation).unwrap(), value);
+            let doc = SceneDoc::from_json(&json!({"animations":[value]}).to_string()).unwrap();
+            assert_eq!(doc.animations[0].show_path, Some(visible));
+        }
+        for invalid in [json!("true"), json!(1), json!({}), json!([])] {
+            let mut value = base.clone();
+            value["show_path"] = invalid;
+            assert!(serde_json::from_value::<AnimationDoc>(value.clone()).is_err());
+            assert!(SceneDoc::from_json(&json!({"animations":[value]}).to_string()).is_err());
+        }
     }
 
     #[test]
