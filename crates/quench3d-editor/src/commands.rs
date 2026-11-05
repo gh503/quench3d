@@ -27,7 +27,7 @@ pub fn tools() -> Value {
         ),
         (
             "set_transform",
-            "Set the named object's position or quaternion without changing unrelated bodies.",
+            "Set the named object's position or quaternion without changing unrelated bodies. Existing animations override position during playback; clear_orbit first to stop an orbit.",
             json!({"name":{"type":"string"},"position":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotation":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4}}),
             vec!["name"],
         ),
@@ -42,6 +42,22 @@ pub fn tools() -> Value {
             "Set the named object's RGBA color.",
             json!({"name":{"type":"string"},"color":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4}}),
             vec!["name", "color"],
+        ),
+        (
+            "set_orbit",
+            "Animate a standalone primitive in a stable circular kinematic orbit (not gravity). Resume playback to animate. Rejects conflicting non-orbit tracks.",
+            json!({"name":{"type":"string"},"center":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"radius":{"type":"number","minimum":0.001,"maximum":10000},"period_secs":{"type":"number","minimum":0.1,"maximum":86400},"phase_deg":{"type":"number","minimum":-360000,"maximum":360000},"plane":{"type":"string","enum":["xz","xy","yz"]}}),
+            vec!["name","center","radius","period_secs"],
+        ),
+        (
+            "clear_orbit",
+            "Remove the AI-owned orbit track. The object remains stationary kinematic; use set_body_mode to restore dynamics if desired.",
+            json!({"name":{"type":"string"}}), vec!["name"],
+        ),
+        (
+            "set_body_mode",
+            "Set a standalone primitive to static (fixed anchor), dynamic (gravity), or kinematic. Resets velocities; clear conflicting animations before static/dynamic mode.",
+            json!({"name":{"type":"string"},"mode":{"type":"string","enum":["static","dynamic","kinematic"]}}), vec!["name","mode"],
         ),
         (
             "delete_object",
@@ -277,7 +293,9 @@ fn history_ready(engine: &Engine, doc: &Doc) -> Result<(), Failure> {
 fn inspect(engine: &Engine, doc: &Doc) -> Value {
     let objects:Vec<_>=engine.scene.objects.iter().enumerate().map(|(i,o)|{
         let t=engine.scene.world_transform(i);
-        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"body_position":o.body.and_then(|h|engine.world.body(h)).map(|b|b.position().to_array()),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok()}})
+        let body=o.body.and_then(|h|engine.world.body(h));
+        let orbit=doc.base_doc().and_then(|d|d.animations.iter().find(|a|a.target==o.name && a.name.as_deref()==Some(crate::orbit::owned_name(&o.name).as_str())));
+        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
     }).collect();
     json!({"objects":objects,"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
 }
@@ -302,6 +320,17 @@ fn execute(
         "set_transform" => &["name", "position", "rotation", "expected_revision"],
         "set_shape" => &["name", "shape", "expected_revision"],
         "set_color" => &["name", "color", "expected_revision"],
+        "set_orbit" => &[
+            "name",
+            "center",
+            "radius",
+            "period_secs",
+            "phase_deg",
+            "plane",
+            "expected_revision",
+        ],
+        "clear_orbit" => &["name", "expected_revision"],
+        "set_body_mode" => &["name", "mode", "expected_revision"],
         "delete_object" | "select_object" | "focus_object" => &["name", "expected_revision"],
         "step" | "undo" | "redo" => &["expected_revision"],
         _ => return Err(("unknown_tool", format!("Unknown editor command {command}"))),
@@ -441,6 +470,141 @@ fn execute(
         return Ok(json!({"name":name}));
     }
     editable(engine, doc, index)?;
+    if matches!(command, "set_orbit" | "clear_orbit" | "set_body_mode") {
+        doc.editable_shape(engine, index)
+            .map_err(|e| ("unsupported_target", e))?;
+        let handle = engine.scene.objects[index]
+            .body
+            .ok_or_else(|| ("unsupported_target", "Target must have a rigid body".into()))?;
+        let old = engine
+            .world
+            .body(handle)
+            .ok_or_else(|| {
+                (
+                    "unsupported_target",
+                    "Target rigid body is unavailable".into(),
+                )
+            })?
+            .clone();
+        let owned = crate::orbit::owned_name(name);
+        let animations = doc
+            .base_doc()
+            .map(|d| d.animations.as_slice())
+            .unwrap_or(&[]);
+        let has_animation = animations.iter().any(|a| a.target == name);
+        if command == "set_orbit"
+            && animations
+                .iter()
+                .any(|a| a.target == name && a.name.as_deref() != Some(owned.as_str()))
+        {
+            return Err((
+                "animation_conflict",
+                "Target already has a non-orbit animation; remove it before assigning an orbit"
+                    .into(),
+            ));
+        }
+        let mut prepared = None;
+        let mode = if command == "set_orbit" {
+            let numeric = |key: &str| {
+                args[key]
+                    .as_f64()
+                    .map(|n| n as f32)
+                    .ok_or_else(|| invalid(format!("{key} must be a number")))
+            };
+            let center = array::<3>(&args["center"], "center")?;
+            let phase = if args.get("phase_deg").is_some() {
+                numeric("phase_deg")?
+            } else {
+                0.0
+            };
+            let plane = match args.get("plane") {
+                None => "xz",
+                Some(v) => v
+                    .as_str()
+                    .ok_or_else(|| invalid("plane must be a string"))?,
+            };
+            prepared = Some(
+                crate::orbit::prepare(
+                    name,
+                    center,
+                    numeric("radius")?,
+                    numeric("period_secs")?,
+                    phase,
+                    plane,
+                )
+                .map_err(|e| invalid(&e))?,
+            );
+            BodyType::Kinematic
+        } else if command == "clear_orbit" {
+            if !animations
+                .iter()
+                .any(|a| a.target == name && a.name.as_deref() == Some(owned.as_str()))
+            {
+                return Err(("no_orbit", "Target has no AI-owned orbit".into()));
+            }
+            BodyType::Kinematic
+        } else {
+            let mode = match args["mode"].as_str() {
+                Some("static") => BodyType::Static,
+                Some("dynamic") => BodyType::Dynamic,
+                Some("kinematic") => BodyType::Kinematic,
+                _ => return Err(invalid("mode must be static, dynamic or kinematic")),
+            };
+            if mode != BodyType::Kinematic && has_animation {
+                return Err((
+                    "animation_conflict",
+                    "Clear target animations before changing to static or dynamic".into(),
+                ));
+            }
+            mode
+        };
+        history_ready(engine, doc)?;
+        doc.record_edit(engine);
+        if prepared.is_some() && doc.base_doc.is_none() {
+            doc.base_doc = Some(
+                quench3d_cli::scene_doc::SceneDoc::from_json("{}")
+                    .map_err(|e| ("edit_failed", e.to_string()))?,
+            );
+        }
+        let mut replacement = crate::orbit::convert_body(&old, mode);
+        if let Some(animation) = prepared {
+            let first = animation.position.as_ref().unwrap().values[0];
+            let mut pose = replacement.transform();
+            pose.position = Vec3::from_array(first);
+            replacement.set_transform(pose);
+            let mut t = engine.scene.world_transform(index);
+            t.position = pose.position;
+            engine.scene.set_world_transform(index, t);
+            let base = doc.base_doc_mut().unwrap();
+            base.animations
+                .retain(|a| a.target != name || a.name.as_deref() != Some(owned.as_str()));
+            base.animations.push(animation);
+        } else if command == "clear_orbit" {
+            if let Some(base) = doc.base_doc_mut() {
+                base.animations
+                    .retain(|a| a.target != name || a.name.as_deref() != Some(owned.as_str()));
+            }
+        }
+        assert!(
+            engine.world.replace_body(handle, replacement),
+            "validated body"
+        );
+        doc.status = format!("Agent: {command} {name}");
+        doc.record_edit(engine);
+        return Ok(
+            json!({"name":name,"body_mode":format!("{mode:?}").to_lowercase(),"kinematic_animation":command=="set_orbit","message":if command=="clear_orbit"{"Orbit removed; body remains stationary kinematic"}else{"Body mode and animation updated"}}),
+        );
+    }
+    if command == "set_transform"
+        && doc
+            .base_doc()
+            .is_some_and(|d| d.animations.iter().any(|a| a.target == name))
+    {
+        return Err((
+            "animation_conflict",
+            "Clear the object's orbit or animation before editing its transform".into(),
+        ));
+    }
     if command == "set_transform" && position.is_none() && rotation.is_none() {
         return Err(invalid("position or rotation required"));
     }
@@ -526,6 +690,9 @@ fn execute(
             result.map_err(|e| ("edit_failed", e))?;
         }
         "delete_object" => {
+            if let Some(base) = doc.base_doc_mut() {
+                base.animations.retain(|a| a.target != name);
+            }
             doc.select_only(Some(index));
             doc.delete_selected(engine);
         }

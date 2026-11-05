@@ -1117,6 +1117,22 @@ impl PhysicsWorld {
         true
     }
 
+    /// Replace a body's properties in place while retaining its handle.
+    /// Invalidates query indices and cached contact impulses after mass/type edits.
+    pub fn replace_body(&mut self, handle: BodyHandle, replacement: RigidBody) -> bool {
+        let Some(slot) = self.bodies.get_mut(handle.index as usize) else {
+            return false;
+        };
+        if slot.generation != handle.generation || slot.body.is_none() {
+            return false;
+        }
+        slot.body = Some(replacement);
+        self.version = self.version.wrapping_add(1);
+        self.cache.clear();
+        self.wake_up_all();
+        true
+    }
+
     /// 可变访问刚体。
     ///
     /// 会让 [`PhysicsWorld::version`] +1：拿到 `&mut` 之后刚体可能被搬到任何地方，
@@ -4652,6 +4668,25 @@ impl PhysicsWorld {
 mod tests {
     use super::*;
     use crate::body::BodyBuilder;
+
+    #[test]
+    fn replacing_body_keeps_handle_and_invalidates_queries_and_contacts() {
+        let mut world = PhysicsWorld::new();
+        let handle = world.add_body(BodyBuilder::dynamic(Shape::Sphere { radius: 0.5 }).build());
+        let version = world.version();
+        assert!(world.replace_body(
+            handle,
+            BodyBuilder::kinematic(Shape::Sphere { radius: 0.5 }).build()
+        ));
+        assert_eq!(world.body(handle).unwrap().inv_mass(), 0.0);
+        assert_eq!(world.body(handle).unwrap().body_type, BodyType::Kinematic);
+        assert!(world.version() > version);
+        assert!(!world.replace_body(
+            BodyHandle::new(handle.index, handle.generation + 1),
+            BodyBuilder::dynamic(Shape::Sphere { radius: 1.0 }).build()
+        ));
+        assert_eq!(world.body(handle).unwrap().body_type, BodyType::Kinematic);
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn global_normal_shared_island_case(variant: usize) {

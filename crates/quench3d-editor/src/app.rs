@@ -118,6 +118,7 @@ impl Default for EditorConfig {
 /// 「这一下左键拖动是转视角、还是以后要变成拖物体」。
 #[derive(Default)]
 struct EditorGame {
+    motion: crate::motion::Runtime,
     /// 左键拖动是否当作转视角（在视口里按下才算）。
     orbit_with_left: bool,
     /// 右键拖动是否当作平移（在视口里按下才算）。
@@ -229,7 +230,7 @@ impl Game for EditorGame {
     }
 
     fn fixed_update(&mut self, engine: &mut Engine, dt: f32) {
-        engine.world.step(dt);
+        self.motion.step(&mut engine.world, dt);
     }
 }
 
@@ -502,6 +503,7 @@ impl Inner {
             window,
             engine,
             game: EditorGame {
+                motion: crate::motion::Runtime::default(),
                 orbit_with_left: false,
                 pan_with_right: false,
                 fly_with_right: false,
@@ -645,7 +647,16 @@ impl Inner {
         // 回放播放头在 tick 之前推进并写回位姿：这样本帧的 submit 用的是新位姿，
         // 不会晚一帧。录制则只能在 tick 之后采（物理刚步进完）。
         self.doc.advance_replay(&mut self.engine, dt);
+        if let Some(error) = self
+            .doc
+            .motion
+            .prepare(&self.engine, self.doc.base_doc.as_ref())
+        {
+            self.doc.status = error;
+        }
+        game.motion = std::mem::take(&mut self.doc.motion);
         self.engine.tick(&mut game, dt);
+        self.doc.motion = std::mem::take(&mut game.motion);
         self.doc.record_replay_frame(&self.engine.world);
         self.game = game;
         // 摄像头骨架是**每帧重建**的调试线段：begin_frame 已清空，tick 之后、

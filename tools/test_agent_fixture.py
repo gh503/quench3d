@@ -39,6 +39,8 @@ class ModelScript:
         self.long_completed = False
         self.seen_compaction = False
         self.late_sent = threading.Event()
+        self.orbit_requests = []
+        self.orbit_stop_requests = []
 
     def report(self):
         with self.lock:
@@ -49,7 +51,9 @@ class ModelScript:
                     'followup_requests': self.followup_requests.copy(),
                     'long_requests': self.long_requests.copy(),
                     'long_completed': self.long_completed,
-                    'seen_compaction': self.seen_compaction}
+                    'seen_compaction': self.seen_compaction,
+                    'orbit_requests': self.orbit_requests.copy(),
+                    'orbit_stop_requests': self.orbit_stop_requests.copy()}
 
     @staticmethod
     def result(body, call_id):
@@ -80,6 +84,42 @@ class ModelScript:
     def reply(self, body):
         prompts = [m.get('content', '') for m in body['messages'] if m.get('role') == 'user']
         latest_prompt = str(prompts[-1]) if prompts else ''
+        if latest_prompt.startswith('fixture-orbit'):
+            stopping = latest_prompt.startswith('fixture-orbit-stop')
+            prefix = 'orbit_stop_' if stopping else 'orbit_'
+            calls = [call for message in body['messages']
+                     if message.get('role') == 'assistant'
+                     for call in message.get('tool_calls', [])
+                     if str(call.get('id', '')).startswith(prefix)
+                     and str(call.get('id', '')).removeprefix(prefix).isdigit()]
+            index = int(calls[-1]['id'].removeprefix(prefix)) + 1 if calls else 0
+            steps = [('set_playback', {'paused': True})] if stopping else [
+                ('set_playback', {'paused': True}),
+                ('inspect_scene', {}),
+                ('spawn_primitive', {'name': 'OrbitSun',
+                    'shape': {'type': 'sphere', 'radius': 0.8}, 'position': [0, 5, 0]}),
+                ('set_body_mode', {'name': 'OrbitSun', 'mode': 'static'}),
+                ('spawn_primitive', {'name': 'OrbitPlanet',
+                    'shape': {'type': 'sphere', 'radius': 0.2}, 'position': [3, 5, 0]}),
+                ('set_orbit', {'name': 'OrbitPlanet', 'center': [0, 5, 0],
+                    'radius': 3, 'period_secs': 2, 'plane': 'xz', 'phase_deg': 0}),
+                ('set_playback', {'paused': False})]
+            if not 0 <= index <= len(steps):
+                raise AssertionError('unexpected orbit fixture round')
+            receipt = self.result(body, calls[-1]['id']) if calls else None
+            offered = {tool['function']['name'] for tool in body.get('tools', [])}
+            if not {name for name, _args in steps}.issubset(offered):
+                raise AssertionError('editor did not advertise orbit/body-mode tools')
+            with self.lock:
+                target = self.orbit_stop_requests if stopping else self.orbit_requests
+                target.append({'round': index, 'last_revision': receipt['revision'] if receipt else None})
+            if index == len(steps):
+                return self.response({'content': 'fixture-orbit-stopped' if stopping else 'fixture-orbit-done'})
+            name, args = steps[index]
+            if name not in ('inspect_scene', 'set_playback'):
+                args['expected_revision'] = receipt['revision']
+            return self.response({'tool_calls': [{'id': f'{prefix}{index}', 'type': 'function',
+                'function': {'name': name, 'arguments': json.dumps(args)}}]})
         if latest_prompt.startswith('fixture-long'):
             # Infer progress from the latest surviving call, not total transcript
             # length: older calls are intentionally removed from request context.
@@ -317,6 +357,42 @@ class FixtureTests(unittest.TestCase):
         body['messages'] = [m for m in body['messages'] if m.get('content') != 'fixture-main']
         with self.assertRaisesRegex(AssertionError, 'original user'):
             script.reply(body)
+
+    def test_orbit_script_uses_receipt_revisions_and_stop_has_no_revision(self):
+        script = ModelScript()
+        names = ['set_playback', 'inspect_scene', 'spawn_primitive', 'set_body_mode', 'set_orbit']
+        body = {'messages': [{'role': 'user', 'content': 'fixture-orbit'}],
+                'tools': [{'function': {'name': name}} for name in names]}
+        expected = ['set_playback', 'inspect_scene', 'spawn_primitive', 'set_body_mode',
+                    'spawn_primitive', 'set_orbit', 'set_playback']
+        for index, name in enumerate(expected):
+            message = script.reply(body)['choices'][0]['message']
+            call = message['tool_calls'][0]
+            self.assertEqual(call['id'], f'orbit_{index}')
+            self.assertEqual(call['function']['name'], name)
+            args = json.loads(call['function']['arguments'])
+            if name in ('set_playback', 'inspect_scene'):
+                self.assertNotIn('expected_revision', args)
+            else:
+                self.assertEqual(args['expected_revision'], f'orbit-rev-{index - 1}')
+            if name == 'set_orbit':
+                self.assertEqual(args['center'], [0, 5, 0])
+                self.assertEqual(args['radius'], 3)
+                self.assertEqual(args['period_secs'], 2)
+                self.assertEqual(args['plane'], 'xz')
+            body['messages'].extend([message, {'role': 'tool', 'tool_call_id': call['id'],
+                'content': json.dumps({'ok': True, 'revision': f'orbit-rev-{index}'})}])
+        self.assertEqual(script.reply(body)['choices'][0]['message']['content'], 'fixture-orbit-done')
+        body['messages'].append({'role': 'user', 'content': 'fixture-orbit-stop'})
+        stop = script.reply(body)['choices'][0]['message']
+        call = stop['tool_calls'][0]
+        self.assertEqual(call['id'], 'orbit_stop_0')
+        self.assertEqual(json.loads(call['function']['arguments']), {'paused': True})
+        body['messages'].extend([stop, {'role': 'tool', 'tool_call_id': call['id'],
+            'content': json.dumps({'ok': True, 'revision': 'orbit-stopped'})}])
+        self.assertEqual(script.reply(body)['choices'][0]['message']['content'], 'fixture-orbit-stopped')
+        self.assertEqual(len(script.report()['orbit_requests']), 8)
+        self.assertEqual(len(script.report()['orbit_stop_requests']), 2)
 
     def test_long_script_progress_survives_compressed_context(self):
         script = ModelScript()

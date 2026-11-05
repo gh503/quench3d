@@ -344,6 +344,8 @@ pub struct Doc {
     /// 只覆盖编辑器真正管得着的部分 —— 否则「CLI 生成 → 编辑器改一改 → CLI 渲染」
     /// 会把光照与渲染设置**静默清零**（这曾经是真事）。
     pub(crate) base_doc: Option<quench3d_cli::scene_doc::SceneDoc>,
+    /// Playback cache; authored tracks remain in `base_doc.animations`.
+    pub(crate) motion: crate::motion::Runtime,
     baseline: Vec<Baseline>,
     /// 场景树里正在拖动的物体（拖到另一行上改父子）。
     ///
@@ -557,6 +559,9 @@ impl Doc {
 
     /// 装载 / 撤销 / 重做之后刷新映射（物体下标会被增删挪动）。
     pub fn set_model_instances(&mut self, instances: Vec<quench3d_cli::runner::ModelInstance>) {
+        // Successful scene installs can reuse exactly the same names and handle
+        // indices. Explicit invalidation also restarts an identical reloaded clip.
+        self.motion.reset();
         self.model_instances = instances;
     }
 
@@ -1084,6 +1089,7 @@ impl Doc {
             textures: std::collections::HashMap::new(),
             model_instances: Vec::new(),
             base_doc: None,
+            motion: crate::motion::Runtime::default(),
             baseline: Vec::new(),
             drag_source: None,
             reparent_request: None,
@@ -1199,11 +1205,13 @@ impl Doc {
     /// 撤销/重做之后，底稿文档也要跟着快照走 —— 否则"撤销回到带光照的场景、
     /// 再存一次"会把光照丢掉。
     fn refresh_base_from(&mut self, snapshot: &str) {
+        self.motion.reset();
         self.base_doc = quench3d_cli::scene_doc::SceneDoc::from_json(snapshot).ok();
     }
 
     /// 以当前场景为起点重开历史（打开文件 / 装载新场景后调用）。
     pub fn reset_history(&mut self, engine: &Engine) {
+        self.motion.reset();
         let json = scene_json(engine, self);
         self.history.reset_json(json);
         self.clipboard.clear();
@@ -1274,6 +1282,7 @@ impl Doc {
 
     /// 回到基线：位置、朝向、速度都复原（刚体同时唤醒，否则睡着的球不会掉）。
     pub fn reset(&mut self, engine: &mut Engine) {
+        self.motion.reset();
         for base in &self.baseline {
             let Some(index) = engine
                 .scene
@@ -1294,6 +1303,36 @@ impl Doc {
                     body.wake_up();
                 }
             }
+        }
+        // Orbit edits define their own phase anchor, independent of an older
+        // object baseline. Reset immediately previews that anchor while paused.
+        if let Some(base) = &self.base_doc {
+            for animation in &base.animations {
+                if animation.name.as_deref()
+                    != Some(crate::orbit::owned_name(&animation.target).as_str())
+                {
+                    continue;
+                }
+                let Some(first) = animation.position.as_ref().and_then(|t| t.values.first()) else {
+                    continue;
+                };
+                let Some(object) = engine
+                    .scene
+                    .objects
+                    .iter()
+                    .find(|o| o.name == animation.target)
+                else {
+                    continue;
+                };
+                if let Some(body) = object.body.and_then(|h| engine.world.body_mut(h)) {
+                    let mut pose = body.transform();
+                    pose.position = Vec3::from_array(*first);
+                    body.set_transform(pose);
+                    body.set_linear_velocity(Vec3::ZERO);
+                    body.set_angular_velocity(Vec3::ZERO);
+                }
+            }
+            engine.scene.sync_from_physics(&engine.world);
         }
         self.status = format!("已重置到基线（{} 个物体）", self.baseline.len());
     }
@@ -1440,7 +1479,11 @@ impl Doc {
     /// 单步：不管当前是否暂停，都推进一个固定步长。
     pub fn step_once(&mut self, engine: &mut Engine) {
         let dt = engine.world.fixed_dt();
-        engine.world.step(dt);
+        if let Some(error) = self.motion.prepare(engine, self.base_doc.as_ref()) {
+            self.status = error;
+            return;
+        }
+        self.motion.step(&mut engine.world, dt);
         if engine.scene.auto_sync_physics {
             let world = &engine.world;
             engine.scene.sync_from_physics(world);
@@ -1453,6 +1496,10 @@ impl Doc {
     ///
     /// 编辑器一打开就该有东西可看、可点、可推 —— 空白视口没法验证任何功能。
     pub fn build_default_scene(&mut self, engine: &mut Engine) {
+        self.motion.reset();
+        if let Some(base) = &mut self.base_doc {
+            base.animations.clear();
+        }
         engine.scene.clear();
         engine.world.clear();
         self.model_instances.clear();
@@ -1950,6 +1997,10 @@ impl Doc {
             self.forget_object(index);
         }
         names.reverse();
+        if let Some(base) = &mut self.base_doc {
+            base.animations
+                .retain(|animation| !names.contains(&animation.target));
+        }
         let next = if engine.scene.objects.is_empty() {
             None
         } else {
@@ -1973,6 +2024,10 @@ impl Doc {
 
     /// 清空场景（地面也不留）。
     pub fn clear(&mut self, engine: &mut Engine) {
+        self.motion.reset();
+        if let Some(base) = &mut self.base_doc {
+            base.animations.clear();
+        }
         engine.scene.clear();
         engine.world.clear();
         self.model_instances.clear();

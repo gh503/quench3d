@@ -312,6 +312,70 @@ async function main() {
   evidence.stages.push({ stage: 'long-context-compaction', agent: longDone.agent,
     http: longReport.long_requests, full_message_count: longActive.messages.length });
 
+  // Exercise the advertised orbit tools through actual model HTTP, not direct
+  // scene mutation. Only inspect while playing because revisions change per step.
+  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit: 创建静态太阳和绕其公转的行星，然后播放。' })).ok, true);
+  const orbitDone = await until(async () => {
+    const current = await status();
+    if (current.agent.status === 'error') throw new Error(JSON.stringify(current));
+    return current.agent.status === 'done' && current.agent.messages.some(m =>
+      m.role === 'assistant' && m.content === 'fixture-orbit-done') && current;
+  }, 'actual AI orbit setup', 60000);
+  const orbitObject = (snapshot, name, radius) => {
+    const matches = snapshot.objects.filter(object => object.name === name);
+    assert.equal(matches.length, 1, `unique ${name}`);
+    const object = matches[0];
+    assert.equal(object.shape.type, 'sphere');
+    assert.ok(Math.abs(object.shape.radius - radius) < 1e-5, `${name} sphere radius`);
+    assert.ok(Array.isArray(object.body_position), `${name} has physical body`);
+    const visualLag = Math.hypot(...object.position.map((value, index) => value - object.body_position[index]));
+    // Live rendering interpolates adjacent 60 Hz physical poses. At radius 3
+    // and period 2 the maximum one-step chord is ~0.157 m.
+    assert.ok(visualLag < (snapshot.paused ? 1e-4 : 0.17), `${name} interpolation stays within one physical step: ${visualLag}`);
+    return object;
+  };
+  const checkOrbit = snapshot => {
+    const sun = orbitObject(snapshot, 'OrbitSun', 0.8);
+    const planet = orbitObject(snapshot, 'OrbitPlanet', 0.2);
+    sun.position.forEach((value, index) => assert.ok(Math.abs(value - [0, 5, 0][index]) < 1e-4, 'sun stays fixed'));
+    assert.ok(Math.abs(Math.hypot(planet.body_position[0], planet.body_position[2]) - 3) < 1e-3, 'physical orbital radius stays 3');
+    assert.ok(Math.abs(Math.hypot(planet.position[0], planet.position[2]) - 3) < 0.002, 'interpolated orbital radius stays near 3');
+    assert.ok(Math.abs(planet.position[1] - 5) < 1e-4, 'xz orbit stays at height 5');
+    return { sun, planet };
+  };
+  const orbitFirst = scene(await request({ action: 'inspect' }));
+  assert.equal(orbitFirst.paused, false);
+  const firstOrbitObjects = checkOrbit(orbitFirst);
+  const moved = await until(async () => {
+    const snapshot = scene(await request({ action: 'inspect' }));
+    const objects = checkOrbit(snapshot);
+    const distance = Math.hypot(...objects.planet.position.map((value, i) => value - firstOrbitObjects.planet.position[i]));
+    return distance > 0.3 && { snapshot, objects, distance };
+  }, 'orbit advances with actual simulation time', 30000);
+  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit-stop: 暂停公转。' })).ok, true);
+  await until(async () => {
+    const current = await status();
+    if (current.agent.status === 'error') throw new Error(JSON.stringify(current));
+    return current.agent.status === 'done' && current.agent.messages.some(m =>
+      m.role === 'assistant' && m.content === 'fixture-orbit-stopped');
+  }, 'AI pauses orbit');
+  const pausedOrbit = scene(await request({ action: 'inspect' }));
+  assert.equal(pausedOrbit.paused, true);
+  const pausedObjects = checkOrbit(pausedOrbit);
+  const pauseFrame = (await status()).frame;
+  await until(async () => (await status()).frame > pauseFrame + 20, 'paused orbit rendered frames');
+  const stillOrbit = scene(await request({ action: 'inspect' }));
+  const stillObjects = checkOrbit(stillOrbit);
+  assert.deepEqual(stillObjects.planet.position, pausedObjects.planet.position, 'pause stops orbital motion');
+  assert.deepEqual(stillObjects.sun.position, pausedObjects.sun.position, 'paused sun remains fixed');
+  const orbitReport = await (await fetch(`${control}/fixture/status`)).json();
+  assert.deepEqual(orbitReport.errors, []);
+  assert.deepEqual(orbitReport.orbit_requests.map(item => item.round), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(orbitReport.orbit_stop_requests.length, 2);
+  assert.equal(orbitReport.long_requests.length, 41, 'orbit stage does not rerun the long task');
+  evidence.stages.push({ stage: 'actual-ai-orbit', agent: orbitDone.agent, first: orbitFirst,
+    moved, paused: pausedOrbit, still: stillOrbit, http: orbitReport.orbit_requests });
+
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(out, 'agent-final.png'), Buffer.from(screenshot.data, 'base64'));
   assert.deepEqual(evidence.errors, [], 'browser runtime exceptions');

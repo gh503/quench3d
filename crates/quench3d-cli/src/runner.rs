@@ -1642,9 +1642,9 @@ impl Script {
 
     /// 把关键帧动画采样出来的姿态写进世界。
     ///
-    /// 这是**运动学**覆盖：每步直接设变换。为了让接触/摩擦看到"它在动"而不是"它每步瞬移"，
-    /// 位置轨道还会用有限差分补一个线速度（`Δ位置/dt`）。朝向轨道只设姿态、不动角速度——
-    /// 这条边界写在文档里（要精确的滚动/摩擦耦合得等角速度推算那一步）。
+    /// 运动学刚体从当前姿态出发，以有限差分线速度和角速度在随后物理步内到达采样姿态，
+    /// 让接触/摩擦看到真实运动；不能先设目标姿态再积分一次，否则会越过目标。
+    /// 静态和动态刚体保留直接覆盖姿态的既有行为，后续动作仍可覆盖本步动画。
     fn apply_animations(&mut self, world: &mut PhysicsWorld, dt: f32) {
         if self.animations.is_empty() {
             return;
@@ -1686,7 +1686,12 @@ impl Script {
                 continue;
             };
             let cur = body.transform();
-            body.set_transform(Transform::new(want_pos, want_rot, Vec3::ONE));
+            // Kinematic integration consumes the velocities below. Starting it at
+            // the sampled target would apply the same displacement twice. For a
+            // zero/nonpositive step there is no integration to reach the target.
+            if body.body_type != BodyType::Kinematic || dt <= 0.0 {
+                body.set_transform(Transform::new(want_pos, want_rot, Vec3::ONE));
+            }
             if had_pos && dt > 0.0 {
                 body.set_linear_velocity((want_pos - cur.position) / dt);
             }
@@ -6562,6 +6567,62 @@ pub fn run_doctor() -> DoctorReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_script_circle_tracks_target(steps: usize, dt: f32, substeps: u32) {
+        let doc = SceneDoc::from_json(&format!(
+            r#"{{
+                "gravity": [0,0,0],
+                "physics": {{ "substeps": {substeps} }},
+                "objects": [{{ "name": "orbit", "body": "kinematic",
+                    "position": [2,0,0], "shape": {{ "type": "sphere" }} }}],
+                "animations": [{{ "name": "circle", "target": "orbit",
+                    "position": {{ "times": [0,1,2,3,4],
+                        "values": [[2,0,0],[0,0,2],[-2,0,0],[0,0,-2],[2,0,0]] }},
+                    "rotation": {{ "times": [0,1,2,3,4],
+                        "values": [[0,0,0],[0,90,0],[0,180,0],[0,270,0],[0,360,0]] }}
+                }}]
+            }}"#
+        ))
+        .unwrap();
+        let mut build = build_world(&doc).unwrap();
+        let handle = build.handles["orbit"];
+        let mut script = Script::new(&doc, &build.world, &build.handles).unwrap();
+        for step in 0..steps {
+            let previous = build.world.body(handle).unwrap().position();
+            script.step(&mut build.world, dt);
+            let (position, rotation) = script.animations[0].anim.sample(script.time);
+            let target = position.unwrap();
+            let body = build.world.body(handle).unwrap();
+            assert!(
+                (body.position() - target).length() < 2e-5,
+                "step {step}: {:?} overshot sampled target {target:?}",
+                body.position()
+            );
+            assert!(
+                (body.linear_velocity() - (target - previous) / dt).length() < 2e-4,
+                "the contact solver must retain the actual chord velocity"
+            );
+            assert!(body.angular_velocity().length() > 0.1);
+            // Angular integration uses normalized Euler, so allow its small
+            // numerical error while rejecting an entire extra animation step.
+            let target_rotation = rotation.unwrap();
+            assert!(
+                (body.rotation().mul_vec3(Vec3::X) - target_rotation.mul_vec3(Vec3::X)).length()
+                    < 1e-4,
+                "rotation must not be integrated twice"
+            );
+        }
+    }
+
+    #[test]
+    fn script_kinematic_quarter_circle_reaches_each_sample_once() {
+        assert_script_circle_tracks_target(60, 1.0 / 60.0, 1);
+    }
+
+    #[test]
+    fn script_kinematic_full_circle_does_not_overshoot_with_substeps() {
+        assert_script_circle_tracks_target(240, 1.0 / 60.0, 4);
+    }
 
     #[test]
     fn cast_shadows_defaults_true_and_can_be_disabled() {

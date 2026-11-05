@@ -339,3 +339,414 @@ fn commands_spawn_shape_color_delete_and_playback_use_names() {
     );
     assert!(engine.paused);
 }
+
+#[test]
+fn orbit_tools_persist_run_continuously_and_clear_to_stationary_kinematic() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let bystander_before = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "moving bystander")
+        .unwrap()
+        .transform
+        .position;
+    let mut rev = revision(&mut engine, &mut doc);
+    rev = call(
+        &mut engine,
+        &mut doc,
+        "set_body_mode",
+        json!({
+            "name":"target", "mode":"static", "expected_revision":rev
+        }),
+    )["revision"]
+        .clone();
+    let target = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "target")
+        .unwrap();
+    let body = engine.world.body(target.body.unwrap()).unwrap();
+    assert_eq!(body.body_type, quench3d::physics::BodyType::Static);
+    assert_eq!(body.inv_mass(), 0.0);
+    assert_eq!(body.linear_velocity(), Vec3::ZERO);
+
+    let orbit = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"target", "center":[0,5,0], "radius":3.0, "period_secs":4.0,
+            "phase_deg":0.0, "plane":"xz", "expected_revision":rev
+        }),
+    );
+    rev = orbit["revision"].clone();
+    assert_eq!(orbit["result"]["body_mode"], "kinematic");
+    assert_eq!(orbit["result"]["kinematic_animation"], true);
+    let target = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "target")
+        .unwrap();
+    let body = engine.world.body(target.body.unwrap()).unwrap();
+    assert_eq!(body.body_type, quench3d::physics::BodyType::Kinematic);
+    assert_eq!(body.inv_mass(), 0.0);
+    assert_eq!(body.position(), Vec3::new(3.0, 5.0, 0.0));
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap();
+    let parsed: quench3d_cli::scene_doc::SceneDoc = serde_json::from_str(&saved.json).unwrap();
+    let track = parsed
+        .animations
+        .iter()
+        .find(|a| a.target == "target")
+        .unwrap();
+    assert_eq!(track.name.as_deref(), Some("ai-orbit:target"));
+    assert_eq!(track.looping, Some(true));
+    assert_eq!(track.position.as_ref().unwrap().values.len(), 257);
+
+    // The paused edit has not advanced unrelated bodies. Explicit single steps
+    // verify a full quarter turn and more than two complete loop boundaries.
+    let initial = body.position();
+    assert_eq!(
+        engine
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.name == "moving bystander")
+            .unwrap()
+            .transform
+            .position,
+        bystander_before
+    );
+    let steps_per_orbit = (4.0 / engine.world.fixed_dt()).round() as usize;
+    for step in 1..=steps_per_orbit * 3 {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "step",
+            json!({"expected_revision":rev}),
+        )["revision"]
+            .clone();
+        let object = engine
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.name == "target")
+            .unwrap();
+        let p = object.transform.position;
+        if step == steps_per_orbit / 4 {
+            assert!(
+                (p - Vec3::new(0.0, 5.0, 3.0)).length() < 0.03,
+                "quarter orbit did not advance: {p:?}"
+            );
+        }
+        let d = p - Vec3::new(0.0, 5.0, 0.0);
+        assert!(
+            (d.length() - 3.0).abs() < 0.01,
+            "orbit radius drifted: {p:?}"
+        );
+        let body = engine.world.body(object.body.unwrap()).unwrap();
+        assert!(
+            (body.position() - p).length() < 1e-4,
+            "scene/body transforms diverged"
+        );
+    }
+    let after_two = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "target")
+        .unwrap()
+        .transform
+        .position;
+    assert!(
+        (after_two - initial).length() < 0.03,
+        "orbit did not loop: {after_two:?}"
+    );
+    let bystander = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "moving bystander")
+        .unwrap();
+    let bystander_body = engine.world.body(bystander.body.unwrap()).unwrap();
+    assert!((bystander_body.linear_velocity().x - 2.0).abs() < 0.01);
+    assert!(bystander_body.position().x > bystander_before.x + 1.0);
+
+    // Export/import keeps the orbit track and starts from its phase anchor.
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved.json).unwrap();
+    let reloaded = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "target")
+        .unwrap();
+    let reloaded_body = engine.world.body(reloaded.body.unwrap()).unwrap();
+    assert_eq!(
+        reloaded_body.body_type,
+        quench3d::physics::BodyType::Kinematic
+    );
+    assert_eq!(reloaded_body.position(), Vec3::new(3.0, 5.0, 0.0));
+    for _ in 0..steps_per_orbit / 4 {
+        doc.step_once(&mut engine);
+    }
+    let reloaded = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "target")
+        .unwrap();
+    assert!(
+        (engine
+            .world
+            .body(reloaded.body.unwrap())
+            .unwrap()
+            .position()
+            - Vec3::new(0.0, 5.0, 3.0))
+        .length()
+            < 0.03,
+        "saved orbit did not resume after reload"
+    );
+
+    rev = revision(&mut engine, &mut doc);
+    let cleared = call(
+        &mut engine,
+        &mut doc,
+        "clear_orbit",
+        json!({
+            "name":"target", "expected_revision":rev
+        }),
+    );
+    assert_eq!(cleared["result"]["body_mode"], "kinematic");
+    assert_eq!(cleared["result"]["kinematic_animation"], false);
+    let target = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "target")
+        .unwrap();
+    let handle = target.body.unwrap();
+    let settled = engine.world.body(handle).unwrap().position();
+    assert_eq!(
+        engine.world.body(handle).unwrap().body_type,
+        quench3d::physics::BodyType::Kinematic
+    );
+    assert!(!doc
+        .base_doc()
+        .unwrap()
+        .animations
+        .iter()
+        .any(|a| a.name.as_deref() == Some("ai-orbit:target")));
+    let mut rev = cleared["revision"].clone();
+    for _ in 0..120 {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "step",
+            json!({"expected_revision":rev}),
+        )["revision"]
+            .clone();
+    }
+    assert!((engine.world.body(handle).unwrap().position() - settled).length() < 1e-5);
+}
+
+#[test]
+fn orbit_tools_validate_without_mutation_and_require_fresh_revisions() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let valid = revision(&mut engine, &mut doc);
+    let before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let before_history = doc.history.len();
+    for args in [
+        json!({"name":"target","center":[0,0,0],"radius":0,"period_secs":4,"expected_revision":valid}),
+        json!({"name":"target","center":[0,0,0],"radius":3,"period_secs":0,"expected_revision":valid}),
+        json!({"name":"target","center":[0,0,0],"radius":3,"period_secs":4,"plane":"bad","expected_revision":valid}),
+        json!({"name":"target","center":[0,0,0],"radius":3,"period_secs":4}),
+    ] {
+        let response = commands::dispatch(&mut engine, &mut doc, "set_orbit", args);
+        assert_eq!(response["ok"], false);
+        assert!(matches!(
+            response["error"]["code"].as_str(),
+            Some("invalid_arguments")
+        ));
+        assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+        assert_eq!(doc.history.len(), before_history);
+    }
+    // A duplicate target name is rejected without creating any track.
+    engine.scene.objects[1].name = "target".into();
+    let duplicate_rev = revision(&mut engine, &mut doc);
+    let duplicate_before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let duplicate = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"target","center":[0,5,0],"radius":3,"period_secs":4,"expected_revision":duplicate_rev
+        }),
+    );
+    assert_eq!(duplicate["error"]["code"], "ambiguous_name");
+    assert_eq!(
+        scene_io::scene_to_json(&engine, &doc).unwrap().json,
+        duplicate_before
+    );
+    assert_eq!(doc.history.len(), before_history);
+    engine.scene.objects[1].name = "moving bystander".into();
+    let valid = revision(&mut engine, &mut doc);
+    let set = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"target","center":[0,5,0],"radius":3,"period_secs":4,"expected_revision":valid
+        }),
+    );
+    let stale = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "clear_orbit",
+        json!({
+            "name":"target","expected_revision":valid
+        }),
+    );
+    assert_eq!(stale["ok"], false);
+    assert_eq!(stale["error"]["code"], "stale_revision");
+    assert_eq!(set["ok"], true);
+    let configured = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let undone = call(
+        &mut engine,
+        &mut doc,
+        "undo",
+        json!({"expected_revision":set["revision"]}),
+    );
+    assert!(doc.base_doc().unwrap().animations.is_empty());
+    let target = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "target")
+        .unwrap();
+    assert_eq!(
+        engine.world.body(target.body.unwrap()).unwrap().body_type,
+        quench3d::physics::BodyType::Dynamic
+    );
+    call(
+        &mut engine,
+        &mut doc,
+        "redo",
+        json!({"expected_revision":undone["revision"]}),
+    );
+    assert_eq!(
+        scene_io::scene_to_json(&engine, &doc).unwrap().json,
+        configured
+    );
+}
+
+#[test]
+fn body_mode_changes_preserve_material_properties_and_reset_velocity() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let target_index = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == "target")
+        .unwrap();
+    let shared_shape = engine
+        .world
+        .body(engine.scene.objects[target_index].body.unwrap())
+        .unwrap()
+        .shape
+        .clone();
+    let target_color = engine.scene.objects[target_index].color;
+    let target_handle = engine.scene.objects[target_index].body.unwrap();
+    {
+        let body = engine.world.body_mut(target_handle).unwrap();
+        body.friction = 0.27;
+        body.static_friction = 0.63;
+        body.restitution = 0.42;
+        body.gravity_scale = 0.37;
+        body.linear_damping = 0.12;
+        body.angular_damping = 0.23;
+        body.user_data = 123;
+        body.sensor = true;
+        body.linear_velocity = Vec3::new(1.0, 2.0, 3.0);
+        body.angular_velocity = Vec3::new(0.2, 0.3, 0.4);
+    }
+    let bystander_index = engine
+        .scene
+        .objects
+        .iter()
+        .position(|o| o.name == "moving bystander")
+        .unwrap();
+    let bystander_handle = engine.scene.objects[bystander_index].body.unwrap();
+    let bystander_velocity = engine
+        .world
+        .body(bystander_handle)
+        .unwrap()
+        .linear_velocity();
+    let bystander_color = engine.scene.objects[bystander_index].color;
+    let mut rev = revision(&mut engine, &mut doc);
+    for (mode, expected) in [
+        ("static", quench3d::physics::BodyType::Static),
+        ("kinematic", quench3d::physics::BodyType::Kinematic),
+        ("dynamic", quench3d::physics::BodyType::Dynamic),
+    ] {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "set_body_mode",
+            json!({
+                "name":"target","mode":mode,"expected_revision":rev
+            }),
+        )["revision"]
+            .clone();
+        let target = engine
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.name == "target")
+            .unwrap();
+        let body = engine.world.body(target.body.unwrap()).unwrap();
+        assert_eq!(body.body_type, expected);
+        assert_eq!(target.color, target_color);
+        assert_eq!(body.shape, shared_shape);
+        assert_eq!(body.friction, 0.27);
+        assert_eq!(body.static_friction, 0.63);
+        assert_eq!(body.restitution, 0.42);
+        assert_eq!(body.gravity_scale, 0.37);
+        assert_eq!(body.linear_damping, 0.12);
+        assert_eq!(body.angular_damping, 0.23);
+        assert_eq!(body.user_data, 123);
+        assert!(body.sensor);
+        if expected == quench3d::physics::BodyType::Dynamic {
+            assert!(body.inv_mass() > 0.0);
+        } else {
+            assert_eq!(body.inv_mass(), 0.0);
+        }
+        assert_eq!(body.linear_velocity(), Vec3::ZERO);
+        assert_eq!(body.angular_velocity(), Vec3::ZERO);
+    }
+    assert_eq!(
+        engine
+            .scene
+            .objects
+            .iter()
+            .find(|o| o.name == "moving bystander")
+            .unwrap()
+            .color,
+        bystander_color
+    );
+    assert_eq!(
+        engine
+            .world
+            .body(bystander_handle)
+            .unwrap()
+            .linear_velocity(),
+        bystander_velocity
+    );
+}
