@@ -830,6 +830,7 @@ fn merge_object(object: &ObjectDoc, template: &ObjectDoc) -> ObjectDoc {
         allow_sleep: o.allow_sleep.or(t.allow_sleep),
         // 可见性取"与"：模板说不可见就不会被物体默认的 true 翻回来
         visible: o.visible && t.visible,
+        show_label: o.show_label.or(t.show_label),
         cast_shadows: o.cast_shadows && t.cast_shadows,
         receive_shadows: o.receive_shadows && t.receive_shadows,
         scale: o.scale.or(t.scale),
@@ -1839,6 +1840,9 @@ pub struct ObjectDoc {
     /// 是否可见，缺省 true。
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// 在编辑器视口中显示物体名称，缺省关闭；不影响渲染或物理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_label: Option<bool>,
     /// 是否投射阴影，缺省 true。关掉只影响阴影图，不影响主画面。
     #[serde(default = "default_true")]
     pub cast_shadows: bool,
@@ -3414,6 +3418,7 @@ fn check_object(item: &Value, path: &str, out: &mut Vec<Diagnostic>) {
     check_field::<f32>(map, "mass", path, out);
     check_field::<bool>(map, "allow_sleep", path, out);
     check_field::<bool>(map, "visible", path, out);
+    check_field::<bool>(map, "show_label", path, out);
     check_field::<bool>(map, "cast_shadows", path, out);
     check_field::<bool>(map, "receive_shadows", path, out);
     check_field::<String>(map, "template", path, out);
@@ -8747,6 +8752,25 @@ pub fn arr(v: Vec3) -> [f32; 3] {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn viewport_labels_roundtrip_inherit_and_allow_explicit_disable() {
+        let doc = SceneDoc::from_json(r#"{
+            "templates":{"planet":{"show_label":true,"shape":{"type":"sphere","radius":1}}},
+            "objects":[{"name":"地球","template":"planet"},{"name":"金星","template":"planet","show_label":false}]
+        }"#).unwrap();
+        let expanded = doc.expanded();
+        assert_eq!(expanded.objects[0].show_label, Some(true));
+        assert_eq!(expanded.objects[1].show_label, Some(false));
+        let roundtrip = SceneDoc::from_json(&doc.to_json_pretty()).unwrap();
+        assert_eq!(roundtrip.objects[1].show_label, Some(false));
+        assert!(
+            SceneDoc::from_json(r#"{"objects":[{"name":"地球","show_label":"yes"}]}"#).is_err()
+        );
+        let old = SceneDoc::from_json(r#"{"objects":[{"name":"地球"}]}"#).unwrap();
+        assert_eq!(old.objects[0].show_label, None);
+        assert!(!old.to_json_pretty().contains("show_label"));
+    }
 
     #[test]
     fn empty_object_is_a_valid_scene() {

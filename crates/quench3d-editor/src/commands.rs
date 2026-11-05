@@ -44,6 +44,12 @@ pub fn tools() -> Value {
             vec!["name", "color"],
         ),
         (
+            "set_object_label",
+            "Show or hide the named object's visible name label in the viewport. Saved with the scene and follows moving objects; Chinese names are supported.",
+            json!({"name":{"type":"string"},"visible":{"type":"boolean"}}),
+            vec!["name", "visible"],
+        ),
+        (
             "set_orbit",
             "Animate a standalone primitive in a stable circular kinematic orbit (not gravity). Resume playback to animate. Rejects conflicting non-orbit tracks.",
             json!({"name":{"type":"string"},"center":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"radius":{"type":"number","minimum":0.001,"maximum":10000},"period_secs":{"type":"number","minimum":0.1,"maximum":86400},"phase_deg":{"type":"number","minimum":-360000,"maximum":360000},"plane":{"type":"string","enum":["xz","xy","yz"]}}),
@@ -295,7 +301,7 @@ fn inspect(engine: &Engine, doc: &Doc) -> Value {
         let t=engine.scene.world_transform(i);
         let body=o.body.and_then(|h|engine.world.body(h));
         let orbit=doc.base_doc().and_then(|d|d.animations.iter().find(|a|a.target==o.name && a.name.as_deref()==Some(crate::orbit::owned_name(&o.name).as_str())));
-        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
+        json!({"name":o.name,"position":t.position.to_array(),"rotation":[t.rotation.x,t.rotation.y,t.rotation.z,t.rotation.w],"color":o.color.to_array(),"label_visible":doc.label_visible(&o.name),"body_position":body.map(|b|b.position().to_array()),"body_type":body.map(|b|format!("{:?}",b.body_type).to_lowercase()),"velocity":body.map(|b|b.linear_velocity.to_array()),"gravity_scale":body.map(|b|b.gravity_scale),"orbit":orbit.map(|a|json!({"name":a.name,"period_secs":a.position.as_ref().and_then(|p|p.times.last()).copied(),"loop":a.looping,"motion":"kinematic animation, not gravity"})),"shape":doc.editable_shape(engine,i).ok().map(shape_json),"capabilities":{"edit":editable(engine,doc,i).is_ok(),"set_shape":doc.editable_shape(engine,i).is_ok(),"set_orbit":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some(),"set_body_mode":editable(engine,doc,i).is_ok() && doc.editable_shape(engine,i).is_ok() && body.is_some()}})
     }).collect();
     json!({"objects":objects,"paused":engine.paused,"selection":doc.selection().into_iter().filter_map(|i|engine.scene.objects.get(i).map(|o|o.name.clone())).collect::<Vec<_>>(),"history":{"len":doc.history.len(),"can_undo":doc.history.can_undo(),"can_redo":doc.history.can_redo()}})
 }
@@ -320,6 +326,7 @@ fn execute(
         "set_transform" => &["name", "position", "rotation", "expected_revision"],
         "set_shape" => &["name", "shape", "expected_revision"],
         "set_color" => &["name", "color", "expected_revision"],
+        "set_object_label" => &["name", "visible", "expected_revision"],
         "set_orbit" => &[
             "name",
             "center",
@@ -468,6 +475,28 @@ fn execute(
         doc.select_only(Some(index));
         doc.focus_selected(engine);
         return Ok(json!({"name":name}));
+    }
+    if command == "set_object_label" {
+        let visible = args["visible"]
+            .as_bool()
+            .ok_or_else(|| invalid("visible boolean required"))?;
+        let object = &engine.scene.objects[index];
+        if object.generated
+            || object.fluid_particle.is_some()
+            || object.fluid_surface.is_some()
+            || engine.scene.is_particle_object(index)
+        {
+            return Err((
+                "unsupported_target",
+                "Generated particles and fluid surfaces do not support labels".into(),
+            ));
+        }
+        history_ready(engine, doc)?;
+        doc.record_edit(engine);
+        doc.set_label_visible(name, visible);
+        doc.record_edit(engine);
+        doc.status = format!("Agent: label {name} {visible}");
+        return Ok(json!({"name":name,"label_visible":visible,"text":name}));
     }
     editable(engine, doc, index)?;
     if matches!(command, "set_orbit" | "clear_orbit" | "set_body_mode") {

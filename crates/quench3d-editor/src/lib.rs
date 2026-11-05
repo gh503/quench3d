@@ -35,6 +35,7 @@ pub mod doc;
 pub mod gizmo;
 pub mod history;
 pub mod layout;
+mod labels;
 mod navigation;
 mod motion;
 mod orbit;

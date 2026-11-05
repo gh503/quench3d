@@ -347,6 +347,8 @@ pub struct Doc {
     /// Playback cache; authored tracks remain in `base_doc.animations`.
     pub(crate) motion: crate::motion::Runtime,
     baseline: Vec<Baseline>,
+    /// Names with an enabled persistent viewport label.
+    object_labels: std::collections::BTreeSet<String>,
     /// 场景树里正在拖动的物体（拖到另一行上改父子）。
     ///
     /// 只是 UI 的瞬时状态，不写进场景文件；松开指针后必须清掉。
@@ -392,6 +394,37 @@ impl Doc {
     /// 可变访问底稿（编辑器"模型"面板用它把模型变换写回 `models`）。
     pub fn base_doc_mut(&mut self) -> Option<&mut quench3d_cli::scene_doc::SceneDoc> {
         self.base_doc.as_mut()
+    }
+
+    /// Whether the object's persistent viewport name label is enabled.
+    pub fn label_visible(&self, name: &str) -> bool {
+        self.object_labels.contains(name)
+    }
+
+    /// Enable or disable a viewport name label. Callers validate object identity
+    /// and record the surrounding edit through ordinary editor history.
+    pub fn set_label_visible(&mut self, name: &str, visible: bool) {
+        if visible {
+            self.object_labels.insert(name.to_owned());
+        } else {
+            self.object_labels.remove(name);
+        }
+    }
+
+    /// Restore label metadata after replacing the scene or a history snapshot.
+    pub(crate) fn restore_labels_from_base(&mut self) {
+        self.object_labels = self
+            .base_doc
+            .as_ref()
+            .map(|base| {
+                base.expanded()
+                    .objects
+                    .iter()
+                    .filter(|o| o.show_label == Some(true))
+                    .filter_map(|o| o.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     /// 画中画回读尺寸（宽，高）。
@@ -1091,6 +1124,7 @@ impl Doc {
             base_doc: None,
             motion: crate::motion::Runtime::default(),
             baseline: Vec::new(),
+            object_labels: std::collections::BTreeSet::new(),
             drag_source: None,
             reparent_request: None,
             spawn_counter: 0,
@@ -1207,6 +1241,7 @@ impl Doc {
     fn refresh_base_from(&mut self, snapshot: &str) {
         self.motion.reset();
         self.base_doc = quench3d_cli::scene_doc::SceneDoc::from_json(snapshot).ok();
+        self.restore_labels_from_base();
     }
 
     /// 以当前场景为起点重开历史（打开文件 / 装载新场景后调用）。
@@ -1496,6 +1531,7 @@ impl Doc {
     ///
     /// 编辑器一打开就该有东西可看、可点、可推 —— 空白视口没法验证任何功能。
     pub fn build_default_scene(&mut self, engine: &mut Engine) {
+        self.object_labels.clear();
         self.motion.reset();
         if let Some(base) = &mut self.base_doc {
             base.animations.clear();
@@ -1997,6 +2033,7 @@ impl Doc {
             self.forget_object(index);
         }
         names.reverse();
+        self.object_labels.retain(|name| !names.contains(name));
         if let Some(base) = &mut self.base_doc {
             base.animations
                 .retain(|animation| !names.contains(&animation.target));
@@ -2024,6 +2061,7 @@ impl Doc {
 
     /// 清空场景（地面也不留）。
     pub fn clear(&mut self, engine: &mut Engine) {
+        self.object_labels.clear();
         self.motion.reset();
         if let Some(base) = &mut self.base_doc {
             base.animations.clear();
@@ -2289,6 +2327,23 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_restore_from_snapshot_and_clear_missing_metadata() {
+        let mut doc = Doc::new();
+        assert!(!doc.label_visible("地球"));
+        doc.set_label_visible("地球", true);
+        assert!(doc.label_visible("地球"));
+        doc.set_label_visible("地球", false);
+        assert!(!doc.label_visible("地球"));
+        doc.refresh_base_from(
+            r#"{"objects":[{"name":"地球","show_label":true},{"name":"金星","show_label":false}]}"#,
+        );
+        assert!(doc.label_visible("地球"));
+        assert!(!doc.label_visible("金星"));
+        doc.refresh_base_from("{}");
+        assert!(!doc.label_visible("地球"));
+    }
 
     /// 工具栏里每个图元都必须三件套齐全：名字、物理形状、"有体积"。
     ///

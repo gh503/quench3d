@@ -750,3 +750,311 @@ fn body_mode_changes_preserve_material_properties_and_reset_velocity() {
         bystander_velocity
     );
 }
+
+#[test]
+fn object_label_tool_preserves_chinese_names_and_saved_orbit_labels() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    assert!(commands::tools()
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["function"]["name"] == "set_object_label"));
+    let mut rev = revision(&mut engine, &mut doc);
+    for (name, position) in [("太阳", [0, 5, 0]), ("地球", [3, 5, 0])] {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "spawn_primitive",
+            json!({
+                "name":name,"shape":{"type":"sphere","radius":0.3},
+                "position":position,"expected_revision":rev
+            }),
+        )["revision"]
+            .clone();
+        assert!(!doc.label_visible(name));
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "set_object_label",
+            json!({
+                "name":name,"visible":true,"expected_revision":rev
+            }),
+        )["revision"]
+            .clone();
+        assert!(doc.label_visible(name));
+    }
+    rev = call(
+        &mut engine,
+        &mut doc,
+        "set_orbit",
+        json!({
+            "name":"地球","center":[0,5,0],"radius":3,"period_secs":4,
+            "expected_revision":rev
+        }),
+    )["revision"]
+        .clone();
+    let before = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "地球")
+        .unwrap()
+        .transform
+        .position;
+    for _ in 0..60 {
+        rev = call(
+            &mut engine,
+            &mut doc,
+            "step",
+            json!({"expected_revision":rev}),
+        )["revision"]
+            .clone();
+        assert!(doc.label_visible("地球"));
+    }
+    let after = engine
+        .scene
+        .objects
+        .iter()
+        .find(|o| o.name == "地球")
+        .unwrap();
+    assert!(
+        (after.transform.position - before).length() > 1.0,
+        "labeled planet must actually move"
+    );
+    assert!(
+        (after.transform.position - engine.world.body(after.body.unwrap()).unwrap().position())
+            .length()
+            < 1e-4
+    );
+    let inspected = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    for name in ["太阳", "地球"] {
+        assert_eq!(
+            inspected["result"]["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["name"] == name)
+                .unwrap()["label_visible"],
+            true
+        );
+    }
+    let saved = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let parsed: quench3d_cli::scene_doc::SceneDoc = serde_json::from_str(&saved).unwrap();
+    for name in ["太阳", "地球"] {
+        let object = parsed
+            .objects
+            .iter()
+            .find(|o| o.name.as_deref() == Some(name))
+            .expect("exact Chinese object name survives serialization");
+        assert_eq!(object.show_label, Some(true));
+    }
+    scene_io::load_text_into_doc(&mut engine, &mut doc, &saved).unwrap();
+    for name in ["太阳", "地球"] {
+        assert!(doc.label_visible(name));
+    }
+    let reloaded = call(&mut engine, &mut doc, "inspect_scene", json!({}));
+    assert_eq!(
+        reloaded["result"]["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["name"] == "地球")
+            .unwrap()["label_visible"],
+        true
+    );
+}
+
+#[test]
+fn object_label_tool_undo_redo_restores_both_visibility_states() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    assert!(!doc.label_visible("target"));
+    let rev = revision(&mut engine, &mut doc);
+    let enabled = call(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"target","visible":true,"expected_revision":rev
+        }),
+    );
+    assert!(doc.label_visible("target"));
+    let undone = call(
+        &mut engine,
+        &mut doc,
+        "undo",
+        json!({"expected_revision":enabled["revision"]}),
+    );
+    assert!(!doc.label_visible("target"));
+    let redone = call(
+        &mut engine,
+        &mut doc,
+        "redo",
+        json!({"expected_revision":undone["revision"]}),
+    );
+    assert!(doc.label_visible("target"));
+    let disabled = call(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"target","visible":false,"expected_revision":redone["revision"]
+        }),
+    );
+    assert!(!doc.label_visible("target"));
+    call(
+        &mut engine,
+        &mut doc,
+        "undo",
+        json!({"expected_revision":disabled["revision"]}),
+    );
+    assert!(doc.label_visible("target"));
+    assert!(!doc.label_visible("moving bystander"));
+}
+
+#[test]
+fn object_label_tool_rejects_invalid_stale_ambiguous_and_running_edits_without_mutation() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let rev = revision(&mut engine, &mut doc);
+    let before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let history = doc.history.len();
+    for args in [
+        json!({"name":"target","visible":"true","expected_revision":rev}),
+        json!({"name":"target","visible":1,"expected_revision":rev}),
+        json!({"name":"target","expected_revision":rev}),
+        json!({"visible":true,"expected_revision":rev}),
+        json!({"name":"missing","visible":true,"expected_revision":rev}),
+        json!({"name":"target","visible":true}),
+    ] {
+        let result = commands::dispatch(&mut engine, &mut doc, "set_object_label", args);
+        assert_eq!(result["ok"], false, "{result}");
+        assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, before);
+        assert_eq!(doc.history.len(), history);
+        assert!(!doc.label_visible("target"));
+    }
+    let enabled = call(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"target","visible":true,"expected_revision":rev
+        }),
+    );
+    let after = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let history = doc.history.len();
+    let stale = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"target","visible":false,"expected_revision":rev
+        }),
+    );
+    assert_eq!(stale["error"]["code"], "stale_revision");
+    assert_eq!(scene_io::scene_to_json(&engine, &doc).unwrap().json, after);
+    assert_eq!(doc.history.len(), history);
+    assert!(doc.label_visible("target"));
+    engine.scene.objects[1].name = "target".into();
+    let duplicate_rev = revision(&mut engine, &mut doc);
+    let duplicate_before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let ambiguous = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"target","visible":false,"expected_revision":duplicate_rev
+        }),
+    );
+    assert_eq!(ambiguous["error"]["code"], "ambiguous_name");
+    assert_eq!(
+        scene_io::scene_to_json(&engine, &doc).unwrap().json,
+        duplicate_before
+    );
+    assert_eq!(doc.history.len(), history);
+    assert!(doc.label_visible("target"));
+    engine.scene.objects[1].name = "moving bystander".into();
+    engine.paused = false;
+    let running_rev = revision(&mut engine, &mut doc);
+    let running_before = scene_io::scene_to_json(&engine, &doc).unwrap().json;
+    let running = commands::dispatch(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"target","visible":false,"expected_revision":running_rev
+        }),
+    );
+    assert_eq!(running["error"]["code"], "simulation_running");
+    assert_eq!(
+        scene_io::scene_to_json(&engine, &doc).unwrap().json,
+        running_before
+    );
+    assert_eq!(doc.history.len(), history);
+    assert!(doc.label_visible("target"));
+    assert_eq!(enabled["ok"], true);
+}
+
+#[test]
+fn object_label_metadata_is_removed_on_delete_clear_and_default_scene_rebuild() {
+    let Some((mut engine, mut doc)) = fixture() else {
+        return;
+    };
+    let rev = revision(&mut engine, &mut doc);
+    let enabled = call(
+        &mut engine,
+        &mut doc,
+        "set_object_label",
+        json!({
+            "name":"target","visible":true,"expected_revision":rev
+        }),
+    );
+    let deleted = call(
+        &mut engine,
+        &mut doc,
+        "delete_object",
+        json!({
+            "name":"target","expected_revision":enabled["revision"]
+        }),
+    );
+    assert!(!doc.label_visible("target"));
+    call(
+        &mut engine,
+        &mut doc,
+        "spawn_primitive",
+        json!({
+            "name":"target","shape":{"type":"sphere","radius":0.2},
+            "expected_revision":deleted["revision"]
+        }),
+    );
+    assert!(
+        !doc.label_visible("target"),
+        "same-name replacement must not inherit label metadata"
+    );
+    doc.set_label_visible("target", true);
+    doc.clear(&mut engine);
+    assert!(!doc.label_visible("target"));
+    let rev = revision(&mut engine, &mut doc);
+    call(
+        &mut engine,
+        &mut doc,
+        "spawn_primitive",
+        json!({
+            "name":"target","shape":{"type":"sphere","radius":0.2},"expected_revision":rev
+        }),
+    );
+    assert!(!doc.label_visible("target"));
+    doc.set_label_visible("target", true);
+    doc.build_default_scene(&mut engine);
+    assert!(!doc.label_visible("target"));
+    for object in &engine.scene.objects {
+        assert!(
+            !doc.label_visible(&object.name),
+            "default scene labels must begin disabled"
+        );
+    }
+}

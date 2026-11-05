@@ -4992,6 +4992,13 @@ fn inspector(
 
             material_section(ui, engine, doc);
             ui.separator();
+            let label_name = engine.scene.objects[index].name.clone();
+            let mut label_visible = doc.label_visible(&label_name);
+            if ui.checkbox(&mut label_visible, "显示名称").changed() {
+                doc.record_edit(engine);
+                doc.set_label_visible(&label_name, label_visible);
+                doc.record_edit(engine);
+            }
             // 改父物体要在拿到 `objects[index]` 的可变借用之前发出请求，
             // 因为它要同时改场景里的两个物体（还得保持世界位姿）。
             let mut parent_request: Option<Option<usize>> = None;
@@ -5389,6 +5396,8 @@ fn viewport(
                     view.box_select_start = None;
                 }
             }
+
+            crate::labels::draw(ui, engine, doc, rect);
 
             // 左上角提示：当前相机模式与操作。
             let hint = match engine.camera_mode {

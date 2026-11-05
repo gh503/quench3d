@@ -585,6 +585,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             Some(list) => (None, Some(list)),
             None => (Some(shape), None),
         };
+        let show_label = doc.label_visible(&name).then_some(true);
         out.objects.push(ObjectDoc {
             name: Some(name),
             // 编辑器不做模板/实例的界面：装载时已经展开成具体物体，导出就是具体物体
@@ -639,6 +640,7 @@ pub fn scene_to_json(engine: &Engine, doc: &Doc) -> Result<SavedScene, String> {
             mass: body.filter(|b| b.is_dynamic()).map(|b| b.mass()),
             allow_sleep: body.map(|b| b.can_sleep()),
             visible: object.visible,
+            show_label,
             cast_shadows: object.cast_shadows,
             receive_shadows: object.receive_shadows,
             // 碰撞过滤 / 传感器 / CCD：编辑器目前**没有编辑界面**，但导出时从刚体上读回来，
@@ -1007,6 +1009,7 @@ pub fn load_text_into_doc(
         .map_err(|e| e.to_string())?;
     let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
+    doc.restore_labels_from_base();
     doc.selected_camera = None;
     doc.pip_camera = None;
     doc.pip_texture = None;
@@ -1027,6 +1030,7 @@ pub fn load_file_into_doc(
         .map_err(|e| e.to_string())?;
     let installed = install_doc(engine, parsed.clone())?;
     doc.base_doc = Some(parsed);
+    doc.restore_labels_from_base();
     doc.selected_camera = None;
     doc.pip_camera = None;
     doc.pip_texture = None;

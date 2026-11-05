@@ -314,18 +314,31 @@ async function main() {
 
   // Exercise the advertised orbit tools through actual model HTTP, not direct
   // scene mutation. Only inspect while playing because revisions change per step.
-  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit: 创建静态太阳和绕其公转的行星，然后播放。' })).ok, true);
+  assert.equal((await request({ action: 'start', prompt: 'fixture-orbit: 创建静态太阳和绕其公转的地球，显示两个物体的中文名称标签，然后播放。' })).ok, true);
   const orbitDone = await until(async () => {
     const current = await status();
     if (current.agent.status === 'error') throw new Error(JSON.stringify(current));
     return current.agent.status === 'done' && current.agent.messages.some(m =>
       m.role === 'assistant' && m.content === 'fixture-orbit-done') && current;
   }, 'actual AI orbit setup', 60000);
+  const labelCalls = orbitDone.agent.messages.flatMap(message => message.tool_calls ?? [])
+    .filter(call => /^orbit_\d+$/.test(call.id) && call.function.name === 'set_object_label');
+  assert.equal(labelCalls.length, 2, 'AI executes both label tools');
+  assert.deepEqual(labelCalls.map(call => JSON.parse(call.function.arguments).name), ['太阳', '地球']);
+  for (const call of labelCalls) {
+    const args = JSON.parse(call.function.arguments);
+    assert.equal(args.visible, true);
+    assert.equal(typeof args.expected_revision, 'string');
+    const receipts = orbitDone.agent.messages.filter(message => message.role === 'tool' && message.tool_call_id === call.id);
+    assert.equal(receipts.length, 1, `one label receipt for ${args.name}`);
+    assert.equal(JSON.parse(receipts[0].content).ok, true, `label tool succeeded for ${args.name}`);
+  }
   const orbitObject = (snapshot, name, radius) => {
     const matches = snapshot.objects.filter(object => object.name === name);
     assert.equal(matches.length, 1, `unique ${name}`);
     const object = matches[0];
     assert.equal(object.shape.type, 'sphere');
+    assert.equal(object.label_visible, true, `${name} Chinese name label remains enabled`);
     assert.ok(Math.abs(object.shape.radius - radius) < 1e-5, `${name} sphere radius`);
     assert.ok(Array.isArray(object.body_position), `${name} has physical body`);
     const visualLag = Math.hypot(...object.position.map((value, index) => value - object.body_position[index]));
@@ -335,8 +348,8 @@ async function main() {
     return object;
   };
   const checkOrbit = snapshot => {
-    const sun = orbitObject(snapshot, 'OrbitSun', 0.8);
-    const planet = orbitObject(snapshot, 'OrbitPlanet', 0.2);
+    const sun = orbitObject(snapshot, '太阳', 0.8);
+    const planet = orbitObject(snapshot, '地球', 0.2);
     sun.position.forEach((value, index) => assert.ok(Math.abs(value - [0, 5, 0][index]) < 1e-4, 'sun stays fixed'));
     assert.ok(Math.abs(Math.hypot(planet.body_position[0], planet.body_position[2]) - 3) < 1e-3, 'physical orbital radius stays 3');
     assert.ok(Math.abs(Math.hypot(planet.position[0], planet.position[2]) - 3) < 0.002, 'interpolated orbital radius stays near 3');
@@ -370,11 +383,11 @@ async function main() {
   assert.deepEqual(stillObjects.sun.position, pausedObjects.sun.position, 'paused sun remains fixed');
   const orbitReport = await (await fetch(`${control}/fixture/status`)).json();
   assert.deepEqual(orbitReport.errors, []);
-  assert.deepEqual(orbitReport.orbit_requests.map(item => item.round), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(orbitReport.orbit_requests.map(item => item.round), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   assert.equal(orbitReport.orbit_stop_requests.length, 2);
   assert.equal(orbitReport.long_requests.length, 41, 'orbit stage does not rerun the long task');
   evidence.stages.push({ stage: 'actual-ai-orbit', agent: orbitDone.agent, first: orbitFirst,
-    moved, paused: pausedOrbit, still: stillOrbit, http: orbitReport.orbit_requests });
+    moved, paused: pausedOrbit, still: stillOrbit, label_calls: labelCalls, http: orbitReport.orbit_requests });
 
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(out, 'agent-final.png'), Buffer.from(screenshot.data, 'base64'));

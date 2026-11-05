@@ -24,9 +24,11 @@ The Chat Completions parser accepts tool-call responses with omitted, null or em
 
 ## Current tools and contracts
 
-`inspect_scene`, `spawn_primitive`, `set_transform`, `set_shape`, `set_color`, `set_body_mode`, `set_orbit`, `clear_orbit`, `delete_object`, `select_object`, `focus_object`, `set_playback`, `step`, `undo`, `redo`.
+`inspect_scene`, `spawn_primitive`, `set_transform`, `set_shape`, `set_color`, `set_object_label`, `set_body_mode`, `set_orbit`, `clear_orbit`, `delete_object`, `select_object`, `focus_object`, `set_playback`, `step`, `undo`, `redo`.
 
 For a sustained planetary demonstration, set the sun to `static` with `set_body_mode`, then use `set_orbit` for each planet: fixed `center`, `radius`, `period_secs`, optional `phase_deg` and `plane` (`xz`, `xy`, `yz`). This installs a persisted looping position animation and a kinematic body, so planets follow the path instead of falling. Outer planets can have longer periods; `period ∝ radius^1.5` gives Kepler-like timing. The path is a finely sampled circle with linear interpolation, not an N-body gravitational simulation. `clear_orbit` removes the generated loop and leaves a stationary kinematic body; change its mode explicitly for subsequent dynamic simulation. Animation data is saved with the scene and follows editor playback, pause, single-step and reset.
+
+`set_object_label` accepts an exact `name` and boolean `visible`, with the usual paused/revision contract. It displays the object's current name beside its projected position, supports Chinese, follows moving objects and saves `objects[].show_label` with the scene. The properties panel also has a name-display checkbox. Labels use non-interactive overlays, clip to the viewport and avoid overlapping text where space allows; hidden/offscreen objects and generated fluid/particle surfaces are excluded. Toggle edits participate in undo/redo and scene reload.
 
 Targets use unique exact object names. Ambiguous or absent names fail explicitly. Inspect returns the actual scene, physical body positions, shape capabilities and history availability. Mutations return the new revision and actual success/error result. All tools except inspection and playback require `expected_revision`; pause before inspecting and editing. A stale revision triggers a fresh inspection rather than a guessed retry. Revisions are state fingerprints, not access tokens or monotonically increasing sequence numbers.
 
